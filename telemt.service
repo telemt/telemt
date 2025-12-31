@@ -1,0 +1,12 @@
+[Unit]
+Description=Telemt
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/bin
+ExecStart=/bin/telemt /etc/telemt.toml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
