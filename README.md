@@ -8,6 +8,10 @@
   - [Build](#build)
 - [How to use?](#how-to-use)
   - [Systemd Method](#telemt-via-systemd)
+- [FAQ](#faq)
+  - [Telegram Calls](#telegram-calls-via-mtproxy)
+  - [DPI](#how-does-dpi-see-mtproxy-tls)
+  - [Whitelist on Network Level](#whitelist-on-ip)
 - [Why Rust?](#why-rust)
 
 ## Features
