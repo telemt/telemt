@@ -97,7 +97,9 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 **3.**  In Shell type `systemctl start telemt` - it must start with zero exit-code
+
 **4.** In Shell type `systemctl status telemt` - there you can reach info about current MTProxy status
+
 **5.** In Shell type `systemctl enable telemt` - then telemt will start with system startup, after the network is up
 
 ## FAQ
