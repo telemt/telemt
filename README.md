@@ -50,9 +50,10 @@ chmod +x /bin/telemt
 
 ## How to use?
 ### Telemt via Systemd
-**This instruction "assume" that you:
-- logged in as root
-- you already have an assembled and executable `telemt` in /bin folder as a result of the [Quick Start Guide](#quick-start-guide) or [Build](#build)**
+**This instruction "assume" that you:**
+- logged in as root or executed `su -` / `sudo su`
+- you already have an assembled and executable `telemt` in /bin folder as a result of the [Quick Start Guide](#quick-start-guide) or [Build](#build)
+
 **0. Check port and generate secrets**
 
 The port you have selected for use should be MISSING from the list, when:
