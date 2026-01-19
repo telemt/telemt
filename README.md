@@ -119,7 +119,7 @@ then Ctrl+X -> Y -> Enter to save
 ### Minimal Configuration for First Start
 ```toml
 port = 443                              # Listening port
-show_links = ["tele", "hello"]          # Specify users, for whom will be displayed the links
+show_link = ["tele", "hello"]          # Specify users, for whom will be displayed the links
 
 tls_domain = "petrovich.ru"             # Domain for ee-secret and masking
 mask = true                             # Enable masking of bad traffic
@@ -131,8 +131,6 @@ fast_mode = true                        # Use "fast" obfuscation variant
 
 client_keepalive = 600                  # Seconds
 client_ack_timeout = 300                # Seconds
-
-show_link = [ "hello" ]
 
 [modes]
 classic = true                          # Plain obfuscated mode
