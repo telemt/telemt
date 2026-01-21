@@ -3,6 +3,7 @@
 **Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements such as connection pooling, replay protection, detailed statistics, masking from "prying" eyes
 
 💥 The configuration structure has changed since version 1.1.0.0, change it in your environment!
+⚓ Our implementation of **TLS-fronting** is the most debugged, advanced and **"indistinguishable from the original"**:  we are confident we have it right - [see our evidence](#recognizability-for-dpi-and-crawler) 
 
 # GOTO
 - [Features](#features)
