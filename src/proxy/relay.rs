@@ -13,6 +13,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Activity timeout for iOS compatibility (30 minutes)
 const ACTIVITY_TIMEOUT_SECS: u64 = 1800;
 
+/// High watermark for write buffer before forcing a flush (bytes).
+///
+/// Matches Python asyncio's default transport high_water (64 KB).
+///
+/// In the Python reference, `writer.write()` is a synchronous buffer append
+/// and `await writer.drain()` only blocks when the buffer exceeds this mark.
+///
+/// In our Rust code, `write_all` already pushes data through the async layer
+/// stack (CryptoWriter → FakeTlsWriter → TCP).  Each `poll_write` call in
+/// those layers drains any pending data before accepting new bytes, so data
+/// flows naturally without explicit flush.
+///
+/// We only call `flush()` after accumulating FLUSH_WATERMARK bytes to ensure
+/// intermediate buffers (FakeTlsWriter's partial TLS record, CryptoWriter's
+/// pending ciphertext) are drained periodically.  This prevents the pathological
+/// case where a partial TLS record sits in FakeTlsWriter's buffer while the
+/// relay is blocking on a read.
+const FLUSH_WATERMARK: usize = 65536;
+
 /// Relay data bidirectionally between client and server
 pub async fn relay_bidirectional<CR, CW, SR, SW>(
     mut client_reader: CR,
@@ -59,6 +78,7 @@ where
         let mut msg_count = 0u64;
         let mut last_activity = Instant::now();
         let mut last_log = Instant::now();
+        let mut unflushed: usize = 0;
         
         loop {
             // Read with timeout
@@ -129,9 +149,15 @@ where
                         debug!(user = %user_c2s, error = %e, "Failed to write to server");
                         break;
                     }
-                    if let Err(e) = server_writer.flush().await {
-                        debug!(user = %user_c2s, error = %e, "Failed to flush to server");
-                        break;
+
+                    // Watermark-based flush (see module doc).
+                    unflushed += n;
+                    if unflushed >= FLUSH_WATERMARK {
+                        if let Err(e) = server_writer.flush().await {
+                            debug!(user = %user_c2s, error = %e, "Failed to flush to server");
+                            break;
+                        }
+                        unflushed = 0;
                     }
                 }
                 
@@ -156,6 +182,7 @@ where
         let mut msg_count = 0u64;
         let mut last_activity = Instant::now();
         let mut last_log = Instant::now();
+        let mut unflushed: usize = 0;
         
         loop {
             let read_result = tokio::time::timeout(
@@ -224,9 +251,15 @@ where
                         debug!(user = %user_s2c, error = %e, "Failed to write to client");
                         break;
                     }
-                    if let Err(e) = client_writer.flush().await {
-                        debug!(user = %user_s2c, error = %e, "Failed to flush to client");
-                        break;
+
+                    // Watermark-based flush (see module doc).
+                    unflushed += n;
+                    if unflushed >= FLUSH_WATERMARK {
+                        if let Err(e) = client_writer.flush().await {
+                            debug!(user = %user_s2c, error = %e, "Failed to flush to client");
+                            break;
+                        }
+                        unflushed = 0;
                     }
                 }
                 

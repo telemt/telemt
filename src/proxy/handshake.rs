@@ -178,6 +178,10 @@ where
         
         let dec_iv = u128::from_be_bytes(dec_iv_bytes.try_into().unwrap());
         
+        // Create decryptor and process the 64-byte handshake.
+        // After this call the CTR counter is at position HANDSHAKE_LEN (64).
+        // The client's encryptor is at the same position after encrypting the
+        // nonce, so we MUST continue from here for subsequent data.
         let mut decryptor = AesCtr::new(&dec_key, dec_iv);
         let decrypted = decryptor.decrypt(handshake);
         
@@ -218,7 +222,19 @@ where
         
         replay_checker.add_handshake(dec_prekey_iv);
         
-        let decryptor = AesCtr::new(&dec_key, dec_iv);
+        // The `decryptor` created above already processed the full 64-byte
+        // handshake via `decrypt(handshake)`, advancing the AES-CTR counter
+        // to position HANDSHAKE_LEN (64).  The client's encryptor is at the
+        // same position after encrypting the nonce it sent us.
+        //
+        // Creating a fresh cipher at position 0 would cause every subsequent
+        // byte to be decrypted with the wrong keystream — producing garbage.
+        // In middle-proxy mode this garbage is interpreted as a frame length,
+        // leading to multi-gigabyte allocations and OOM crashes.
+        //
+        // The server→client encryptor starts at position 0, which IS correct:
+        // the client's decryptor for this direction has not consumed any
+        // keystream yet (no data has been sent from server to client).
         let encryptor = AesCtr::new(&enc_key, enc_iv);
         
         let success = HandshakeSuccess {
@@ -363,5 +379,36 @@ mod tests {
         
         drop(success);
         // Drop impl zeroizes key material without panic
+    }
+    
+    /// Verify that the decryptor is at the correct CTR position after handshake
+    #[test]
+    fn test_decryptor_position_after_handshake() {
+        let key = [0x42u8; 32];
+        let iv = 99999u128;
+        
+        // Simulate what handle_mtproto_handshake does:
+        // 1) Create decryptor and process handshake (advances to position 64)
+        let mut dec_handshake = AesCtr::new(&key, iv);
+        let dummy_handshake = [0xABu8; HANDSHAKE_LEN];
+        let _ = dec_handshake.decrypt(&dummy_handshake);
+        // dec_handshake is now at position 64
+        
+        // 2) Simulate the client encrypting data from position 64
+        let mut client_enc = AesCtr::new(&key, iv);
+        let mut skip = [0u8; HANDSHAKE_LEN];
+        client_enc.apply(&mut skip); // advance to 64
+        
+        let plaintext = b"Hello, MTProto relay!";
+        let ciphertext = client_enc.encrypt(plaintext);
+        
+        // 3) Decrypt with the handshake-advanced decryptor (CORRECT)
+        let decrypted_correct = dec_handshake.decrypt(&ciphertext);
+        assert_eq!(&decrypted_correct, plaintext);
+        
+        // 4) A fresh decryptor at position 0 would produce garbage (BUG)
+        let mut dec_fresh = AesCtr::new(&key, iv);
+        let decrypted_wrong = dec_fresh.decrypt(&ciphertext);
+        assert_ne!(&decrypted_wrong, plaintext);
     }
 }

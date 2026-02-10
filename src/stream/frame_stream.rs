@@ -8,6 +8,16 @@ use crate::crypto::{crc32, SecureRandom};
 use std::sync::Arc;
 use super::traits::{FrameMeta, LayeredStream};
 
+/// Maximum frame payload size (defense-in-depth against corrupted length fields).
+///
+/// Even when AES-CTR decryption is correct, TCP corruption or implementation
+/// bugs could produce a garbage length.  Without this check, such a length
+/// (up to 4 GB for u32) would cause an OOM-killing allocation.
+///
+/// 16 MB matches MAX_MSG_LEN and the default `max_frame_size` used by the
+/// tokio-util codec variants in `frame_codec.rs`.
+const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024; // 16 MB
+
 // ============= Abridged (Compact) Frame =============
 
 /// Reader for abridged MTProto framing
@@ -46,7 +56,21 @@ impl<R: AsyncRead + Unpin> AbridgedFrameReader<R> {
         }
         
         // Length is in 4-byte words
-        let byte_len = len * 4;
+        let byte_len = len.checked_mul(4).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidData, "abridged frame length overflow")
+        })?;
+        
+        // Validate frame size
+        if byte_len > MAX_FRAME_PAYLOAD {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Abridged frame too large: {} bytes (max {}). \
+                     Likely corrupted stream (AES-CTR desync or bad data).",
+                    byte_len, MAX_FRAME_PAYLOAD
+                ),
+            ));
+        }
         
         // Read data
         let mut data = vec![0u8; byte_len];
@@ -75,6 +99,15 @@ impl<W> AbridgedFrameWriter<W> {
 
 impl<W: AsyncWrite + Unpin> AbridgedFrameWriter<W> {
     /// Write a frame
+    ///
+    /// The entire frame (header + data) is concatenated into a single buffer
+    /// and written in one `write_all` call.  This is critical for the
+    /// FakeTLS path: the CryptoWriter encrypts the buffer in one shot and
+    /// the FakeTlsWriter wraps it in a **single** TLS Application Data record.
+    ///
+    /// Splitting into multiple writes would produce multiple TLS records for
+    /// one MTProto frame, which some Telegram clients (notably iOS) do not
+    /// handle correctly — they expect record-aligned frames.
     pub async fn write_frame(&mut self, data: &[u8], meta: &FrameMeta) -> Result<()> {
         if data.len() % 4 != 0 {
             return Err(Error::new(
@@ -92,14 +125,16 @@ impl<W: AsyncWrite + Unpin> AbridgedFrameWriter<W> {
         
         let len_div_4 = data.len() / 4;
         
+        // Build entire frame into one buffer to produce a single TLS record
+        let mut frame = Vec::with_capacity(4 + data.len());
+        
         if len_div_4 < 0x7f {
             // Short length (1 byte)
-            self.upstream.write_all(&[len_div_4 as u8]).await?;
+            frame.push(len_div_4 as u8);
         } else if len_div_4 < (1 << 24) {
             // Long length (4 bytes: 0x7f + 3 bytes)
-            let mut header = [0x7f, 0, 0, 0];
-            header[1..4].copy_from_slice(&(len_div_4 as u32).to_le_bytes()[..3]);
-            self.upstream.write_all(&header).await?;
+            frame.push(0x7f);
+            frame.extend_from_slice(&(len_div_4 as u32).to_le_bytes()[..3]);
         } else {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -107,7 +142,9 @@ impl<W: AsyncWrite + Unpin> AbridgedFrameWriter<W> {
             ));
         }
         
-        self.upstream.write_all(data).await?;
+        frame.extend_from_slice(data);
+        
+        self.upstream.write_all(&frame).await?;
         Ok(())
     }
     
@@ -151,6 +188,18 @@ impl<R: AsyncRead + Unpin> IntermediateFrameReader<R> {
             len -= 0x80000000;
         }
         
+        // Validate frame size
+        if len > MAX_FRAME_PAYLOAD {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Intermediate frame too large: {} bytes (max {}). \
+                     Likely corrupted stream (AES-CTR desync or bad data).",
+                    len, MAX_FRAME_PAYLOAD
+                ),
+            ));
+        }
+        
         // Read data
         let mut data = vec![0u8; len];
         self.upstream.read_exact(&mut data).await?;
@@ -177,13 +226,18 @@ impl<W> IntermediateFrameWriter<W> {
 }
 
 impl<W: AsyncWrite + Unpin> IntermediateFrameWriter<W> {
+    /// Write a frame
+    ///
+    /// See [`AbridgedFrameWriter::write_frame`] for why we use a single write.
     pub async fn write_frame(&mut self, data: &[u8], meta: &FrameMeta) -> Result<()> {
         if meta.simple_ack {
             self.upstream.write_all(data).await?;
         } else {
-            let len_bytes = (data.len() as u32).to_le_bytes();
-            self.upstream.write_all(&len_bytes).await?;
-            self.upstream.write_all(data).await?;
+            // Single buffer → single encrypt → single TLS record
+            let mut frame = Vec::with_capacity(4 + data.len());
+            frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            frame.extend_from_slice(data);
+            self.upstream.write_all(&frame).await?;
         }
         Ok(())
     }
@@ -228,6 +282,18 @@ impl<R: AsyncRead + Unpin> SecureIntermediateFrameReader<R> {
             len -= 0x80000000;
         }
         
+        // Validate frame size
+        if len > MAX_FRAME_PAYLOAD {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Secure intermediate frame too large: {} bytes (max {}). \
+                     Likely corrupted stream (AES-CTR desync or bad data).",
+                    len, MAX_FRAME_PAYLOAD
+                ),
+            ));
+        }
+        
         // Read data (including padding)
         let mut data = vec![0u8; len];
         self.upstream.read_exact(&mut data).await?;
@@ -261,6 +327,9 @@ impl<W> SecureIntermediateFrameWriter<W> {
 }
 
 impl<W: AsyncWrite + Unpin> SecureIntermediateFrameWriter<W> {
+    /// Write a frame
+    ///
+    /// See [`AbridgedFrameWriter::write_frame`] for why we use a single write.
     pub async fn write_frame(&mut self, data: &[u8], meta: &FrameMeta) -> Result<()> {
         if meta.simple_ack {
             self.upstream.write_all(data).await?;
@@ -272,11 +341,14 @@ impl<W: AsyncWrite + Unpin> SecureIntermediateFrameWriter<W> {
         let padding = self.rng.bytes(padding_len);
         
         let total_len = data.len() + padding_len;
-        let len_bytes = (total_len as u32).to_le_bytes();
         
-        self.upstream.write_all(&len_bytes).await?;
-        self.upstream.write_all(data).await?;
-        self.upstream.write_all(&padding).await?;
+        // Single buffer → single encrypt → single TLS record
+        let mut frame = Vec::with_capacity(4 + total_len);
+        frame.extend_from_slice(&(total_len as u32).to_le_bytes());
+        frame.extend_from_slice(data);
+        frame.extend_from_slice(&padding);
+        
+        self.upstream.write_all(&frame).await?;
         
         Ok(())
     }
@@ -403,15 +475,18 @@ impl<W: AsyncWrite + Unpin> MtprotoFrameWriter<W> {
         let padding_needed = (CBC_PADDING - (total_len % CBC_PADDING)) % CBC_PADDING;
         let padding_count = padding_needed / PADDING_FILLER.len();
         
-        // Write everything
-        self.upstream.write_all(&len_bytes).await?;
-        self.upstream.write_all(&seq_bytes).await?;
-        self.upstream.write_all(msg).await?;
-        self.upstream.write_all(&crc_bytes).await?;
-        
+        // Build entire frame into one buffer and write in one call
+        let frame_len = total_len + padding_count * PADDING_FILLER.len();
+        let mut frame = Vec::with_capacity(frame_len);
+        frame.extend_from_slice(&len_bytes);
+        frame.extend_from_slice(&seq_bytes);
+        frame.extend_from_slice(msg);
+        frame.extend_from_slice(&crc_bytes);
         for _ in 0..padding_count {
-            self.upstream.write_all(&PADDING_FILLER).await?;
+            frame.extend_from_slice(&PADDING_FILLER);
         }
+        
+        self.upstream.write_all(&frame).await?;
         
         Ok(())
     }
@@ -584,5 +659,53 @@ mod tests {
         
         let (received, _) = reader.read_frame().await.unwrap();
         assert_eq!(&received[..], &data[..]);
+    }
+    
+    #[tokio::test]
+    async fn test_intermediate_frame_too_large() {
+        let (client, server) = duplex(1024);
+        
+        // Manually write a frame header claiming a huge length
+        let mut writer = client;
+        let huge_len: u32 = (MAX_FRAME_PAYLOAD + 1) as u32;
+        writer.write_all(&huge_len.to_le_bytes()).await.unwrap();
+        writer.flush().await.unwrap();
+        
+        let mut reader = IntermediateFrameReader::new(server);
+        let result = reader.read_frame().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+    
+    #[tokio::test]
+    async fn test_abridged_frame_too_large() {
+        let (client, server) = duplex(1024);
+        
+        // Extended length format: 0x7f + 3 bytes LE
+        let mut writer = client;
+        let words: u32 = (MAX_FRAME_PAYLOAD / 4) + 1;
+        let mut header = [0x7fu8, 0, 0, 0];
+        header[1..4].copy_from_slice(&words.to_le_bytes()[..3]);
+        writer.write_all(&header).await.unwrap();
+        writer.flush().await.unwrap();
+        
+        let mut reader = AbridgedFrameReader::new(server);
+        let result = reader.read_frame().await;
+        assert!(result.is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_secure_frame_too_large() {
+        let (client, server) = duplex(1024);
+        
+        let mut writer = client;
+        let huge_len: u32 = (MAX_FRAME_PAYLOAD + 1) as u32;
+        writer.write_all(&huge_len.to_le_bytes()).await.unwrap();
+        writer.flush().await.unwrap();
+        
+        let mut reader = SecureIntermediateFrameReader::new(server);
+        let result = reader.read_frame().await;
+        assert!(result.is_err());
     }
 }

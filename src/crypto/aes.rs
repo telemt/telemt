@@ -81,6 +81,9 @@ impl AesCtr {
 /// are different operations. This implementation handles CBC chaining
 /// correctly across multiple blocks.
 ///
+/// **Stateless**: each call to `encrypt`/`decrypt` starts from the
+/// stored IV. For stateful (chained) CBC, see [`AesCbcChain`].
+///
 /// Key and IV are zeroized on drop.
 pub struct AesCbc {
     key: [u8; 32],
@@ -274,6 +277,162 @@ impl AesCbc {
     }
 }
 
+// ============= AES-256-CBC Stateful Chain =============
+
+/// Stateful AES-256-CBC cipher that maintains chaining across calls.
+///
+/// Unlike [`AesCbc`], each successive call to [`encrypt`](Self::encrypt)
+/// or [`decrypt`](Self::decrypt) continues the CBC chain from where the
+/// previous call left off (the IV is updated to the last ciphertext block).
+///
+/// This is **required** by the Telegram Middle Proxy protocol, where a
+/// single CBC session spans many MTProto frames sent over the lifetime
+/// of the connection.
+///
+/// ## IV update rules
+///
+/// - **After encrypt**: IV ← last ciphertext block of the **output**
+/// - **After decrypt**: IV ← last ciphertext block of the **input**
+///
+/// Key and IV are zeroized on drop.
+pub struct AesCbcChain {
+    key: [u8; 32],
+    iv: [u8; 16],
+}
+
+impl Drop for AesCbcChain {
+    fn drop(&mut self) {
+        self.key.zeroize();
+        self.iv.zeroize();
+    }
+}
+
+impl AesCbcChain {
+    /// AES block size
+    const BLOCK_SIZE: usize = 16;
+
+    /// Create a new stateful CBC chain with the given key and initial IV.
+    pub fn new(key: [u8; 32], iv: [u8; 16]) -> Self {
+        Self { key, iv }
+    }
+
+    /// Create from slices (validates lengths).
+    pub fn from_slices(key: &[u8], iv: &[u8]) -> Result<Self> {
+        if key.len() != 32 {
+            return Err(ProxyError::InvalidKeyLength { expected: 32, got: key.len() });
+        }
+        if iv.len() != 16 {
+            return Err(ProxyError::InvalidKeyLength { expected: 16, got: iv.len() });
+        }
+        Ok(Self {
+            key: key.try_into().unwrap(),
+            iv: iv.try_into().unwrap(),
+        })
+    }
+
+    /// Get current IV (for debugging / tests).
+    pub fn current_iv(&self) -> &[u8; 16] {
+        &self.iv
+    }
+
+    /// Encrypt data, advancing the CBC chain.
+    ///
+    /// After this call, `self.iv` equals the last ciphertext block produced.
+    /// Data length **must** be a multiple of 16.
+    pub fn encrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        if data.len() % Self::BLOCK_SIZE != 0 {
+            return Err(ProxyError::Crypto(
+                format!("CBC encrypt: data length {} not aligned to 16", data.len()),
+            ));
+        }
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        use aes::cipher::KeyInit;
+        let ks = aes::Aes256::new((&self.key).into());
+
+        let mut result = Vec::with_capacity(data.len());
+        let mut prev = self.iv;
+
+        for chunk in data.chunks(Self::BLOCK_SIZE) {
+            let plain: [u8; 16] = chunk.try_into().unwrap();
+            let xored = xor16(&plain, &prev);
+            let cipher = encrypt_block_raw(&xored, &ks);
+            prev = cipher;
+            result.extend_from_slice(&cipher);
+        }
+
+        // Advance chain
+        self.iv = prev;
+        Ok(result)
+    }
+
+    /// Decrypt data, advancing the CBC chain.
+    ///
+    /// After this call, `self.iv` equals the last ciphertext block of the
+    /// **input** (i.e. `data[data.len()-16..]`).
+    /// Data length **must** be a multiple of 16.
+    pub fn decrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        if data.len() % Self::BLOCK_SIZE != 0 {
+            return Err(ProxyError::Crypto(
+                format!("CBC decrypt: data length {} not aligned to 16", data.len()),
+            ));
+        }
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        use aes::cipher::KeyInit;
+        let ks = aes::Aes256::new((&self.key).into());
+
+        let mut result = Vec::with_capacity(data.len());
+        let mut prev = self.iv;
+
+        for chunk in data.chunks(Self::BLOCK_SIZE) {
+            let cipher: [u8; 16] = chunk.try_into().unwrap();
+            let decrypted = decrypt_block_raw(&cipher, &ks);
+            let plain = xor16(&decrypted, &prev);
+            prev = cipher; // CBC: next IV = current ciphertext
+            result.extend_from_slice(&plain);
+        }
+
+        // Advance chain — IV is the last ciphertext block of INPUT
+        self.iv = prev;
+        Ok(result)
+    }
+}
+
+// ============= Block-Level Helpers (shared) =============
+
+/// XOR two 16-byte blocks
+#[inline]
+fn xor16(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
+    let mut r = [0u8; 16];
+    for i in 0..16 {
+        r[i] = a[i] ^ b[i];
+    }
+    r
+}
+
+/// Raw AES-256 single-block encrypt (ECB, no chaining)
+#[inline]
+fn encrypt_block_raw(block: &[u8; 16], ks: &aes::Aes256) -> [u8; 16] {
+    use aes::cipher::BlockEncrypt;
+    let mut out = *block;
+    ks.encrypt_block((&mut out).into());
+    out
+}
+
+/// Raw AES-256 single-block decrypt (ECB, no chaining)
+#[inline]
+fn decrypt_block_raw(block: &[u8; 16], ks: &aes::Aes256) -> [u8; 16] {
+    use aes::cipher::BlockDecrypt;
+    let mut out = *block;
+    ks.decrypt_block((&mut out).into());
+    out
+}
+
 // ============= Encryption Traits =============
 
 /// Trait for unified encryption interface
@@ -323,15 +482,11 @@ mod tests {
     fn test_aes_ctr_roundtrip() {
         let key = [0u8; 32];
         let iv = 12345u128;
-        
         let original = b"Hello, MTProto!";
-        
         let mut enc = AesCtr::new(&key, iv);
         let encrypted = enc.encrypt(original);
-        
         let mut dec = AesCtr::new(&key, iv);
         let decrypted = dec.decrypt(&encrypted);
-        
         assert_eq!(original.as_slice(), decrypted.as_slice());
     }
     
@@ -339,34 +494,26 @@ mod tests {
     fn test_aes_ctr_in_place() {
         let key = [0x42u8; 32];
         let iv = 999u128;
-        
         let original = b"Test data for in-place encryption";
         let mut data = original.to_vec();
-        
         let mut cipher = AesCtr::new(&key, iv);
         cipher.apply(&mut data);
-        
         assert_ne!(&data[..], original);
-        
         let mut cipher = AesCtr::new(&key, iv);
         cipher.apply(&mut data);
-        
         assert_eq!(&data[..], original);
     }
     
-    // ============= AES-CBC Tests =============
+    // ============= AES-CBC (Stateless) Tests =============
     
     #[test]
     fn test_aes_cbc_roundtrip() {
         let key = [0u8; 32];
         let iv = [0u8; 16];
-        
         let original = [0u8; 32];
-        
         let cipher = AesCbc::new(key, iv);
         let encrypted = cipher.encrypt(&original).unwrap();
         let decrypted = cipher.decrypt(&encrypted).unwrap();
-        
         assert_eq!(original.as_slice(), decrypted.as_slice());
     }
     
@@ -374,19 +521,12 @@ mod tests {
     fn test_aes_cbc_chaining_works() {
         let key = [0x42u8; 32];
         let iv = [0x00u8; 16];
-        
         let plaintext = [0xAAu8; 32];
-        
         let cipher = AesCbc::new(key, iv);
         let ciphertext = cipher.encrypt(&plaintext).unwrap();
-        
         let block1 = &ciphertext[0..16];
         let block2 = &ciphertext[16..32];
-        
-        assert_ne!(
-            block1, block2,
-            "CBC chaining broken: identical plaintext blocks produced identical ciphertext"
-        );
+        assert_ne!(block1, block2);
     }
     
     #[test]
@@ -394,13 +534,10 @@ mod tests {
         let key = [0u8; 32];
         let iv = [0u8; 16];
         let plaintext = [0u8; 16];
-        
         let cipher = AesCbc::new(key, iv);
         let ciphertext = cipher.encrypt(&plaintext).unwrap();
-        
         let decrypted = cipher.decrypt(&ciphertext).unwrap();
         assert_eq!(plaintext.as_slice(), decrypted.as_slice());
-        
         assert_ne!(ciphertext.as_slice(), plaintext.as_slice());
     }
     
@@ -408,13 +545,10 @@ mod tests {
     fn test_aes_cbc_multi_block() {
         let key = [0x12u8; 32];
         let iv = [0x34u8; 16];
-        
         let plaintext: Vec<u8> = (0..80).collect();
-        
         let cipher = AesCbc::new(key, iv);
         let ciphertext = cipher.encrypt(&plaintext).unwrap();
         let decrypted = cipher.decrypt(&ciphertext).unwrap();
-        
         assert_eq!(plaintext, decrypted);
     }
     
@@ -422,15 +556,11 @@ mod tests {
     fn test_aes_cbc_in_place() {
         let key = [0x12u8; 32];
         let iv = [0x34u8; 16];
-        
         let original = [0x56u8; 48];
         let mut buffer = original;
-        
         let cipher = AesCbc::new(key, iv);
-        
         cipher.encrypt_in_place(&mut buffer).unwrap();
         assert_ne!(&buffer[..], &original[..]);
-        
         cipher.decrypt_in_place(&mut buffer).unwrap();
         assert_eq!(&buffer[..], &original[..]);
     }
@@ -438,10 +568,8 @@ mod tests {
     #[test]
     fn test_aes_cbc_empty_data() {
         let cipher = AesCbc::new([0u8; 32], [0u8; 16]);
-        
         let encrypted = cipher.encrypt(&[]).unwrap();
         assert!(encrypted.is_empty());
-        
         let decrypted = cipher.decrypt(&[]).unwrap();
         assert!(decrypted.is_empty());
     }
@@ -449,28 +577,20 @@ mod tests {
     #[test]
     fn test_aes_cbc_unaligned_error() {
         let cipher = AesCbc::new([0u8; 32], [0u8; 16]);
-        
-        let result = cipher.encrypt(&[0u8; 15]);
-        assert!(result.is_err());
-        
-        let result = cipher.encrypt(&[0u8; 17]);
-        assert!(result.is_err());
+        assert!(cipher.encrypt(&[0u8; 15]).is_err());
+        assert!(cipher.encrypt(&[0u8; 17]).is_err());
     }
     
     #[test]
     fn test_aes_cbc_avalanche_effect() {
         let key = [0xAB; 32];
         let iv = [0xCD; 16];
-        
         let plaintext1 = [0u8; 32];
         let mut plaintext2 = [0u8; 32];
         plaintext2[0] = 0x01;
-        
         let cipher = AesCbc::new(key, iv);
-        
         let ciphertext1 = cipher.encrypt(&plaintext1).unwrap();
         let ciphertext2 = cipher.encrypt(&plaintext2).unwrap();
-        
         assert_ne!(&ciphertext1[0..16], &ciphertext2[0..16]);
         assert_ne!(&ciphertext1[16..32], &ciphertext2[16..32]);
     }
@@ -479,13 +599,10 @@ mod tests {
     fn test_aes_cbc_iv_matters() {
         let key = [0x55; 32];
         let plaintext = [0x77u8; 16];
-        
         let cipher1 = AesCbc::new(key, [0u8; 16]);
         let cipher2 = AesCbc::new(key, [1u8; 16]);
-        
         let ciphertext1 = cipher1.encrypt(&plaintext).unwrap();
         let ciphertext2 = cipher2.encrypt(&plaintext).unwrap();
-        
         assert_ne!(ciphertext1, ciphertext2);
     }
     
@@ -494,13 +611,126 @@ mod tests {
         let key = [0x99; 32];
         let iv = [0x88; 16];
         let plaintext = [0x77u8; 32];
-        
         let cipher = AesCbc::new(key, iv);
-        
         let ciphertext1 = cipher.encrypt(&plaintext).unwrap();
         let ciphertext2 = cipher.encrypt(&plaintext).unwrap();
-        
         assert_eq!(ciphertext1, ciphertext2);
+    }
+    
+    // ============= AES-CBC Chain (Stateful) Tests =============
+    
+    #[test]
+    fn test_cbc_chain_single_call_matches_stateless() {
+        let key = [0x42u8; 32];
+        let iv = [0x13u8; 16];
+        let data = [0xAA; 32];
+
+        let stateless = AesCbc::new(key, iv);
+        let ct_stateless = stateless.encrypt(&data).unwrap();
+
+        let mut chain = AesCbcChain::new(key, iv);
+        let ct_chain = chain.encrypt(&data).unwrap();
+
+        assert_eq!(ct_stateless, ct_chain);
+    }
+
+    #[test]
+    fn test_cbc_chain_encrypt_decrypt_roundtrip() {
+        let key = [0x55u8; 32];
+        let iv = [0x66u8; 16];
+        let data = [0xBB; 48];
+
+        let mut enc = AesCbcChain::new(key, iv);
+        let ct = enc.encrypt(&data).unwrap();
+
+        let mut dec = AesCbcChain::new(key, iv);
+        let pt = dec.decrypt(&ct).unwrap();
+
+        assert_eq!(&data[..], &pt[..]);
+    }
+
+    #[test]
+    fn test_cbc_chain_multi_call_chaining() {
+        let key = [0x11u8; 32];
+        let iv = [0x22u8; 16];
+
+        let block1 = [0xAA; 16];
+        let block2 = [0xBB; 16];
+        let block3 = [0xCC; 16];
+
+        // Encrypt in three separate calls
+        let mut enc = AesCbcChain::new(key, iv);
+        let ct1 = enc.encrypt(&block1).unwrap();
+        let ct2 = enc.encrypt(&block2).unwrap();
+        let ct3 = enc.encrypt(&block3).unwrap();
+
+        // Encrypt all at once with stateless cipher
+        let mut all = Vec::new();
+        all.extend_from_slice(&block1);
+        all.extend_from_slice(&block2);
+        all.extend_from_slice(&block3);
+        let stateless = AesCbc::new(key, iv);
+        let ct_all = stateless.encrypt(&all).unwrap();
+
+        // Must match exactly — chaining must be correct
+        let mut ct_concat = Vec::new();
+        ct_concat.extend_from_slice(&ct1);
+        ct_concat.extend_from_slice(&ct2);
+        ct_concat.extend_from_slice(&ct3);
+        assert_eq!(ct_all, ct_concat);
+
+        // Now decrypt in three separate calls
+        let mut dec = AesCbcChain::new(key, iv);
+        let pt1 = dec.decrypt(&ct1).unwrap();
+        let pt2 = dec.decrypt(&ct2).unwrap();
+        let pt3 = dec.decrypt(&ct3).unwrap();
+
+        assert_eq!(&pt1[..], &block1[..]);
+        assert_eq!(&pt2[..], &block2[..]);
+        assert_eq!(&pt3[..], &block3[..]);
+    }
+
+    #[test]
+    fn test_cbc_chain_iv_advances() {
+        let key = [0xDD; 32];
+        let iv = [0x00; 16];
+        let data = [0xFF; 16];
+
+        let mut chain = AesCbcChain::new(key, iv);
+        assert_eq!(chain.current_iv(), &iv);
+
+        let ct = chain.encrypt(&data).unwrap();
+        // IV must have changed to the last ciphertext block
+        assert_ne!(chain.current_iv(), &iv);
+        let expected_iv: [u8; 16] = ct[..16].try_into().unwrap();
+        assert_eq!(chain.current_iv(), &expected_iv);
+    }
+
+    #[test]
+    fn test_cbc_chain_empty() {
+        let mut chain = AesCbcChain::new([0; 32], [0; 16]);
+        let ct = chain.encrypt(&[]).unwrap();
+        assert!(ct.is_empty());
+        let pt = chain.decrypt(&[]).unwrap();
+        assert!(pt.is_empty());
+    }
+
+    #[test]
+    fn test_cbc_chain_unaligned_error() {
+        let mut chain = AesCbcChain::new([0; 32], [0; 16]);
+        assert!(chain.encrypt(&[0; 15]).is_err());
+        assert!(chain.decrypt(&[0; 17]).is_err());
+    }
+
+    #[test]
+    fn test_cbc_chain_from_slices() {
+        let key = vec![0x42u8; 32];
+        let iv = vec![0x13u8; 16];
+        let chain = AesCbcChain::from_slices(&key, &iv);
+        assert!(chain.is_ok());
+
+        assert!(AesCbcChain::from_slices(&[0; 16], &[0; 16]).is_err());
+        assert!(AesCbcChain::from_slices(&[0; 32], &[0; 8]).is_err());
     }
     
     // ============= Zeroize Tests =============
@@ -509,34 +739,23 @@ mod tests {
     fn test_aes_cbc_zeroize_on_drop() {
         let key = [0xAA; 32];
         let iv = [0xBB; 16];
-        
         let cipher = AesCbc::new(key, iv);
-        // Verify key/iv are set
         assert_eq!(cipher.key, [0xAA; 32]);
         assert_eq!(cipher.iv, [0xBB; 16]);
-        
         drop(cipher);
-        // After drop, key/iv are zeroized (can't observe directly,
-        // but the Drop impl runs without panic)
     }
     
     // ============= Error Handling Tests =============
     
     #[test]
     fn test_invalid_key_length() {
-        let result = AesCtr::from_key_iv(&[0u8; 16], &[0u8; 16]);
-        assert!(result.is_err());
-        
-        let result = AesCbc::from_slices(&[0u8; 16], &[0u8; 16]);
-        assert!(result.is_err());
+        assert!(AesCtr::from_key_iv(&[0u8; 16], &[0u8; 16]).is_err());
+        assert!(AesCbc::from_slices(&[0u8; 16], &[0u8; 16]).is_err());
     }
     
     #[test]
     fn test_invalid_iv_length() {
-        let result = AesCtr::from_key_iv(&[0u8; 32], &[0u8; 8]);
-        assert!(result.is_err());
-        
-        let result = AesCbc::from_slices(&[0u8; 32], &[0u8; 8]);
-        assert!(result.is_err());
+        assert!(AesCtr::from_key_iv(&[0u8; 32], &[0u8; 8]).is_err());
+        assert!(AesCbc::from_slices(&[0u8; 32], &[0u8; 8]).is_err());
     }
 }

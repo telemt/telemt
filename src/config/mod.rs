@@ -57,7 +57,6 @@ impl LogLevel {
             LogLevel::Silent => "warn",
         }
     }
-    
     /// Parse from a loose string (CLI argument)
     pub fn from_str_loose(s: &str) -> Self {
         match s.to_lowercase().as_str() {
@@ -103,19 +102,19 @@ impl Default for ProxyModes {
 pub struct GeneralConfig {
     #[serde(default)]
     pub modes: ProxyModes,
-    
+
     #[serde(default)]
     pub prefer_ipv6: bool,
-    
+
     #[serde(default = "default_true")]
     pub fast_mode: bool,
-    
+
     #[serde(default)]
     pub use_middle_proxy: bool,
 
     #[serde(default)]
     pub ad_tag: Option<String>,
-    
+
     #[serde(default)]
     pub log_level: LogLevel,
 }
@@ -140,16 +139,16 @@ pub struct ServerConfig {
 
     #[serde(default = "default_listen_addr")]
     pub listen_addr_ipv4: String,
-    
+
     #[serde(default)]
     pub listen_addr_ipv6: Option<String>,
-    
+
     #[serde(default)]
     pub listen_unix_sock: Option<String>,
-    
+
     #[serde(default)]
     pub metrics_port: Option<u16>,
-    
+
     #[serde(default = "default_metrics_whitelist")]
     pub metrics_whitelist: Vec<IpAddr>,
 
@@ -175,13 +174,13 @@ impl Default for ServerConfig {
 pub struct TimeoutsConfig {
     #[serde(default = "default_handshake_timeout")]
     pub client_handshake: u64,
-    
+
     #[serde(default = "default_connect_timeout")]
     pub tg_connect: u64,
-    
+
     #[serde(default = "default_keepalive")]
     pub client_keepalive: u64,
-    
+
     #[serde(default = "default_ack_timeout")]
     pub client_ack: u64,
 }
@@ -201,13 +200,13 @@ impl Default for TimeoutsConfig {
 pub struct AntiCensorshipConfig {
     #[serde(default = "default_tls_domain")]
     pub tls_domain: String,
-    
+
     #[serde(default = "default_true")]
     pub mask: bool,
-    
+
     #[serde(default)]
     pub mask_host: Option<String>,
-    
+
     #[serde(default = "default_mask_port")]
     pub mask_port: u16,
 
@@ -234,19 +233,19 @@ pub struct AccessConfig {
 
     #[serde(default)]
     pub user_max_tcp_conns: HashMap<String, usize>,
-    
+
     #[serde(default)]
     pub user_expirations: HashMap<String, DateTime<Utc>>,
-    
+
     #[serde(default)]
     pub user_data_quota: HashMap<String, u64>,
 
     #[serde(default = "default_replay_check_len")]
     pub replay_check_len: usize,
-    
+
     #[serde(default = "default_replay_window_secs")]
     pub replay_window_secs: u64,
-    
+
     #[serde(default)]
     pub ignore_time_skew: bool,
 }
@@ -341,10 +340,10 @@ impl ProxyConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| ProxyError::Config(e.to_string()))?;
-        
+
         let mut config: ProxyConfig = toml::from_str(&content)
             .map_err(|e| ProxyError::Config(e.to_string()))?;
-        
+
         // Validate secrets
         for (user, secret) in &config.access.users {
             if !secret.chars().all(|c| c.is_ascii_hexdigit()) || secret.len() != 32 {
@@ -354,21 +353,21 @@ impl ProxyConfig {
                 });
             }
         }
-        
+
         // Validate tls_domain
         if config.censorship.tls_domain.is_empty() {
             return Err(ProxyError::Config("tls_domain cannot be empty".to_string()));
         }
-        
+
         // Default mask_host to tls_domain if not set
         if config.censorship.mask_host.is_none() {
             config.censorship.mask_host = Some(config.censorship.tls_domain.clone());
         }
-        
+
         // Random fake_cert_len
         use rand::Rng;
         config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
-        
+
         // Migration: Populate listeners if empty
         if config.server.listeners.is_empty() {
             if let Ok(ipv4) = config.server.listen_addr_ipv4.parse::<IpAddr>() {
@@ -378,7 +377,7 @@ impl ProxyConfig {
                 });
             }
             if let Some(ipv6_str) = &config.server.listen_addr_ipv6 {
-                 if let Ok(ipv6) = ipv6_str.parse::<IpAddr>() {
+                if let Ok(ipv6) = ipv6_str.parse::<IpAddr>() {
                     config.server.listeners.push(ListenerConfig {
                         ip: ipv6,
                         announce_ip: None,
@@ -389,31 +388,59 @@ impl ProxyConfig {
 
         // Migration: Populate upstreams if empty (Default Direct)
         if config.upstreams.is_empty() {
-             config.upstreams.push(UpstreamConfig {
+            config.upstreams.push(UpstreamConfig {
                 upstream_type: UpstreamType::Direct { interface: None },
                 weight: 1,
                 enabled: true,
             });
         }
-        
+
         Ok(config)
     }
-    
+
     pub fn validate(&self) -> Result<()> {
         if self.access.users.is_empty() {
             return Err(ProxyError::Config("No users configured".to_string()));
         }
-        
+
         if !self.general.modes.classic && !self.general.modes.secure && !self.general.modes.tls {
             return Err(ProxyError::Config("No modes enabled".to_string()));
         }
-        
+
         if self.censorship.tls_domain.contains(' ') || self.censorship.tls_domain.contains('/') {
             return Err(ProxyError::Config(
                 format!("Invalid tls_domain: '{}'. Must be a valid domain name", self.censorship.tls_domain)
             ));
         }
-        
+
+        // Validate middle proxy: require parseable ad_tag when enabled
+        if self.general.use_middle_proxy && self.ad_tag_bytes().is_none() {
+            return Err(ProxyError::Config(
+                "use_middle_proxy requires ad_tag (32 hex chars). Get one from @mtproxybot".to_string()
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Parse ad_tag from hex string to 16-byte array.
+    ///
+    /// Returns `None` only if ad_tag is not set, not valid hex, or wrong length.
+    /// All-zero ad_tags ARE accepted (useful for testing; Telegram just won't
+    /// display a sponsored channel).
+    pub fn ad_tag_bytes(&self) -> Option<[u8; 16]> {
+        self.general.ad_tag.as_ref().and_then(|hex_str| {
+            let bytes = hex::decode(hex_str).ok()?;
+            let arr: [u8; 16] = bytes.try_into().ok()?;
+            Some(arr)
+        })
+    }
+
+    /// Check if middle proxy mode is properly configured.
+    ///
+    /// Returns `true` when `use_middle_proxy` is enabled AND a valid
+    /// 16-byte ad_tag is present (including all-zero).
+    pub fn is_middle_proxy_enabled(&self) -> bool {
+        self.general.use_middle_proxy && self.ad_tag_bytes().is_some()
     }
 }
