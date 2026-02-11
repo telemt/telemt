@@ -29,14 +29,14 @@ use super::handshake::handshake_middle_proxy;
 ///
 /// Middle proxies can silently close idle handshaked sockets rather quickly.
 /// Keeping entries too long causes immediate EOF on reuse (`TG→C ... early eof`).
-const MAX_CONN_AGE: Duration = Duration::from_secs(30);
+const MAX_CONN_AGE: Duration = Duration::from_secs(8);
 
 /// Keep enough hot connections for parallel media uploads.
 /// Telegram clients can open several concurrent MTProto sockets.
 const TARGET_PER_DC: usize = 8;
 
 /// Interval between replenish rounds
-const REPLENISH_INTERVAL: Duration = Duration::from_secs(5);
+const REPLENISH_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How long a DC stays "active" for background replenishment after last use.
 const ACTIVE_DC_TTL: Duration = Duration::from_secs(15 * 60);
