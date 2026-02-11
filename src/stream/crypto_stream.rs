@@ -63,9 +63,7 @@ use super::state::{StreamState, YieldBuffer};
 // ============= Constants =============
 
 /// Maximum size for pending ciphertext buffer (bounded backpressure).
-/// Reduced to 64KB to prevent bufferbloat on mobile networks.
-/// 512KB was causing high latency on 3G/LTE connections.
-const MAX_PENDING_WRITE: usize = 64 * 1024;
+const MAX_PENDING_WRITE: usize = 1024 * 1024;
 
 /// Default read buffer capacity (reader mostly decrypts in-place into caller buffer).
 const DEFAULT_READ_CAPACITY: usize = 16 * 1024;

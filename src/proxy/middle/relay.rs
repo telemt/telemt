@@ -33,7 +33,7 @@
 //!
 //! - **`RPC_PROXY_ANS`**: `write_frame()` buffers the data through the
 //!   layered writer stack.  We only call `flush()` when:
-//!   1. Accumulated unflushed bytes exceed `TG2C_DRAIN_WATERMARK` (64 KB), or
+//!   1. Accumulated unflushed bytes exceed `TG2C_DRAIN_WATERMARK` (2 MB), or
 //!   2. The response has `flags & 8` set (C MTProxy "flush immediately"), or
 //!   3. On exit (final flush to push any remaining buffered data).
 //!
@@ -43,9 +43,9 @@
 //! ### Why per-frame flush caused media failures
 //!
 //! During media transfers, Telegram sends a rapid stream of large
-//! `RPC_PROXY_ANS` responses.  Per-frame `flush()` would block the TG→C
-//! read loop whenever the client was temporarily slow to read (mobile
-//! network, TCP window exhaustion).  This cascaded:
+//! `RPC_PROXY_ANS` responses (up to ~524 KB each).  Per-frame `flush()`
+//! would block the TG→C read loop whenever the client was temporarily slow
+//! to read (mobile network, TCP window exhaustion).  This cascaded:
 //!
 //! 1. TG→C stops reading from middle proxy (blocked on flush)
 //! 2. Middle proxy backpressures on its write buffer
@@ -83,16 +83,8 @@ const TG2C_SLOW_WRITE_WARN: Duration = Duration::from_millis(200);
 /// Warn when a single drain call takes longer than this.
 const TG2C_SLOW_DRAIN_WARN: Duration = Duration::from_millis(200);
 
-/// Approximate asyncio transport high-water mark (64 KB).
-///
-/// Python asyncio's default high-water mark is 64 KB.  `drain()` only
-/// blocks when the transport buffer exceeds this size.  We replicate the
-/// same behavior: accumulate writes without flushing, and only force a
-/// synchronous flush when unflushed bytes exceed this threshold.
-///
-/// This prevents HOL-blocking on every frame while still ensuring that
-/// buffered data doesn't grow unbounded.
-const TG2C_DRAIN_WATERMARK: usize = 64 * 1024;
+/// Approximate asyncio transport high-water mark.
+const TG2C_DRAIN_WATERMARK: usize = 2 * 1024 * 1024;
 
 /// `rpc_proxy_ans.flags` bit: flush immediately.
 ///
@@ -379,7 +371,7 @@ async fn relay_client_to_tg<R: AsyncRead + Unpin>(
 /// - `write_frame()` pushes data through the layered writer stack without
 ///   forcing a synchronous drain.
 /// - `flush()` is called only when:
-///   1. `unflushed >= TG2C_DRAIN_WATERMARK` (64 KB accumulated), or
+///   1. `unflushed >= TG2C_DRAIN_WATERMARK` (2 MB accumulated), or
 ///   2. `rpc_proxy_ans.flags & 8` is set (C MTProxy "flush immediately"), or
 ///   3. The message is a `RPC_SIMPLE_ACK` (quickack must reach client ASAP).
 ///
@@ -465,18 +457,12 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                 //
                 // We only force a synchronous flush() when:
                 //
-                // 1) Accumulated unflushed bytes exceed the watermark (64 KB),
+                // 1) Accumulated unflushed bytes exceed the watermark (2 MB),
                 //    matching Python asyncio's drain() semantics.
                 //
                 // 2) The middle proxy set the "flush immediately" flag
                 //    (flags & 8) in the RPC_PROXY_ANS header, as defined
                 //    in C MTProxy's mtproto-common.h.
-                //
-                // This avoids HOL-blocking: during media transfers the
-                // client may temporarily slow down (mobile network, TCP
-                // window exhaustion).  Per-frame flush() would block the
-                // TG→C read loop on every frame, cascading backpressure
-                // all the way to the middle proxy and stalling uploads.
                 unflushed = unflushed.saturating_add(data.len());
                 let want_flush =
                     (flags & RPC_PROXY_ANS_FLUSH_IMMEDIATELY) != 0 ||

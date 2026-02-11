@@ -25,28 +25,25 @@ use super::config::MiddleProxyConfig;
 use super::connection::HandshakedMiddleConnection;
 use super::handshake::handshake_middle_proxy;
 
-/// Maximum age of a pooled connection before it is discarded
-///
-/// Middle proxies can silently close idle handshaked sockets rather quickly.
-/// Keeping entries too long causes immediate EOF on reuse (`TG→C ... early eof`).
-const MAX_CONN_AGE: Duration = Duration::from_secs(8);
+/// Maximum age of a pooled connection before it is discarded.
+const MAX_CONN_AGE: Duration = Duration::from_secs(60);
 
 /// Keep enough hot connections for parallel media uploads.
 /// Telegram clients can open several concurrent MTProto sockets.
-const TARGET_PER_DC: usize = 8;
+const TARGET_PER_DC: usize = 3;
 
-/// Interval between replenish rounds
-const REPLENISH_INTERVAL: Duration = Duration::from_secs(3);
+/// Interval between replenish rounds.
+const REPLENISH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How long a DC stays "active" for background replenishment after last use.
-const ACTIVE_DC_TTL: Duration = Duration::from_secs(15 * 60);
+const ACTIVE_DC_TTL: Duration = Duration::from_secs(30 * 60);
 
-/// Timeout for creating a single pooled connection (handshake included)
-const POOL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Timeout for creating a single pooled connection (handshake included).
+const POOL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Small wait window to reuse a connection that is already being pre-created.
-const EMPTY_POOL_WAIT_TOTAL: Duration = Duration::from_millis(300);
-const EMPTY_POOL_WAIT_STEP: Duration = Duration::from_millis(60);
+const EMPTY_POOL_WAIT_TOTAL: Duration = Duration::from_millis(2000);
+const EMPTY_POOL_WAIT_STEP: Duration = Duration::from_millis(200); 
 
 // ============= Pool Entry =============
 
