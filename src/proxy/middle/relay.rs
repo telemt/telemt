@@ -11,13 +11,12 @@
 //! - **C→TG**: read frame from client → wrap in RPC_PROXY_REQ → send to middle proxy
 //! - **TG→C**: read RPC response → unwrap → write frame to client
 //!
-//! ## Drain policy (critical for throughput)
+//! ## Drain policy (critical for correctness)
 //!
 //! Python reference uses `writer.write()` (instant buffer) + `await drain()`
-//! on every write.  Crucially, `drain()` is **not** "flush to zero" — it only
-//! blocks when the transport buffer exceeds the high-water mark (default 64 KB).
-//! If the buffer is small, `drain()` returns almost immediately without
-//! blocking the read loop.
+//! on every write.  `drain()` only blocks when the transport buffer exceeds
+//! the high-water mark (default 64 KB).  If the buffer is small, `drain()`
+//! returns almost immediately without blocking.
 //!
 //! The official C MTProxy uses epoll: data is queued in a write buffer and
 //! flushed by the event loop when the socket is writable — never per-frame.
@@ -25,37 +24,39 @@
 //! in `rpc_proxy_ans`, which forces an immediate drain for that particular
 //! response.
 //!
-//! ### Our approach: watermark-based flush
+//! ### Our approach: per-frame flush
 //!
-//! We use a **watermark-based** drain policy that closely matches Python's
-//! asyncio semantics while avoiding the HOL-blocking caused by per-frame
-//! `flush()`:
+//! We call `flush()` after **every** `write_frame()` for both `RPC_PROXY_ANS`
+//! and `RPC_SIMPLE_ACK` — matching Python's per-write `drain()` pattern.
+//! (The C MTProxy `flags & 8` bit is therefore always implicitly honored.)
 //!
-//! - **`RPC_PROXY_ANS`**: `write_frame()` buffers the data through the
-//!   layered writer stack.  We only call `flush()` when:
-//!   1. Accumulated unflushed bytes exceed `TG2C_DRAIN_WATERMARK` (2 MB), or
-//!   2. The response has `flags & 8` set (C MTProxy "flush immediately"), or
-//!   3. On exit (final flush to push any remaining buffered data).
+//! - **`RPC_PROXY_ANS`**: `write_frame()` pushes data through the layered
+//!   writer stack, then `flush()` propagates through all layers
+//!   (FrameWriter → CryptoWriter → FakeTlsWriter → TCP), ensuring data
+//!   reaches the TCP send buffer.
 //!
-//! - **`RPC_SIMPLE_ACK`**: Always flushed immediately — quickack
+//! - **`RPC_SIMPLE_ACK`**: Also flushed immediately — quickack
 //!   confirmations must reach the client ASAP to unblock uploads.
 //!
-//! ### Why per-frame flush caused media failures
+//! ### Why per-frame flush is necessary
 //!
-//! During media transfers, Telegram sends a rapid stream of large
-//! `RPC_PROXY_ANS` responses (up to ~524 KB each).  Per-frame `flush()`
-//! would block the TG→C read loop whenever the client was temporarily slow
-//! to read (mobile network, TCP window exhaustion).  This cascaded:
+//! With the layered writer stack (CryptoWriter → FakeTlsWriter → TCP),
+//! `write_frame()` alone may leave data in intermediate buffers.  Without
+//! an explicit `flush()`, data can sit in CryptoWriter's pending buffer
+//! or FakeTlsWriter's partial TLS record indefinitely — until the next
+//! write pushes it through.
 //!
-//! 1. TG→C stops reading from middle proxy (blocked on flush)
-//! 2. Middle proxy backpressures on its write buffer
-//! 3. C→TG `RPC_PROXY_REQ` responses (including ACKs) stall
-//! 4. Client sees timeouts, media "stuck", parallel messages freeze
+//! If the middle proxy sends a burst of small responses (88–3000 bytes)
+//! and then pauses, the last response's data gets stuck in internal
+//! buffers.  The client never receives it, ACKs never flow back, and
+//! the middle proxy eventually closes the connection with an early EOF
+//! (~26–31 seconds later).
 //!
-//! The watermark approach lets `write_frame()` buffer data into the
-//! layered writer stack (CryptoWriter → FakeTlsWriter → TCP) without
-//! blocking, and only forces a synchronous drain when the buffer grows
-//! beyond the watermark — exactly like Python's asyncio transport.
+//! For small messages that fit in TCP's send buffer, `flush()` completes
+//! instantly (all layers return `Ready` immediately).  For large media
+//! chunks, `flush()` ensures data actually reaches the client.  If TCP's
+//! send buffer is full (slow client), `flush()` blocks — which is correct
+//! backpressure behavior that prevents unbounded memory growth.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,17 +83,6 @@ const TG2C_TELEMETRY_INTERVAL: Duration = Duration::from_secs(10);
 const TG2C_SLOW_WRITE_WARN: Duration = Duration::from_millis(200);
 /// Warn when a single drain call takes longer than this.
 const TG2C_SLOW_DRAIN_WARN: Duration = Duration::from_millis(200);
-
-/// Approximate asyncio transport high-water mark.
-const TG2C_DRAIN_WATERMARK: usize = 256 * 1024;
-
-/// `rpc_proxy_ans.flags` bit: flush immediately.
-///
-/// Defined in C MTProxy's `mtproto-common.h`.  When this bit is set,
-/// the middle proxy is signaling that the data should be pushed to the
-/// client without waiting for the watermark.  Python ignores this
-/// (always drains), but we honor it for correctness.
-const RPC_PROXY_ANS_FLUSH_IMMEDIATELY: u32 = 8;
 
 #[derive(Debug, Default)]
 struct TgToClientTelemetry {
@@ -365,19 +355,20 @@ async fn relay_client_to_tg<R: AsyncRead + Unpin>(
 ///
 /// ## Drain policy
 ///
-/// Unlike the previous per-frame `flush()` approach, this function uses a
-/// **watermark-based** drain strategy modeled after Python's asyncio:
+/// `flush()` is called after **every** frame write — both `RPC_PROXY_ANS`
+/// and `RPC_SIMPLE_ACK`.  This matches Python's `writer.write(data);
+/// await writer.drain()` pattern.
 ///
-/// - `write_frame()` pushes data through the layered writer stack without
-///   forcing a synchronous drain.
-/// - `flush()` is called only when:
-///   1. `unflushed >= TG2C_DRAIN_WATERMARK` (2 MB accumulated), or
-///   2. `rpc_proxy_ans.flags & 8` is set (C MTProxy "flush immediately"), or
-///   3. The message is a `RPC_SIMPLE_ACK` (quickack must reach client ASAP).
+/// Without per-frame flush, data can get stuck in CryptoWriter's or
+/// FakeTlsWriter's internal buffers when messages are small (88–3000
+/// bytes) — the layered writer stack only drains pending data during
+/// the next `poll_write`, which never comes if the relay is waiting
+/// on a read.  This causes ACK timeouts, early EOF from the middle
+/// proxy, and failed media transfers.
 ///
-/// This prevents HOL-blocking during media transfers where the TG→C read
-/// loop was previously stalled on `flush()` while the client was temporarily
-/// slow to read.
+/// For small messages, `flush()` is essentially free (all layers return
+/// Ready immediately).  For large payloads, it provides correct
+/// backpressure.
 async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
     mut mp_reader: MiddleProxyReader,
     mut frame_writer: FrameWriterKind<W>,
@@ -389,7 +380,6 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
     let mut last_activity = Instant::now();
     let mut telemetry = TgToClientTelemetry::default();
     let mut last_telemetry_log = Instant::now();
-    let mut unflushed: usize = 0;
 
     loop {
         let read_started = Instant::now();
@@ -447,38 +437,34 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                 }
                 let write_elapsed = write_started.elapsed();
 
-                // Watermark-based flush (see module doc and function doc).
+                // Always flush after every ProxyAns frame.
+                //
+                // This matches Python's `writer.write(data); await writer.drain()`
+                // pattern.  For small messages (<16KB) that fit in TCP's send
+                // buffer, flush() completes instantly (poll_flush propagates
+                // through CryptoWriter → FakeTlsWriter → TCP, all return Ready
+                // immediately).  For large media chunks, flush() ensures data
+                // actually reaches the client instead of sitting in
+                // CryptoWriter's pending buffer.
+                //
+                // The previous watermark approach (only flush after N KB)
+                // caused data to get stuck in internal buffers: the relay
+                // would read the next RPC response while the client was still
+                // waiting for the previous one, leading to ACK timeouts,
+                // early EOF from middle proxy, and failed media transfers.
                 //
                 // write_frame() pushes plaintext through the layered writer
-                // stack (FrameWriter → CryptoWriter → FakeTlsWriter → TCP).
-                // Each layer's poll_write drains pending data from the
-                // previous layer, so data generally flows through without
-                // explicit flush().
-                //
-                // We only force a synchronous flush() when:
-                //
-                // 1) Accumulated unflushed bytes exceed the watermark (2 MB),
-                //    matching Python asyncio's drain() semantics.
-                //
-                // 2) The middle proxy set the "flush immediately" flag
-                //    (flags & 8) in the RPC_PROXY_ANS header, as defined
-                //    in C MTProxy's mtproto-common.h.
-                unflushed = unflushed.saturating_add(data.len());
-                let want_flush =
-                    (flags & RPC_PROXY_ANS_FLUSH_IMMEDIATELY) != 0 ||
-                    unflushed >= TG2C_DRAIN_WATERMARK;
-
-                let (drain_elapsed, did_flush) = if want_flush {
-                    let drain_started = Instant::now();
-                    if let Err(e) = flush_frame_writer(&mut frame_writer).await {
-                        debug!(user = %user, error = %e, "TG→C flush failed");
-                        break;
-                    }
-                    unflushed = 0;
-                    (drain_started.elapsed(), true)
-                } else {
-                    (Duration::ZERO, false)
-                };
+                // stack (FrameWriter → CryptoWriter → FakeTlsWriter).  The
+                // flush() after it ensures all layers drain their internal
+                // buffers through to TCP.  If TCP's send buffer is full
+                // (slow client), flush() blocks — which is correct
+                // backpressure behavior.
+                let drain_started = Instant::now();
+                if let Err(e) = flush_frame_writer(&mut frame_writer).await {
+                    debug!(user = %user, error = %e, "TG→C flush failed");
+                    break;
+                }
+                let drain_elapsed = drain_started.elapsed();
 
                 telemetry.record_proxy_ans(
                     data.len(),
@@ -497,7 +483,7 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                         "TG→C slow write_frame"
                     );
                 }
-                if did_flush && drain_elapsed >= TG2C_SLOW_DRAIN_WARN {
+                if drain_elapsed >= TG2C_SLOW_DRAIN_WARN {
                     warn!(
                         user = %user,
                         bytes = data.len(),
@@ -541,8 +527,6 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                     break;
                 }
                 let drain_elapsed = drain_started.elapsed();
-                // Reset unflushed counter — flush just pushed everything through.
-                unflushed = 0;
 
                 telemetry.record_simple_ack(
                     confirm.len(),

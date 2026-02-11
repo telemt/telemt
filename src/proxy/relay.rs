@@ -30,7 +30,7 @@ const ACTIVITY_TIMEOUT_SECS: u64 = 1800;
 /// pending ciphertext) are drained periodically.  This prevents the pathological
 /// case where a partial TLS record sits in FakeTlsWriter's buffer while the
 /// relay is blocking on a read.
-const FLUSH_WATERMARK: usize = 524288;
+const FLUSH_WATERMARK: usize = 65536;
 
 /// Relay data bidirectionally between client and server
 pub async fn relay_bidirectional<CR, CW, SR, SW>(
