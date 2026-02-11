@@ -36,6 +36,21 @@ pub struct HandshakedMiddleConnection {
     pub(super) read_seq: i32,
     pub(super) my_ip: IpAddr,
     pub(super) my_port: u16,
+    /// Leftover decrypted bytes from CBC alignment during the handshake phase.
+    ///
+    /// After the nonce + handshake exchange, `read_cbc_exact` may have decrypted
+    /// more bytes than were consumed (because CBC operates on 16-byte blocks).
+    /// Those residual bytes (typically padding pseudo-frames like `[04,00,00,00]`)
+    /// **must** be carried over into the data-relay phase.  If they are dropped,
+    /// the CBC chain's internal IV is already past them, yet the MiddleProxyReader
+    /// would never see them — causing a silent offset mismatch that corrupts the
+    /// very next frame it tries to read.
+    ///
+    /// In most cases the residual is just padding, but under certain timing
+    /// conditions the middle proxy can pipeline data right after the handshake
+    /// response inside the same TCP segment, so part of the first real data
+    /// frame may already be sitting in this buffer.
+    pub(super) dec_buf: Vec<u8>,
 }
 
 impl HandshakedMiddleConnection {
@@ -66,7 +81,9 @@ impl HandshakedMiddleConnection {
             writer,
             enc_chain: self.enc_chain,
             dec_chain: self.dec_chain,
-            dec_buf: Vec::with_capacity(256),
+            // CRITICAL: carry over the leftover decrypted bytes from the
+            // handshake phase instead of starting with an empty buffer.
+            dec_buf: self.dec_buf,
             write_seq: self.write_seq,
             read_seq: self.read_seq,
             out_conn_id,
