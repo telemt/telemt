@@ -51,9 +51,16 @@ use super::state::{StreamState, HeaderBuffer, YieldBuffer, WriteBuffer};
 /// TLS record header size (type + version + length)
 const TLS_HEADER_SIZE: usize = 5;
 
-/// Maximum TLS fragment size per spec (plaintext fragment).
-/// We use this for *outgoing* chunking, because we build plain ApplicationData records.
-const MAX_TLS_PAYLOAD: usize = 16384;
+/// Maximum TLS fragment size for outgoing records.
+///
+/// Python reference uses 16384 + 24 = 16408:
+///   MAX_CHUNK_SIZE = 16384 + 24
+///
+/// TLS 1.3 AEAD overhead allows records slightly larger than 2^14.
+/// Telegram FakeTLS clients (iOS) may send records up to this size,
+/// and using the same limit for output avoids unnecessary record splitting
+/// that could confuse some client implementations.
+const MAX_TLS_PAYLOAD: usize = 16384 + 24;
 
 /// Maximum pending write buffer for one record remainder.
 /// Note: we never queue unlimited amount of data here; state holds at most one record.

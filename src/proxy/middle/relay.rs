@@ -19,13 +19,15 @@
 //! The official C MTProxy uses epoll: data is queued in a write buffer and
 //! flushed by the event loop when the socket is writable — never per-frame.
 //!
-//! We follow this with an explicit **drain call after each frame write**,
-//! but without `flush()`: we drive pending bytes through layered writer
-//! state machines (CryptoWriter/FakeTlsWriter) via zero-length write polling.
+//! We call `flush()` after each frame write to ensure all data is pushed
+//! through the entire layered writer stack (CryptoWriter → FakeTlsWriter → TCP).
+//! This is critical for large payloads (photos, videos) where data can get
+//! stuck in intermediate buffers (CryptoWriter pending, FakeTlsWriter
+//! WritingRecord) if not explicitly flushed.
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 
@@ -146,11 +148,26 @@ fn log_tg2c_telemetry(user: &str, telemetry: &TgToClientTelemetry, final_log: bo
     );
 }
 
-/// `mtprotoproxy.py` semantics: call `drain()` after writes.
-async fn drain_frame_writer<W: AsyncWrite + Unpin>(
+/// Flush the entire layered writer stack: FrameWriter → CryptoWriter → FakeTlsWriter → TCP.
+///
+/// This is the Rust equivalent of Python's `await writer.drain()`.
+///
+/// **Why `flush()` and not `write(&[])`?**
+///
+/// `flush()` calls `poll_flush` which propagates through ALL layers:
+///   1. CryptoWriter flushes its pending ciphertext buffer
+///   2. FakeTlsWriter flushes any partial TLS record (WritingRecord state)
+///   3. TCP flush (no-op in tokio, but completes the chain)
+///
+/// A zero-length `write(&[])` only drives CryptoWriter's pending→FakeTlsWriter
+/// path, but does NOT guarantee FakeTlsWriter's internal partial record is
+/// fully delivered to TCP. For small payloads (GIFs) this works by accident,
+/// but for large payloads (photos, videos) that produce many TLS records,
+/// data can get stuck in FakeTlsWriter's WritingRecord buffer.
+async fn flush_frame_writer<W: AsyncWrite + Unpin>(
     frame_writer: &mut FrameWriterKind<W>,
 ) -> Result<()> {
-    frame_writer.drain_pending().await?;
+    frame_writer.flush().await?;
     Ok(())
 }
 
@@ -284,10 +301,9 @@ async fn relay_client_to_tg<R: AsyncRead + Unpin>(
                     debug!(user = %user, error = %e, "C→TG write to middle proxy failed");
                     break;
                 }
-                // No flush — MiddleProxyWriter writes directly to TCP
-                // (OwnedWriteHalf).  TCP has no userspace buffer, so
-                // write_all already pushes bytes into the kernel send
-                // buffer.  flush() on TcpStream is a no-op in tokio.
+                // No flush needed here: MiddleProxyWriter.write_proxy_req() calls
+                // write_all() on OwnedWriteHalf (unbuffered TCP stream), which pushes
+                // CBC-encrypted bytes directly into the kernel send buffer.
             }
         }
     }
@@ -370,9 +386,24 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                 }
                 let write_elapsed = write_started.elapsed();
 
+                // CRITICAL: flush() the entire layered writer stack after each frame.
+                //
+                // write_frame() calls write_all() which pushes plaintext through:
+                //   FrameWriter → CryptoWriter (AES-CTR encrypt) → FakeTlsWriter (TLS wrap) → TCP
+                //
+                // For large payloads (photos/videos), CryptoWriter may buffer ciphertext
+                // in its `pending` buffer, and FakeTlsWriter may have a partial TLS record
+                // in its `WritingRecord` state.  Without flush(), this buffered data is NOT
+                // guaranteed to reach TCP before we read the next frame from the middle proxy.
+                //
+                // For small payloads (GIFs, text), data fits in a single TLS record and
+                // passes through on the first poll_write — so the bug is invisible.
+                //
+                // flush() calls poll_flush on each layer in sequence, ensuring ALL pending
+                // data reaches the TCP kernel buffer.  This matches Python's `await wr.drain()`.
                 let drain_started = Instant::now();
-                if let Err(e) = drain_frame_writer(&mut frame_writer).await {
-                    debug!(user = %user, error = %e, "TG→C drain failed");
+                if let Err(e) = flush_frame_writer(&mut frame_writer).await {
+                    debug!(user = %user, error = %e, "TG→C flush failed");
                     break;
                 }
                 let drain_elapsed = drain_started.elapsed();
@@ -401,7 +432,7 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                         msg = msg_count,
                         read_wait_ms = read_elapsed.as_secs_f64() * 1000.0,
                         drain_ms = drain_elapsed.as_secs_f64() * 1000.0,
-                        "TG→C slow drain_pending"
+                        "TG→C slow flush"
                     );
                 }
 
@@ -429,8 +460,8 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                 let write_elapsed = write_started.elapsed();
 
                 let drain_started = Instant::now();
-                if let Err(e) = drain_frame_writer(&mut frame_writer).await {
-                    debug!(user = %user, error = %e, "TG→C drain simple_ack failed");
+                if let Err(e) = flush_frame_writer(&mut frame_writer).await {
+                    debug!(user = %user, error = %e, "TG→C flush simple_ack failed");
                     break;
                 }
                 let drain_elapsed = drain_started.elapsed();
@@ -448,7 +479,7 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                         msg = msg_count,
                         read_wait_ms = read_elapsed.as_secs_f64() * 1000.0,
                         drain_ms = drain_elapsed.as_secs_f64() * 1000.0,
-                        "TG→C slow drain_pending for simple_ack"
+                        "TG→C slow flush for simple_ack"
                     );
                 }
 
@@ -472,8 +503,8 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
         }
     }
 
-    // Final drain before shutdown.
-    let _ = drain_frame_writer(&mut frame_writer).await;
+    // Final flush before shutdown — push any remaining buffered data to TCP.
+    let _ = flush_frame_writer(&mut frame_writer).await;
     log_tg2c_telemetry(user, &telemetry, true);
 
     debug!(

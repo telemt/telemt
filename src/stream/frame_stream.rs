@@ -152,14 +152,11 @@ impl<W: AsyncWrite + Unpin> AbridgedFrameWriter<W> {
         self.upstream.flush().await
     }
 
-    /// Asyncio-like `drain()` for layered writers.
+    /// Flush all pending data through the layered writer stack.
     ///
-    /// We do not call `flush()` here.  Instead, we perform a zero-length write
-    /// which drives pending state machines in lower layers (CryptoWriter /
-    /// FakeTlsWriter) without forcing a transport flush syscall path.
+    /// Equivalent to Python's `await writer.drain()`.
     pub async fn drain_pending(&mut self) -> Result<()> {
-        let _ = self.upstream.write(&[]).await?;
-        Ok(())
+        self.upstream.flush().await
     }
 }
 
@@ -256,9 +253,11 @@ impl<W: AsyncWrite + Unpin> IntermediateFrameWriter<W> {
         self.upstream.flush().await
     }
 
+    /// Flush all pending data through the layered writer stack.
+    ///
+    /// Equivalent to Python's `await writer.drain()`.
     pub async fn drain_pending(&mut self) -> Result<()> {
-        let _ = self.upstream.write(&[]).await?;
-        Ok(())
+        self.upstream.flush().await
     }
 }
 
@@ -372,9 +371,11 @@ impl<W: AsyncWrite + Unpin> SecureIntermediateFrameWriter<W> {
         self.upstream.flush().await
     }
 
+    /// Flush all pending data through the layered writer stack.
+    ///
+    /// Equivalent to Python's `await writer.drain()`.
     pub async fn drain_pending(&mut self) -> Result<()> {
-        let _ = self.upstream.write(&[]).await?;
-        Ok(())
+        self.upstream.flush().await
     }
 }
 

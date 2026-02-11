@@ -311,13 +311,137 @@ pub fn validate_tls_handshake(
     None
 }
 
-/// Generate a fake X25519 public key for TLS
+/// Generate a fake X25519 public key for TLS ServerHello.
 ///
-/// This generates random bytes that look like a valid X25519 public key.
-/// Since we're not doing real TLS, the actual cryptographic properties don't matter.
+/// Matches the Python reference implementation:
+///   P = 2**255 - 19
+///   n = random(0..P)
+///   return (n*n) % P  in little-endian
+///
+/// This produces a quadratic residue mod P, which is a valid-looking
+/// X25519 public key point. Random bytes have ~50% chance of being
+/// invalid curve points, which DPI systems can detect.
 pub fn gen_fake_x25519_key(rng: &SecureRandom) -> [u8; 32] {
-    let bytes = rng.bytes(32);
-    bytes.try_into().unwrap()
+    // Curve25519 prime: P = 2^255 - 19
+    // We work with 256-bit numbers represented as [u64; 4] in little-endian limb order.
+    
+    // Generate random n < P by generating 32 random bytes and reducing mod P.
+    let n_bytes = rng.bytes(32);
+    
+    // Simple approach: clamp the high bit to ensure n < 2^255,
+    // then the value is < 2^255 which is < 2^255 - 19 + 19 = P + 19.
+    // A modular reduction step handles the rare case where n >= P.
+    let mut n = [0u8; 32];
+    n.copy_from_slice(&n_bytes);
+    n[31] &= 0x7f; // Clear top bit: n < 2^255
+    
+    // Compute n*n mod P using a simplified schoolbook approach.
+    // For just generating fake keys this doesn't need to be fast.
+    let result = mulmod_curve25519(&n, &n);
+    
+    result
+}
+
+/// Multiply two 255-bit numbers modulo P = 2^255 - 19, returning little-endian bytes.
+///
+/// Uses a simple double-and-add approach. Not constant-time (not needed for fake keys).
+fn mulmod_curve25519(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    // P = 2^255 - 19
+    // We represent numbers as 5 limbs of 51 bits each for easy modular reduction.
+    
+    let a_limbs = bytes_to_limbs(a);
+    let b_limbs = bytes_to_limbs(b);
+    
+    // Schoolbook multiplication into 10 limbs
+    let mut product = [0u128; 10];
+    for i in 0..5 {
+        for j in 0..5 {
+            product[i + j] += a_limbs[i] as u128 * b_limbs[j] as u128;
+        }
+    }
+    
+    // Reduce: limbs [5..9] fold back with factor 19 (because 2^255 ≡ 19 mod P)
+    // Each limb at position i+5 contributes 2^(51*(i+5)) = 2^(255+51*i) ≡ 19 * 2^(51*i)
+    for i in 0..5 {
+        product[i] += product[i + 5] * 19;
+    }
+    
+    // Carry propagation
+    let mut limbs = [0u64; 5];
+    let mut carry = 0u128;
+    for i in 0..5 {
+        let val = product[i] + carry;
+        limbs[i] = (val & ((1u128 << 51) - 1)) as u64;
+        carry = val >> 51;
+    }
+    
+    // Final reduction: if carry remains, multiply by 19 and add back
+    if carry > 0 {
+        let extra = carry * 19;
+        let mut c = extra;
+        for i in 0..5 {
+            let val = limbs[i] as u128 + c;
+            limbs[i] = (val & ((1u128 << 51) - 1)) as u64;
+            c = val >> 51;
+        }
+    }
+    
+    limbs_to_bytes(&limbs)
+}
+
+fn bytes_to_limbs(bytes: &[u8; 32]) -> [u64; 5] {
+    // 5 limbs of 51 bits from 255-bit LE number
+    let mut val = [0u64; 5];
+    
+    // Read as a 256-bit LE integer, take 51 bits at a time
+    let mut bits = 0u128;
+    let mut bit_count = 0usize;
+    let mut limb_idx = 0;
+    
+    for &byte in bytes.iter() {
+        bits |= (byte as u128) << bit_count;
+        bit_count += 8;
+        
+        while bit_count >= 51 && limb_idx < 5 {
+            val[limb_idx] = (bits & ((1u128 << 51) - 1)) as u64;
+            bits >>= 51;
+            bit_count -= 51;
+            limb_idx += 1;
+        }
+    }
+    
+    if limb_idx < 5 {
+        val[limb_idx] = (bits & ((1u128 << 51) - 1)) as u64;
+    }
+    
+    val
+}
+
+fn limbs_to_bytes(limbs: &[u64; 5]) -> [u8; 32] {
+    // Reconstruct 255-bit LE number from 5 limbs of 51 bits
+    let mut result = [0u8; 32];
+    
+    let mut bits = 0u128;
+    let mut bit_count = 0usize;
+    let mut byte_idx = 0;
+    
+    for &limb in limbs.iter() {
+        bits |= (limb as u128) << bit_count;
+        bit_count += 51;
+        
+        while bit_count >= 8 && byte_idx < 32 {
+            result[byte_idx] = (bits & 0xff) as u8;
+            bits >>= 8;
+            bit_count -= 8;
+            byte_idx += 1;
+        }
+    }
+    
+    if byte_idx < 32 {
+        result[byte_idx] = (bits & 0xff) as u8;
+    }
+    
+    result
 }
 
 /// Build TLS ServerHello response
