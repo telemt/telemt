@@ -3,6 +3,7 @@
 //! Manages:
 //! - PROXY_SECRET (initial hardcoded + periodic updates from Telegram)
 //! - Middle proxy DC address lists (v4 / v6, periodic updates)
+//! - Default DC fallback for unknown/CDN DCs (parsed from `default N;` directive)
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -40,6 +41,13 @@ const DEFAULT_UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// HTTP request timeout
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Initial default DC index (used before config is fetched from Telegram).
+///
+/// The C MTProxy implementation uses `default 2;` in its config.  We use
+/// the same default so that CDN DCs (e.g. DC 203) are routed through
+/// DC 2's middle proxy before the first config refresh.
+const INITIAL_DEFAULT_DC: i32 = 2;
+
 // ============= MiddleProxyConfig =============
 
 /// Thread-safe runtime configuration for middle proxy connections.
@@ -48,6 +56,18 @@ pub struct MiddleProxyConfig {
     proxy_secret: Arc<RwLock<Vec<u8>>>,
     middle_proxies_v4: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
     middle_proxies_v6: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
+    /// Default DC index for unknown/CDN DCs.
+    ///
+    /// Parsed from the `default N;` directive in `getProxyConfig` response.
+    /// When a client requests a DC that's not in the middle proxy address
+    /// table (e.g. DC 203 for CDN media), the proxy falls back to using
+    /// this DC's middle proxy addresses.  Any middle proxy can route
+    /// requests to any DC — the routing happens inside the middle proxy
+    /// infrastructure, not on our side.
+    ///
+    /// This is how the official C MTProxy handles CDN DCs: the config
+    /// file contains `default 2;` which maps all unknown DCs to DC 2.
+    default_dc: Arc<RwLock<i32>>,
 }
 
 impl MiddleProxyConfig {
@@ -64,6 +84,7 @@ impl MiddleProxyConfig {
             middle_proxies_v6: Arc::new(RwLock::new(
                 crate::protocol::constants::TG_MIDDLE_PROXIES_V6.clone(),
             )),
+            default_dc: Arc::new(RwLock::new(INITIAL_DEFAULT_DC)),
         }
     }
 
@@ -98,7 +119,64 @@ impl MiddleProxyConfig {
     /// - then IPv4 fallback
     ///
     /// Duplicates are removed while preserving first-seen order.
+    ///
+    /// **Fallback for unknown DCs (e.g. CDN DC 203):**
+    ///
+    /// If the requested `dc_idx` has no entries in either the v4 or v6
+    /// tables, the function transparently falls back to the `default_dc`
+    /// (parsed from Telegram's `default N;` config directive, typically 2).
+    ///
+    /// This is critical for media delivery: Telegram clients connect to
+    /// CDN DCs (200+) for photos, videos, stickers, and GIFs.  Without
+    /// this fallback, all media operations fail with
+    /// `No middle proxy address for DC 203`.
+    ///
+    /// Any middle proxy server can route to any DC — the actual DC
+    /// routing happens inside the Telegram middle proxy infrastructure.
+    /// The `proxy_for` config only controls load balancing, not
+    /// reachability.
     pub async fn get_middle_proxy_addrs(
+        &self,
+        dc_idx: i32,
+        prefer_ipv6: bool,
+    ) -> Vec<(IpAddr, u16)> {
+        // Try direct lookup first
+        let addrs = self.lookup_dc_addrs(dc_idx, prefer_ipv6).await;
+        if !addrs.is_empty() {
+            return addrs;
+        }
+
+        // DC not found — fall back to default DC.
+        // This handles CDN DCs (200+), test DCs, and any other DC index
+        // not explicitly listed in the proxy_for config.
+        let default_dc = *self.default_dc.read().await;
+        if dc_idx != default_dc {
+            debug!(
+                requested_dc = dc_idx,
+                fallback_dc = default_dc,
+                "DC not in middle proxy table, falling back to default DC"
+            );
+            let addrs = self.lookup_dc_addrs(default_dc, prefer_ipv6).await;
+            if !addrs.is_empty() {
+                return addrs;
+            }
+        }
+
+        // Last resort: try DC 2 if default_dc itself has no entries
+        if default_dc != 2 && dc_idx != 2 {
+            warn!(
+                requested_dc = dc_idx,
+                default_dc = default_dc,
+                "Default DC also has no entries, trying DC 2 as last resort"
+            );
+            return self.lookup_dc_addrs(2, prefer_ipv6).await;
+        }
+
+        Vec::new()
+    }
+
+    /// Internal: look up addresses for a specific DC index (no fallback).
+    async fn lookup_dc_addrs(
         &self,
         dc_idx: i32,
         prefer_ipv6: bool,
@@ -180,11 +258,20 @@ impl MiddleProxyConfig {
 
     async fn update_dc_list_v4(&self) {
         match fetch_and_parse_dc_list(PROXY_CONFIG_V4_URL).await {
-            Ok(new_map) if !new_map.is_empty() => {
+            Ok((new_map, new_default)) if !new_map.is_empty() => {
                 let total_addrs: usize = new_map.values().map(|v| v.len()).sum();
                 let mut current = self.middle_proxies_v4.write().await;
                 info!(dcs = new_map.len(), addrs = total_addrs, "Updated middle proxy IPv4 list");
                 *current = new_map;
+
+                // Update default DC if present in the config
+                if let Some(dc) = new_default {
+                    let mut default = self.default_dc.write().await;
+                    if *default != dc {
+                        info!(old = *default, new = dc, "Updated default DC from config");
+                    }
+                    *default = dc;
+                }
             }
             Ok(_) => warn!("Empty IPv4 DC list received, keeping old"),
             Err(e) => warn!("Failed to update IPv4 DC list: {}", e),
@@ -193,11 +280,12 @@ impl MiddleProxyConfig {
 
     async fn update_dc_list_v6(&self) {
         match fetch_and_parse_dc_list(PROXY_CONFIG_V6_URL).await {
-            Ok(new_map) if !new_map.is_empty() => {
+            Ok((new_map, _new_default)) if !new_map.is_empty() => {
                 let total_addrs: usize = new_map.values().map(|v| v.len()).sum();
                 let mut current = self.middle_proxies_v6.write().await;
                 info!(dcs = new_map.len(), addrs = total_addrs, "Updated middle proxy IPv6 list");
                 *current = new_map;
+                // Note: we don't update default_dc from v6 config — v4 is authoritative
             }
             Ok(_) => warn!("Empty IPv6 DC list received, keeping old"),
             Err(e) => warn!("Failed to update IPv6 DC list: {}", e),
@@ -237,26 +325,36 @@ async fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, String> {
 
 async fn fetch_and_parse_dc_list(
     url: &str,
-) -> std::result::Result<HashMap<i32, Vec<(IpAddr, u16)>>, String> {
+) -> std::result::Result<(HashMap<i32, Vec<(IpAddr, u16)>>, Option<i32>), String> {
     let body_bytes = fetch_bytes(url).await?;
     let body = String::from_utf8_lossy(&body_bytes);
     parse_dc_list(&body)
 }
 
-/// Parse `proxy_for <dc_idx> <host>:<port>;` lines from config text.
+/// Parse `proxy_for <dc_idx> <host>:<port>;` lines and `default <dc>;`
+/// from config text.
 ///
-/// Ignores comment lines (`#`), `default` directives, and anything else
-/// that doesn't match the `proxy_for` pattern. Multiple addresses per
-/// DC index are accumulated into vectors.
+/// Ignores comment lines (`#`), and anything else that doesn't match
+/// the `proxy_for` or `default` patterns. Multiple addresses per DC
+/// index are accumulated into vectors.
+///
+/// Returns `(address_map, optional_default_dc)`.
+///
+/// The `default N;` directive tells the proxy which DC to use as fallback
+/// for any DC index not explicitly listed in the `proxy_for` entries.
+/// This is how the official C MTProxy handles CDN DCs (200+).
 fn parse_dc_list(
     text: &str,
-) -> std::result::Result<HashMap<i32, Vec<(IpAddr, u16)>>, String> {
-    let re = Regex::new(r"proxy_for\s+(-?\d+)\s+(.+):(\d+)\s*;")
+) -> std::result::Result<(HashMap<i32, Vec<(IpAddr, u16)>>, Option<i32>), String> {
+    let proxy_re = Regex::new(r"proxy_for\s+(-?\d+)\s+(.+):(\d+)\s*;")
+        .map_err(|e| format!("regex error: {}", e))?;
+
+    let default_re = Regex::new(r"(?m)^\s*default\s+(-?\d+)\s*;")
         .map_err(|e| format!("regex error: {}", e))?;
 
     let mut result: HashMap<i32, Vec<(IpAddr, u16)>> = HashMap::new();
 
-    for cap in re.captures_iter(text) {
+    for cap in proxy_re.captures_iter(text) {
         let dc_idx: i32 = cap[1].parse().unwrap_or(0);
         let mut host = cap[2].to_string();
         let port: u16 = cap[3].parse().unwrap_or(0);
@@ -271,7 +369,12 @@ fn parse_dc_list(
         }
     }
 
-    Ok(result)
+    // Parse `default N;` directive
+    let default_dc = default_re
+        .captures(text)
+        .and_then(|cap| cap[1].parse::<i32>().ok());
+
+    Ok((result, default_dc))
 }
 
 // ============= Tests =============
@@ -316,7 +419,10 @@ proxy_for -5 91.108.56.176:8888;
 proxy_for -5 91.108.56.146:8888;
 "#;
 
-        let map = parse_dc_list(real_config).unwrap();
+        let (map, default_dc) = parse_dc_list(real_config).unwrap();
+
+        // Default DC should be parsed
+        assert_eq!(default_dc, Some(2));
 
         // Total: 12 unique DC indices
         assert_eq!(map.len(), 12);
@@ -351,8 +457,8 @@ proxy_for -5 91.108.56.146:8888;
         let total: usize = map.values().map(|v| v.len()).sum();
         assert_eq!(total, 22);
 
-        // Comment, default, empty lines — all ignored
-        // (no panic, no extra entries)
+        // DC 203 should NOT be in the map (it's a CDN DC)
+        assert!(!map.contains_key(&203));
     }
 
     #[test]
@@ -361,16 +467,34 @@ proxy_for -5 91.108.56.146:8888;
 proxy_for 1 [2001:b28:f23d:f001::d]:8888;
 proxy_for 2 [2001:67c:04e8:f002::d]:80;
 "#;
-        let map = parse_dc_list(text).unwrap();
+        let (map, default_dc) = parse_dc_list(text).unwrap();
         assert_eq!(map.len(), 2);
         assert!(map[&1][0].0.is_ipv6());
         assert_eq!(map[&2][0].1, 80);
+        // No default directive in this config
+        assert_eq!(default_dc, None);
     }
 
     #[test]
     fn test_parse_dc_list_empty() {
-        let map = parse_dc_list("# only comments\ndefault 2;\n").unwrap();
+        let (map, default_dc) = parse_dc_list("# only comments\ndefault 2;\n").unwrap();
         assert!(map.is_empty());
+        assert_eq!(default_dc, Some(2));
+    }
+
+    #[test]
+    fn test_parse_dc_list_default_dc() {
+        let text = "default 3;\nproxy_for 1 1.2.3.4:8888;\n";
+        let (map, default_dc) = parse_dc_list(text).unwrap();
+        assert_eq!(default_dc, Some(3));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_dc_list_no_default() {
+        let text = "proxy_for 1 1.2.3.4:8888;\n";
+        let (_map, default_dc) = parse_dc_list(text).unwrap();
+        assert_eq!(default_dc, None);
     }
 
     #[tokio::test]
@@ -380,5 +504,24 @@ proxy_for 2 [2001:67c:04e8:f002::d]:80;
         assert_eq!(secret.len(), EXPECTED_PROXY_SECRET_LEN);
         let sel = cfg.get_key_selector().await;
         assert_eq!(sel, [0xc4, 0xf9, 0xfa, 0xca]);
+    }
+
+    #[tokio::test]
+    async fn test_fallback_to_default_dc() {
+        let cfg = MiddleProxyConfig::new();
+
+        // DC 2 should have addresses (from hardcoded table)
+        let addrs_dc2 = cfg.get_middle_proxy_addrs(2, false).await;
+        assert!(!addrs_dc2.is_empty(), "DC 2 should have addresses");
+
+        // DC 203 should NOT be in the table but should fall back to DC 2
+        let addrs_dc203 = cfg.get_middle_proxy_addrs(203, false).await;
+        assert!(
+            !addrs_dc203.is_empty(),
+            "DC 203 should fall back to default DC and return addresses"
+        );
+
+        // The fallback addresses should be the same as DC 2 (the default)
+        assert_eq!(addrs_dc203, addrs_dc2);
     }
 }

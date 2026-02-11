@@ -84,7 +84,7 @@ const TG2C_SLOW_WRITE_WARN: Duration = Duration::from_millis(200);
 const TG2C_SLOW_DRAIN_WARN: Duration = Duration::from_millis(200);
 
 /// Approximate asyncio transport high-water mark.
-const TG2C_DRAIN_WATERMARK: usize = 2 * 1024 * 1024;
+const TG2C_DRAIN_WATERMARK: usize = 256 * 1024;
 
 /// `rpc_proxy_ans.flags` bit: flush immediately.
 ///
