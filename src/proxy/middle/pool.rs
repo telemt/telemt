@@ -25,28 +25,46 @@ use super::config::MiddleProxyConfig;
 use super::connection::HandshakedMiddleConnection;
 use super::handshake::handshake_middle_proxy;
 
-/// Maximum age of a pooled connection before it is discarded
+/// Maximum age of a pooled connection before it is discarded.
 ///
-/// Middle proxies can silently close idle handshaked sockets rather quickly.
-/// Keeping entries too long causes immediate EOF on reuse (`TG→C ... early eof`).
-const MAX_CONN_AGE: Duration = Duration::from_secs(8);
+/// The Python reference (`TgConnectionPool`) has no explicit age limit —
+/// it checks `writer.transport.is_closing()` on reuse.  Middle proxies
+/// keep idle connections open for at least 60 s, so 45 s is safe and
+/// avoids the connection-storm problem that a short (8 s) TTL caused.
+const MAX_CONN_AGE: Duration = Duration::from_secs(45);
 
-/// Keep enough hot connections for parallel media uploads.
-/// Telegram clients can open several concurrent MTProto sockets.
-const TARGET_PER_DC: usize = 8;
+/// Target hot connections per DC.
+///
+/// Reduced from 8 to 4 to prevent handshake storms that overwhelm slow
+/// middle proxies (e.g. DC 5 at ~300 ms RTT).  The Python reference uses
+/// `MAX_CONNS_IN_POOL = 64` total (not per-DC), with lazy creation.
+const TARGET_PER_DC: usize = 4;
 
-/// Interval between replenish rounds
-const REPLENISH_INTERVAL: Duration = Duration::from_secs(3);
+/// Interval between replenish rounds.
+const REPLENISH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How long a DC stays "active" for background replenishment after last use.
 const ACTIVE_DC_TTL: Duration = Duration::from_secs(15 * 60);
 
-/// Timeout for creating a single pooled connection (handshake included)
-const POOL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Timeout for creating a single pooled connection (handshake included).
+///
+/// Increased from 8 s to 15 s.  Some DCs (especially DC 5) have ~300 ms
+/// RTT, and the full handshake (TCP + nonce + KDF + CBC handshake) can
+/// take 3–5 s under load.  8 s caused cascading timeouts.
+const POOL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Small wait window to reuse a connection that is already being pre-created.
-const EMPTY_POOL_WAIT_TOTAL: Duration = Duration::from_millis(300);
-const EMPTY_POOL_WAIT_STEP: Duration = Duration::from_millis(60);
+/// How long to wait for an in-flight pre-create before falling back to
+/// on-demand creation.  Increased from 300 ms to 2 s to give the pool a
+/// fair chance when connections are already being pre-created.
+const EMPTY_POOL_WAIT_TOTAL: Duration = Duration::from_millis(2000);
+const EMPTY_POOL_WAIT_STEP: Duration = Duration::from_millis(100);
+
+/// Maximum number of in-flight pre-create tasks per DC.
+///
+/// Caps the number of concurrent handshakes to avoid overwhelming the
+/// middle proxy with connection bursts.  The Python reference creates
+/// connections lazily (one at a time via `asyncio.ensure_future`).
+const MAX_INFLIGHT_PER_DC: usize = 3;
 
 // ============= Pool Entry =============
 
@@ -161,8 +179,8 @@ impl MiddleProxyPool {
 
     /// Ensure there are enough ready + in-flight pooled connections.
     ///
-    /// Matching `mtprotoproxy.py` behavior, this schedules multiple concurrent
-    /// pre-creates instead of serially waiting one-by-one.
+    /// Caps in-flight at [`MAX_INFLIGHT_PER_DC`] to prevent connection
+    /// storms that overwhelm slow middle proxies.
     fn schedule_topup(self: &Arc<Self>, dc_idx: i32) {
         let counter = self.inflight_counter(dc_idx);
 
@@ -175,7 +193,14 @@ impl MiddleProxyPool {
                 return;
             }
 
-            let needed = target_inflight - inflight;
+            // Cap concurrent handshakes to avoid overwhelming the middle proxy.
+            let needed = target_inflight.saturating_sub(inflight)
+                .min(MAX_INFLIGHT_PER_DC.saturating_sub(inflight));
+
+            if needed == 0 {
+                return;
+            }
+
             if counter
                 .compare_exchange(
                     inflight,
