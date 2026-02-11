@@ -4,13 +4,13 @@
 //! - PROXY_SECRET (initial hardcoded + periodic updates from Telegram)
 //! - Middle proxy DC address lists (v4 / v6, periodic updates)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use regex::Regex;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn};
 
 // ============= Initial Proxy Secret =============
 
@@ -80,16 +80,46 @@ impl MiddleProxyConfig {
         prefer_ipv6: bool,
         rng: &crate::crypto::SecureRandom,
     ) -> Option<(IpAddr, u16)> {
+        let addrs = self.get_middle_proxy_addrs(dc_idx, prefer_ipv6).await;
+        rng.choose(&addrs).copied()
+    }
+
+    /// Get candidate middle-proxy addresses for a DC.
+    ///
+    /// Order:
+    /// - IPv6 first when `prefer_ipv6` is set
+    /// - then IPv4 fallback
+    ///
+    /// Duplicates are removed while preserving first-seen order.
+    pub async fn get_middle_proxy_addrs(
+        &self,
+        dc_idx: i32,
+        prefer_ipv6: bool,
+    ) -> Vec<(IpAddr, u16)> {
+        let mut out = Vec::new();
+        let mut seen: HashSet<(IpAddr, u16)> = HashSet::new();
+
         if prefer_ipv6 {
-            let map = self.middle_proxies_v6.read().await;
-            if let Some(addrs) = map.get(&dc_idx) {
-                if !addrs.is_empty() {
-                    return rng.choose(addrs).copied();
+            let map_v6 = self.middle_proxies_v6.read().await;
+            if let Some(addrs) = map_v6.get(&dc_idx) {
+                for &addr in addrs {
+                    if seen.insert(addr) {
+                        out.push(addr);
+                    }
                 }
             }
         }
-        let map = self.middle_proxies_v4.read().await;
-        map.get(&dc_idx).and_then(|addrs| rng.choose(addrs).copied())
+
+        let map_v4 = self.middle_proxies_v4.read().await;
+        if let Some(addrs) = map_v4.get(&dc_idx) {
+            for &addr in addrs {
+                if seen.insert(addr) {
+                    out.push(addr);
+                }
+            }
+        }
+
+        out
     }
 
     /// Get all known DC indices from the v4 map.

@@ -151,6 +151,16 @@ impl<W: AsyncWrite + Unpin> AbridgedFrameWriter<W> {
     pub async fn flush(&mut self) -> Result<()> {
         self.upstream.flush().await
     }
+
+    /// Asyncio-like `drain()` for layered writers.
+    ///
+    /// We do not call `flush()` here.  Instead, we perform a zero-length write
+    /// which drives pending state machines in lower layers (CryptoWriter /
+    /// FakeTlsWriter) without forcing a transport flush syscall path.
+    pub async fn drain_pending(&mut self) -> Result<()> {
+        let _ = self.upstream.write(&[]).await?;
+        Ok(())
+    }
 }
 
 impl<W> LayeredStream<W> for AbridgedFrameWriter<W> {
@@ -244,6 +254,11 @@ impl<W: AsyncWrite + Unpin> IntermediateFrameWriter<W> {
     
     pub async fn flush(&mut self) -> Result<()> {
         self.upstream.flush().await
+    }
+
+    pub async fn drain_pending(&mut self) -> Result<()> {
+        let _ = self.upstream.write(&[]).await?;
+        Ok(())
     }
 }
 
@@ -355,6 +370,11 @@ impl<W: AsyncWrite + Unpin> SecureIntermediateFrameWriter<W> {
     
     pub async fn flush(&mut self) -> Result<()> {
         self.upstream.flush().await
+    }
+
+    pub async fn drain_pending(&mut self) -> Result<()> {
+        let _ = self.upstream.write(&[]).await?;
+        Ok(())
     }
 }
 
@@ -551,6 +571,14 @@ impl<W: AsyncWrite + Unpin> FrameWriterKind<W> {
             FrameWriterKind::Abridged(w) => w.flush().await,
             FrameWriterKind::Intermediate(w) => w.flush().await,
             FrameWriterKind::SecureIntermediate(w) => w.flush().await,
+        }
+    }
+
+    pub async fn drain_pending(&mut self) -> Result<()> {
+        match self {
+            FrameWriterKind::Abridged(w) => w.drain_pending().await,
+            FrameWriterKind::Intermediate(w) => w.drain_pending().await,
+            FrameWriterKind::SecureIntermediate(w) => w.drain_pending().await,
         }
     }
 }

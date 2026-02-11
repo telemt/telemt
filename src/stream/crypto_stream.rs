@@ -588,11 +588,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CryptoWriter<W> {
             return Poll::Ready(Err(err));
         }
 
-        // Empty write is always OK
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-
         // 1) If we have pending ciphertext, prioritize flushing it
         if matches!(this.state, CryptoWriterState::Flushing { .. }) {
             match this.poll_flush_pending(cx) {
@@ -601,6 +596,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CryptoWriter<W> {
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {
+                    if buf.is_empty() {
+                        return Poll::Pending;
+                    }
+
                     // Upstream blocked. Apply ideal backpressure
                     let to_accept =
                         Self::select_to_accept_for_buffering(&this.state, buf.len());
@@ -630,6 +629,21 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CryptoWriter<W> {
                     return Poll::Ready(Ok(to_accept));
                 }
             }
+        }
+
+        // Empty write: drive upstream state machine without forcing flush().
+        //
+        // This is used by higher layers as an asyncio-like `drain()` signal.
+        // For FakeTlsWriter it flushes any partial pending TLS record first.
+        if buf.is_empty() {
+            return match Pin::new(&mut this.upstream).poll_write(cx, &[]) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(_)) => Poll::Ready(Ok(0)),
+                Poll::Ready(Err(e)) => {
+                    this.poison(io::Error::new(e.kind(), e.to_string()));
+                    Poll::Ready(Err(e))
+                }
+            };
         }
 
         // 2) Fast path: pending empty -> write-through

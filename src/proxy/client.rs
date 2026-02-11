@@ -63,7 +63,7 @@ impl ClientHandler {
 }
 
 impl RunningClientHandler {
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         self.stats.increment_connects_all();
 
         let peer = self.peer;
@@ -77,31 +77,33 @@ impl RunningClientHandler {
             debug!(peer = %peer, error = %e, "Failed to configure client socket");
         }
 
-        let handshake_timeout = Duration::from_secs(self.config.timeouts.client_handshake);
         let stats = self.stats.clone();
-
-        let result = timeout(handshake_timeout, self.do_handshake()).await;
+        let result = self.do_handshake().await;
 
         match result {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 debug!(peer = %peer, "Connection handled successfully");
                 Ok(())
             }
-            Ok(Err(e)) => {
-                debug!(peer = %peer, error = %e, "Handshake failed");
-                Err(e)
-            }
-            Err(_) => {
+            Err(ProxyError::TgHandshakeTimeout) => {
                 stats.increment_handshake_timeouts();
                 debug!(peer = %peer, "Handshake timeout");
                 Err(ProxyError::TgHandshakeTimeout)
+            }
+            Err(e) => {
+                debug!(peer = %peer, error = %e, "Handshake failed");
+                Err(e)
             }
         }
     }
 
     async fn do_handshake(mut self) -> Result<()> {
+        let handshake_timeout = Duration::from_secs(self.config.timeouts.client_handshake);
         let mut first_bytes = [0u8; 5];
-        self.stream.read_exact(&mut first_bytes).await?;
+        match timeout(handshake_timeout, self.stream.read_exact(&mut first_bytes)).await {
+            Ok(read_res) => read_res?,
+            Err(_) => return Err(ProxyError::TgHandshakeTimeout),
+        };
 
         let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
         let peer = self.peer;
@@ -117,6 +119,7 @@ impl RunningClientHandler {
 
     async fn handle_tls_client(mut self, first_bytes: [u8; 5]) -> Result<()> {
         let peer = self.peer;
+        let handshake_timeout = Duration::from_secs(self.config.timeouts.client_handshake);
 
         let tls_len = u16::from_be_bytes([first_bytes[3], first_bytes[4]]) as usize;
 
@@ -132,7 +135,10 @@ impl RunningClientHandler {
 
         let mut handshake = vec![0u8; 5 + tls_len];
         handshake[..5].copy_from_slice(&first_bytes);
-        self.stream.read_exact(&mut handshake[5..]).await?;
+        match timeout(handshake_timeout, self.stream.read_exact(&mut handshake[5..])).await {
+            Ok(read_res) => read_res?,
+            Err(_) => return Err(ProxyError::TgHandshakeTimeout),
+        };
 
         let config = self.config.clone();
         let replay_checker = self.replay_checker.clone();
@@ -155,7 +161,10 @@ impl RunningClientHandler {
         };
 
         debug!(peer = %peer, "Reading MTProto handshake through TLS");
-        let mtproto_data = tls_reader.read_exact(HANDSHAKE_LEN).await?;
+        let mtproto_data = match timeout(handshake_timeout, tls_reader.read_exact(HANDSHAKE_LEN)).await {
+            Ok(read_res) => read_res?,
+            Err(_) => return Err(ProxyError::TgHandshakeTimeout),
+        };
         let mtproto_handshake: [u8; HANDSHAKE_LEN] = mtproto_data[..].try_into()
             .map_err(|_| ProxyError::InvalidHandshake("Short MTProto handshake".into()))?;
 
@@ -181,6 +190,7 @@ impl RunningClientHandler {
 
     async fn handle_direct_client(mut self, first_bytes: [u8; 5]) -> Result<()> {
         let peer = self.peer;
+        let handshake_timeout = Duration::from_secs(self.config.timeouts.client_handshake);
 
         if !self.config.general.modes.classic && !self.config.general.modes.secure {
             debug!(peer = %peer, "Non-TLS modes disabled");
@@ -192,7 +202,10 @@ impl RunningClientHandler {
 
         let mut handshake = [0u8; HANDSHAKE_LEN];
         handshake[..5].copy_from_slice(&first_bytes);
-        self.stream.read_exact(&mut handshake[5..]).await?;
+        match timeout(handshake_timeout, self.stream.read_exact(&mut handshake[5..])).await {
+            Ok(read_res) => read_res?,
+            Err(_) => return Err(ProxyError::TgHandshakeTimeout),
+        };
 
         let config = self.config.clone();
         let replay_checker = self.replay_checker.clone();

@@ -11,25 +11,23 @@
 //! - **C→TG**: read frame from client → wrap in RPC_PROXY_REQ → send to middle proxy
 //! - **TG→C**: read RPC response → unwrap → write frame to client
 //!
-//! ## Flush policy (critical for throughput)
+//! ## Drain policy (critical for throughput)
 //!
 //! Python reference uses `writer.write()` (instant buffer) + `await drain()`
-//! which only blocks when buffer > 64 KB (high watermark).
+//! on every write.
 //!
 //! The official C MTProxy uses epoll: data is queued in a write buffer and
 //! flushed by the event loop when the socket is writable — never per-frame.
 //!
-//! We follow the same principle: **no per-frame flush**.  Data flows through
-//! `write_all` which pushes bytes through CryptoWriter → FakeTlsWriter → TCP.
-//! Internal layers drain pending data on each `poll_write`.  Explicit flush
-//! is called only after a batch of writes when the reader would block, or
-//! when the connection is closing.
+//! We follow this with an explicit **drain call after each frame write**,
+//! but without `flush()`: we drive pending bytes through layered writer
+//! state machines (CryptoWriter/FakeTlsWriter) via zero-length write polling.
 
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::crypto::SecureRandom;
 use crate::error::Result;
@@ -43,6 +41,118 @@ use super::connection::{MiddleProxyReader, MiddleProxyWriter, MiddleProxyStream}
 
 /// Activity timeout — drop connection if no data flows for this long.
 const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(1800); // 30 minutes
+
+/// Periodic telemetry log interval for TG→C relay.
+const TG2C_TELEMETRY_INTERVAL: Duration = Duration::from_secs(10);
+/// Warn when a single frame write takes longer than this.
+const TG2C_SLOW_WRITE_WARN: Duration = Duration::from_millis(200);
+/// Warn when a single drain call takes longer than this.
+const TG2C_SLOW_DRAIN_WARN: Duration = Duration::from_millis(200);
+
+#[derive(Debug, Default)]
+struct TgToClientTelemetry {
+    proxy_ans_count: u64,
+    proxy_ans_bytes: u64,
+    simple_ack_count: u64,
+    simple_ack_bytes: u64,
+    read_total: Duration,
+    write_total: Duration,
+    drain_total: Duration,
+    read_max: Duration,
+    write_max: Duration,
+    drain_max: Duration,
+    slow_write_count: u64,
+    slow_drain_count: u64,
+}
+
+impl TgToClientTelemetry {
+    fn record_proxy_ans(
+        &mut self,
+        bytes: usize,
+        read_elapsed: Duration,
+        write_elapsed: Duration,
+        drain_elapsed: Duration,
+    ) {
+        self.proxy_ans_count += 1;
+        self.proxy_ans_bytes += bytes as u64;
+        self.record_common(read_elapsed, write_elapsed, drain_elapsed);
+    }
+
+    fn record_simple_ack(
+        &mut self,
+        bytes: usize,
+        read_elapsed: Duration,
+        write_elapsed: Duration,
+        drain_elapsed: Duration,
+    ) {
+        self.simple_ack_count += 1;
+        self.simple_ack_bytes += bytes as u64;
+        self.record_common(read_elapsed, write_elapsed, drain_elapsed);
+    }
+
+    fn record_common(
+        &mut self,
+        read_elapsed: Duration,
+        write_elapsed: Duration,
+        drain_elapsed: Duration,
+    ) {
+        self.read_total += read_elapsed;
+        self.write_total += write_elapsed;
+        self.drain_total += drain_elapsed;
+        self.read_max = self.read_max.max(read_elapsed);
+        self.write_max = self.write_max.max(write_elapsed);
+        self.drain_max = self.drain_max.max(drain_elapsed);
+
+        if write_elapsed >= TG2C_SLOW_WRITE_WARN {
+            self.slow_write_count += 1;
+        }
+        if drain_elapsed >= TG2C_SLOW_DRAIN_WARN {
+            self.slow_drain_count += 1;
+        }
+    }
+
+    fn total_msgs(&self) -> u64 {
+        self.proxy_ans_count + self.simple_ack_count
+    }
+}
+
+fn log_tg2c_telemetry(user: &str, telemetry: &TgToClientTelemetry, final_log: bool) {
+    let total_msgs = telemetry.total_msgs();
+    if total_msgs == 0 {
+        return;
+    }
+
+    let avg_read_ms = telemetry.read_total.as_secs_f64() * 1000.0 / total_msgs as f64;
+    let avg_write_ms = telemetry.write_total.as_secs_f64() * 1000.0 / total_msgs as f64;
+    let avg_drain_ms = telemetry.drain_total.as_secs_f64() * 1000.0 / total_msgs as f64;
+
+    debug!(
+        user = %user,
+        msgs = total_msgs,
+        proxy_ans_msgs = telemetry.proxy_ans_count,
+        proxy_ans_bytes = telemetry.proxy_ans_bytes,
+        simple_ack_msgs = telemetry.simple_ack_count,
+        simple_ack_bytes = telemetry.simple_ack_bytes,
+        avg_read_ms = avg_read_ms,
+        avg_write_ms = avg_write_ms,
+        avg_drain_ms = avg_drain_ms,
+        max_read_ms = telemetry.read_max.as_secs_f64() * 1000.0,
+        max_write_ms = telemetry.write_max.as_secs_f64() * 1000.0,
+        max_drain_ms = telemetry.drain_max.as_secs_f64() * 1000.0,
+        slow_write_count = telemetry.slow_write_count,
+        slow_drain_count = telemetry.slow_drain_count,
+        final_log = final_log,
+        "TG→C relay telemetry"
+    );
+}
+
+/// `mtprotoproxy.py` semantics: call `drain()` after writes.
+async fn drain_frame_writer<W: AsyncWrite + Unpin>(
+    frame_writer: &mut FrameWriterKind<W>,
+) -> Result<()> {
+    frame_writer.drain_pending().await?;
+    Ok(())
+}
 
 /// Relay traffic between a client and a Telegram Middle Proxy.
 ///
@@ -74,26 +184,30 @@ where
     let stats_t2c = stats.clone();
 
     // ---- Client → Telegram (via Middle Proxy) ----
-    let c2t = tokio::spawn(async move {
+    let mut c2t = tokio::spawn(async move {
         relay_client_to_tg(clt_frame_reader, mp_writer, &user_c2t, &stats_c2t).await
     });
 
     // ---- Telegram (via Middle Proxy) → Client ----
-    let t2c = tokio::spawn(async move {
+    let mut t2c = tokio::spawn(async move {
         relay_tg_to_client(mp_reader, clt_frame_writer, &user_t2c, &stats_t2c).await
     });
 
-    // Wait for either direction to finish
+    // Wait for either direction to finish, then stop the opposite direction.
     tokio::select! {
-        res = c2t => {
+        res = &mut c2t => {
             if let Err(e) = res {
                 warn!(error = %e, "C→TG relay task panicked");
             }
+            t2c.abort();
+            let _ = t2c.await;
         }
-        res = t2c => {
+        res = &mut t2c => {
             if let Err(e) = res {
                 warn!(error = %e, "TG→C relay task panicked");
             }
+            c2t.abort();
+            let _ = c2t.await;
         }
     }
 
@@ -198,21 +312,17 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
     let mut total_bytes: u64 = 0;
     let mut msg_count: u64 = 0;
     let mut last_activity = Instant::now();
-    let mut unflushed_bytes: usize = 0;
-
-    /// High watermark: flush only after accumulating this many bytes.
-    /// Matches Python asyncio's default high_water (64 KB).
-    /// This prevents per-frame flush from serialising writes through
-    /// CryptoWriter → FakeTlsWriter → TCP, which kills throughput
-    /// for media (hundreds of frames per second, mobile TCP windows).
-    const FLUSH_WATERMARK: usize = 65536;
+    let mut telemetry = TgToClientTelemetry::default();
+    let mut last_telemetry_log = Instant::now();
 
     loop {
+        let read_started = Instant::now();
         let read_result = tokio::time::timeout(
             ACTIVITY_TIMEOUT,
             mp_reader.read_rpc(),
         )
         .await;
+        let read_elapsed = read_started.elapsed();
 
         match read_result {
             // Timeout
@@ -253,23 +363,51 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                 );
 
                 let meta = FrameMeta::new();
+                let write_started = Instant::now();
                 if let Err(e) = frame_writer.write_frame(&data, &meta).await {
                     debug!(user = %user, error = %e, "TG→C write to client failed");
                     break;
                 }
+                let write_elapsed = write_started.elapsed();
 
-                // Watermark-based flush — mimics Python's drain() semantics.
-                // write_all already pushes data through the layer stack;
-                // CryptoWriter and FakeTlsWriter drain pending on each
-                // poll_write.  We only call flush explicitly when enough
-                // data has accumulated to ensure it reaches the kernel.
-                unflushed_bytes += data.len();
-                if unflushed_bytes >= FLUSH_WATERMARK {
-                    if let Err(e) = frame_writer.flush().await {
-                        debug!(user = %user, error = %e, "TG→C flush to client failed");
-                        break;
-                    }
-                    unflushed_bytes = 0;
+                let drain_started = Instant::now();
+                if let Err(e) = drain_frame_writer(&mut frame_writer).await {
+                    debug!(user = %user, error = %e, "TG→C drain failed");
+                    break;
+                }
+                let drain_elapsed = drain_started.elapsed();
+
+                telemetry.record_proxy_ans(
+                    data.len(),
+                    read_elapsed,
+                    write_elapsed,
+                    drain_elapsed,
+                );
+
+                if write_elapsed >= TG2C_SLOW_WRITE_WARN {
+                    warn!(
+                        user = %user,
+                        bytes = data.len(),
+                        msg = msg_count,
+                        read_wait_ms = read_elapsed.as_secs_f64() * 1000.0,
+                        write_ms = write_elapsed.as_secs_f64() * 1000.0,
+                        "TG→C slow write_frame"
+                    );
+                }
+                if drain_elapsed >= TG2C_SLOW_DRAIN_WARN {
+                    warn!(
+                        user = %user,
+                        bytes = data.len(),
+                        msg = msg_count,
+                        read_wait_ms = read_elapsed.as_secs_f64() * 1000.0,
+                        drain_ms = drain_elapsed.as_secs_f64() * 1000.0,
+                        "TG→C slow drain_pending"
+                    );
+                }
+
+                if last_telemetry_log.elapsed() >= TG2C_TELEMETRY_INTERVAL {
+                    log_tg2c_telemetry(user, &telemetry, false);
+                    last_telemetry_log = Instant::now();
                 }
             }
 
@@ -283,14 +421,41 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
                     simple_ack: true,
                     ..Default::default()
                 };
+                let write_started = Instant::now();
                 if let Err(e) = frame_writer.write_frame(&confirm, &meta).await {
                     debug!(user = %user, error = %e, "TG→C write simple_ack failed");
                     break;
                 }
-                // ACKs are small (4 bytes) — write_all pushes them
-                // through immediately in the common case.  No flush
-                // needed; the next ProxyAns write will drain any
-                // pending data from FakeTlsWriter.
+                let write_elapsed = write_started.elapsed();
+
+                let drain_started = Instant::now();
+                if let Err(e) = drain_frame_writer(&mut frame_writer).await {
+                    debug!(user = %user, error = %e, "TG→C drain simple_ack failed");
+                    break;
+                }
+                let drain_elapsed = drain_started.elapsed();
+
+                telemetry.record_simple_ack(
+                    confirm.len(),
+                    read_elapsed,
+                    write_elapsed,
+                    drain_elapsed,
+                );
+
+                if drain_elapsed >= TG2C_SLOW_DRAIN_WARN {
+                    warn!(
+                        user = %user,
+                        msg = msg_count,
+                        read_wait_ms = read_elapsed.as_secs_f64() * 1000.0,
+                        drain_ms = drain_elapsed.as_secs_f64() * 1000.0,
+                        "TG→C slow drain_pending for simple_ack"
+                    );
+                }
+
+                if last_telemetry_log.elapsed() >= TG2C_TELEMETRY_INTERVAL {
+                    log_tg2c_telemetry(user, &telemetry, false);
+                    last_telemetry_log = Instant::now();
+                }
             }
 
             // RPC_CLOSE_EXT — middle proxy closed the connection
@@ -307,9 +472,9 @@ async fn relay_tg_to_client<W: AsyncWrite + Unpin>(
         }
     }
 
-    // Final flush: push any remaining data in CryptoWriter / FakeTlsWriter
-    // buffers to the client before the connection closes.
-    let _ = frame_writer.flush().await;
+    // Final drain before shutdown.
+    let _ = drain_frame_writer(&mut frame_writer).await;
+    log_tg2c_telemetry(user, &telemetry, true);
 
     debug!(
         user = %user,
