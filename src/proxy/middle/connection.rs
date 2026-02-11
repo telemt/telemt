@@ -32,14 +32,6 @@ pub struct HandshakedMiddleConnection {
     pub(super) stream: TcpStream,
     pub(super) enc_chain: AesCbcChain,
     pub(super) dec_chain: AesCbcChain,
-    /// Leftover decrypted bytes from the CBC handshake phase.
-    ///
-    /// The handshake reads CBC-encrypted frames in 16-byte aligned blocks.
-    /// If the last frame doesn't end on a block boundary, the excess
-    /// decrypted bytes are buffered here.  Dropping them would desync the
-    /// CBC plaintext stream — the reader would skip those bytes and
-    /// interpret the next message starting at the wrong offset.
-    pub(super) dec_buf: Vec<u8>,
     pub(super) write_seq: i32,
     pub(super) read_seq: i32,
     pub(super) my_ip: IpAddr,
@@ -74,7 +66,7 @@ impl HandshakedMiddleConnection {
             writer,
             enc_chain: self.enc_chain,
             dec_chain: self.dec_chain,
-            dec_buf: self.dec_buf,
+            dec_buf: Vec::with_capacity(256),
             write_seq: self.write_seq,
             read_seq: self.read_seq,
             out_conn_id,

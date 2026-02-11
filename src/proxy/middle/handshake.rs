@@ -127,10 +127,6 @@ pub async fn handshake_middle_proxy(
     stream.flush().await.map_err(ProxyError::Io)?;
 
     // ---- Phase 5: Read RPC_HANDSHAKE response through CBC ----
-    //
-    // IMPORTANT: `dec_buf` carries leftover decrypted bytes from aligned
-    // CBC reads.  It MUST be preserved in `HandshakedMiddleConnection`
-    // so that the subsequent `MiddleProxyReader` does not lose data.
     let mut dec_buf = Vec::new();
     let handshake_ans = read_cbc_mtproto_frame(
         &mut stream, &mut dec_chain, &mut dec_buf, &mut read_seq,
@@ -148,7 +144,6 @@ pub async fn handshake_middle_proxy(
         stream,
         enc_chain,
         dec_chain,
-        dec_buf,
         write_seq,
         read_seq,
         my_ip,
