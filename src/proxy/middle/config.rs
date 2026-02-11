@@ -23,6 +23,13 @@ const INITIAL_PROXY_SECRET_HEX: &str = concat!(
     "54c490b079e31bef82ff0ee8f2b0a32756d249c5f21269816cb7061b265db212",
 );
 
+/// Expected length of the proxy secret in bytes.
+///
+/// The secret fetched from `getProxySecret` must be exactly 128 bytes.
+/// If we receive anything else (HTML error page, truncated response, etc.)
+/// we keep the old secret to avoid silently breaking middle-proxy mode.
+const EXPECTED_PROXY_SECRET_LEN: usize = 128;
+
 const PROXY_SECRET_URL: &str = "https://core.telegram.org/getProxySecret";
 const PROXY_CONFIG_V4_URL: &str = "https://core.telegram.org/getProxyConfig";
 const PROXY_CONFIG_V6_URL: &str = "https://core.telegram.org/getProxyConfigV6";
@@ -139,9 +146,16 @@ impl MiddleProxyConfig {
         }
     }
 
+    /// Fetch and validate the proxy secret from Telegram.
+    ///
+    /// The secret must be exactly [`EXPECTED_PROXY_SECRET_LEN`] bytes.
+    /// If the response is empty, truncated, or has unexpected length
+    /// (e.g. an HTML error page), we keep the old secret and log a warning.
+    /// This prevents silently breaking middle-proxy mode due to transient
+    /// HTTP errors or CDN issues.
     async fn update_proxy_secret(&self) {
         match fetch_bytes(PROXY_SECRET_URL).await {
-            Ok(new_secret) if !new_secret.is_empty() => {
+            Ok(new_secret) if new_secret.len() == EXPECTED_PROXY_SECRET_LEN => {
                 let mut current = self.proxy_secret.write().await;
                 if *current != new_secret {
                     info!(len = new_secret.len(), "Middle proxy secret updated");
@@ -150,7 +164,16 @@ impl MiddleProxyConfig {
                     debug!("Middle proxy secret unchanged");
                 }
             }
-            Ok(_) => warn!("Empty proxy secret received, keeping old"),
+            Ok(new_secret) if new_secret.is_empty() => {
+                warn!("Empty proxy secret received, keeping old");
+            }
+            Ok(new_secret) => {
+                warn!(
+                    len = new_secret.len(),
+                    expected = EXPECTED_PROXY_SECRET_LEN,
+                    "Bad proxy secret length (possibly HTML error page?), keeping old"
+                );
+            }
             Err(e) => warn!("Failed to update proxy secret: {}", e),
         }
     }
@@ -260,7 +283,7 @@ mod tests {
     #[test]
     fn test_initial_secret_length() {
         let secret = hex::decode(INITIAL_PROXY_SECRET_HEX).unwrap();
-        assert_eq!(secret.len(), 128);
+        assert_eq!(secret.len(), EXPECTED_PROXY_SECRET_LEN);
     }
 
     /// Test with the exact getProxyConfig response from core.telegram.org
@@ -354,7 +377,7 @@ proxy_for 2 [2001:67c:04e8:f002::d]:80;
     async fn test_config_default() {
         let cfg = MiddleProxyConfig::new();
         let secret = cfg.get_proxy_secret().await;
-        assert_eq!(secret.len(), 128);
+        assert_eq!(secret.len(), EXPECTED_PROXY_SECRET_LEN);
         let sel = cfg.get_key_selector().await;
         assert_eq!(sel, [0xc4, 0xf9, 0xfa, 0xca]);
     }
