@@ -212,6 +212,9 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_mask_port")]
     pub mask_port: u16,
 
+    #[serde(default)]
+    pub mask_unix_sock: Option<String>,
+
     #[serde(default = "default_fake_cert_len")]
     pub fake_cert_len: usize,
 }
@@ -223,6 +226,7 @@ impl Default for AntiCensorshipConfig {
             mask: true,
             mask_host: None,
             mask_port: default_mask_port(),
+            mask_unix_sock: None,
             fake_cert_len: default_fake_cert_len(),
         }
     }
@@ -376,8 +380,33 @@ impl ProxyConfig {
             return Err(ProxyError::Config("tls_domain cannot be empty".to_string()));
         }
         
-        // Default mask_host to tls_domain if not set
-        if config.censorship.mask_host.is_none() {
+        // Validate mask_unix_sock
+        if let Some(ref sock_path) = config.censorship.mask_unix_sock {
+            if sock_path.is_empty() {
+                return Err(ProxyError::Config(
+                    "mask_unix_sock cannot be empty".to_string()
+                ));
+            }
+            #[cfg(unix)]
+            if sock_path.len() > 107 {
+                return Err(ProxyError::Config(
+                    format!("mask_unix_sock path too long: {} bytes (max 107)", sock_path.len())
+                ));
+            }
+            #[cfg(not(unix))]
+            return Err(ProxyError::Config(
+                "mask_unix_sock is only supported on Unix platforms".to_string()
+            ));
+
+            if config.censorship.mask_host.is_some() {
+                return Err(ProxyError::Config(
+                    "mask_unix_sock and mask_host are mutually exclusive".to_string()
+                ));
+            }
+        }
+
+        // Default mask_host to tls_domain if not set and no unix socket configured
+        if config.censorship.mask_host.is_none() && config.censorship.mask_unix_sock.is_none() {
             config.censorship.mask_host = Some(config.censorship.tls_domain.clone());
         }
         
@@ -429,7 +458,7 @@ impl ProxyConfig {
                 format!("Invalid tls_domain: '{}'. Must be a valid domain name", self.censorship.tls_domain)
             ));
         }
-        
+
         Ok(())
     }
 }

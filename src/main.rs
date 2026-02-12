@@ -130,10 +130,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.general.modes.secure,
         config.general.modes.tls);
     info!("TLS domain: {}", config.censorship.tls_domain);
-    info!("Mask: {} -> {}:{}",
-        config.censorship.mask,
-        config.censorship.mask_host.as_deref().unwrap_or(&config.censorship.tls_domain),
-        config.censorship.mask_port);
+    if let Some(ref sock) = config.censorship.mask_unix_sock {
+        info!("Mask: {} -> unix:{}", config.censorship.mask, sock);
+        if !std::path::Path::new(sock).exists() {
+            warn!("Unix socket '{}' does not exist yet. Masking will fail until it appears.", sock);
+        }
+    } else {
+        info!("Mask: {} -> {}:{}",
+            config.censorship.mask,
+            config.censorship.mask_host.as_deref().unwrap_or(&config.censorship.tls_domain),
+            config.censorship.mask_port);
+    }
 
     if config.censorship.tls_domain == "www.google.com" {
         warn!("Using default tls_domain. Consider setting a custom domain.");

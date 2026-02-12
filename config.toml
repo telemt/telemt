@@ -48,6 +48,7 @@ tls_domain = "google.ru"
 mask = true
 mask_port = 443
 # mask_host = "petrovich.ru" # Defaults to tls_domain if not set
+# mask_unix_sock = "/var/run/nginx.sock" # Unix socket (mutually exclusive with mask_host)
 fake_cert_len = 2048
 
 # === Access Control & Users ===
