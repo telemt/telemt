@@ -202,6 +202,51 @@ pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Sock
     Ok(socket)
 }
 
+/// Create a Unix socket listener with stale socket detection.
+///
+/// If the socket file already exists, attempts to connect to it:
+/// - If connection succeeds → another instance is running → returns AddrInUse error
+/// - If connection fails → stale socket → removes it and binds
+#[cfg(unix)]
+pub fn create_unix_listener(path: &str) -> Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::net::UnixListener;
+    use std::path::Path;
+
+    let socket_path = Path::new(path);
+
+    if socket_path.exists() {
+        match std::os::unix::net::UnixStream::connect(socket_path) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!("Unix socket {} is already in use by another process", path)
+                ));
+            }
+            Err(_) => {
+                debug!("Removing stale Unix socket: {}", path);
+                std::fs::remove_file(socket_path)?;
+            }
+        }
+    }
+
+    let listener = UnixListener::bind(socket_path)?;
+    listener.set_nonblocking(true)?;
+
+    debug!("Created Unix socket listener at {}", path);
+    Ok(listener)
+}
+
+/// Remove Unix socket file on shutdown
+#[cfg(unix)]
+pub fn cleanup_unix_socket(path: &str) {
+    if std::path::Path::new(path).exists() {
+        match std::fs::remove_file(path) {
+            Ok(_) => debug!("Cleaned up Unix socket: {}", path),
+            Err(e) => debug!("Failed to remove Unix socket {}: {}", path, e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

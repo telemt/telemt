@@ -4,7 +4,7 @@ use crate::error::{ProxyError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::path::Path;
 
 // ============= Helper Defaults =============
@@ -38,9 +38,6 @@ fn default_keepalive() -> u64 {
 }
 fn default_ack_timeout() -> u64 {
     300
-}
-fn default_listen_addr() -> String {
-    "0.0.0.0".to_string()
 }
 fn default_fake_cert_len() -> usize {
     2048
@@ -156,6 +153,26 @@ pub struct GeneralConfig {
 
     #[serde(default)]
     pub log_level: LogLevel,
+
+    #[serde(default)]
+    pub links: LinksConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinksConfig {
+    /// Users whose tg:// links to show at startup.
+    #[serde(default)]
+    pub show: Vec<String>,
+
+    /// Public host (IP or domain) for tg:// link generation.
+    /// Overrides announce_ip / detected IP in links.
+    #[serde(default)]
+    pub public_host: Option<String>,
+
+    /// Public port for tg:// link generation.
+    /// Overrides server.port in links.
+    #[serde(default)]
+    pub public_port: Option<u16>,
 }
 
 impl Default for GeneralConfig {
@@ -169,6 +186,7 @@ impl Default for GeneralConfig {
             proxy_secret_path: None,
             middle_proxy_nat_ip: None,
             log_level: LogLevel::Normal,
+            links: LinksConfig::default(),
         }
     }
 }
@@ -178,14 +196,19 @@ pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    #[serde(default = "default_listen_addr")]
-    pub listen_addr_ipv4: String,
+    #[serde(default)]
+    pub listen_addr_ipv4: Option<String>,
 
     #[serde(default)]
     pub listen_addr_ipv6: Option<String>,
 
     #[serde(default)]
     pub listen_unix_sock: Option<String>,
+
+    /// Unix socket file permissions (octal string, e.g. "0666").
+    /// Applied after bind. If not set, inherits from process umask.
+    #[serde(default)]
+    pub listen_unix_sock_perm: Option<String>,
 
     #[serde(default)]
     pub metrics_port: Option<u16>,
@@ -201,9 +224,10 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
-            listen_addr_ipv4: default_listen_addr(),
+            listen_addr_ipv4: None,
             listen_addr_ipv6: Some("::".to_string()),
             listen_unix_sock: None,
+            listen_unix_sock_perm: None,
             metrics_port: None,
             metrics_whitelist: default_metrics_whitelist(),
             listeners: Vec::new(),
@@ -380,7 +404,7 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub show_link: Vec<String>,
 
     /// DC address overrides for non-standard DCs (CDN, media, test, etc.)
@@ -397,15 +421,26 @@ pub struct ProxyConfig {
     /// If not set, defaults to 2 (matching Telegram's official `default 2;` in proxy-multi.conf).
     #[serde(default)]
     pub default_dc: Option<u8>,
+
+    /// Non-fatal warnings collected during config loading.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 impl ProxyConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| ProxyError::Config(e.to_string()))?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| ProxyError::Config(e.to_string()))?;
 
-        let mut config: ProxyConfig =
-            toml::from_str(&content).map_err(|e| ProxyError::Config(e.to_string()))?;
+        // Pre-parse raw TOML to detect defaulted fields
+        let raw: toml::Value = toml::from_str(&content)
+            .map_err(|e| ProxyError::Config(e.to_string()))?;
+        let port_explicit = raw.get("server")
+            .and_then(|s| s.get("port"))
+            .is_some();
+
+        let mut config: ProxyConfig = toml::from_str(&content)
+            .map_err(|e| ProxyError::Config(e.to_string()))?;
 
         // Validate secrets
         for (user, secret) in &config.access.users {
@@ -457,15 +492,51 @@ impl ProxyConfig {
         use rand::Rng;
         config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
 
-        // Migration: Populate listeners if empty
-        if config.server.listeners.is_empty() {
-            if let Ok(ipv4) = config.server.listen_addr_ipv4.parse::<IpAddr>() {
-                config.server.listeners.push(ListenerConfig {
-                    ip: ipv4,
-                    announce_ip: None,
-                });
+        // Validate listen_unix_sock
+        if let Some(ref sock_path) = config.server.listen_unix_sock {
+            if sock_path.is_empty() {
+                return Err(ProxyError::Config(
+                    "listen_unix_sock cannot be empty".to_string()
+                ));
             }
-            if let Some(ipv6_str) = &config.server.listen_addr_ipv6 {
+            #[cfg(unix)]
+            if sock_path.len() > 107 {
+                return Err(ProxyError::Config(
+                    format!("listen_unix_sock path too long: {} bytes (max 107)", sock_path.len())
+                ));
+            }
+            #[cfg(not(unix))]
+            return Err(ProxyError::Config(
+                "listen_unix_sock is only supported on Unix platforms".to_string()
+            ));
+        }
+
+        // Validate listen_unix_sock_perm
+        if let Some(ref perm_str) = config.server.listen_unix_sock_perm {
+            if config.server.listen_unix_sock.is_none() {
+                return Err(ProxyError::Config(
+                    "listen_unix_sock_perm requires listen_unix_sock to be set".to_string()
+                ));
+            }
+            u32::from_str_radix(perm_str, 8).map_err(|_| {
+                ProxyError::Config(format!(
+                    "listen_unix_sock_perm must be an octal string (e.g. \"0666\"), got \"{}\"",
+                    perm_str
+                ))
+            })?;
+        }
+
+        // Migration: Populate listeners from legacy listen_addr_* fields.
+        if config.server.listeners.is_empty() {
+            if let Some(ref ipv4_str) = config.server.listen_addr_ipv4 {
+                if let Ok(ipv4) = ipv4_str.parse::<IpAddr>() {
+                    config.server.listeners.push(ListenerConfig {
+                        ip: ipv4,
+                        announce_ip: None,
+                    });
+                }
+            }
+            if let Some(ref ipv6_str) = config.server.listen_addr_ipv6 {
                 if let Ok(ipv6) = ipv6_str.parse::<IpAddr>() {
                     config.server.listeners.push(ListenerConfig {
                         ip: ipv6,
@@ -475,6 +546,18 @@ impl ProxyConfig {
             }
         }
 
+        // Validate: at least one listen endpoint must be configured.
+        if config.server.listeners.is_empty() && config.server.listen_unix_sock.is_none() {
+            return Err(ProxyError::Config(
+                "No listen address configured. Set [[server.listeners]], listen_addr_ipv4, or listen_unix_sock".to_string()
+            ));
+        }
+
+        // Migration: show_link → general.links.show
+        if !config.show_link.is_empty() && config.general.links.show.is_empty() {
+            config.general.links.show = std::mem::take(&mut config.show_link);
+        }
+
         // Migration: Populate upstreams if empty (Default Direct)
         if config.upstreams.is_empty() {
             config.upstreams.push(UpstreamConfig {
@@ -482,6 +565,20 @@ impl ProxyConfig {
                 weight: 1,
                 enabled: true,
             });
+        }
+
+        // Warnings for defaulted fields
+        if !config.server.listeners.is_empty() && !port_explicit {
+            config.warnings.push(format!(
+                "[server] port is not set; defaulting to {}",
+                config.server.port
+            ));
+        }
+        if config.server.listen_unix_sock.is_some() && config.general.links.public_port.is_none() {
+            config.warnings.push(format!(
+                "[general.links] public_port is not set; using [server] port {} for tg:// links",
+                config.server.port
+            ));
         }
 
         Ok(config)

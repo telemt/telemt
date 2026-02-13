@@ -23,6 +23,149 @@ use crate::proxy::handshake::{HandshakeSuccess, handle_mtproto_handshake, handle
 use crate::proxy::masking::handle_bad_client;
 use crate::proxy::middle_relay::handle_via_middle_proxy;
 
+/// Handle a client connection from any stream type (TCP, Unix socket)
+///
+/// This is the generic entry point for client handling. Unlike `ClientHandler::new().run()`,
+/// it skips TCP-specific socket configuration (TCP_NODELAY, keepalive, TCP_USER_TIMEOUT)
+/// which is appropriate for non-TCP streams like Unix sockets.
+pub async fn handle_client_stream<S>(
+    mut stream: S,
+    peer: SocketAddr,
+    config: Arc<ProxyConfig>,
+    stats: Arc<Stats>,
+    upstream_manager: Arc<UpstreamManager>,
+    replay_checker: Arc<ReplayChecker>,
+    buffer_pool: Arc<BufferPool>,
+    rng: Arc<SecureRandom>,
+    me_pool: Option<Arc<MePool>>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    stats.increment_connects_all();
+    debug!(peer = %peer, "New connection (generic stream)");
+
+    let handshake_timeout = Duration::from_secs(config.timeouts.client_handshake);
+    let stats_for_timeout = stats.clone();
+
+    // For non-TCP streams, use a synthetic local address
+    let local_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port)
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
+
+    let result = timeout(handshake_timeout, async {
+        let mut first_bytes = [0u8; 5];
+        stream.read_exact(&mut first_bytes).await?;
+
+        let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
+        debug!(peer = %peer, is_tls = is_tls, "Handshake type detected");
+
+        if is_tls {
+            let tls_len = u16::from_be_bytes([first_bytes[3], first_bytes[4]]) as usize;
+
+            if tls_len < 512 {
+                debug!(peer = %peer, tls_len = tls_len, "TLS handshake too short");
+                stats.increment_connects_bad();
+                let (reader, writer) = tokio::io::split(stream);
+                handle_bad_client(reader, writer, &first_bytes, &config).await;
+                return Ok(());
+            }
+
+            let mut handshake = vec![0u8; 5 + tls_len];
+            handshake[..5].copy_from_slice(&first_bytes);
+            stream.read_exact(&mut handshake[5..]).await?;
+
+            let (read_half, write_half) = tokio::io::split(stream);
+
+            let (mut tls_reader, tls_writer, _tls_user) = match handle_tls_handshake(
+                &handshake, read_half, write_half, peer,
+                &config, &replay_checker, &rng,
+            ).await {
+                HandshakeResult::Success(result) => result,
+                HandshakeResult::BadClient { reader, writer } => {
+                    stats.increment_connects_bad();
+                    handle_bad_client(reader, writer, &handshake, &config).await;
+                    return Ok(());
+                }
+                HandshakeResult::Error(e) => return Err(e),
+            };
+
+            debug!(peer = %peer, "Reading MTProto handshake through TLS");
+            let mtproto_data = tls_reader.read_exact(HANDSHAKE_LEN).await?;
+            let mtproto_handshake: [u8; HANDSHAKE_LEN] = mtproto_data[..].try_into()
+                .map_err(|_| ProxyError::InvalidHandshake("Short MTProto handshake".into()))?;
+
+            let (crypto_reader, crypto_writer, success) = match handle_mtproto_handshake(
+                &mtproto_handshake, tls_reader, tls_writer, peer,
+                &config, &replay_checker, true,
+            ).await {
+                HandshakeResult::Success(result) => result,
+                HandshakeResult::BadClient { reader: _, writer: _ } => {
+                    stats.increment_connects_bad();
+                    debug!(peer = %peer, "Valid TLS but invalid MTProto handshake");
+                    return Ok(());
+                }
+                HandshakeResult::Error(e) => return Err(e),
+            };
+
+            RunningClientHandler::handle_authenticated_static(
+                crypto_reader, crypto_writer, success,
+                upstream_manager, stats, config, buffer_pool, rng, me_pool,
+                local_addr,
+            ).await
+        } else {
+            if !config.general.modes.classic && !config.general.modes.secure {
+                debug!(peer = %peer, "Non-TLS modes disabled");
+                stats.increment_connects_bad();
+                let (reader, writer) = tokio::io::split(stream);
+                handle_bad_client(reader, writer, &first_bytes, &config).await;
+                return Ok(());
+            }
+
+            let mut handshake = [0u8; HANDSHAKE_LEN];
+            handshake[..5].copy_from_slice(&first_bytes);
+            stream.read_exact(&mut handshake[5..]).await?;
+
+            let (read_half, write_half) = tokio::io::split(stream);
+
+            let (crypto_reader, crypto_writer, success) = match handle_mtproto_handshake(
+                &handshake, read_half, write_half, peer,
+                &config, &replay_checker, false,
+            ).await {
+                HandshakeResult::Success(result) => result,
+                HandshakeResult::BadClient { reader, writer } => {
+                    stats.increment_connects_bad();
+                    handle_bad_client(reader, writer, &handshake, &config).await;
+                    return Ok(());
+                }
+                HandshakeResult::Error(e) => return Err(e),
+            };
+
+            RunningClientHandler::handle_authenticated_static(
+                crypto_reader, crypto_writer, success,
+                upstream_manager, stats, config, buffer_pool, rng, me_pool,
+                local_addr,
+            ).await
+        }
+    }).await;
+
+    match result {
+        Ok(Ok(())) => {
+            debug!(peer = %peer, "Connection handled successfully");
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            debug!(peer = %peer, error = %e, "Handshake failed");
+            Err(e)
+        }
+        Err(_) => {
+            stats_for_timeout.increment_handshake_timeouts();
+            debug!(peer = %peer, "Handshake timeout");
+            Err(ProxyError::TgHandshakeTimeout)
+        }
+    }
+}
+
 pub struct ClientHandler;
 
 pub struct RunningClientHandler {
@@ -267,9 +410,9 @@ impl RunningClientHandler {
 
     /// Main dispatch after successful handshake.
     /// Two modes:
-    ///   - Direct: TCP relay to TG DC (existing behavior)  
+    ///   - Direct: TCP relay to TG DC (existing behavior)
     ///   - Middle Proxy: RPC multiplex through ME pool (new — supports CDN DCs)
-    async fn handle_authenticated_static<R, W>(
+    pub(crate) async fn handle_authenticated_static<R, W>(
         client_reader: CryptoReader<R>,
         client_writer: CryptoWriter<W>,
         success: HandshakeSuccess,
