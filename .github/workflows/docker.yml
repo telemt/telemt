@@ -2,7 +2,7 @@ name: Docker
 
 on:
   push:
-    branches: [ main, testing ]
+    branches: [ main ]
     tags: [ '*' ]
 
 env:
