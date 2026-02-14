@@ -223,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if !config.show_link.is_empty() {
                     info!("--- Proxy Links ({}) ---", public_ip);
-                    for user_name in &config.show_link {
+                    for user_name in config.show_link.resolve_users(&config.access.users) {
                         if let Some(secret) = config.access.users.get(user_name) {
                             info!("User: {}", user_name);
                             if config.general.modes.classic {
