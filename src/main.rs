@@ -29,7 +29,6 @@ use crate::proxy::{ClientHandler, handle_client_stream};
 use crate::transport::{create_unix_listener, cleanup_unix_socket};
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
-use crate::proxy::ClientHandler;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::transport::middle_proxy::MePool;
