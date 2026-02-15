@@ -8,6 +8,7 @@ use tokio::signal;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
+use tokio::net::UnixListener;
 
 mod cli;
 mod config;
@@ -230,25 +231,25 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // proxy-secret is from: https://core.telegram.org/getProxySecret
         // =============================================================
         let proxy_secret_path = config.general.proxy_secret_path.as_deref();
-        match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
-            Ok(proxy_secret) => {
-                info!(
-                    secret_len = proxy_secret.len(),
-                    key_sig = format_args!(
-                        "0x{:08x}",
-                        if proxy_secret.len() >= 4 {
-                            u32::from_le_bytes([
-                                proxy_secret[0],
-                                proxy_secret[1],
-                                proxy_secret[2],
-                                proxy_secret[3],
-                            ])
-                        } else {
-                            0
-                        }
-                    ),
-                    "Proxy-secret loaded"
-                );
+match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
+    Ok(proxy_secret) => {
+        info!(
+            secret_len = proxy_secret.len() as usize,  // ← ЯВНЫЙ ТИП usize
+            key_sig = format_args!(
+                "0x{:08x}",
+                if proxy_secret.len() >= 4 {
+                    u32::from_le_bytes([
+                        proxy_secret[0],
+                        proxy_secret[1],
+                        proxy_secret[2],
+                        proxy_secret[3],
+                    ])
+                } else {
+                    0
+                }
+            ),
+            "Proxy-secret loaded"
+        );
 
                 let pool = MePool::new(
                     proxy_tag,
@@ -522,6 +523,62 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+
+	#[cfg(unix)]
+	if let Some(ref unix_path) = config.server.listen_unix_sock {
+		use tokio::net::UnixListener;  // ← добавь импорт, если его нет выше
+
+		// Удаляем старые файлы сокета, если они есть (стандартная практика)
+		let _ = tokio::fs::remove_file(unix_path).await;
+
+		let unix_listener = UnixListener::bind(unix_path)?;
+		info!("Listening on unix:{}", unix_path);
+
+		let config = config.clone();
+		let stats = stats.clone();
+		let upstream_manager = upstream_manager.clone();
+		let replay_checker = replay_checker.clone();
+		let buffer_pool = buffer_pool.clone();
+		let rng = rng.clone();
+		let me_pool = me_pool.clone();
+		let ip_tracker = ip_tracker.clone();
+
+		tokio::spawn(async move {
+			let unix_conn_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+			loop {
+				match unix_listener.accept().await {
+					Ok((stream, _)) => {
+						let conn_id = unix_conn_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+						let fake_peer = SocketAddr::from(([127, 0, 0, 1], (conn_id % 65535) as u16));  // безопасный порт
+
+						let config = config.clone();
+						let stats = stats.clone();
+						let upstream_manager = upstream_manager.clone();
+						let replay_checker = replay_checker.clone();
+						let buffer_pool = buffer_pool.clone();
+						let rng = rng.clone();
+						let me_pool = me_pool.clone();
+						let ip_tracker = ip_tracker.clone();
+
+						tokio::spawn(async move {
+							if let Err(e) = crate::proxy::client::handle_client_stream(
+								stream, fake_peer, config, stats,
+								upstream_manager, replay_checker, buffer_pool, rng,
+								me_pool, ip_tracker,
+							).await {
+								debug!(error = %e, "Unix socket connection error");
+							}
+						});
+					}
+					Err(e) => {
+						error!("Unix socket accept error: {}", e);
+						tokio::time::sleep(Duration::from_millis(100)).await;
+					}
+				}
+			}
+		});
+	}
 
     match signal::ctrl_c().await {
         Ok(()) => info!("Shutting down..."),
