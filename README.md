@@ -164,6 +164,10 @@ then Ctrl+X -> Y -> Enter to save
 ## Configuration
 ### Minimal Configuration for First Start
 ```toml
+# === UI ===
+# Users to show in the startup log (tg:// links)
+show_link = ["hello"]
+
 # === General Settings ===
 [general]
 prefer_ipv6 = false
@@ -181,16 +185,8 @@ tls = true
 port = 443
 listen_addr_ipv4 = "0.0.0.0"
 listen_addr_ipv6 = "::"
-# listen_unix_sock = "/var/run/telemt.sock" # Unix socket
-# listen_unix_sock_perm = "0666" # Socket file permissions
 # metrics_port = 9090
 # metrics_whitelist = ["127.0.0.1", "::1"]
-
-# Users to show in the startup log (tg:// links)
-[general.links]
-show = ["hello"]
-# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
-# public_port = 443                  # Port for tg:// links (default: server.port)
 
 # Listen on multiple interfaces/IPs (overrides listen_addr_*)
 [[server.listeners]]

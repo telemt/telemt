@@ -186,6 +186,8 @@ fn generate_config(username: &str, secret: &str, port: u16, domain: &str) -> Str
 r#"# Telemt MTProxy — auto-generated config
 # Re-run `telemt --init` to regenerate
 
+show_link = ["{username}"]
+
 [general]
 prefer_ipv6 = false
 fast_mode = true
@@ -197,17 +199,10 @@ classic = false
 secure = false
 tls = true
 
-[general.links]
-show = ["{username}"]
-# public_host = "proxy.example.com"
-# public_port = 443
-
 [server]
 port = {port}
 listen_addr_ipv4 = "0.0.0.0"
 listen_addr_ipv6 = "::"
-# listen_unix_sock = "/var/run/telemt.sock"
-# listen_unix_sock_perm = "0666"
 
 [[server.listeners]]
 ip = "0.0.0.0"
@@ -225,8 +220,6 @@ client_ack = 300
 tls_domain = "{domain}"
 mask = true
 mask_port = 443
-# mask_host = "{domain}"
-# mask_unix_sock = "/var/run/nginx.sock"
 fake_cert_len = 2048
 
 [access]

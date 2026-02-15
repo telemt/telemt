@@ -4,8 +4,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-#[cfg(unix)]
-use tokio::net::UnixListener;
 use tokio::signal;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
@@ -23,10 +21,7 @@ mod stream;
 mod transport;
 mod util;
 
-use crate::config::{ProxyConfig, LogLevel};
-use crate::proxy::{ClientHandler, handle_client_stream};
-#[cfg(unix)]
-use crate::transport::{create_unix_listener, cleanup_unix_socket};
+use crate::config::{LogLevel, ProxyConfig};
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::proxy::ClientHandler;
@@ -104,31 +99,6 @@ fn parse_cli() -> (String, bool, Option<String>) {
     (config_path, silent, log_level)
 }
 
-fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
-    info!("--- Proxy Links ({}) ---", host);
-    for user_name in &config.general.links.show {
-        if let Some(secret) = config.access.users.get(user_name) {
-            info!("User: {}", user_name);
-            if config.general.modes.classic {
-                info!("  Classic: tg://proxy?server={}&port={}&secret={}",
-                    host, port, secret);
-            }
-            if config.general.modes.secure {
-                info!("  DD:      tg://proxy?server={}&port={}&secret=dd{}",
-                    host, port, secret);
-            }
-            if config.general.modes.tls {
-                let domain_hex = hex::encode(&config.censorship.tls_domain);
-                info!("  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
-                    host, port, secret, domain_hex);
-            }
-        } else {
-            warn!("User '{}' listed in [general.links] show not found in [access.users]", user_name);
-        }
-    }
-    info!("------------------------");
-}
-
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (config_path, cli_silent, cli_log_level) = parse_cli();
@@ -198,10 +168,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     if config.censorship.tls_domain == "www.google.com" {
         warn!("Using default tls_domain. Consider setting a custom domain.");
-    }
-
-    for w in &config.warnings {
-        warn!("{}", w);
     }
 
     let prefer_ipv6 = config.general.prefer_ipv6;
@@ -440,12 +406,35 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     listener_conf.ip
                 };
 
-                // Per-listener links (only when public_host is NOT set)
-                let links = &config.general.links;
-                if links.public_host.is_none() && !links.show.is_empty() {
-                    let link_host = public_ip.to_string();
-                    let link_port = links.public_port.unwrap_or(config.server.port);
-                    print_proxy_links(&link_host, link_port, &config);
+                if !config.show_link.is_empty() {
+                    info!("--- Proxy Links ({}) ---", public_ip);
+                    for user_name in config.show_link.resolve_users(&config.access.users) {
+                        if let Some(secret) = config.access.users.get(user_name) {
+                            info!("User: {}", user_name);
+                            if config.general.modes.classic {
+                                info!(
+                                    "  Classic: tg://proxy?server={}&port={}&secret={}",
+                                    public_ip, config.server.port, secret
+                                );
+                            }
+                            if config.general.modes.secure {
+                                info!(
+                                    "  DD:      tg://proxy?server={}&port={}&secret=dd{}",
+                                    public_ip, config.server.port, secret
+                                );
+                            }
+                            if config.general.modes.tls {
+                                let domain_hex = hex::encode(&config.censorship.tls_domain);
+                                info!(
+                                    "  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
+                                    public_ip, config.server.port, secret, domain_hex
+                                );
+                            }
+                        } else {
+                            warn!("User '{}' in show_link not found", user_name);
+                        }
+                    }
+                    info!("------------------------");
                 }
 
                 listeners.push(listener);
@@ -456,109 +445,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Unix socket listener
-    #[cfg(unix)]
-    let unix_sock_path = if let Some(ref unix_path) = config.server.listen_unix_sock {
-        match create_unix_listener(unix_path) {
-            Ok(std_listener) => {
-                // Set socket file permissions if configured
-                if let Some(ref perm_str) = config.server.listen_unix_sock_perm {
-                    if let Ok(mode) = u32::from_str_radix(perm_str, 8) {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(
-                            unix_path,
-                            std::fs::Permissions::from_mode(mode),
-                        )?;
-                    }
-                }
-
-                let unix_listener = UnixListener::from_std(std_listener)?;
-                info!("Listening on unix:{}", unix_path);
-
-                let config = config.clone();
-                let stats = stats.clone();
-                let upstream_manager = upstream_manager.clone();
-                let replay_checker = replay_checker.clone();
-                let buffer_pool = buffer_pool.clone();
-                let rng = rng.clone();
-                let me_pool = me_pool.clone();
-
-                let unix_conn_counter = std::sync::Arc::new(
-                    std::sync::atomic::AtomicU64::new(1)
-                );
-
-                tokio::spawn(async move {
-                    loop {
-                        match unix_listener.accept().await {
-                            Ok((stream, _unix_addr)) => {
-                                let conn_id = unix_conn_counter.fetch_add(
-                                    1, std::sync::atomic::Ordering::Relaxed
-                                );
-                                let fake_peer = SocketAddr::from(([127, 0, 0, 1], conn_id as u16));
-                                let config = config.clone();
-                                let stats = stats.clone();
-                                let upstream_manager = upstream_manager.clone();
-                                let replay_checker = replay_checker.clone();
-                                let buffer_pool = buffer_pool.clone();
-                                let rng = rng.clone();
-                                let me_pool = me_pool.clone();
-
-                                tokio::spawn(async move {
-                                    if let Err(e) = handle_client_stream(
-                                        stream, fake_peer, config, stats,
-                                        upstream_manager, replay_checker, buffer_pool, rng,
-                                        me_pool,
-                                    ).await {
-                                        debug!(error = %e, "Unix socket connection error");
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                error!("Unix socket accept error: {}", e);
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                            }
-                        }
-                    }
-                });
-
-                Some(unix_path.clone())
-            }
-            Err(e) => {
-                error!("Failed to bind to unix:{}: {}", unix_path, e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Links with explicit public_host (independent of TCP listeners)
-    let links = &config.general.links;
-    if let Some(ref public_host) = links.public_host {
-        if !links.show.is_empty() {
-            let link_port = links.public_port.unwrap_or(config.server.port);
-            print_proxy_links(public_host, link_port, &config);
-        }
-    }
-
-    // Warn if links were configured but couldn't be shown
-    // (no TCP listeners succeeded and no public_host set)
-    let links = &config.general.links;
-    if listeners.is_empty() && links.public_host.is_none() && !links.show.is_empty() {
-        warn!("Proxy links not shown: no TCP listeners bound. Set [general.links] public_host or fix listener errors above.");
-    }
-
     if listeners.is_empty() {
-        #[cfg(unix)]
-        if unix_sock_path.is_none() {
-            error!("No listeners. Exiting.");
-            std::process::exit(1);
-        }
-        #[cfg(not(unix))]
-        {
-            error!("No listeners. Exiting.");
-            std::process::exit(1);
-        }
+        error!("No listeners. Exiting.");
+        std::process::exit(1);
     }
 
     // Switch to user-configured log level after startup
@@ -624,13 +513,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     match signal::ctrl_c().await {
-        Ok(()) => {
-            info!("Shutting down...");
-            #[cfg(unix)]
-            if let Some(ref path) = unix_sock_path {
-                cleanup_unix_socket(path);
-            }
-        }
+        Ok(()) => info!("Shutting down..."),
         Err(e) => error!("Signal error: {}", e),
     }
 
