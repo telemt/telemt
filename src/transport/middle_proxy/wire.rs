@@ -28,9 +28,7 @@ fn ipv4_to_mapped_v6_c_compat(ip: Ipv4Addr) -> [u8; 16] {
     buf[8..12].copy_from_slice(&(-0x10000i32).to_le_bytes());
 
     // Matches tl_store_int(htonl(remote_ip_host_order)).
-    let host_order = u32::from_ne_bytes(ip.octets());
-    let network_order = host_order.to_be();
-    buf[12..16].copy_from_slice(&network_order.to_le_bytes());
+    buf[12..16].copy_from_slice(&ip.octets());
 
     buf
 }
@@ -102,5 +100,19 @@ pub fn proto_flags_for_tag(tag: crate::protocol::constants::ProtoTag, has_proxy_
         ProtoTag::Abridged => flags | RPC_FLAG_ABRIDGED,
         ProtoTag::Intermediate => flags | RPC_FLAG_INTERMEDIATE,
         ProtoTag::Secure => flags | RPC_FLAG_PAD | RPC_FLAG_INTERMEDIATE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ipv4_mapped_encoding() {
+        let ip = Ipv4Addr::new(149, 154, 175, 50);
+        let buf = ipv4_to_mapped_v6_c_compat(ip);
+        assert_eq!(&buf[0..10], &[0u8; 10]);
+        assert_eq!(&buf[10..12], &[0xff, 0xff]);
+        assert_eq!(&buf[12..16], &[149, 154, 175, 50]);
     }
 }

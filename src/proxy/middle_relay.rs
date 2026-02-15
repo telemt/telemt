@@ -63,7 +63,13 @@ where
                     Ok(Some((payload, quickack))) => {
                         trace!(conn_id, bytes = payload.len(), "C->ME frame");
                         stats.add_user_octets_from(&user, payload.len() as u64);
-                        let flags = if quickack { proto_flags | RPC_FLAG_QUICKACK } else { proto_flags };
+                        let mut flags = proto_flags;
+                        if quickack {
+                            flags |= RPC_FLAG_QUICKACK;
+                        }
+                        if payload.len() >= 8 && payload[..8].iter().all(|b| *b == 0) {
+                            flags |= RPC_FLAG_NOT_ENCRYPTED;
+                        }
                         me_pool.send_proxy_req(
                             conn_id,
                             success.dc_idx,

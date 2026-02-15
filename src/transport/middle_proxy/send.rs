@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::error::{ProxyError, Result};
-use crate::protocol::constants::{RPC_CLOSE_EXT_U32, TG_MIDDLE_PROXIES_V4};
+use crate::protocol::constants::{RPC_CLOSE_EXT_U32};
 
 use super::MePool;
 use super::codec::RpcWriter;
@@ -39,7 +39,7 @@ impl MePool {
             let writers: Vec<(SocketAddr, Arc<Mutex<RpcWriter>>)> = ws.iter().cloned().collect();
             drop(ws);
 
-            let candidate_indices = candidate_indices_for_dc(&writers, target_dc);
+            let candidate_indices = self.candidate_indices_for_dc(&writers, target_dc).await;
             if candidate_indices.is_empty() {
                 return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
             }
@@ -106,41 +106,54 @@ impl MePool {
     pub fn connection_count(&self) -> usize {
         self.writers.try_read().map(|w| w.len()).unwrap_or(0)
     }
-}
+    
+    pub(super) async fn candidate_indices_for_dc(
+        &self,
+        writers: &[(SocketAddr, Arc<Mutex<RpcWriter>>)],
+        target_dc: i16,
+    ) -> Vec<usize> {
+        let mut preferred = Vec::<SocketAddr>::new();
+        let key = target_dc as i32;
+        let map = self.proxy_map_v4.read().await;
 
-fn candidate_indices_for_dc(
-    writers: &[(SocketAddr, Arc<Mutex<RpcWriter>>)],
-    target_dc: i16,
-) -> Vec<usize> {
-    let mut preferred = Vec::<SocketAddr>::new();
-    let key = target_dc as i32;
-    if let Some(v) = TG_MIDDLE_PROXIES_V4.get(&key) {
-        preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
-    }
-    if preferred.is_empty() {
-        let abs = key.abs();
-        if let Some(v) = TG_MIDDLE_PROXIES_V4.get(&abs) {
+        if let Some(v) = map.get(&key) {
             preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
         }
-    }
-    if preferred.is_empty() {
-        let abs = key.abs();
-        if let Some(v) = TG_MIDDLE_PROXIES_V4.get(&-abs) {
-            preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+        if preferred.is_empty() {
+            let abs = key.abs();
+            if let Some(v) = map.get(&abs) {
+                preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+            }
         }
-    }
-    if preferred.is_empty() {
-        return (0..writers.len()).collect();
+        if preferred.is_empty() {
+            let abs = key.abs();
+            if let Some(v) = map.get(&-abs) {
+                preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+            }
+        }
+        if preferred.is_empty() {
+            let def = self.default_dc.load(Ordering::Relaxed);
+            if def != 0 {
+                if let Some(v) = map.get(&def) {
+                    preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+                }
+            }
+        }
+
+        if preferred.is_empty() {
+            return (0..writers.len()).collect();
+        }
+
+        let mut out = Vec::new();
+        for (idx, (addr, _)) in writers.iter().enumerate() {
+            if preferred.iter().any(|p| p == addr) {
+                out.push(idx);
+            }
+        }
+        if out.is_empty() {
+            return (0..writers.len()).collect();
+        }
+        out
     }
 
-    let mut out = Vec::new();
-    for (idx, (addr, _)) in writers.iter().enumerate() {
-        if preferred.iter().any(|p| p == addr) {
-            out.push(idx);
-        }
-    }
-    if out.is_empty() {
-        return (0..writers.len()).collect();
-    }
-    out
 }

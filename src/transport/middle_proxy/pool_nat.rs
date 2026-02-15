@@ -10,7 +10,7 @@ impl MePool {
     pub(super) fn translate_ip_for_nat(&self, ip: IpAddr) -> IpAddr {
         let nat_ip = self
             .nat_ip_cfg
-            .or_else(|| self.nat_ip_detected.get().copied());
+            .or_else(|| self.nat_ip_detected.try_read().ok().and_then(|g| (*g).clone()));
 
         let Some(nat_ip) = nat_ip else {
             return ip;
@@ -60,13 +60,16 @@ impl MePool {
             return None;
         }
 
-        if let Some(ip) = self.nat_ip_detected.get().copied() {
+        if let Some(ip) = self.nat_ip_detected.read().await.clone() {
             return Some(ip);
         }
 
-        match fetch_public_ipv4().await {
+        match fetch_public_ipv4_with_retry().await {
             Ok(Some(ip)) => {
-                let _ = self.nat_ip_detected.set(IpAddr::V4(ip));
+                {
+                    let mut guard = self.nat_ip_detected.write().await;
+                    *guard = Some(IpAddr::V4(ip));
+                }
                 info!(public_ip = %ip, "Auto-detected public IP for NAT translation");
                 Some(IpAddr::V4(ip))
             }
@@ -98,8 +101,22 @@ impl MePool {
     }
 }
 
-async fn fetch_public_ipv4() -> Result<Option<Ipv4Addr>> {
-    let res = reqwest::get("https://checkip.amazonaws.com").await.map_err(|e| {
+async fn fetch_public_ipv4_with_retry() -> Result<Option<Ipv4Addr>> {
+    let providers = [
+        "https://checkip.amazonaws.com",
+        "http://v4.ident.me",
+        "http://ipv4.icanhazip.com",
+    ];
+    for url in providers {
+        if let Ok(Some(ip)) = fetch_public_ipv4_once(url).await {
+            return Ok(Some(ip));
+        }
+    }
+    Ok(None)
+}
+
+async fn fetch_public_ipv4_once(url: &str) -> Result<Option<Ipv4Addr>> {
+    let res = reqwest::get(url).await.map_err(|e| {
         ProxyError::Proxy(format!("public IP detection request failed: {e}"))
     })?;
 

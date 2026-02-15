@@ -27,9 +27,10 @@ use crate::ip_tracker::UserIpTracker;
 use crate::proxy::ClientHandler;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
-use crate::transport::middle_proxy::MePool;
+use crate::transport::middle_proxy::{MePool, fetch_proxy_config};
 use crate::transport::{ListenOptions, UpstreamManager, create_listener};
 use crate::util::ip::detect_ip;
+use crate::protocol::constants::{TG_MIDDLE_PROXIES_V4, TG_MIDDLE_PROXIES_V6};
 
 fn parse_cli() -> (String, bool, Option<String>) {
     let mut config_path = "config.toml".to_string();
@@ -250,12 +251,34 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     "Proxy-secret loaded"
                 );
 
+                // Load ME config (v4/v6) + default DC
+                let mut cfg_v4 = fetch_proxy_config(
+                    "https://core.telegram.org/getProxyConfig",
+                )
+                .await
+                .unwrap_or_default();
+                let mut cfg_v6 = fetch_proxy_config(
+                    "https://core.telegram.org/getProxyConfigV6",
+                )
+                .await
+                .unwrap_or_default();
+
+                if cfg_v4.map.is_empty() {
+                    cfg_v4.map = crate::protocol::constants::TG_MIDDLE_PROXIES_V4.clone();
+                }
+                if cfg_v6.map.is_empty() {
+                    cfg_v6.map = crate::protocol::constants::TG_MIDDLE_PROXIES_V6.clone();
+                }
+
                 let pool = MePool::new(
                     proxy_tag,
                     proxy_secret,
                     config.general.middle_proxy_nat_ip,
                     config.general.middle_proxy_nat_probe,
                     config.general.middle_proxy_nat_stun.clone(),
+                    cfg_v4.map.clone(),
+                    cfg_v6.map.clone(),
+                    cfg_v4.default_dc.or(cfg_v6.default_dc),
                 );
 
                 match pool.init(2, &rng).await {
@@ -268,6 +291,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         tokio::spawn(async move {
                             crate::transport::middle_proxy::me_health_monitor(
                                 pool_clone, rng_clone, 2,
+                            )
+                            .await;
+                        });
+
+                        // Periodic updater: getProxyConfig + proxy-secret
+                        let pool_clone2 = pool.clone();
+                        tokio::spawn(async move {
+                            crate::transport::middle_proxy::me_config_updater(
+                                pool_clone2,
+                                std::time::Duration::from_secs(12 * 3600),
                             )
                             .await;
                         });
