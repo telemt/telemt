@@ -337,77 +337,77 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
 
         let ping_results = upstream_manager.ping_all_dcs(prefer_ipv6).await;
 
-        for upstream_result in &ping_results {
-            // Show which IP version is in use and which is fallback
-            if upstream_result.both_available {
-                if prefer_ipv6 {
-                    info!("  IPv6 in use and IPv4 is fallback");
-                } else {
-                    info!("  IPv4 in use and IPv6 is fallback");
-                }
-            } else {
-                let v6_works = upstream_result
-                    .v6_results
-                    .iter()
-                    .any(|r| r.rtt_ms.is_some());
-                let v4_works = upstream_result
-                    .v4_results
-                    .iter()
-                    .any(|r| r.rtt_ms.is_some());
-                if v6_works && !v4_works {
-                    info!("  IPv6 only (IPv4 unavailable)");
-                } else if v4_works && !v6_works {
-                    info!("  IPv4 only (IPv6 unavailable)");
-                } else if !v6_works && !v4_works {
-                    info!("  No connectivity!");
-                }
-            }
+		for upstream_result in &ping_results {
+			let v6_works = upstream_result
+				.v6_results
+				.iter()
+				.any(|r| r.rtt_ms.is_some());
+			let v4_works = upstream_result
+				.v4_results
+				.iter()
+				.any(|r| r.rtt_ms.is_some());
+			
+			if upstream_result.both_available {
+				if prefer_ipv6 {
+					info!("  IPv6 in use and IPv4 is fallback");
+				} else {
+					info!("  IPv4 in use and IPv6 is fallback");
+				}
+			} else {
+				if v6_works && !v4_works {
+					info!("  IPv6 only (IPv4 unavailable)");
+				} else if v4_works && !v6_works {
+					info!("  IPv4 only (IPv6 unavailable)");
+				} else if !v6_works && !v4_works {
+					info!("  No connectivity!");
+				}
+			}
 
-            info!("  via {}", upstream_result.upstream_name);
-            info!("============================================================");
+			info!("  via {}", upstream_result.upstream_name);
+			info!("============================================================");
 
-            // Print IPv6 results first
-            for dc in &upstream_result.v6_results {
-                let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
-                match &dc.rtt_ms {
-                    Some(rtt) => {
-                        // Align: IPv6 addresses are longer, use fewer tabs
-                        // [2001:b28:f23d:f001::a]:443 = ~28 chars
-                        info!("    DC{} [IPv6] {}:\t\t{:.0} ms", dc.dc_idx, addr_str, rtt);
-                    }
-                    None => {
-                        let err = dc.error.as_deref().unwrap_or("fail");
-                        info!("    DC{} [IPv6] {}:\t\tFAIL ({})", dc.dc_idx, addr_str, err);
-                    }
-                }
-            }
+			// Print IPv6 results first (only if IPv6 is available)
+			if v6_works {
+				for dc in &upstream_result.v6_results {
+					let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
+					match &dc.rtt_ms {
+						Some(rtt) => {
+							info!("    DC{} [IPv6] {}:\t\t{:.0} ms", dc.dc_idx, addr_str, rtt);
+						}
+						None => {
+							let err = dc.error.as_deref().unwrap_or("fail");
+							info!("    DC{} [IPv6] {}:\t\tFAIL ({})", dc.dc_idx, addr_str, err);
+						}
+					}
+				}
 
-            info!("============================================================");
+				info!("============================================================");
+			}
 
-            // Print IPv4 results
-            for dc in &upstream_result.v4_results {
-                let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
-                match &dc.rtt_ms {
-                    Some(rtt) => {
-                        // Align: IPv4 addresses are shorter, use more tabs
-                        // 149.154.175.50:443 = ~18 chars
-                        info!(
-                            "    DC{} [IPv4] {}:\t\t\t\t{:.0} ms",
-                            dc.dc_idx, addr_str, rtt
-                        );
-                    }
-                    None => {
-                        let err = dc.error.as_deref().unwrap_or("fail");
-                        info!(
-                            "    DC{} [IPv4] {}:\t\t\t\tFAIL ({})",
-                            dc.dc_idx, addr_str, err
-                        );
-                    }
-                }
-            }
+			// Print IPv4 results (only if IPv4 is available)
+			if v4_works {
+				for dc in &upstream_result.v4_results {
+					let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
+					match &dc.rtt_ms {
+						Some(rtt) => {
+							info!(
+								"    DC{} [IPv4] {}:\t\t\t\t{:.0} ms",
+								dc.dc_idx, addr_str, rtt
+							);
+						}
+						None => {
+							let err = dc.error.as_deref().unwrap_or("fail");
+							info!(
+								"    DC{} [IPv4] {}:\t\t\t\tFAIL ({})",
+								dc.dc_idx, addr_str, err
+							);
+						}
+					}
+				}
 
-            info!("============================================================");
-        }
+				info!("============================================================");
+			}
+		}
     }
 
     // Background tasks
