@@ -6,6 +6,17 @@ use crate::error::{ProxyError, Result};
 
 use super::MePool;
 
+#[derive(Debug, Clone, Copy)]
+pub struct StunProbeResult {
+    pub local_addr: std::net::SocketAddr,
+    pub reflected_addr: std::net::SocketAddr,
+}
+
+pub async fn stun_probe(stun_addr: Option<String>) -> Result<Option<StunProbeResult>> {
+    let stun_addr = stun_addr.unwrap_or_else(|| "stun.l.google.com:19302".to_string());
+    fetch_stun_binding(&stun_addr).await
+}
+
 impl MePool {
     pub(super) fn translate_ip_for_nat(&self, ip: IpAddr) -> IpAddr {
         let nat_ip = self
@@ -88,10 +99,12 @@ impl MePool {
             .unwrap_or_else(|| "stun.l.google.com:19302".to_string());
         match fetch_stun_binding(&stun_addr).await {
             Ok(sa) => {
-                if let Some(sa) = sa {
-                    info!(%sa, "NAT probe: reflected address");
+                if let Some(result) = sa {
+                    info!(local = %result.local_addr, reflected = %result.reflected_addr, "NAT probe: reflected address");
+                    Some(result.reflected_addr)
+                } else {
+                    None
                 }
-                sa
             }
             Err(e) => {
                 warn!(error = %e, "NAT probe failed");
@@ -128,7 +141,7 @@ async fn fetch_public_ipv4_once(url: &str) -> Result<Option<Ipv4Addr>> {
     Ok(ip)
 }
 
-async fn fetch_stun_binding(stun_addr: &str) -> Result<Option<std::net::SocketAddr>> {
+async fn fetch_stun_binding(stun_addr: &str) -> Result<Option<StunProbeResult>> {
     use rand::RngCore;
     use tokio::net::UdpSocket;
 
@@ -196,10 +209,17 @@ async fn fetch_stun_binding(stun_addr: &str) -> Result<Option<std::net::SocketAd
                 } else {
                     (u16::from_be_bytes(port_bytes), ip_bytes)
                 };
-                return Ok(Some(std::net::SocketAddr::new(
+                let reflected = std::net::SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])),
                     port,
-                )));
+                );
+                let local_addr = socket.local_addr().map_err(|e| {
+                    ProxyError::Proxy(format!("STUN local_addr failed: {e}"))
+                })?;
+                return Ok(Some(StunProbeResult {
+                    local_addr,
+                    reflected_addr: reflected,
+                }));
             }
             _ => {}
         }

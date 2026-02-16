@@ -5,8 +5,12 @@ services:
     restart: unless-stopped
     ports:
       - "443:443"
+    # Allow caching 'proxy-secret' in read-only container
+    working_dir: /run/telemt
     volumes:
-      - ./config.toml:/app/config.toml:ro
+      - ./config.toml:/run/telemt/config.toml:ro
+    tmpfs:
+      - /run/telemt:rw,mode=1777,size=1m
     environment:
       - RUST_LOG=info
     # Uncomment this line if you want to use host network for IPv6, but bridge is default and usually better

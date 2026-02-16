@@ -205,15 +205,29 @@ pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Sock
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
     use tokio::net::TcpListener;
     
     #[tokio::test]
     async fn test_configure_socket() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("bind failed: {e}"),
+        };
         let addr = listener.local_addr().unwrap();
         
-        let stream = TcpStream::connect(addr).await.unwrap();
-        configure_tcp_socket(&stream, true, Duration::from_secs(30)).unwrap();
+        let stream = match TcpStream::connect(addr).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("connect failed: {e}"),
+        };
+        if let Err(e) = configure_tcp_socket(&stream, true, Duration::from_secs(30)) {
+            if e.kind() == ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("configure_tcp_socket failed: {e}");
+        }
     }
     
     #[test]

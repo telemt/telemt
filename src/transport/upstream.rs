@@ -2,6 +2,7 @@
 //! 
 //! IPv6/IPv4 connectivity checks with configurable preference.
 
+use std::collections::HashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -350,7 +351,11 @@ impl UpstreamManager {
 
     /// Ping all Telegram DCs through all upstreams.
     /// Tests BOTH IPv6 and IPv4, returns separate results for each.
-    pub async fn ping_all_dcs(&self, prefer_ipv6: bool) -> Vec<StartupPingResult> {
+    pub async fn ping_all_dcs(
+        &self,
+        prefer_ipv6: bool,
+        dc_overrides: &HashMap<String, Vec<String>>,
+    ) -> Vec<StartupPingResult> {
         let upstreams: Vec<(usize, UpstreamConfig)> = {
             let guard = self.upstreams.read().await;
             guard.iter().enumerate()
@@ -448,6 +453,58 @@ impl UpstreamManager {
                     },
                 };
                 v4_results.push(ping_result);
+            }
+
+            // === Ping DC overrides (v4/v6) ===
+            for (dc_key, addrs) in dc_overrides {
+                let dc_num: i16 = match dc_key.parse::<i16>() {
+                    Ok(v) if v > 0 => v,
+                    Err(_) => {
+                        warn!(dc = %dc_key, "Invalid dc_overrides key, skipping");
+                        continue;
+                    },
+                    _ => continue,
+                };
+                let dc_idx = dc_num as usize;
+                for addr_str in addrs {
+                    match addr_str.parse::<SocketAddr>() {
+                        Ok(addr) => {
+                            let is_v6 = addr.is_ipv6();
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(DC_PING_TIMEOUT_SECS),
+                                self.ping_single_dc(&upstream_config, addr)
+                            ).await;
+
+                            let ping_result = match result {
+                                Ok(Ok(rtt_ms)) => DcPingResult {
+                                    dc_idx,
+                                    dc_addr: addr,
+                                    rtt_ms: Some(rtt_ms),
+                                    error: None,
+                                },
+                                Ok(Err(e)) => DcPingResult {
+                                    dc_idx,
+                                    dc_addr: addr,
+                                    rtt_ms: None,
+                                    error: Some(e.to_string()),
+                                },
+                                Err(_) => DcPingResult {
+                                    dc_idx,
+                                    dc_addr: addr,
+                                    rtt_ms: None,
+                                    error: Some("timeout".to_string()),
+                                },
+                            };
+
+                            if is_v6 {
+                                v6_results.push(ping_result);
+                            } else {
+                                v4_results.push(ping_result);
+                            }
+                        }
+                        Err(_) => warn!(dc = %dc_idx, addr = %addr_str, "Invalid dc_overrides address, skipping"),
+                    }
+                }
             }
 
             // Check if both IP versions have at least one working DC

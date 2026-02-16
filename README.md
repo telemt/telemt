@@ -2,42 +2,86 @@
 
 **Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements such as connection pooling, replay protection, detailed statistics, masking from "prying" eyes
 
-## Emergency
-### RU
-Многие из вас столкнулись с проблемой загрузки медиа из каналов с >100k subs...
+## NEWS and EMERGENCY
+### ✈️ Telemt 3 is released!
+<table>
+<tr>
+<td width="50%" valign="top">
 
-Мы уже знаем о проблеме: она связана с dc=203 - Telegram CDN и сейчас есть подтверждённое исправление...
+### 🇷🇺 RU
 
-🤐 ДОСТУПНО ТОЛЬКО В РЕЛИЗЕ 2.0.0.1 и последующих
+15 февраля мы опубликовали `telemt 3` с поддержкой Middle-End Proxy, а значит:
 
-Сейчас оно принимо через добавление в конфиг:
+- с функциональными медиа, в том числе с CDN/DC=203  
+- с Ad-tag — показывайте спонсорский канал и собирайте статистику через официального бота  
+- с новым подходом к безопасности и асинхронности  
+- с высокоточной диагностикой криптографии через `ME_DIAG`  
+
+Для использования нужно:
+
+1. Версия `telemt` ≥3.0.0
+2. Выполнение любого из наборов условий:
+   - публичный IP для исходящих соединений установлен на интерфейса инстанса с `telemt`
+     - ЛИБО
+   - вы используете NAT 1:1 + включили STUN-пробинг
+3. В конфиге, в секции `[general]` указать:
+```toml
+use_middle_proxy = true
+```
+
+Если условия из пункта 1 не выполняются:
+1. Выключите ME-режим:
+   - установите `use_middle_proxy = false`
+     - ЛИБО
+   - Middle-End Proxy будет выключен автоматически по таймауту, но это займёт больше времени при запуске
+2. В конфиге, добавьте в конец:
 ```toml
 [dc_overrides]
 "203" = "91.105.192.100:443"
 ```
-Мы работаем над поиском всех адресов для каждого "нестандартного" DC...
 
-Фикс вне конфига будет в релизе 2.0.0.2
+Если у вас есть компетенции в асинхронных сетевых приложениях, анализе трафика, реверс-инжиниринге или сетевых расследованиях — мы открыты к идеям и pull requests.
 
-Если у вас есть компетенции в асинхронных сетевых приложениях, анализе трафика, reverse engineering, network forensics - мы открыты к мыслям, предложениям, pull requests
+</td>
+<td width="50%" valign="top">
 
-### EN
-Many of you have encountered issues loading media from channels with over 100k subscribers…
+### 🇬🇧 EN
 
-We’re already aware of the problem: it’s related to `dc=203` – Telegram CDN – and we now have a confirmed fix.
+On February 15, we released `telemt 3` with support for Middle-End Proxy, which means:
 
-🤐 AVAILABLE ONLY IN RELEASE 2.0.0.1 and later
+- functional media, including CDN/DC=203  
+- Ad-tag support – promote a sponsored channel and collect statistics via Telegram bot  
+- new approach to security and asynchronicity  
+- high-precision cryptography diagnostics via `ME_DIAG`  
 
-Currently, you can apply it by adding the following to your config:
+To use this feature, the following requirements must be met:
+1. `telemt` version ≥ 3.0.0
+2. One of the following conditions satisfied:
+   - the instance running `telemt` has a public IP address assigned to its network interface for outbound connections  
+     - OR
+   - you are using 1:1 NAT and have STUN probing enabled  
+3. In the config file, under the `[general]` section, specify:
+```toml
+use_middle_proxy = true
+````
+
+If the conditions from step 1 are not satisfied:
+1. Disable Middle-End mode:
+   - set `use_middle_proxy = false`
+     - OR
+   - Middle-End Proxy will be disabled automatically after a timeout, but this will increase startup time
+
+2. In the config file, add the following at the end:
 ```toml
 [dc_overrides]
 "203" = "91.105.192.100:443"
 ```
-We’re working on identifying all addresses for every “non‑standard” DC…
 
-The fix will be included in release 2.0.0.2, no manual config needed.
+If you have expertise in asynchronous network applications, traffic analysis, reverse engineering, or network forensics — we welcome ideas, suggestions, and pull requests.
 
-If you have expertise in asynchronous network applications, traffic analysis, reverse engineering, or network forensics – we’re open to ideas, suggestions, and pull requests.
+</td>
+</tr>
+</table>
 
 # Features
 💥 The configuration structure has changed since version 1.1.0.0. change it in your environment!

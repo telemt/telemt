@@ -3,6 +3,7 @@
 use crate::error::{ProxyError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde::de::Deserializer;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
@@ -53,6 +54,40 @@ fn default_metrics_whitelist() -> Vec<IpAddr> {
     vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
 }
 
+fn default_unknown_dc_log_path() -> Option<String> {
+    Some("unknown-dc.txt".to_string())
+}
+
+// ============= Custom Deserializers =============
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_dc_overrides<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: HashMap<String, OneOrMany> = HashMap::deserialize(deserializer)?;
+    let mut out = HashMap::new();
+    for (dc, val) in raw {
+        let mut addrs = match val {
+            OneOrMany::One(s) => vec![s],
+            OneOrMany::Many(v) => v,
+        };
+        addrs.retain(|s| !s.trim().is_empty());
+        if !addrs.is_empty() {
+            out.insert(dc, addrs);
+        }
+    }
+    Ok(out)
+}
+
 // ============= Log Level =============
 
 /// Logging verbosity level
@@ -92,6 +127,50 @@ impl LogLevel {
             "silent" | "quiet" | "error" | "warn" => LogLevel::Silent,
             _ => LogLevel::Normal,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dc_overrides_allow_string_and_array() {
+        let toml = r#"
+            [dc_overrides]
+            "201" = "149.154.175.50:443"
+            "202" = ["149.154.167.51:443", "149.154.175.100:443"]
+        "#;
+        let cfg: ProxyConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.dc_overrides["201"], vec!["149.154.175.50:443"]);
+        assert_eq!(
+            cfg.dc_overrides["202"],
+            vec!["149.154.167.51:443", "149.154.175.100:443"]
+        );
+    }
+
+    #[test]
+    fn dc_overrides_inject_dc203_default() {
+        let toml = r#"
+            [general]
+            use_middle_proxy = false
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_dc_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert!(cfg
+            .dc_overrides
+            .get("203")
+            .map(|v| v.contains(&"91.105.192.100:443".to_string()))
+            .unwrap_or(false));
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -163,6 +242,14 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub middle_proxy_nat_stun: Option<String>,
 
+    /// Ignore STUN/interface IP mismatch (keep using Middle Proxy even if NAT detected).
+    #[serde(default)]
+    pub stun_iface_mismatch_ignore: bool,
+
+    /// Log unknown (non-standard) DC requests to a file (default: unknown-dc.txt). Set to null to disable.
+    #[serde(default = "default_unknown_dc_log_path")]
+    pub unknown_dc_log_path: Option<String>,
+
     #[serde(default)]
     pub log_level: LogLevel,
 
@@ -183,6 +270,8 @@ impl Default for GeneralConfig {
             middle_proxy_nat_ip: None,
             middle_proxy_nat_probe: false,
             middle_proxy_nat_stun: None,
+            stun_iface_mismatch_ignore: false,
+            unknown_dc_log_path: default_unknown_dc_log_path(),
             log_level: LogLevel::Normal,
             disable_colors: false,
         }
@@ -499,13 +588,13 @@ pub struct ProxyConfig {
     pub show_link: ShowLink,
 
     /// DC address overrides for non-standard DCs (CDN, media, test, etc.)
-    /// Keys are DC indices as strings, values are "ip:port" addresses.
+    /// Keys are DC indices as strings, values are one or more \"ip:port\" addresses.
     /// Matches the C implementation's `proxy_for <dc_id> <ip>:<port>` config directive.
     /// Example in config.toml:
     ///   [dc_overrides]
-    ///   "203" = "149.154.175.100:443"
-    #[serde(default)]
-    pub dc_overrides: HashMap<String, String>,
+    ///   \"203\" = [\"149.154.175.100:443\", \"91.105.192.100:443\"]
+    #[serde(default, deserialize_with = "deserialize_dc_overrides")]
+    pub dc_overrides: HashMap<String, Vec<String>>,
 
     /// Default DC index (1-5) for unmapped non-standard DCs.
     /// Matches the C implementation's `default <dc_id>` config directive.
@@ -598,6 +687,12 @@ impl ProxyConfig {
                 enabled: true,
             });
         }
+
+        // Ensure default DC203 override is present.
+        config
+            .dc_overrides
+            .entry("203".to_string())
+            .or_insert_with(|| vec!["91.105.192.100:443".to_string()]);
 
         Ok(config)
     }

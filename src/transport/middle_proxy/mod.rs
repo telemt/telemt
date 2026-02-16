@@ -15,6 +15,7 @@ use bytes::Bytes;
 
 pub use health::me_health_monitor;
 pub use pool::MePool;
+pub use pool_nat::{stun_probe, StunProbeResult};
 pub use registry::ConnRegistry;
 pub use secret::fetch_proxy_secret;
 pub use config_updater::{fetch_proxy_config, me_config_updater};
