@@ -32,6 +32,7 @@ let x = 5; // set x to 5 lol
 - If a file exceeds this limit, split it into submodules.
 - Organize submodules logically by responsibility (e.g., protocol, transport, state, handlers).
 - Parent modules MUST declare and describe submodules.
+- Use local git for versioning and diffs, write CORRECT and FULL comments to commits with descriptions
 
 Correct example:
 
