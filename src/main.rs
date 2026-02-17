@@ -35,7 +35,7 @@ use crate::transport::middle_proxy::{
     stun_probe,
 };
 use crate::transport::{ListenOptions, UpstreamManager, create_listener};
-use crate::util::ip::detect_ip;
+use crate::util::ip::{detect_ip, check_ipv6_available};
 use crate::protocol::constants::{TG_MIDDLE_PROXIES_V4, TG_MIDDLE_PROXIES_V6};
 
 fn parse_cli() -> (String, bool, Option<String>) {
@@ -219,7 +219,19 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         warn!("Using default tls_domain. Consider setting a custom domain.");
     }
 
-    let prefer_ipv6 = config.general.prefer_ipv6;
+    let ipv6_available = check_ipv6_available();
+    if ipv6_available {
+        info!("IPv6: available");
+    } else {
+        warn!("IPv6: not available on this host");
+    }
+
+    let prefer_ipv6 = if config.general.prefer_ipv6 && !ipv6_available {
+        warn!("prefer_ipv6 is set but IPv6 is not available, falling back to IPv4");
+        false
+    } else {
+        config.general.prefer_ipv6
+    };
     let mut use_middle_proxy = config.general.use_middle_proxy;
     let config = Arc::new(config);
     let stats = Arc::new(Stats::new());
@@ -342,6 +354,12 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     cfg_v6.map = crate::protocol::constants::TG_MIDDLE_PROXIES_V6.clone();
                 }
 
+                let effective_v6_map = if ipv6_available {
+                    cfg_v6.map.clone()
+                } else {
+                    std::collections::HashMap::new()
+                };
+
                 let pool = MePool::new(
                     proxy_tag,
                     proxy_secret,
@@ -349,7 +367,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     config.general.middle_proxy_nat_probe,
                     config.general.middle_proxy_nat_stun.clone(),
                     cfg_v4.map.clone(),
-                    cfg_v6.map.clone(),
+                    effective_v6_map,
                     cfg_v4.default_dc.or(cfg_v6.default_dc),
                 );
 
@@ -362,7 +380,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                         let rng_clone = rng.clone();
                         tokio::spawn(async move {
                             crate::transport::middle_proxy::me_health_monitor(
-                                pool_clone, rng_clone, 2,
+                                pool_clone, rng_clone, 2, ipv6_available,
                             )
                             .await;
                         });
@@ -482,7 +500,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
     info!("================= Telegram DC Connectivity =================");
 
     let ping_results = upstream_manager
-        .ping_all_dcs(prefer_ipv6, &config.dc_overrides)
+        .ping_all_dcs(prefer_ipv6, &config.dc_overrides, ipv6_available)
         .await;
 
 	for upstream_result in &ping_results {
@@ -560,7 +578,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
     // Background tasks
     let um_clone = upstream_manager.clone();
     tokio::spawn(async move {
-        um_clone.run_health_checks(prefer_ipv6).await;
+        um_clone.run_health_checks(prefer_ipv6, ipv6_available).await;
     });
 
     let rc_clone = replay_checker.clone();

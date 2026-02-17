@@ -54,6 +54,12 @@ fn get_local_ipv6(target: &str) -> Option<IpAddr> {
     socket.local_addr().ok().map(|addr| addr.ip())
 }
 
+/// Check if IPv6 connectivity is available on this host.
+/// Uses UDP connect to Google DNS IPv6 (no packets sent).
+pub fn check_ipv6_available() -> bool {
+    get_local_ipv6("[2001:4860:4860::8888]:80").is_some()
+}
+
 /// Detect public IP addresses
 pub async fn detect_ip() -> IpInfo {
     let mut info = IpInfo::default();
