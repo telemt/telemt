@@ -263,7 +263,14 @@ where
         }
     }
 
-    client_writer.flush().await.map_err(ProxyError::Io)
+    // Avoid unconditional per-frame flush (throughput killer on large downloads).
+    // Flush only when low-latency ack semantics are requested or when
+    // CryptoWriter has buffered pending ciphertext that must be drained.
+    if quickack || client_writer.has_pending() {
+        client_writer.flush().await.map_err(ProxyError::Io)?;
+    }
+
+    Ok(())
 }
 
 async fn write_client_ack<W>(
@@ -283,5 +290,6 @@ where
         .write_all(&bytes)
         .await
         .map_err(ProxyError::Io)?;
+    // ACK should remain low-latency.
     client_writer.flush().await.map_err(ProxyError::Io)
 }

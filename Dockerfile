@@ -37,6 +37,7 @@ RUN chown -R telemt:telemt /app
 USER telemt
 
 EXPOSE 443
+EXPOSE 9090
 
 ENTRYPOINT ["/app/telemt"]
 CMD ["config.toml"]

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use regex::Regex;
+use httpdate;
 use tracing::{debug, info, warn};
 
 use crate::error::Result;
@@ -11,6 +12,7 @@ use crate::error::Result;
 use super::MePool;
 use super::secret::download_proxy_secret;
 use crate::crypto::SecureRandom;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Default)]
 pub struct ProxyConfigData {
@@ -19,9 +21,29 @@ pub struct ProxyConfigData {
 }
 
 pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
-    let text = reqwest::get(url)
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}")))?
+        ;
+
+    if let Some(date) = resp.headers().get(reqwest::header::DATE) {
+        if let Ok(date_str) = date.to_str() {
+            if let Ok(server_time) = httpdate::parse_http_date(date_str) {
+                if let Ok(skew) = SystemTime::now().duration_since(server_time).or_else(|e| {
+                    server_time.duration_since(SystemTime::now()).map_err(|_| e)
+                }) {
+                    let skew_secs = skew.as_secs();
+                    if skew_secs > 60 {
+                        warn!(skew_secs, "Time skew >60s detected from fetch_proxy_config Date header");
+                    } else if skew_secs > 30 {
+                        warn!(skew_secs, "Time skew >30s detected from fetch_proxy_config Date header");
+                    }
+                }
+            }
+        }
+    }
+
+    let text = resp
         .text()
         .await
         .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config read failed: {e}")))?;

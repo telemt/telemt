@@ -17,12 +17,28 @@
 - с новым подходом к безопасности и асинхронности  
 - с высокоточной диагностикой криптографии через `ME_DIAG`  
 
-Для использования нужно указать:
+Для использования нужно:
+
+1. Версия `telemt` ≥3.0.0
+2. Выполнение любого из наборов условий:
+   - публичный IP для исходящих соединений установлен на интерфейса инстанса с `telemt`
+     - ЛИБО
+   - вы используете NAT 1:1 + включили STUN-пробинг
+3. В конфиге, в секции `[general]` указать:
 ```toml
 use_middle_proxy = true
 ```
 
-в версии `telemt` 3.0.0 и последующих.
+Если условия из пункта 1 не выполняются:
+1. Выключите ME-режим:
+   - установите `use_middle_proxy = false`
+     - ЛИБО
+   - Middle-End Proxy будет выключен автоматически по таймауту, но это займёт больше времени при запуске
+2. В конфиге, добавьте в конец:
+```toml
+[dc_overrides]
+"203" = "91.105.192.100:443"
+```
 
 Если у вас есть компетенции в асинхронных сетевых приложениях, анализе трафика, реверс-инжиниринге или сетевых расследованиях — мы открыты к идеям и pull requests.
 
@@ -38,11 +54,28 @@ On February 15, we released `telemt 3` with support for Middle-End Proxy, which 
 - new approach to security and asynchronicity  
 - high-precision cryptography diagnostics via `ME_DIAG`  
 
-To use it, set:
+To use this feature, the following requirements must be met:
+1. `telemt` version ≥ 3.0.0
+2. One of the following conditions satisfied:
+   - the instance running `telemt` has a public IP address assigned to its network interface for outbound connections  
+     - OR
+   - you are using 1:1 NAT and have STUN probing enabled  
+3. In the config file, under the `[general]` section, specify:
 ```toml
 use_middle_proxy = true
+````
+
+If the conditions from step 1 are not satisfied:
+1. Disable Middle-End mode:
+   - set `use_middle_proxy = false`
+     - OR
+   - Middle-End Proxy will be disabled automatically after a timeout, but this will increase startup time
+
+2. In the config file, add the following at the end:
+```toml
+[dc_overrides]
+"203" = "91.105.192.100:443"
 ```
-in version `telemt` 3.0.0 or later.
 
 If you have expertise in asynchronous network applications, traffic analysis, reverse engineering, or network forensics — we welcome ideas, suggestions, and pull requests.
 
@@ -175,10 +208,6 @@ then Ctrl+X -> Y -> Enter to save
 ## Configuration
 ### Minimal Configuration for First Start
 ```toml
-# === UI ===
-# Users to show in the startup log (tg:// links)
-show_link = ["hello"]
-
 # === General Settings ===
 [general]
 prefer_ipv6 = false
@@ -202,10 +231,18 @@ listen_addr_ipv6 = "::"
 # Listen on multiple interfaces/IPs (overrides listen_addr_*)
 [[server.listeners]]
 ip = "0.0.0.0"
-# announce_ip = "1.2.3.4" # Optional: Public IP for tg:// links
+# announce = "my.hostname.tld" # Optional: hostname for tg:// links
+# OR
+# announce = "1.2.3.4" # Optional: Public IP for tg:// links
 
 [[server.listeners]]
 ip = "::"
+
+# Users to show in the startup log (tg:// links)
+[general.links]
+show = ["hello"] # Users to show in the startup log (tg:// links)
+# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
+# public_port = 443                  # Port for tg:// links (default: server.port)
 
 # === Timeouts (in seconds) ===
 [timeouts]
@@ -254,6 +291,10 @@ weight = 10
 # address = "127.0.0.1:9050"
 # enabled = false
 # weight = 1
+
+# === DC Address Overrides ===
+# [dc_overrides]
+# "203" = "91.105.192.100:443"
 ```
 ### Advanced
 #### Adtag

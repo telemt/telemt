@@ -174,6 +174,7 @@ impl RpcWriter {
         if buf.len() >= 16 {
             self.iv.copy_from_slice(&buf[buf.len() - 16..]);
         }
-        self.writer.write_all(&buf).await.map_err(ProxyError::Io)
+        self.writer.write_all(&buf).await.map_err(ProxyError::Io)?;
+        self.writer.flush().await.map_err(ProxyError::Io)
     }
 }

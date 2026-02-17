@@ -8,12 +8,15 @@ use tokio::signal;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 mod cli;
 mod config;
 mod crypto;
 mod error;
 mod ip_tracker;
+mod metrics;
 mod protocol;
 mod proxy;
 mod stats;
@@ -27,7 +30,10 @@ use crate::ip_tracker::UserIpTracker;
 use crate::proxy::ClientHandler;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
-use crate::transport::middle_proxy::{MePool, fetch_proxy_config};
+use crate::transport::middle_proxy::{
+    MePool, fetch_proxy_config, run_me_ping, MePingFamily, MePingSample, format_sample_line,
+    stun_probe,
+};
 use crate::transport::{ListenOptions, UpstreamManager, create_listener};
 use crate::util::ip::detect_ip;
 use crate::protocol::constants::{TG_MIDDLE_PROXIES_V4, TG_MIDDLE_PROXIES_V6};
@@ -98,6 +104,37 @@ fn parse_cli() -> (String, bool, Option<String>) {
     }
 
     (config_path, silent, log_level)
+}
+
+fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
+    info!("--- Proxy Links ({}) ---", host);
+    for user_name in config.general.links.show.resolve_users(&config.access.users) {
+        if let Some(secret) = config.access.users.get(user_name) {
+            info!("User: {}", user_name);
+            if config.general.modes.classic {
+                info!(
+                    "  Classic: tg://proxy?server={}&port={}&secret={}",
+                    host, port, secret
+                );
+            }
+            if config.general.modes.secure {
+                info!(
+                    "  DD:      tg://proxy?server={}&port={}&secret=dd{}",
+                    host, port, secret
+                );
+            }
+            if config.general.modes.tls {
+                let domain_hex = hex::encode(&config.censorship.tls_domain);
+                info!(
+                    "  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
+                    host, port, secret, domain_hex
+                );
+            }
+        } else {
+            warn!("User '{}' in show_link not found", user_name);
+        }
+    }
+    info!("------------------------");
 }
 
 #[tokio::main]
@@ -183,7 +220,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
 
     let prefer_ipv6 = config.general.prefer_ipv6;
-    let use_middle_proxy = config.general.use_middle_proxy;
+    let mut use_middle_proxy = config.general.use_middle_proxy;
     let config = Arc::new(config);
     let stats = Arc::new(Stats::new());
     let rng = Arc::new(SecureRandom::new());
@@ -206,6 +243,41 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Connection concurrency limit
     let _max_connections = Arc::new(Semaphore::new(10_000));
+
+    // STUN check before choosing transport
+    if use_middle_proxy {
+        match stun_probe(config.general.middle_proxy_nat_stun.clone()).await {
+            Ok(Some(probe)) => {
+                info!(
+                    local_ip = %probe.local_addr.ip(),
+                    reflected_ip = %probe.reflected_addr.ip(),
+                    "STUN Autodetect:"
+                );
+                if probe.local_addr.ip() != probe.reflected_addr.ip()
+                    && !config.general.stun_iface_mismatch_ignore
+                {
+                    match crate::transport::middle_proxy::detect_public_ip().await {
+                        Some(ip) => {
+                            info!(
+                                local_ip = %probe.local_addr.ip(),
+                                reflected_ip = %probe.reflected_addr.ip(),
+                                public_ip = %ip,
+                                "STUN mismatch but public IP auto-detected, continuing with middle proxy"
+                            );
+                        }
+                        None => {
+                            warn!(
+                                "STUN/IP-on-Interface mismatch and public IP auto-detect failed -> fallback to direct-DC"
+                            );
+                            use_middle_proxy = false;
+                        }
+                    }
+                }
+            }
+            Ok(None) => warn!("STUN probe returned no address; continuing"),
+            Err(e) => warn!(error = %e, "STUN probe failed; continuing"),
+        }
+    }
 
     // =====================================================================
     // Middle Proxy initialization (if enabled)
@@ -231,25 +303,25 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // proxy-secret is from: https://core.telegram.org/getProxySecret
         // =============================================================
         let proxy_secret_path = config.general.proxy_secret_path.as_deref();
-        match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
-            Ok(proxy_secret) => {
-                info!(
-                    secret_len = proxy_secret.len(),
-                    key_sig = format_args!(
-                        "0x{:08x}",
-                        if proxy_secret.len() >= 4 {
-                            u32::from_le_bytes([
-                                proxy_secret[0],
-                                proxy_secret[1],
-                                proxy_secret[2],
-                                proxy_secret[3],
-                            ])
-                        } else {
-                            0
-                        }
-                    ),
-                    "Proxy-secret loaded"
-                );
+match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
+    Ok(proxy_secret) => {
+        info!(
+            secret_len = proxy_secret.len() as usize,  // ← ЯВНЫЙ ТИП usize
+            key_sig = format_args!(
+                "0x{:08x}",
+                if proxy_secret.len() >= 4 {
+                    u32::from_le_bytes([
+                        proxy_secret[0],
+                        proxy_secret[1],
+                        proxy_secret[2],
+                        proxy_secret[3],
+                    ])
+                } else {
+                    0
+                }
+            ),
+            "Proxy-secret loaded"
+        );
 
                 // Load ME config (v4/v6) + default DC
                 let mut cfg_v4 = fetch_proxy_config(
@@ -295,6 +367,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             .await;
                         });
 
+                        // Periodic ME connection rotation
+                        let pool_clone_rot = pool.clone();
+                        let rng_clone_rot = rng.clone();
+                        tokio::spawn(async move {
+                            crate::transport::middle_proxy::me_rotation_task(
+                                pool_clone_rot,
+                                rng_clone_rot,
+                                std::time::Duration::from_secs(1800),
+                            )
+                            .await;
+                        });
+
                         // Periodic updater: getProxyConfig + proxy-secret
                         let pool_clone2 = pool.clone();
                         let rng_clone2 = rng.clone();
@@ -325,89 +409,153 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
 
     if me_pool.is_some() {
-        info!("Transport: Middle Proxy (supports all DCs including CDN)");
+        info!("Transport: Middle-End Proxy - all DC-over-RPC");
     } else {
-        info!("Transport: Direct TCP (standard DCs only)");
+        info!("Transport: Direct DC - TCP - standard DC-over-TCP");
     }
 
-    // Startup DC ping (only meaningful in direct mode)
-    if me_pool.is_none() {
-        info!("================= Telegram DC Connectivity =================");
+    // Middle-End ping before DC connectivity
+    if let Some(ref pool) = me_pool {
+        let me_results = run_me_ping(pool, &rng).await;
 
-        let ping_results = upstream_manager.ping_all_dcs(prefer_ipv6).await;
+        let v4_ok = me_results.iter().any(|r| {
+            matches!(r.family, MePingFamily::V4)
+                && r.samples.iter().any(|s| s.error.is_none() && s.handshake_ms.is_some())
+        });
+        let v6_ok = me_results.iter().any(|r| {
+            matches!(r.family, MePingFamily::V6)
+                && r.samples.iter().any(|s| s.error.is_none() && s.handshake_ms.is_some())
+        });
 
-        for upstream_result in &ping_results {
-            // Show which IP version is in use and which is fallback
-            if upstream_result.both_available {
-                if prefer_ipv6 {
-                    info!("  IPv6 in use and IPv4 is fallback");
-                } else {
-                    info!("  IPv4 in use and IPv6 is fallback");
-                }
-            } else {
-                let v6_works = upstream_result
-                    .v6_results
-                    .iter()
-                    .any(|r| r.rtt_ms.is_some());
-                let v4_works = upstream_result
-                    .v4_results
-                    .iter()
-                    .any(|r| r.rtt_ms.is_some());
-                if v6_works && !v4_works {
-                    info!("  IPv6 only (IPv4 unavailable)");
-                } else if v4_works && !v6_works {
-                    info!("  IPv4 only (IPv6 unavailable)");
-                } else if !v6_works && !v4_works {
-                    info!("  No connectivity!");
-                }
-            }
-
-            info!("  via {}", upstream_result.upstream_name);
-            info!("============================================================");
-
-            // Print IPv6 results first
-            for dc in &upstream_result.v6_results {
-                let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
-                match &dc.rtt_ms {
-                    Some(rtt) => {
-                        // Align: IPv6 addresses are longer, use fewer tabs
-                        // [2001:b28:f23d:f001::a]:443 = ~28 chars
-                        info!("    DC{} [IPv6] {}:\t\t{:.0} ms", dc.dc_idx, addr_str, rtt);
-                    }
-                    None => {
-                        let err = dc.error.as_deref().unwrap_or("fail");
-                        info!("    DC{} [IPv6] {}:\t\tFAIL ({})", dc.dc_idx, addr_str, err);
-                    }
-                }
-            }
-
-            info!("============================================================");
-
-            // Print IPv4 results
-            for dc in &upstream_result.v4_results {
-                let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
-                match &dc.rtt_ms {
-                    Some(rtt) => {
-                        // Align: IPv4 addresses are shorter, use more tabs
-                        // 149.154.175.50:443 = ~18 chars
-                        info!(
-                            "    DC{} [IPv4] {}:\t\t\t\t{:.0} ms",
-                            dc.dc_idx, addr_str, rtt
-                        );
-                    }
-                    None => {
-                        let err = dc.error.as_deref().unwrap_or("fail");
-                        info!(
-                            "    DC{} [IPv4] {}:\t\t\t\tFAIL ({})",
-                            dc.dc_idx, addr_str, err
-                        );
-                    }
-                }
-            }
-
-            info!("============================================================");
+        info!("================= Telegram ME Connectivity =================");
+        if v4_ok && v6_ok {
+            info!("  IPv4 and IPv6 available");
+        } else if v4_ok {
+            info!("  IPv4 only / IPv6 unavailable");
+        } else if v6_ok {
+            info!("  IPv6 only / IPv4 unavailable");
+        } else {
+            info!("  No ME connectivity");
         }
+        info!("  via direct");
+        info!("============================================================");
+
+        use std::collections::BTreeMap;
+        let mut grouped: BTreeMap<i32, Vec<MePingSample>> = BTreeMap::new();
+        for report in me_results {
+            for s in report.samples {
+                let key = s.dc.abs();
+                grouped.entry(key).or_default().push(s);
+            }
+        }
+
+        let family_order = if prefer_ipv6 {
+            vec![(MePingFamily::V6, true), (MePingFamily::V6, false), (MePingFamily::V4, true), (MePingFamily::V4, false)]
+        } else {
+            vec![(MePingFamily::V4, true), (MePingFamily::V4, false), (MePingFamily::V6, true), (MePingFamily::V6, false)]
+        };
+
+        for (dc_abs, samples) in grouped {
+            for (family, is_pos) in &family_order {
+                let fam_samples: Vec<&MePingSample> = samples
+                    .iter()
+                    .filter(|s| matches!(s.family, f if &f == family) && (s.dc >= 0) == *is_pos)
+                    .collect();
+                if fam_samples.is_empty() {
+                    continue;
+                }
+
+                let fam_label = match family {
+                    MePingFamily::V4 => "IPv4",
+                    MePingFamily::V6 => "IPv6",
+                };
+                info!("    DC{} [{}]", dc_abs, fam_label);
+                for sample in fam_samples {
+                    let line = format_sample_line(sample);
+                    info!("{}", line);
+                }
+            }
+        }
+        info!("============================================================");
     }
+
+    info!("================= Telegram DC Connectivity =================");
+
+    let ping_results = upstream_manager
+        .ping_all_dcs(prefer_ipv6, &config.dc_overrides)
+        .await;
+
+	for upstream_result in &ping_results {
+		let v6_works = upstream_result
+			.v6_results
+			.iter()
+			.any(|r| r.rtt_ms.is_some());
+		let v4_works = upstream_result
+			.v4_results
+			.iter()
+			.any(|r| r.rtt_ms.is_some());
+		
+		if upstream_result.both_available {
+			if prefer_ipv6 {
+				info!("  IPv6 in use / IPv4 is fallback");
+			} else {
+				info!("  IPv4 in use / IPv6 is fallback");
+			}
+		} else {
+			if v6_works && !v4_works {
+				info!("  IPv6 only / IPv4 unavailable)");
+			} else if v4_works && !v6_works {
+				info!("  IPv4 only / IPv6 unavailable)");
+			} else if !v6_works && !v4_works {
+				info!("  No DC connectivity");
+			}
+		}
+
+		info!("  via {}", upstream_result.upstream_name);
+		info!("============================================================");
+
+		// Print IPv6 results first (only if IPv6 is available)
+		if v6_works {
+			for dc in &upstream_result.v6_results {
+				let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
+				match &dc.rtt_ms {
+					Some(rtt) => {
+						info!("    DC{} [IPv6] {} - {:.0} ms", dc.dc_idx, addr_str, rtt);
+					}
+					None => {
+						let err = dc.error.as_deref().unwrap_or("fail");
+						info!("    DC{} [IPv6] {} - FAIL ({})", dc.dc_idx, addr_str, err);
+					}
+				}
+			}
+
+			info!("============================================================");
+		}
+
+		// Print IPv4 results (only if IPv4 is available)
+		if v4_works {
+			for dc in &upstream_result.v4_results {
+				let addr_str = format!("{}:{}", dc.dc_addr.ip(), dc.dc_addr.port());
+				match &dc.rtt_ms {
+					Some(rtt) => {
+						info!(
+							"    DC{} [IPv4] {}\t\t\t\t{:.0} ms",
+							dc.dc_idx, addr_str, rtt
+						);
+					}
+					None => {
+						let err = dc.error.as_deref().unwrap_or("fail");
+						info!(
+							"    DC{} [IPv4] {}:\t\t\t\tFAIL ({})",
+							dc.dc_idx, addr_str, err
+						);
+					}
+				}
+			}
+
+			info!("============================================================");
+		}
+	}
 
     // Background tasks
     let um_clone = upstream_manager.clone();
@@ -440,47 +588,28 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 let listener = TcpListener::from_std(socket.into())?;
                 info!("Listening on {}", addr);
 
-                let public_ip = if let Some(ip) = listener_conf.announce_ip {
-                    ip
+                // Resolve the public host for link generation
+                let public_host = if let Some(ref announce) = listener_conf.announce {
+                    announce.clone()  // Use announce (IP or hostname) if explicitly set
                 } else if listener_conf.ip.is_unspecified() {
+                    // Auto-detect for unspecified addresses
                     if listener_conf.ip.is_ipv4() {
-                        detected_ip.ipv4.unwrap_or(listener_conf.ip)
+                        detected_ip.ipv4
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_else(|| listener_conf.ip.to_string())
                     } else {
-                        detected_ip.ipv6.unwrap_or(listener_conf.ip)
+                        detected_ip.ipv6
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_else(|| listener_conf.ip.to_string())
                     }
                 } else {
-                    listener_conf.ip
+                    listener_conf.ip.to_string()
                 };
 
-                if !config.show_link.is_empty() {
-                    info!("--- Proxy Links ({}) ---", public_ip);
-                    for user_name in config.show_link.resolve_users(&config.access.users) {
-                        if let Some(secret) = config.access.users.get(user_name) {
-                            info!("User: {}", user_name);
-                            if config.general.modes.classic {
-                                info!(
-                                    "  Classic: tg://proxy?server={}&port={}&secret={}",
-                                    public_ip, config.server.port, secret
-                                );
-                            }
-                            if config.general.modes.secure {
-                                info!(
-                                    "  DD:      tg://proxy?server={}&port={}&secret=dd{}",
-                                    public_ip, config.server.port, secret
-                                );
-                            }
-                            if config.general.modes.tls {
-                                let domain_hex = hex::encode(&config.censorship.tls_domain);
-                                info!(
-                                    "  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
-                                    public_ip, config.server.port, secret, domain_hex
-                                );
-                            }
-                        } else {
-                            warn!("User '{}' in show_link not found", user_name);
-                        }
-                    }
-                    info!("------------------------");
+                // Show per-listener proxy links only when public_host is not set
+                if config.general.links.public_host.is_none() && !config.general.links.show.is_empty() {
+                    let link_port = config.general.links.public_port.unwrap_or(config.server.port);
+                    print_proxy_links(&public_host, link_port, &config);
                 }
 
                 listeners.push(listener);
@@ -491,7 +620,104 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if listeners.is_empty() {
+    // Show proxy links once when public_host is set, OR when there are no TCP listeners
+    // (unix-only mode) — use detected IP as fallback
+    if !config.general.links.show.is_empty() && (config.general.links.public_host.is_some() || listeners.is_empty()) {
+        let (host, port) = if let Some(ref h) = config.general.links.public_host {
+            (h.clone(), config.general.links.public_port.unwrap_or(config.server.port))
+        } else {
+            let ip = detected_ip
+                .ipv4
+                .or(detected_ip.ipv6)
+                .map(|ip| ip.to_string());
+            if ip.is_none() {
+                warn!("show_link is configured but public IP could not be detected. Set public_host in config.");
+            }
+            (ip.unwrap_or_else(|| "UNKNOWN".to_string()), config.general.links.public_port.unwrap_or(config.server.port))
+        };
+
+        print_proxy_links(&host, port, &config);
+    }
+
+    // Unix socket setup (before listeners check so unix-only config works)
+    let mut has_unix_listener = false;
+    #[cfg(unix)]
+    if let Some(ref unix_path) = config.server.listen_unix_sock {
+        // Remove stale socket file if present (standard practice)
+        let _ = tokio::fs::remove_file(unix_path).await;
+
+        let unix_listener = UnixListener::bind(unix_path)?;
+
+        // Apply socket permissions if configured
+        if let Some(ref perm_str) = config.server.listen_unix_sock_perm {
+            match u32::from_str_radix(perm_str.trim_start_matches('0'), 8) {
+                Ok(mode) => {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(mode);
+                    if let Err(e) = std::fs::set_permissions(unix_path, perms) {
+                        error!("Failed to set unix socket permissions to {}: {}", perm_str, e);
+                    } else {
+                        info!("Listening on unix:{} (mode {})", unix_path, perm_str);
+                    }
+                }
+                Err(e) => {
+                    warn!("Invalid listen_unix_sock_perm '{}': {}. Ignoring.", perm_str, e);
+                    info!("Listening on unix:{}", unix_path);
+                }
+            }
+        } else {
+            info!("Listening on unix:{}", unix_path);
+        }
+
+        has_unix_listener = true;
+
+        let config = config.clone();
+        let stats = stats.clone();
+        let upstream_manager = upstream_manager.clone();
+        let replay_checker = replay_checker.clone();
+        let buffer_pool = buffer_pool.clone();
+        let rng = rng.clone();
+        let me_pool = me_pool.clone();
+        let ip_tracker = ip_tracker.clone();
+
+        tokio::spawn(async move {
+            let unix_conn_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+            loop {
+                match unix_listener.accept().await {
+                    Ok((stream, _)) => {
+                        let conn_id = unix_conn_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let fake_peer = SocketAddr::from(([127, 0, 0, 1], (conn_id % 65535) as u16));
+
+                        let config = config.clone();
+                        let stats = stats.clone();
+                        let upstream_manager = upstream_manager.clone();
+                        let replay_checker = replay_checker.clone();
+                        let buffer_pool = buffer_pool.clone();
+                        let rng = rng.clone();
+                        let me_pool = me_pool.clone();
+                        let ip_tracker = ip_tracker.clone();
+
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::proxy::client::handle_client_stream(
+                                stream, fake_peer, config, stats,
+                                upstream_manager, replay_checker, buffer_pool, rng,
+                                me_pool, ip_tracker,
+                            ).await {
+                                debug!(error = %e, "Unix socket connection error");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Unix socket accept error: {}", e);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        });
+    }
+
+    if listeners.is_empty() && !has_unix_listener {
         error!("No listeners. Exiting.");
         std::process::exit(1);
     }
@@ -505,6 +731,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     filter_handle
         .reload(runtime_filter)
         .expect("Failed to switch log filter");
+
+    if let Some(port) = config.server.metrics_port {
+        let stats = stats.clone();
+        let whitelist = config.server.metrics_whitelist.clone();
+        tokio::spawn(async move {
+            metrics::serve(port, stats, whitelist).await;
+        });
+    }
 
     for listener in listeners {
         let config = config.clone();

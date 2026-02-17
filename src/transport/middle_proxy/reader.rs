@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use crate::crypto::{AesCbc, crc32};
@@ -21,12 +25,21 @@ pub(crate) async fn reader_loop(
     enc_leftover: BytesMut,
     mut dec: BytesMut,
     writer: Arc<Mutex<RpcWriter>>,
+    ping_tracker: Arc<Mutex<HashMap<i64, (Instant, u64)>>>,
+    rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
+    _writer_id: u64,
+    degraded: Arc<AtomicBool>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let mut raw = enc_leftover;
+    let mut expected_seq: i32 = 0;
 
     loop {
         let mut tmp = [0u8; 16_384];
-        let n = rd.read(&mut tmp).await.map_err(ProxyError::Io)?;
+        let n = tokio::select! {
+            res = rd.read(&mut tmp) => res.map_err(ProxyError::Io)?,
+            _ = cancel.cancelled() => return Ok(()),
+        };
         if n == 0 {
             return Ok(());
         }
@@ -68,6 +81,14 @@ pub(crate) async fn reader_loop(
             if crc32(&frame[..pe]) != ec {
                 warn!("CRC mismatch in data frame");
                 continue;
+            }
+
+            let seq_no = i32::from_le_bytes(frame[4..8].try_into().unwrap());
+            if seq_no != expected_seq {
+                warn!(seq_no, expected = expected_seq, "ME RPC seq mismatch");
+                expected_seq = seq_no.wrapping_add(1);
+            } else {
+                expected_seq = expected_seq.wrapping_add(1);
             }
 
             let payload = &frame[8..pe];
@@ -118,6 +139,23 @@ pub(crate) async fn reader_loop(
                 if let Err(e) = writer.lock().await.send(&pong).await {
                     warn!(error = %e, "PONG send failed");
                     break;
+                }
+            } else if pt == RPC_PONG_U32 && body.len() >= 8 {
+                let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
+                if let Some((sent, wid)) = {
+                    let mut guard = ping_tracker.lock().await;
+                    guard.remove(&ping_id)
+                } {
+                    let rtt = sent.elapsed().as_secs_f64() * 1000.0;
+                    let mut stats = rtt_stats.lock().await;
+                    let entry = stats.entry(wid).or_insert((rtt, rtt));
+                    entry.1 = entry.1 * 0.8 + rtt * 0.2;
+                    if rtt < entry.0 {
+                        entry.0 = rtt;
+                    }
+                    let degraded_now = entry.1 > entry.0 * 2.0;
+                    degraded.store(degraded_now, Ordering::Relaxed);
+                    trace!(writer_id = wid, rtt_ms = rtt, ema_ms = entry.1, base_ms = entry.0, degraded = degraded_now, "ME RTT sample");
                 }
             } else {
                 debug!(

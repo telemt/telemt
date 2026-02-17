@@ -97,6 +97,12 @@ impl Stats {
             .unwrap_or(0)
     }
     
+    pub fn get_handshake_timeouts(&self) -> u64 { self.handshake_timeouts.load(Ordering::Relaxed) }
+
+    pub fn iter_user_stats(&self) -> dashmap::iter::Iter<'_, String, UserStats> {
+        self.user_stats.iter()
+    }
+
     pub fn uptime_secs(&self) -> f64 {
         self.start_time.read()
             .map(|t| t.elapsed().as_secs_f64())

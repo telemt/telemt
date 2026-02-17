@@ -3,6 +3,7 @@
 use crate::error::{ProxyError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde::de::Deserializer;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
@@ -53,6 +54,40 @@ fn default_metrics_whitelist() -> Vec<IpAddr> {
     vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
 }
 
+fn default_unknown_dc_log_path() -> Option<String> {
+    Some("unknown-dc.txt".to_string())
+}
+
+// ============= Custom Deserializers =============
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_dc_overrides<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: HashMap<String, OneOrMany> = HashMap::deserialize(deserializer)?;
+    let mut out = HashMap::new();
+    for (dc, val) in raw {
+        let mut addrs = match val {
+            OneOrMany::One(s) => vec![s],
+            OneOrMany::Many(v) => v,
+        };
+        addrs.retain(|s| !s.trim().is_empty());
+        if !addrs.is_empty() {
+            out.insert(dc, addrs);
+        }
+    }
+    Ok(out)
+}
+
 // ============= Log Level =============
 
 /// Logging verbosity level
@@ -92,6 +127,50 @@ impl LogLevel {
             "silent" | "quiet" | "error" | "warn" => LogLevel::Silent,
             _ => LogLevel::Normal,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dc_overrides_allow_string_and_array() {
+        let toml = r#"
+            [dc_overrides]
+            "201" = "149.154.175.50:443"
+            "202" = ["149.154.167.51:443", "149.154.175.100:443"]
+        "#;
+        let cfg: ProxyConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.dc_overrides["201"], vec!["149.154.175.50:443"]);
+        assert_eq!(
+            cfg.dc_overrides["202"],
+            vec!["149.154.167.51:443", "149.154.175.100:443"]
+        );
+    }
+
+    #[test]
+    fn dc_overrides_inject_dc203_default() {
+        let toml = r#"
+            [general]
+            use_middle_proxy = false
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_dc_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert!(cfg
+            .dc_overrides
+            .get("203")
+            .map(|v| v.contains(&"91.105.192.100:443".to_string()))
+            .unwrap_or(false));
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -163,12 +242,41 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub middle_proxy_nat_stun: Option<String>,
 
+    /// Ignore STUN/interface IP mismatch (keep using Middle Proxy even if NAT detected).
+    #[serde(default)]
+    pub stun_iface_mismatch_ignore: bool,
+
+    /// Log unknown (non-standard) DC requests to a file (default: unknown-dc.txt). Set to null to disable.
+    #[serde(default = "default_unknown_dc_log_path")]
+    pub unknown_dc_log_path: Option<String>,
+
     #[serde(default)]
     pub log_level: LogLevel,
 
     /// Disable colored output in logs (useful for files/systemd)
     #[serde(default)]
     pub disable_colors: bool,
+
+    /// [general.links] — proxy link generation overrides
+    #[serde(default)]
+    pub links: LinksConfig,
+}
+
+/// `[general.links]` — proxy link generation settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LinksConfig {
+    /// List of usernames whose tg:// links to display at startup.
+    /// `"*"` = all users, `["alice", "bob"]` = specific users.
+    #[serde(default)]
+    pub show: ShowLink,
+
+    /// Public hostname/IP for tg:// link generation (overrides detected IP).
+    #[serde(default)]
+    pub public_host: Option<String>,
+
+    /// Public port for tg:// link generation (overrides server.port).
+    #[serde(default)]
+    pub public_port: Option<u16>,
 }
 
 impl Default for GeneralConfig {
@@ -183,8 +291,11 @@ impl Default for GeneralConfig {
             middle_proxy_nat_ip: None,
             middle_proxy_nat_probe: false,
             middle_proxy_nat_stun: None,
+            stun_iface_mismatch_ignore: false,
+            unknown_dc_log_path: default_unknown_dc_log_path(),
             log_level: LogLevel::Normal,
             disable_colors: false,
+            links: LinksConfig::default(),
         }
     }
 }
@@ -194,14 +305,24 @@ pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    #[serde(default = "default_listen_addr")]
-    pub listen_addr_ipv4: String,
+    #[serde(default)]
+    pub listen_addr_ipv4: Option<String>,
 
     #[serde(default)]
     pub listen_addr_ipv6: Option<String>,
 
     #[serde(default)]
     pub listen_unix_sock: Option<String>,
+
+    /// Unix socket file permissions (octal, e.g. "0666" or "0777").
+    /// Applied via chmod after bind. Default: no change (inherits umask).
+    #[serde(default)]
+    pub listen_unix_sock_perm: Option<String>,
+
+    /// Enable TCP listening. Default: true when no unix socket, false when
+    /// listen_unix_sock is set. Set explicitly to override auto-detection.
+    #[serde(default)]
+    pub listen_tcp: Option<bool>,
 
     #[serde(default)]
     pub metrics_port: Option<u16>,
@@ -217,9 +338,11 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
-            listen_addr_ipv4: default_listen_addr(),
+            listen_addr_ipv4: Some(default_listen_addr()),
             listen_addr_ipv6: Some("::".to_string()),
             listen_unix_sock: None,
+            listen_unix_sock_perm: None,
+            listen_tcp: None,
             metrics_port: None,
             metrics_whitelist: default_metrics_whitelist(),
             listeners: Vec::new(),
@@ -374,6 +497,12 @@ pub struct UpstreamConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenerConfig {
     pub ip: IpAddr,
+    /// IP address or hostname to announce in proxy links.
+    /// Takes precedence over `announce_ip` if both are set.
+    #[serde(default)]
+    pub announce: Option<String>,
+    /// Deprecated: Use `announce` instead. IP address to announce in proxy links.
+    /// Migrated to `announce` automatically if `announce` is not set.
     #[serde(default)]
     pub announce_ip: Option<IpAddr>,
 }
@@ -499,13 +628,13 @@ pub struct ProxyConfig {
     pub show_link: ShowLink,
 
     /// DC address overrides for non-standard DCs (CDN, media, test, etc.)
-    /// Keys are DC indices as strings, values are "ip:port" addresses.
+    /// Keys are DC indices as strings, values are one or more \"ip:port\" addresses.
     /// Matches the C implementation's `proxy_for <dc_id> <ip>:<port>` config directive.
     /// Example in config.toml:
     ///   [dc_overrides]
-    ///   "203" = "149.154.175.100:443"
-    #[serde(default)]
-    pub dc_overrides: HashMap<String, String>,
+    ///   \"203\" = [\"149.154.175.100:443\", \"91.105.192.100:443\"]
+    #[serde(default, deserialize_with = "deserialize_dc_overrides")]
+    pub dc_overrides: HashMap<String, Vec<String>>,
 
     /// Default DC index (1-5) for unmapped non-standard DCs.
     /// Matches the C implementation's `default <dc_id>` config directive.
@@ -572,11 +701,28 @@ impl ProxyConfig {
         use rand::Rng;
         config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
 
-        // Migration: Populate listeners if empty
-        if config.server.listeners.is_empty() {
-            if let Ok(ipv4) = config.server.listen_addr_ipv4.parse::<IpAddr>() {
+        // Resolve listen_tcp: explicit value wins, otherwise auto-detect.
+        // If unix socket is set → TCP only when listen_addr_ipv4 or listeners are explicitly provided.
+        // If no unix socket → TCP always (backward compat).
+        let listen_tcp = config.server.listen_tcp.unwrap_or_else(|| {
+            if config.server.listen_unix_sock.is_some() {
+                // Unix socket present: TCP only if user explicitly set addresses or listeners
+                config.server.listen_addr_ipv4.is_some()
+                    || !config.server.listeners.is_empty()
+            } else {
+                true
+            }
+        });
+
+        // Migration: Populate listeners if empty (skip when listen_tcp = false)
+        if config.server.listeners.is_empty() && listen_tcp {
+            let ipv4_str = config.server.listen_addr_ipv4
+                .as_deref()
+                .unwrap_or("0.0.0.0");
+            if let Ok(ipv4) = ipv4_str.parse::<IpAddr>() {
                 config.server.listeners.push(ListenerConfig {
                     ip: ipv4,
+                    announce: None,
                     announce_ip: None,
                 });
             }
@@ -584,10 +730,23 @@ impl ProxyConfig {
                 if let Ok(ipv6) = ipv6_str.parse::<IpAddr>() {
                     config.server.listeners.push(ListenerConfig {
                         ip: ipv6,
+                        announce: None,
                         announce_ip: None,
                     });
                 }
             }
+        }
+
+        // Migration: announce_ip → announce for each listener
+        for listener in &mut config.server.listeners {
+            if listener.announce.is_none() && listener.announce_ip.is_some() {
+                listener.announce = Some(listener.announce_ip.unwrap().to_string());
+            }
+        }
+
+        // Migration: show_link (top-level) → general.links.show
+        if !config.show_link.is_empty() && config.general.links.show.is_empty() {
+            config.general.links.show = config.show_link.clone();
         }
 
         // Migration: Populate upstreams if empty (Default Direct)
@@ -598,6 +757,12 @@ impl ProxyConfig {
                 enabled: true,
             });
         }
+
+        // Ensure default DC203 override is present.
+        config
+            .dc_overrides
+            .entry("203".to_string())
+            .or_insert_with(|| vec!["91.105.192.100:443".to_string()]);
 
         Ok(config)
     }

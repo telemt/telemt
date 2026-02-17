@@ -1,7 +1,3 @@
-# === UI ===
-# Users to show in the startup log (tg:// links)
-show_link = ["hello"]
-
 # === General Settings ===
 [general]
 prefer_ipv6 = true
@@ -24,6 +20,8 @@ tls = true
 port = 443
 listen_addr_ipv4 = "0.0.0.0"
 listen_addr_ipv6 = "::"
+# listen_unix_sock = "/var/run/telemt.sock" # Unix socket
+# listen_unix_sock_perm = "0666" # Socket file permissions
 # metrics_port = 9090
 # metrics_whitelist = ["127.0.0.1", "::1"]
 
@@ -34,6 +32,12 @@ ip = "0.0.0.0"
 
 [[server.listeners]]
 ip = "::"
+
+# Users to show in the startup log (tg:// links)
+[general.links]
+show = ["hello"] # Users to show in the startup log (tg:// links)
+# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
+# public_port = 443                  # Port for tg:// links (default: server.port)
 
 # === Timeouts (in seconds) ===
 [timeouts]
@@ -65,7 +69,7 @@ hello = "00000000000000000000000000000000"
 # hello = 50
 
 # [access.user_max_unique_ips]
-# hello = 5  
+# hello = 5
 
 # [access.user_data_quota]
 # hello = 1073741824 # 1 GB
@@ -81,3 +85,7 @@ weight = 10
 # address = "127.0.0.1:1080"
 # enabled = false
 # weight = 1
+
+# === DC Address Overrides ===
+# [dc_overrides]
+# "203" = "91.105.192.100:443"

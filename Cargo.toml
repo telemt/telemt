@@ -9,7 +9,7 @@ libc = "0.2"
 
 # Async runtime
 tokio = { version = "1.42", features = ["full", "tracing"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["full"] }
 
 # Crypto
 aes = "0.8"
@@ -50,6 +50,10 @@ num-traits = "0.2"
 
 # HTTP
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+httpdate = "1.0"
 
 [dev-dependencies]
 tokio-test = "0.4"
