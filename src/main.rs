@@ -256,10 +256,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 if probe.local_addr.ip() != probe.reflected_addr.ip()
                     && !config.general.stun_iface_mismatch_ignore
                 {
-                    warn!(
-                        "STUN/IP-on-Interface mismatch -> fallback to direct-DC"
-                    );
-                    use_middle_proxy = false;
+                    match crate::transport::middle_proxy::detect_public_ip().await {
+                        Some(ip) => {
+                            info!(
+                                local_ip = %probe.local_addr.ip(),
+                                reflected_ip = %probe.reflected_addr.ip(),
+                                public_ip = %ip,
+                                "STUN mismatch but public IP auto-detected, continuing with middle proxy"
+                            );
+                        }
+                        None => {
+                            warn!(
+                                "STUN/IP-on-Interface mismatch and public IP auto-detect failed -> fallback to direct-DC"
+                            );
+                            use_middle_proxy = false;
+                        }
+                    }
                 }
             }
             Ok(None) => warn!("STUN probe returned no address; continuing"),
@@ -351,6 +363,18 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                         tokio::spawn(async move {
                             crate::transport::middle_proxy::me_health_monitor(
                                 pool_clone, rng_clone, 2,
+                            )
+                            .await;
+                        });
+
+                        // Periodic ME connection rotation
+                        let pool_clone_rot = pool.clone();
+                        let rng_clone_rot = rng.clone();
+                        tokio::spawn(async move {
+                            crate::transport::middle_proxy::me_rotation_task(
+                                pool_clone_rot,
+                                rng_clone_rot,
+                                std::time::Duration::from_secs(1800),
                             )
                             .await;
                         });

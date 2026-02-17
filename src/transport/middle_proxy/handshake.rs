@@ -1,5 +1,12 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
+use socket2::{SockRef, TcpKeepalive};
+#[cfg(target_os = "linux")]
+use libc;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::raw::c_int;
 
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -41,7 +48,43 @@ impl MePool {
             .map_err(|_| ProxyError::ConnectionTimeout { addr: addr.to_string() })??;
         let connect_ms = start.elapsed().as_secs_f64() * 1000.0;
         stream.set_nodelay(true).ok();
+        if let Err(e) = Self::configure_keepalive(&stream) {
+            warn!(error = %e, "ME keepalive setup failed");
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(e) = Self::configure_user_timeout(stream.as_raw_fd()) {
+            warn!(error = %e, "ME TCP_USER_TIMEOUT setup failed");
+        }
         Ok((stream, connect_ms))
+    }
+
+    fn configure_keepalive(stream: &TcpStream) -> std::io::Result<()> {
+        let sock = SockRef::from(stream);
+        let ka = TcpKeepalive::new()
+            .with_time(Duration::from_secs(30))
+            .with_interval(Duration::from_secs(10))
+            .with_retries(3);
+        sock.set_tcp_keepalive(&ka)?;
+        sock.set_keepalive(true)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn configure_user_timeout(fd: RawFd) -> std::io::Result<()> {
+        let timeout_ms: c_int = 30_000;
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_USER_TIMEOUT,
+                &timeout_ms as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&timeout_ms) as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Perform full ME RPC handshake on an established TCP stream.

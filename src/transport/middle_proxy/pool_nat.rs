@@ -1,10 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
 use tracing::{info, warn};
 
 use crate::error::{ProxyError, Result};
 
 use super::MePool;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StunProbeResult {
@@ -15,6 +17,10 @@ pub struct StunProbeResult {
 pub async fn stun_probe(stun_addr: Option<String>) -> Result<Option<StunProbeResult>> {
     let stun_addr = stun_addr.unwrap_or_else(|| "stun.l.google.com:19302".to_string());
     fetch_stun_binding(&stun_addr).await
+}
+
+pub async fn detect_public_ip() -> Option<IpAddr> {
+    fetch_public_ipv4_with_retry().await.ok().flatten().map(IpAddr::V4)
 }
 
 impl MePool {
@@ -93,6 +99,15 @@ impl MePool {
     }
 
     pub(super) async fn maybe_reflect_public_addr(&self) -> Option<std::net::SocketAddr> {
+        const STUN_CACHE_TTL: Duration = Duration::from_secs(600);
+        if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
+            if let Some((ts, addr)) = *cache {
+                if ts.elapsed() < STUN_CACHE_TTL {
+                    return Some(addr);
+                }
+            }
+        }
+
         let stun_addr = self
             .nat_stun
             .clone()
@@ -101,6 +116,9 @@ impl MePool {
             Ok(sa) => {
                 if let Some(result) = sa {
                     info!(local = %result.local_addr, reflected = %result.reflected_addr, "NAT probe: reflected address");
+                    if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
+                        *cache = Some((Instant::now(), result.reflected_addr));
+                    }
                     Some(result.reflected_addr)
                 } else {
                     None
