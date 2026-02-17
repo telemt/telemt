@@ -2,7 +2,6 @@
 
 use zeroize::Zeroize;
 use crate::crypto::{sha256, AesCtr};
-use crate::error::Result;
 use super::constants::*;
 
 /// Obfuscation parameters from handshake

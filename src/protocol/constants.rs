@@ -1,6 +1,6 @@
 //! Protocol constants and datacenter addresses
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::LazyLock;
 
 // ============= Telegram Datacenters =============
@@ -202,7 +202,6 @@ pub static RESERVED_NONCE_CONTINUES: &[[u8; 4]] = &[
 // ============= RPC Constants (for Middle Proxy) =============
 
 /// RPC Proxy Request
-
 /// RPC Flags (from Erlang mtp_rpc.erl)
 pub const RPC_FLAG_NOT_ENCRYPTED: u32 = 0x2;
 pub const RPC_FLAG_HAS_AD_TAG: u32    = 0x8;
