@@ -50,10 +50,11 @@ pub async fn stun_probe_family(stun_addr: &str, family: IpFamily) -> Result<Opti
 
     let target_addr = resolve_stun_addr(stun_addr, family).await?;
     if let Some(addr) = target_addr {
-        socket
-            .connect(addr)
-            .await
-            .map_err(|e| ProxyError::Proxy(format!("STUN connect failed: {e}")))?;
+        match socket.connect(addr).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NetworkUnreachable => return Ok(None),
+            Err(e) => return Err(ProxyError::Proxy(format!("STUN connect failed: {e}"))),
+        }
     } else {
         return Ok(None);
     }
