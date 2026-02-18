@@ -210,10 +210,17 @@ then Ctrl+X -> Y -> Enter to save
 ```toml
 # === General Settings ===
 [general]
+# prefer_ipv6 is deprecated; use [network].prefer
 prefer_ipv6 = false
 fast_mode = true
 use_middle_proxy = false
 # ad_tag = "..."
+
+[network]
+ipv4 = true
+ipv6 = true   # set false to disable, omit for auto
+prefer = 4    # 4 or 6
+multipath = false
 
 [general.modes]
 classic = false

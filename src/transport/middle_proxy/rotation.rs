@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tracing::{info, warn};
@@ -15,7 +16,12 @@ pub async fn me_rotation_task(pool: Arc<MePool>, rng: Arc<SecureRandom>, interva
 
         let candidate = {
             let ws = pool.writers.read().await;
-            ws.get(0).cloned()
+            if ws.is_empty() {
+                None
+            } else {
+                let idx = (pool.rr.load(std::sync::atomic::Ordering::Relaxed) as usize) % ws.len();
+                ws.get(idx).cloned()
+            }
         };
 
         let Some(w) = candidate else {
@@ -34,4 +40,3 @@ pub async fn me_rotation_task(pool: Arc<MePool>, rng: Arc<SecureRandom>, interva
         }
     }
 }
-

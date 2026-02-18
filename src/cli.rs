@@ -189,10 +189,17 @@ r#"# Telemt MTProxy — auto-generated config
 show_link = ["{username}"]
 
 [general]
+# prefer_ipv6 is deprecated; use [network].prefer
 prefer_ipv6 = false
 fast_mode = true
 use_middle_proxy = false
 log_level = "normal"
+
+[network]
+ipv4 = true
+ipv6 = true
+prefer = 4
+multipath = false
 
 [general.modes]
 classic = false

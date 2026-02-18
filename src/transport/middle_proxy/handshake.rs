@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::crypto::{SecureRandom, build_middleproxy_prekey, derive_middleproxy_keys, sha256};
 use crate::error::{ProxyError, Result};
+use crate::network::IpFamily;
 use crate::protocol::constants::{
     ME_CONNECT_TIMEOUT_SECS, ME_HANDSHAKE_TIMEOUT_SECS, RPC_CRYPTO_AES_U32, RPC_HANDSHAKE_ERROR_U32,
     RPC_HANDSHAKE_U32, RPC_PING_U32, RPC_PONG_U32, RPC_NONCE_U32,
@@ -101,8 +102,13 @@ impl MePool {
         let peer_addr = stream.peer_addr().map_err(ProxyError::Io)?;
 
         let _ = self.maybe_detect_nat_ip(local_addr.ip()).await;
+        let family = if local_addr.ip().is_ipv4() {
+            IpFamily::V4
+        } else {
+            IpFamily::V6
+        };
         let reflected = if self.nat_probe {
-            self.maybe_reflect_public_addr().await
+            self.maybe_reflect_public_addr(family).await
         } else {
             None
         };

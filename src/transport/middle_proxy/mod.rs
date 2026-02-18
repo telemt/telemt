@@ -19,7 +19,7 @@ use bytes::Bytes;
 pub use health::me_health_monitor;
 pub use ping::{run_me_ping, format_sample_line, MePingReport, MePingSample, MePingFamily};
 pub use pool::MePool;
-pub use pool_nat::{stun_probe, detect_public_ip, StunProbeResult};
+pub use pool_nat::{stun_probe, detect_public_ip};
 pub use registry::ConnRegistry;
 pub use secret::fetch_proxy_secret;
 pub use config_updater::{fetch_proxy_config, me_config_updater};

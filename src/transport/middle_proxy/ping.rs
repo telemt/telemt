@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -92,8 +93,16 @@ mod tests {
 pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingReport> {
     let mut reports = Vec::new();
 
-    let v4_map = pool.proxy_map_v4.read().await.clone();
-    let v6_map = pool.proxy_map_v6.read().await.clone();
+    let v4_map = if pool.decision.ipv4_me {
+        pool.proxy_map_v4.read().await.clone()
+    } else {
+        HashMap::new()
+    };
+    let v6_map = if pool.decision.ipv6_me {
+        pool.proxy_map_v6.read().await.clone()
+    } else {
+        HashMap::new()
+    };
 
     let mut grouped: Vec<(MePingFamily, i32, Vec<(IpAddr, u16)>)> = Vec::new();
     for (dc, addrs) in v4_map {

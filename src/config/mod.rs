@@ -54,6 +54,10 @@ fn default_metrics_whitelist() -> Vec<IpAddr> {
     vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
 }
 
+fn default_prefer_4() -> u8 {
+    4
+}
+
 fn default_unknown_dc_log_path() -> Option<String> {
     Some("unknown-dc.txt".to_string())
 }
@@ -185,6 +189,32 @@ impl std::fmt::Display for LogLevel {
     }
 }
 
+fn validate_network_cfg(net: &mut NetworkConfig) -> Result<()> {
+    if !net.ipv4 && matches!(net.ipv6, Some(false)) {
+        return Err(ProxyError::Config(
+            "Both ipv4 and ipv6 are disabled in [network]".to_string(),
+        ));
+    }
+
+    if net.prefer != 4 && net.prefer != 6 {
+        return Err(ProxyError::Config(
+            "network.prefer must be 4 or 6".to_string(),
+        ));
+    }
+
+    if !net.ipv4 && net.prefer == 4 {
+        warn!("prefer=4 but ipv4=false; forcing prefer=6");
+        net.prefer = 6;
+    }
+
+    if matches!(net.ipv6, Some(false)) && net.prefer == 6 {
+        warn!("prefer=6 but ipv6=false; forcing prefer=4");
+        net.prefer = 4;
+    }
+
+    Ok(())
+}
+
 // ============= Sub-Configs =============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +233,34 @@ impl Default for ProxyModes {
             classic: true,
             secure: true,
             tls: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    #[serde(default = "default_true")]
+    pub ipv4: bool,
+
+    /// None = auto-detect IPv6 availability
+    #[serde(default)]
+    pub ipv6: Option<bool>,
+
+    /// 4 or 6
+    #[serde(default = "default_prefer_4")]
+    pub prefer: u8,
+
+    #[serde(default)]
+    pub multipath: bool,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            ipv4: true,
+            ipv6: None,
+            prefer: 4,
+            multipath: false,
         }
     }
 }
@@ -610,6 +668,9 @@ pub struct ProxyConfig {
     pub general: GeneralConfig,
 
     #[serde(default)]
+    pub network: NetworkConfig,
+
+    #[serde(default)]
     pub server: ServerConfig,
 
     #[serde(default)]
@@ -696,6 +757,16 @@ impl ProxyConfig {
         if config.censorship.mask_host.is_none() && config.censorship.mask_unix_sock.is_none() {
             config.censorship.mask_host = Some(config.censorship.tls_domain.clone());
         }
+
+        // Migration: prefer_ipv6 -> network.prefer
+        if config.general.prefer_ipv6 {
+            if config.network.prefer == 4 {
+                config.network.prefer = 6;
+            }
+            warn!("prefer_ipv6 is deprecated, use [network].prefer = 6");
+        }
+
+        validate_network_cfg(&mut config.network)?;
 
         // Random fake_cert_len
         use rand::Rng;

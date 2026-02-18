@@ -1,9 +1,18 @@
 # === General Settings ===
 [general]
-prefer_ipv6 = true
+# prefer_ipv6 is deprecated; use [network].prefer instead
+prefer_ipv6 = false
 fast_mode = true
 use_middle_proxy = true
 #ad_tag = "00000000000000000000000000000000"
+
+[network]
+# Enable/disable families; ipv6 = true/false/auto(None)
+ipv4 = true
+ipv6 = true
+# prefer = 4 or 6
+prefer = 4
+multipath = false
 
 # Log level: debug | verbose | normal | silent
 # Can be overridden with --silent or --log-level CLI flags

@@ -152,6 +152,9 @@ pub(crate) async fn reader_loop(
                     entry.1 = entry.1 * 0.8 + rtt * 0.2;
                     if rtt < entry.0 {
                         entry.0 = rtt;
+                    } else {
+                        // allow slow baseline drift upward to avoid stale minimum
+                        entry.0 = entry.0 * 0.99 + rtt * 0.01;
                     }
                     let degraded_now = entry.1 > entry.0 * 2.0;
                     degraded.store(degraded_now, Ordering::Relaxed);

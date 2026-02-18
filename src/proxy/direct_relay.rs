@@ -80,7 +80,8 @@ where
 }
 
 fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
-    let datacenters = if config.general.prefer_ipv6 {
+    let prefer_v6 = config.network.prefer == 6 && config.network.ipv6.unwrap_or(true);
+    let datacenters = if prefer_v6 {
         &*TG_DATACENTERS_V6
     } else {
         &*TG_DATACENTERS_V4
@@ -90,7 +91,6 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
 
     let dc_key = dc_idx.to_string();
     if let Some(addrs) = config.dc_overrides.get(&dc_key) {
-        let prefer_v6 = config.general.prefer_ipv6;
         let mut parsed = Vec::new();
         for addr_str in addrs {
             match addr_str.parse::<SocketAddr>() {

@@ -42,5 +42,13 @@ jobs:
     - name: Build Release
       run: cargo build --release --verbose
 
+    - name: Run tests
+      run: cargo test --verbose
+
+# clippy dont fail on warnings because of active development of telemt 
+# and many warnings
+    - name: Run clippy
+      run: cargo clippy -- --cap-lints warn
+
     - name: Check for unused dependencies
       run: cargo udeps || true

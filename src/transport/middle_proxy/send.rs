@@ -3,15 +3,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::error::{ProxyError, Result};
+use crate::network::IpFamily;
 use crate::protocol::constants::RPC_CLOSE_EXT_U32;
 
 use super::MePool;
 use super::wire::build_proxy_req_payload;
-use crate::crypto::SecureRandom;
 use rand::seq::SliceRandom;
 use super::registry::ConnMeta;
 
@@ -84,7 +83,7 @@ impl MePool {
                     drop(map);
                     for (ip, port) in shuffled {
                         let addr = SocketAddr::new(ip, port);
-                        if self.connect_one(addr, &SecureRandom::new()).await.is_ok() {
+                        if self.connect_one(addr, self.rng.as_ref()).await.is_ok() {
                             break;
                         }
                     }
@@ -173,31 +172,43 @@ impl MePool {
         writers: &[super::pool::MeWriter],
         target_dc: i16,
     ) -> Vec<usize> {
-        let mut preferred = Vec::<SocketAddr>::new();
         let key = target_dc as i32;
-        let map = self.proxy_map_v4.read().await;
+        let mut preferred = Vec::<SocketAddr>::new();
 
-        if let Some(v) = map.get(&key) {
-            preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
-        }
-        if preferred.is_empty() {
-            let abs = key.abs();
-            if let Some(v) = map.get(&abs) {
+        for family in self.family_order() {
+            let map_guard = match family {
+                IpFamily::V4 => self.proxy_map_v4.read().await,
+                IpFamily::V6 => self.proxy_map_v6.read().await,
+            };
+
+            if let Some(v) = map_guard.get(&key) {
                 preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
             }
-        }
-        if preferred.is_empty() {
-            let abs = key.abs();
-            if let Some(v) = map.get(&-abs) {
-                preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
-            }
-        }
-        if preferred.is_empty() {
-            let def = self.default_dc.load(Ordering::Relaxed);
-            if def != 0 {
-                if let Some(v) = map.get(&def) {
+            if preferred.is_empty() {
+                let abs = key.abs();
+                if let Some(v) = map_guard.get(&abs) {
                     preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
                 }
+            }
+            if preferred.is_empty() {
+                let abs = key.abs();
+                if let Some(v) = map_guard.get(&-abs) {
+                    preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+                }
+            }
+            if preferred.is_empty() {
+                let def = self.default_dc.load(Ordering::Relaxed);
+                if def != 0 {
+                    if let Some(v) = map_guard.get(&def) {
+                        preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+                    }
+                }
+            }
+
+            drop(map_guard);
+
+            if !preferred.is_empty() && !self.decision.effective_multipath {
+                break;
             }
         }
 

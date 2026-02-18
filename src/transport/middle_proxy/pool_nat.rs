@@ -4,19 +4,14 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::error::{ProxyError, Result};
+use crate::network::probe::is_bogon;
+use crate::network::stun::{stun_probe_dual, IpFamily, StunProbeResult};
 
 use super::MePool;
 use std::time::Instant;
-
-#[derive(Debug, Clone, Copy)]
-pub struct StunProbeResult {
-    pub local_addr: std::net::SocketAddr,
-    pub reflected_addr: std::net::SocketAddr,
-}
-
-pub async fn stun_probe(stun_addr: Option<String>) -> Result<Option<StunProbeResult>> {
+pub async fn stun_probe(stun_addr: Option<String>) -> Result<crate::network::stun::DualStunResult> {
     let stun_addr = stun_addr.unwrap_or_else(|| "stun.l.google.com:19302".to_string());
-    fetch_stun_binding(&stun_addr).await
+    stun_probe_dual(&stun_addr).await
 }
 
 pub async fn detect_public_ip() -> Option<IpAddr> {
@@ -35,7 +30,7 @@ impl MePool {
 
         match (ip, nat_ip) {
             (IpAddr::V4(src), IpAddr::V4(dst))
-                if is_privateish(IpAddr::V4(src))
+                if is_bogon(IpAddr::V4(src))
                     || src.is_loopback()
                     || src.is_unspecified() =>
             {
@@ -55,7 +50,7 @@ impl MePool {
     ) -> std::net::SocketAddr {
         let ip = if let Some(r) = reflected {
             // Use reflected IP (not port) only when local address is non-public.
-            if is_privateish(addr.ip()) || addr.ip().is_loopback() || addr.ip().is_unspecified() {
+            if is_bogon(addr.ip()) || addr.ip().is_loopback() || addr.ip().is_unspecified() {
                 r.ip()
             } else {
                 self.translate_ip_for_nat(addr.ip())
@@ -73,7 +68,7 @@ impl MePool {
             return self.nat_ip_cfg;
         }
 
-        if !(is_privateish(local_ip) || local_ip.is_loopback() || local_ip.is_unspecified()) {
+        if !(is_bogon(local_ip) || local_ip.is_loopback() || local_ip.is_unspecified()) {
             return None;
         }
 
@@ -98,12 +93,19 @@ impl MePool {
         }
     }
 
-    pub(super) async fn maybe_reflect_public_addr(&self) -> Option<std::net::SocketAddr> {
+    pub(super) async fn maybe_reflect_public_addr(
+        &self,
+        family: IpFamily,
+    ) -> Option<std::net::SocketAddr> {
         const STUN_CACHE_TTL: Duration = Duration::from_secs(600);
         if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
-            if let Some((ts, addr)) = *cache {
+            let slot = match family {
+                IpFamily::V4 => &mut cache.v4,
+                IpFamily::V6 => &mut cache.v6,
+            };
+            if let Some((ts, addr)) = slot {
                 if ts.elapsed() < STUN_CACHE_TTL {
-                    return Some(addr);
+                    return Some(*addr);
                 }
             }
         }
@@ -112,12 +114,20 @@ impl MePool {
             .nat_stun
             .clone()
             .unwrap_or_else(|| "stun.l.google.com:19302".to_string());
-        match fetch_stun_binding(&stun_addr).await {
-            Ok(sa) => {
-                if let Some(result) = sa {
-                    info!(local = %result.local_addr, reflected = %result.reflected_addr, "NAT probe: reflected address");
+        match stun_probe_dual(&stun_addr).await {
+            Ok(res) => {
+                let picked: Option<StunProbeResult> = match family {
+                    IpFamily::V4 => res.v4,
+                    IpFamily::V6 => res.v6,
+                };
+                if let Some(result) = picked {
+                    info!(local = %result.local_addr, reflected = %result.reflected_addr, family = ?family, "NAT probe: reflected address");
                     if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
-                        *cache = Some((Instant::now(), result.reflected_addr));
+                        let slot = match family {
+                            IpFamily::V4 => &mut cache.v4,
+                            IpFamily::V6 => &mut cache.v6,
+                        };
+                        *slot = Some((Instant::now(), result.reflected_addr));
                     }
                     Some(result.reflected_addr)
                 } else {
@@ -157,99 +167,4 @@ async fn fetch_public_ipv4_once(url: &str) -> Result<Option<Ipv4Addr>> {
 
     let ip = text.trim().parse().ok();
     Ok(ip)
-}
-
-async fn fetch_stun_binding(stun_addr: &str) -> Result<Option<StunProbeResult>> {
-    use rand::RngCore;
-    use tokio::net::UdpSocket;
-
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("STUN bind failed: {e}")))?;
-    socket
-        .connect(stun_addr)
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("STUN connect failed: {e}")))?;
-
-    // Build minimal Binding Request.
-    let mut req = vec![0u8; 20];
-    req[0..2].copy_from_slice(&0x0001u16.to_be_bytes()); // Binding Request
-    req[2..4].copy_from_slice(&0u16.to_be_bytes()); // length
-    req[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes()); // magic cookie
-    rand::rng().fill_bytes(&mut req[8..20]);
-
-    socket
-        .send(&req)
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("STUN send failed: {e}")))?;
-
-    let mut buf = [0u8; 128];
-    let n = socket
-        .recv(&mut buf)
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("STUN recv failed: {e}")))?;
-    if n < 20 {
-        return Ok(None);
-    }
-
-    // Parse attributes.
-    let mut idx = 20;
-    while idx + 4 <= n {
-        let atype = u16::from_be_bytes(buf[idx..idx + 2].try_into().unwrap());
-        let alen = u16::from_be_bytes(buf[idx + 2..idx + 4].try_into().unwrap()) as usize;
-        idx += 4;
-        if idx + alen > n {
-            break;
-        }
-        match atype {
-            0x0020 /* XOR-MAPPED-ADDRESS */ | 0x0001 /* MAPPED-ADDRESS */ => {
-                if alen < 8 {
-                    break;
-                }
-                let family = buf[idx + 1];
-                if family != 0x01 {
-                    // only IPv4 supported here
-                    break;
-                }
-                let port_bytes = [buf[idx + 2], buf[idx + 3]];
-                let ip_bytes = [buf[idx + 4], buf[idx + 5], buf[idx + 6], buf[idx + 7]];
-
-                let (port, ip) = if atype == 0x0020 {
-                    let magic = 0x2112A442u32.to_be_bytes();
-                    let port = u16::from_be_bytes(port_bytes) ^ ((magic[0] as u16) << 8 | magic[1] as u16);
-                    let ip = [
-                        ip_bytes[0] ^ magic[0],
-                        ip_bytes[1] ^ magic[1],
-                        ip_bytes[2] ^ magic[2],
-                        ip_bytes[3] ^ magic[3],
-                    ];
-                    (port, ip)
-                } else {
-                    (u16::from_be_bytes(port_bytes), ip_bytes)
-                };
-                let reflected = std::net::SocketAddr::new(
-                    IpAddr::V4(Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])),
-                    port,
-                );
-                let local_addr = socket.local_addr().map_err(|e| {
-                    ProxyError::Proxy(format!("STUN local_addr failed: {e}"))
-                })?;
-                return Ok(Some(StunProbeResult {
-                    local_addr,
-                    reflected_addr: reflected,
-                }));
-            }
-            _ => {}
-        }
-        idx += (alen + 3) & !3; // 4-byte alignment
-    }
-
-    Ok(None)
-}
-
-fn is_privateish(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
-        IpAddr::V6(v6) => v6.is_unique_local(),
-    }
 }

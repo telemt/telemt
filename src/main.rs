@@ -16,6 +16,7 @@ mod config;
 mod crypto;
 mod error;
 mod ip_tracker;
+mod network;
 mod metrics;
 mod protocol;
 mod proxy;
@@ -27,16 +28,14 @@ mod util;
 use crate::config::{LogLevel, ProxyConfig};
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
+use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
 use crate::proxy::ClientHandler;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::transport::middle_proxy::{
     MePool, fetch_proxy_config, run_me_ping, MePingFamily, MePingSample, format_sample_line,
-    stun_probe,
 };
 use crate::transport::{ListenOptions, UpstreamManager, create_listener};
-use crate::util::ip::detect_ip;
-use crate::protocol::constants::{TG_MIDDLE_PROXIES_V4, TG_MIDDLE_PROXIES_V6};
 
 fn parse_cli() -> (String, bool, Option<String>) {
     let mut config_path = "config.toml".to_string();
@@ -219,8 +218,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         warn!("Using default tls_domain. Consider setting a custom domain.");
     }
 
-    let prefer_ipv6 = config.general.prefer_ipv6;
-    let mut use_middle_proxy = config.general.use_middle_proxy;
+    let probe = run_probe(
+        &config.network,
+        config.general.middle_proxy_nat_stun.clone(),
+        config.general.middle_proxy_nat_probe,
+    )
+    .await?;
+    let decision = decide_network_capabilities(&config.network, &probe);
+    log_probe_result(&probe, &decision);
+
+    let prefer_ipv6 = decision.prefer_ipv6();
+    let mut use_middle_proxy = config.general.use_middle_proxy && (decision.ipv4_me || decision.ipv6_me);
     let config = Arc::new(config);
     let stats = Arc::new(Stats::new());
     let rng = Arc::new(SecureRandom::new());
@@ -244,39 +252,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Connection concurrency limit
     let _max_connections = Arc::new(Semaphore::new(10_000));
 
-    // STUN check before choosing transport
-    if use_middle_proxy {
-        match stun_probe(config.general.middle_proxy_nat_stun.clone()).await {
-            Ok(Some(probe)) => {
-                info!(
-                    local_ip = %probe.local_addr.ip(),
-                    reflected_ip = %probe.reflected_addr.ip(),
-                    "STUN Autodetect:"
-                );
-                if probe.local_addr.ip() != probe.reflected_addr.ip()
-                    && !config.general.stun_iface_mismatch_ignore
-                {
-                    match crate::transport::middle_proxy::detect_public_ip().await {
-                        Some(ip) => {
-                            info!(
-                                local_ip = %probe.local_addr.ip(),
-                                reflected_ip = %probe.reflected_addr.ip(),
-                                public_ip = %ip,
-                                "STUN mismatch but public IP auto-detected, continuing with middle proxy"
-                            );
-                        }
-                        None => {
-                            warn!(
-                                "STUN/IP-on-Interface mismatch and public IP auto-detect failed -> fallback to direct-DC"
-                            );
-                            use_middle_proxy = false;
-                        }
-                    }
-                }
-            }
-            Ok(None) => warn!("STUN probe returned no address; continuing"),
-            Err(e) => warn!(error = %e, "STUN probe failed; continuing"),
-        }
+    if use_middle_proxy && !decision.ipv4_me && !decision.ipv6_me {
+        warn!("No usable IP family for Middle Proxy detected; falling back to direct DC");
+        use_middle_proxy = false;
     }
 
     // =====================================================================
@@ -351,6 +329,8 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     cfg_v4.map.clone(),
                     cfg_v6.map.clone(),
                     cfg_v4.default_dc.or(cfg_v6.default_dc),
+                    decision.clone(),
+                    rng.clone(),
                 );
 
                 match pool.init(2, &rng).await {
@@ -482,7 +462,12 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
     info!("================= Telegram DC Connectivity =================");
 
     let ping_results = upstream_manager
-        .ping_all_dcs(prefer_ipv6, &config.dc_overrides)
+        .ping_all_dcs(
+            prefer_ipv6,
+            &config.dc_overrides,
+            decision.ipv4_dc,
+            decision.ipv6_dc,
+        )
         .await;
 
 	for upstream_result in &ping_results {
@@ -559,8 +544,15 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
 
     // Background tasks
     let um_clone = upstream_manager.clone();
+    let decision_clone = decision.clone();
     tokio::spawn(async move {
-        um_clone.run_health_checks(prefer_ipv6).await;
+        um_clone
+            .run_health_checks(
+                prefer_ipv6,
+                decision_clone.ipv4_dc,
+                decision_clone.ipv6_dc,
+            )
+            .await;
     });
 
     let rc_clone = replay_checker.clone();
@@ -568,16 +560,31 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         rc_clone.run_periodic_cleanup().await;
     });
 
-    let detected_ip = detect_ip().await;
+    let detected_ip_v4: Option<std::net::IpAddr> = probe
+        .reflected_ipv4
+        .map(|s| s.ip())
+        .or_else(|| probe.detected_ipv4.map(std::net::IpAddr::V4));
+    let detected_ip_v6: Option<std::net::IpAddr> = probe
+        .reflected_ipv6
+        .map(|s| s.ip())
+        .or_else(|| probe.detected_ipv6.map(std::net::IpAddr::V6));
     debug!(
         "Detected IPs: v4={:?} v6={:?}",
-        detected_ip.ipv4, detected_ip.ipv6
+        detected_ip_v4, detected_ip_v6
     );
 
     let mut listeners = Vec::new();
 
     for listener_conf in &config.server.listeners {
         let addr = SocketAddr::new(listener_conf.ip, config.server.port);
+        if addr.is_ipv4() && !decision.ipv4_dc {
+            warn!(%addr, "Skipping IPv4 listener: IPv4 disabled by [network]");
+            continue;
+        }
+        if addr.is_ipv6() && !decision.ipv6_dc {
+            warn!(%addr, "Skipping IPv6 listener: IPv6 disabled by [network]");
+            continue;
+        }
         let options = ListenOptions {
             ipv6_only: listener_conf.ip.is_ipv6(),
             ..Default::default()
@@ -594,11 +601,11 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                 } else if listener_conf.ip.is_unspecified() {
                     // Auto-detect for unspecified addresses
                     if listener_conf.ip.is_ipv4() {
-                        detected_ip.ipv4
+                        detected_ip_v4
                             .map(|ip| ip.to_string())
                             .unwrap_or_else(|| listener_conf.ip.to_string())
                     } else {
-                        detected_ip.ipv6
+                        detected_ip_v6
                             .map(|ip| ip.to_string())
                             .unwrap_or_else(|| listener_conf.ip.to_string())
                     }
@@ -626,9 +633,8 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         let (host, port) = if let Some(ref h) = config.general.links.public_host {
             (h.clone(), config.general.links.public_port.unwrap_or(config.server.port))
         } else {
-            let ip = detected_ip
-                .ipv4
-                .or(detected_ip.ipv6)
+            let ip = detected_ip_v4
+                .or(detected_ip_v6)
                 .map(|ip| ip.to_string());
             if ip.is_none() {
                 warn!("show_link is configured but public IP could not be detected. Set public_host in config.");
