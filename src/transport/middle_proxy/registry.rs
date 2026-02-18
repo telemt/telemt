@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,12 +28,28 @@ pub struct ConnWriter {
     pub writer: Arc<Mutex<RpcWriter>>,
 }
 
+struct RegistryInner {
+    map: HashMap<u64, mpsc::Sender<MeResponse>>,
+    writers: HashMap<u64, Arc<Mutex<RpcWriter>>>,
+    writer_for_conn: HashMap<u64, u64>,
+    conns_for_writer: HashMap<u64, HashSet<u64>>,
+    meta: HashMap<u64, ConnMeta>,
+}
+
+impl RegistryInner {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            writers: HashMap::new(),
+            writer_for_conn: HashMap::new(),
+            conns_for_writer: HashMap::new(),
+            meta: HashMap::new(),
+        }
+    }
+}
+
 pub struct ConnRegistry {
-    map: RwLock<HashMap<u64, mpsc::Sender<MeResponse>>>,
-    writers: RwLock<HashMap<u64, Arc<Mutex<RpcWriter>>>>,
-    writer_for_conn: RwLock<HashMap<u64, u64>>,
-    conns_for_writer: RwLock<HashMap<u64, Vec<u64>>>,
-    meta: RwLock<HashMap<u64, ConnMeta>>,
+    inner: RwLock<RegistryInner>,
     next_id: AtomicU64,
 }
 
@@ -41,11 +57,7 @@ impl ConnRegistry {
     pub fn new() -> Self {
         let start = rand::random::<u64>() | 1;
         Self {
-            map: RwLock::new(HashMap::new()),
-            writers: RwLock::new(HashMap::new()),
-            writer_for_conn: RwLock::new(HashMap::new()),
-            conns_for_writer: RwLock::new(HashMap::new()),
-            meta: RwLock::new(HashMap::new()),
+            inner: RwLock::new(RegistryInner::new()),
             next_id: AtomicU64::new(start),
         }
     }
@@ -53,23 +65,27 @@ impl ConnRegistry {
     pub async fn register(&self) -> (u64, mpsc::Receiver<MeResponse>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(1024);
-        self.map.write().await.insert(id, tx);
+        self.inner.write().await.map.insert(id, tx);
         (id, rx)
     }
 
-    pub async fn unregister(&self, id: u64) {
-        self.map.write().await.remove(&id);
-        self.meta.write().await.remove(&id);
-        if let Some(writer_id) = self.writer_for_conn.write().await.remove(&id) {
-            if let Some(list) = self.conns_for_writer.write().await.get_mut(&writer_id) {
-                list.retain(|c| *c != id);
+    /// Unregister connection, returning associated writer_id if any.
+    pub async fn unregister(&self, id: u64) -> Option<u64> {
+        let mut inner = self.inner.write().await;
+        inner.map.remove(&id);
+        inner.meta.remove(&id);
+        if let Some(writer_id) = inner.writer_for_conn.remove(&id) {
+            if let Some(set) = inner.conns_for_writer.get_mut(&writer_id) {
+                set.remove(&id);
             }
+            return Some(writer_id);
         }
+        None
     }
 
     pub async fn route(&self, id: u64, resp: MeResponse) -> bool {
-        let m = self.map.read().await;
-        if let Some(tx) = m.get(&id) {
+        let inner = self.inner.read().await;
+        if let Some(tx) = inner.map.get(&id) {
             tx.try_send(resp).is_ok()
         } else {
             false
@@ -83,40 +99,38 @@ impl ConnRegistry {
         writer: Arc<Mutex<RpcWriter>>,
         meta: ConnMeta,
     ) {
-        self.meta.write().await.entry(conn_id).or_insert(meta);
-        self.writer_for_conn.write().await.insert(conn_id, writer_id);
-        self.writers.write().await.entry(writer_id).or_insert_with(|| writer.clone());
-        self.conns_for_writer
-            .write()
-            .await
+        let mut inner = self.inner.write().await;
+        inner.meta.entry(conn_id).or_insert(meta);
+        inner.writer_for_conn.insert(conn_id, writer_id);
+        inner.writers.entry(writer_id).or_insert_with(|| writer.clone());
+        inner
+            .conns_for_writer
             .entry(writer_id)
-            .or_insert_with(Vec::new)
-            .push(conn_id);
+            .or_insert_with(HashSet::new)
+            .insert(conn_id);
     }
 
     pub async fn get_writer(&self, conn_id: u64) -> Option<ConnWriter> {
-        let writer_id = {
-            let guard = self.writer_for_conn.read().await;
-            guard.get(&conn_id).cloned()
-        }?;
-        let writer = {
-            let guard = self.writers.read().await;
-            guard.get(&writer_id).cloned()
-        }?;
+        let inner = self.inner.read().await;
+        let writer_id = inner.writer_for_conn.get(&conn_id).cloned()?;
+        let writer = inner.writers.get(&writer_id).cloned()?;
         Some(ConnWriter { writer_id, writer })
     }
 
     pub async fn writer_lost(&self, writer_id: u64) -> Vec<BoundConn> {
-        self.writers.write().await.remove(&writer_id);
-        let conns = self.conns_for_writer.write().await.remove(&writer_id).unwrap_or_default();
+        let mut inner = self.inner.write().await;
+        inner.writers.remove(&writer_id);
+        let conns = inner
+            .conns_for_writer
+            .remove(&writer_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let mut out = Vec::new();
-        let mut writer_for_conn = self.writer_for_conn.write().await;
-        let meta = self.meta.read().await;
-
         for conn_id in conns {
-            writer_for_conn.remove(&conn_id);
-            if let Some(m) = meta.get(&conn_id) {
+            inner.writer_for_conn.remove(&conn_id);
+            if let Some(m) = inner.meta.get(&conn_id) {
                 out.push(BoundConn {
                     conn_id,
                     meta: m.clone(),
@@ -127,7 +141,16 @@ impl ConnRegistry {
     }
 
     pub async fn get_meta(&self, conn_id: u64) -> Option<ConnMeta> {
-        let guard = self.meta.read().await;
-        guard.get(&conn_id).cloned()
+        let inner = self.inner.read().await;
+        inner.meta.get(&conn_id).cloned()
+    }
+
+    pub async fn is_writer_empty(&self, writer_id: u64) -> bool {
+        let inner = self.inner.read().await;
+        inner
+            .conns_for_writer
+            .get(&writer_id)
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
     }
 }

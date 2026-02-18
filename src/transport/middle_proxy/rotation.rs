@@ -31,8 +31,8 @@ pub async fn me_rotation_task(pool: Arc<MePool>, rng: Arc<SecureRandom>, interva
         info!(addr = %w.addr, writer_id = w.id, "Rotating ME connection");
         match pool.connect_one(w.addr, rng.as_ref()).await {
             Ok(()) => {
-                // Remove old writer after new one is up.
-                pool.remove_writer_and_reroute(w.id).await;
+                // Mark old writer for graceful drain; removal happens when sessions finish.
+                pool.mark_writer_draining(w.id).await;
             }
             Err(e) => {
                 warn!(addr = %w.addr, writer_id = w.id, error = %e, "ME rotation connect failed");

@@ -1,0 +1,295 @@
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::path::Path;
+
+use rand::Rng;
+use tracing::warn;
+use serde::{Serialize, Deserialize};
+
+use crate::error::{ProxyError, Result};
+
+use super::defaults::*;
+use super::types::*;
+
+fn validate_network_cfg(net: &mut NetworkConfig) -> Result<()> {
+    if !net.ipv4 && matches!(net.ipv6, Some(false)) {
+        return Err(ProxyError::Config(
+            "Both ipv4 and ipv6 are disabled in [network]".to_string(),
+        ));
+    }
+
+    if net.prefer != 4 && net.prefer != 6 {
+        return Err(ProxyError::Config(
+            "network.prefer must be 4 or 6".to_string(),
+        ));
+    }
+
+    if !net.ipv4 && net.prefer == 4 {
+        warn!("prefer=4 but ipv4=false; forcing prefer=6");
+        net.prefer = 6;
+    }
+
+    if matches!(net.ipv6, Some(false)) && net.prefer == 6 {
+        warn!("prefer=6 but ipv6=false; forcing prefer=4");
+        net.prefer = 4;
+    }
+
+    Ok(())
+}
+
+// ============= Main Config =============
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProxyConfig {
+    #[serde(default)]
+    pub general: GeneralConfig,
+
+    #[serde(default)]
+    pub network: NetworkConfig,
+
+    #[serde(default)]
+    pub server: ServerConfig,
+
+    #[serde(default)]
+    pub timeouts: TimeoutsConfig,
+
+    #[serde(default)]
+    pub censorship: AntiCensorshipConfig,
+
+    #[serde(default)]
+    pub access: AccessConfig,
+
+    #[serde(default)]
+    pub upstreams: Vec<UpstreamConfig>,
+
+    #[serde(default)]
+    pub show_link: ShowLink,
+
+    /// DC address overrides for non-standard DCs (CDN, media, test, etc.)
+    /// Keys are DC indices as strings, values are one or more "ip:port" addresses.
+    /// Matches the C implementation's `proxy_for <dc_id> <ip>:<port>` config directive.
+    /// Example in config.toml:
+    ///   [dc_overrides]
+    ///   "203" = ["149.154.175.100:443", "91.105.192.100:443"]
+    #[serde(default, deserialize_with = "deserialize_dc_overrides")]
+    pub dc_overrides: HashMap<String, Vec<String>>,
+
+    /// Default DC index (1-5) for unmapped non-standard DCs.
+    /// Matches the C implementation's `default <dc_id>` config directive.
+    /// If not set, defaults to 2 (matching Telegram's official `default 2;` in proxy-multi.conf).
+    #[serde(default)]
+    pub default_dc: Option<u8>,
+}
+
+impl ProxyConfig {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| ProxyError::Config(e.to_string()))?;
+
+        let mut config: ProxyConfig =
+            toml::from_str(&content).map_err(|e| ProxyError::Config(e.to_string()))?;
+
+        // Validate secrets.
+        for (user, secret) in &config.access.users {
+            if !secret.chars().all(|c| c.is_ascii_hexdigit()) || secret.len() != 32 {
+                return Err(ProxyError::InvalidSecret {
+                    user: user.clone(),
+                    reason: "Must be 32 hex characters".to_string(),
+                });
+            }
+        }
+
+        // Validate tls_domain.
+        if config.censorship.tls_domain.is_empty() {
+            return Err(ProxyError::Config("tls_domain cannot be empty".to_string()));
+        }
+
+        // Validate mask_unix_sock.
+        if let Some(ref sock_path) = config.censorship.mask_unix_sock {
+            if sock_path.is_empty() {
+                return Err(ProxyError::Config(
+                    "mask_unix_sock cannot be empty".to_string(),
+                ));
+            }
+            #[cfg(unix)]
+            if sock_path.len() > 107 {
+                return Err(ProxyError::Config(format!(
+                    "mask_unix_sock path too long: {} bytes (max 107)",
+                    sock_path.len()
+                )));
+            }
+            #[cfg(not(unix))]
+            return Err(ProxyError::Config(
+                "mask_unix_sock is only supported on Unix platforms".to_string(),
+            ));
+
+            if config.censorship.mask_host.is_some() {
+                return Err(ProxyError::Config(
+                    "mask_unix_sock and mask_host are mutually exclusive".to_string(),
+                ));
+            }
+        }
+
+        // Default mask_host to tls_domain if not set and no unix socket configured.
+        if config.censorship.mask_host.is_none() && config.censorship.mask_unix_sock.is_none() {
+            config.censorship.mask_host = Some(config.censorship.tls_domain.clone());
+        }
+
+        // Migration: prefer_ipv6 -> network.prefer.
+        if config.general.prefer_ipv6 {
+            if config.network.prefer == 4 {
+                config.network.prefer = 6;
+            }
+            warn!("prefer_ipv6 is deprecated, use [network].prefer = 6");
+        }
+
+        // Auto-enable NAT probe when Middle Proxy is requested.
+        if config.general.use_middle_proxy && !config.general.middle_proxy_nat_probe {
+            config.general.middle_proxy_nat_probe = true;
+            warn!("Auto-enabled middle_proxy_nat_probe for middle proxy mode");
+        }
+
+        validate_network_cfg(&mut config.network)?;
+
+        // Random fake_cert_len.
+        config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
+
+        // Resolve listen_tcp: explicit value wins, otherwise auto-detect.
+        // If unix socket is set → TCP only when listen_addr_ipv4 or listeners are explicitly provided.
+        // If no unix socket → TCP always (backward compat).
+        let listen_tcp = config.server.listen_tcp.unwrap_or_else(|| {
+            if config.server.listen_unix_sock.is_some() {
+                // Unix socket present: TCP only if user explicitly set addresses or listeners.
+                config.server.listen_addr_ipv4.is_some()
+                    || !config.server.listeners.is_empty()
+            } else {
+                true
+            }
+        });
+
+        // Migration: Populate listeners if empty (skip when listen_tcp = false).
+        if config.server.listeners.is_empty() && listen_tcp {
+            let ipv4_str = config.server.listen_addr_ipv4
+                .as_deref()
+                .unwrap_or("0.0.0.0");
+            if let Ok(ipv4) = ipv4_str.parse::<IpAddr>() {
+                config.server.listeners.push(ListenerConfig {
+                    ip: ipv4,
+                    announce: None,
+                    announce_ip: None,
+                });
+            }
+            if let Some(ipv6_str) = &config.server.listen_addr_ipv6 {
+                if let Ok(ipv6) = ipv6_str.parse::<IpAddr>() {
+                    config.server.listeners.push(ListenerConfig {
+                        ip: ipv6,
+                        announce: None,
+                        announce_ip: None,
+                    });
+                }
+            }
+        }
+
+        // Migration: announce_ip → announce for each listener.
+        for listener in &mut config.server.listeners {
+            if listener.announce.is_none() && listener.announce_ip.is_some() {
+                listener.announce = Some(listener.announce_ip.unwrap().to_string());
+            }
+        }
+
+        // Migration: show_link (top-level) → general.links.show.
+        if !config.show_link.is_empty() && config.general.links.show.is_empty() {
+            config.general.links.show = config.show_link.clone();
+        }
+
+        // Migration: Populate upstreams if empty (Default Direct).
+        if config.upstreams.is_empty() {
+            config.upstreams.push(UpstreamConfig {
+                upstream_type: UpstreamType::Direct { interface: None },
+                weight: 1,
+                enabled: true,
+            });
+        }
+
+        // Ensure default DC203 override is present.
+        config
+            .dc_overrides
+            .entry("203".to_string())
+            .or_insert_with(|| vec!["91.105.192.100:443".to_string()]);
+
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.access.users.is_empty() {
+            return Err(ProxyError::Config("No users configured".to_string()));
+        }
+
+        if !self.general.modes.classic && !self.general.modes.secure && !self.general.modes.tls {
+            return Err(ProxyError::Config("No modes enabled".to_string()));
+        }
+
+        if self.censorship.tls_domain.contains(' ') || self.censorship.tls_domain.contains('/') {
+            return Err(ProxyError::Config(format!(
+                "Invalid tls_domain: '{}'. Must be a valid domain name",
+                self.censorship.tls_domain
+            )));
+        }
+
+        if let Some(tag) = &self.general.ad_tag {
+            let zeros = "00000000000000000000000000000000";
+            if tag == zeros {
+                warn!("ad_tag is all zeros; register a valid proxy tag via @MTProxybot to enable sponsored channel");
+            }
+            if tag.len() != 32 || tag.chars().any(|c| !c.is_ascii_hexdigit()) {
+                warn!("ad_tag is not a 32-char hex string; ensure you use value issued by @MTProxybot");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dc_overrides_allow_string_and_array() {
+        let toml = r#"
+            [dc_overrides]
+            "201" = "149.154.175.50:443"
+            "202" = ["149.154.167.51:443", "149.154.175.100:443"]
+        "#;
+        let cfg: ProxyConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.dc_overrides["201"], vec!["149.154.175.50:443"]);
+        assert_eq!(
+            cfg.dc_overrides["202"],
+            vec!["149.154.167.51:443", "149.154.175.100:443"]
+        );
+    }
+
+    #[test]
+    fn dc_overrides_inject_dc203_default() {
+        let toml = r#"
+            [general]
+            use_middle_proxy = false
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_dc_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert!(cfg
+            .dc_overrides
+            .get("203")
+            .map(|v| v.contains(&"91.105.192.100:443".to_string()))
+            .unwrap_or(false));
+        let _ = std::fs::remove_file(path);
+    }
+}

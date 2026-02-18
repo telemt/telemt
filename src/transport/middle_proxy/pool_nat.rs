@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use crate::error::{ProxyError, Result};
 use crate::network::probe::is_bogon;
@@ -98,6 +98,18 @@ impl MePool {
         family: IpFamily,
     ) -> Option<std::net::SocketAddr> {
         const STUN_CACHE_TTL: Duration = Duration::from_secs(600);
+        // If STUN probing was disabled after attempts, reuse cached (even stale) or skip.
+        if self.nat_probe_disabled.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(cache) = self.nat_reflection_cache.try_lock() {
+                let slot = match family {
+                    IpFamily::V4 => cache.v4,
+                    IpFamily::V6 => cache.v6,
+                };
+                return slot.map(|(_, addr)| addr);
+            }
+            return None;
+        }
+
         if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
             let slot = match family {
                 IpFamily::V4 => &mut cache.v4,
@@ -108,6 +120,12 @@ impl MePool {
                     return Some(*addr);
                 }
             }
+        }
+
+        let attempt = self.nat_probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if attempt >= 2 {
+            self.nat_probe_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+            return None;
         }
 
         let stun_addr = self
@@ -135,7 +153,15 @@ impl MePool {
                 }
             }
             Err(e) => {
-                warn!(error = %e, "NAT probe failed");
+                let attempts = attempt + 1;
+                if attempts <= 2 {
+                    warn!(error = %e, attempt = attempts, "NAT probe failed");
+                } else {
+                    debug!(error = %e, attempt = attempts, "NAT probe suppressed after max attempts");
+                }
+                if attempts >= 2 {
+                    self.nat_probe_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 None
             }
         }

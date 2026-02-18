@@ -3,7 +3,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use regex::Regex;
 use httpdate;
 use tracing::{debug, info, warn};
 
@@ -18,6 +17,45 @@ use std::time::SystemTime;
 pub struct ProxyConfigData {
     pub map: HashMap<i32, Vec<(IpAddr, u16)>>,
     pub default_dc: Option<i32>,
+}
+
+fn parse_host_port(s: &str) -> Option<(IpAddr, u16)> {
+    if let Some(bracket_end) = s.rfind(']') {
+        if s.starts_with('[') && bracket_end + 1 < s.len() && s.as_bytes().get(bracket_end + 1) == Some(&b':') {
+            let host = &s[1..bracket_end];
+            let port_str = &s[bracket_end + 2..];
+            let ip = host.parse::<IpAddr>().ok()?;
+            let port = port_str.parse::<u16>().ok()?;
+            return Some((ip, port));
+        }
+    }
+
+    let idx = s.rfind(':')?;
+    let host = &s[..idx];
+    let port_str = &s[idx + 1..];
+    let ip = host.parse::<IpAddr>().ok()?;
+    let port = port_str.parse::<u16>().ok()?;
+    Some((ip, port))
+}
+
+fn parse_proxy_line(line: &str) -> Option<(i32, IpAddr, u16)> {
+    // Accepts lines like:
+    // proxy_for 4 91.108.4.195:8888;
+    // proxy_for 2 [2001:67c:04e8:f002::d]:80;
+    // proxy_for 2 2001:67c:04e8:f002::d:80;
+    let trimmed = line.trim();
+    if !trimmed.starts_with("proxy_for") {
+        return None;
+    }
+    // Capture everything between dc and trailing ';'
+    let without_prefix = trimmed.trim_start_matches("proxy_for").trim();
+    let mut parts = without_prefix.split_whitespace();
+    let dc_str = parts.next()?;
+    let rest = parts.next()?;
+    let host_port = rest.trim_end_matches(';');
+    let dc = dc_str.parse::<i32>().ok()?;
+    let (ip, port) = parse_host_port(host_port)?;
+    Some((dc, ip, port))
 }
 
 pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
@@ -48,26 +86,26 @@ pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
         .await
         .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config read failed: {e}")))?;
 
-    let re_proxy = Regex::new(r"proxy_for\s+(-?\d+)\s+([^\s:]+):(\d+)\s*;").unwrap();
-    let re_default = Regex::new(r"default\s+(-?\d+)\s*;").unwrap();
-
     let mut map: HashMap<i32, Vec<(IpAddr, u16)>> = HashMap::new();
-    for cap in re_proxy.captures_iter(&text) {
-        if let (Some(dc), Some(host), Some(port)) = (cap.get(1), cap.get(2), cap.get(3)) {
-            if let Ok(dc_idx) = dc.as_str().parse::<i32>() {
-                if let Ok(ip) = host.as_str().parse::<IpAddr>() {
-                    if let Ok(port_num) = port.as_str().parse::<u16>() {
-                        map.entry(dc_idx).or_default().push((ip, port_num));
-                    }
-                }
-            }
+    for line in text.lines() {
+        if let Some((dc, ip, port)) = parse_proxy_line(line) {
+            map.entry(dc).or_default().push((ip, port));
         }
     }
 
-    let default_dc = re_default
-        .captures(&text)
-        .and_then(|c| c.get(1))
-        .and_then(|m| m.as_str().parse::<i32>().ok());
+    let default_dc = text
+        .lines()
+        .find_map(|l| {
+            let t = l.trim();
+            if let Some(rest) = t.strip_prefix("default") {
+                return rest
+                    .trim()
+                    .trim_end_matches(';')
+                    .parse::<i32>()
+                    .ok();
+            }
+            None
+        });
 
     Ok(ProxyConfigData { map, default_dc })
 }
@@ -109,5 +147,37 @@ pub async fn me_config_updater(pool: Arc<MePool>, rng: Arc<SecureRandom>, interv
             }
             Err(e) => warn!(error = %e, "proxy-secret update failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ipv6_bracketed() {
+        let line = "proxy_for 2 [2001:67c:04e8:f002::d]:80;";
+        let res = parse_proxy_line(line).unwrap();
+        assert_eq!(res.0, 2);
+        assert_eq!(res.1, "2001:67c:04e8:f002::d".parse::<IpAddr>().unwrap());
+        assert_eq!(res.2, 80);
+    }
+
+    #[test]
+    fn parse_ipv6_plain() {
+        let line = "proxy_for 2 2001:67c:04e8:f002::d:80;";
+        let res = parse_proxy_line(line).unwrap();
+        assert_eq!(res.0, 2);
+        assert_eq!(res.1, "2001:67c:04e8:f002::d".parse::<IpAddr>().unwrap());
+        assert_eq!(res.2, 80);
+    }
+
+    #[test]
+    fn parse_ipv4() {
+        let line = "proxy_for 4 91.108.4.195:8888;";
+        let res = parse_proxy_line(line).unwrap();
+        assert_eq!(res.0, 4);
+        assert_eq!(res.1, "91.108.4.195".parse::<IpAddr>().unwrap());
+        assert_eq!(res.2, 8888);
     }
 }

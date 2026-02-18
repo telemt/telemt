@@ -58,7 +58,13 @@ pub async fn run_probe(config: &NetworkConfig, stun_addr: Option<String>, nat_pr
 
     let stun_server = stun_addr.unwrap_or_else(|| "stun.l.google.com:19302".to_string());
     let stun_res = if nat_probe {
-        stun_probe_dual(&stun_server).await?
+        match stun_probe_dual(&stun_server).await {
+            Ok(res) => res,
+            Err(e) => {
+                warn!(error = %e, "STUN probe failed, continuing without reflection");
+                DualStunResult::default()
+            }
+        }
     } else {
         DualStunResult::default()
     };

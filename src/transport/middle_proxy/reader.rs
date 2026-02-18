@@ -136,7 +136,7 @@ pub(crate) async fn reader_loop(
                 let mut pong = Vec::with_capacity(12);
                 pong.extend_from_slice(&RPC_PONG_U32.to_le_bytes());
                 pong.extend_from_slice(&ping_id.to_le_bytes());
-                if let Err(e) = writer.lock().await.send(&pong).await {
+                if let Err(e) = writer.lock().await.send_and_flush(&pong).await {
                     warn!(error = %e, "PONG send failed");
                     break;
                 }
@@ -176,7 +176,7 @@ async fn send_close_conn(writer: &Arc<Mutex<RpcWriter>>, conn_id: u64) {
     p.extend_from_slice(&RPC_CLOSE_CONN_U32.to_le_bytes());
     p.extend_from_slice(&conn_id.to_le_bytes());
 
-    if let Err(e) = writer.lock().await.send(&p).await {
+    if let Err(e) = writer.lock().await.send_and_flush(&p).await {
         debug!(conn_id, error = %e, "Failed to send RPC_CLOSE_CONN");
     }
 }

@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use tokio::net::{lookup_host, UdpSocket};
+use tokio::time::{timeout, Duration, sleep};
 
 use crate::error::{ProxyError, Result};
 
@@ -63,22 +64,36 @@ pub async fn stun_probe_family(stun_addr: &str, family: IpFamily) -> Result<Opti
     req[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes()); // magic cookie
     rand::rng().fill_bytes(&mut req[8..20]); // transaction ID
 
-    socket
-        .send(&req)
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("STUN send failed: {e}")))?;
-
     let mut buf = [0u8; 256];
-    let n = socket
-        .recv(&mut buf)
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("STUN recv failed: {e}")))?;
-    if n < 20 {
-        return Ok(None);
-    }
+    let mut attempt = 0;
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        socket
+            .send(&req)
+            .await
+            .map_err(|e| ProxyError::Proxy(format!("STUN send failed: {e}")))?;
 
-    let magic = 0x2112A442u32.to_be_bytes();
-    let txid = &req[8..20];
+        let recv_res = timeout(Duration::from_secs(3), socket.recv(&mut buf)).await;
+        let n = match recv_res {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(ProxyError::Proxy(format!("STUN recv failed: {e}"))),
+            Err(_) => {
+                attempt += 1;
+                if attempt >= 3 {
+                    return Ok(None);
+                }
+                sleep(backoff).await;
+                backoff *= 2;
+                continue;
+            }
+        };
+
+        if n < 20 {
+            return Ok(None);
+        }
+
+        let magic = 0x2112A442u32.to_be_bytes();
+        let txid = &req[8..20];
     let mut idx = 20;
     while idx + 4 <= n {
         let atype = u16::from_be_bytes(buf[idx..idx + 2].try_into().unwrap());
@@ -158,6 +173,8 @@ pub async fn stun_probe_family(stun_addr: &str, family: IpFamily) -> Result<Opti
         }
 
         idx += (alen + 3) & !3;
+    }
+
     }
 
     Ok(None)

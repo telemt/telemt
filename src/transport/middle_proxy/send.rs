@@ -55,7 +55,7 @@ impl MePool {
                     Ok(()) => return Ok(()),
                     Err(e) => {
                         warn!(error = %e, writer_id = current.writer_id, "ME write failed");
-                        self.remove_writer_and_reroute(current.writer_id).await;
+                        self.remove_writer_and_close_clients(current.writer_id).await;
                         continue;
                     }
                 }
@@ -76,22 +76,29 @@ impl MePool {
                     return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
                 }
                 emergency_attempts += 1;
-                let map = self.proxy_map_v4.read().await;
-                if let Some(addrs) = map.get(&(target_dc as i32)) {
-                    let mut shuffled = addrs.clone();
-                    shuffled.shuffle(&mut rand::rng());
-                    drop(map);
-                    for (ip, port) in shuffled {
-                        let addr = SocketAddr::new(ip, port);
-                        if self.connect_one(addr, self.rng.as_ref()).await.is_ok() {
-                            break;
+                for family in self.family_order() {
+                    let map_guard = match family {
+                        IpFamily::V4 => self.proxy_map_v4.read().await,
+                        IpFamily::V6 => self.proxy_map_v6.read().await,
+                    };
+                    if let Some(addrs) = map_guard.get(&(target_dc as i32)) {
+                        let mut shuffled = addrs.clone();
+                        shuffled.shuffle(&mut rand::rng());
+                        drop(map_guard);
+                        for (ip, port) in shuffled {
+                            let addr = SocketAddr::new(ip, port);
+                            if self.connect_one(addr, self.rng.as_ref()).await.is_ok() {
+                                break;
+                            }
                         }
+                        tokio::time::sleep(Duration::from_millis(100 * emergency_attempts)).await;
+                        let ws2 = self.writers.read().await;
+                        writers_snapshot = ws2.clone();
+                        drop(ws2);
+                        candidate_indices = self.candidate_indices_for_dc(&writers_snapshot, target_dc).await;
+                        break;
                     }
-                    tokio::time::sleep(Duration::from_millis(100 * emergency_attempts)).await;
-                    let ws2 = self.writers.read().await;
-                    writers_snapshot = ws2.clone();
-                    drop(ws2);
-                    candidate_indices = self.candidate_indices_for_dc(&writers_snapshot, target_dc).await;
+                    drop(map_guard);
                 }
                 if candidate_indices.is_empty() {
                     return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
@@ -99,11 +106,10 @@ impl MePool {
             }
 
             candidate_indices.sort_by_key(|idx| {
-                writers_snapshot[*idx]
-                    .degraded
-                    .load(Ordering::Relaxed)
-                    .then_some(1usize)
-                    .unwrap_or(0)
+                let w = &writers_snapshot[*idx];
+                let degraded = w.degraded.load(Ordering::Relaxed);
+                let draining = w.draining.load(Ordering::Relaxed);
+                (draining as usize, degraded as usize)
             });
 
             let start = self.rr.fetch_add(1, Ordering::Relaxed) as usize % candidate_indices.len();
@@ -111,6 +117,9 @@ impl MePool {
             for offset in 0..candidate_indices.len() {
                 let idx = candidate_indices[(start + offset) % candidate_indices.len()];
                 let w = &writers_snapshot[idx];
+                if w.draining.load(Ordering::Relaxed) {
+                    continue;
+                }
                 if let Ok(mut guard) = w.writer.try_lock() {
                     let send_res = guard.send(&payload).await;
                     drop(guard);
@@ -123,7 +132,7 @@ impl MePool {
                         }
                         Err(e) => {
                             warn!(error = %e, writer_id = w.id, "ME write failed");
-                            self.remove_writer_and_reroute(w.id).await;
+                            self.remove_writer_and_close_clients(w.id).await;
                             continue;
                         }
                     }
@@ -131,6 +140,9 @@ impl MePool {
             }
 
             let w = writers_snapshot[candidate_indices[start]].clone();
+            if w.draining.load(Ordering::Relaxed) {
+                continue;
+            }
             match w.writer.lock().await.send(&payload).await {
                 Ok(()) => {
                     self.registry
@@ -140,7 +152,7 @@ impl MePool {
                 }
                 Err(e) => {
                     warn!(error = %e, writer_id = w.id, "ME write failed (blocking)");
-                    self.remove_writer_and_reroute(w.id).await;
+                    self.remove_writer_and_close_clients(w.id).await;
                 }
             }
         }
@@ -151,9 +163,9 @@ impl MePool {
             let mut p = Vec::with_capacity(12);
             p.extend_from_slice(&RPC_CLOSE_EXT_U32.to_le_bytes());
             p.extend_from_slice(&conn_id.to_le_bytes());
-            if let Err(e) = w.writer.lock().await.send(&p).await {
+            if let Err(e) = w.writer.lock().await.send_and_flush(&p).await {
                 debug!(error = %e, "ME close write failed");
-                self.remove_writer_and_reroute(w.writer_id).await;
+                self.remove_writer_and_close_clients(w.writer_id).await;
             }
         } else {
             debug!(conn_id, "ME close skipped (writer missing)");
@@ -213,17 +225,24 @@ impl MePool {
         }
 
         if preferred.is_empty() {
-            return (0..writers.len()).collect();
+            return (0..writers.len())
+                .filter(|i| !writers[*i].draining.load(Ordering::Relaxed))
+                .collect();
         }
 
         let mut out = Vec::new();
         for (idx, w) in writers.iter().enumerate() {
+            if w.draining.load(Ordering::Relaxed) {
+                continue;
+            }
             if preferred.iter().any(|p| *p == w.addr) {
                 out.push(idx);
             }
         }
         if out.is_empty() {
-            return (0..writers.len()).collect();
+            return (0..writers.len())
+                .filter(|i| !writers[*i].draining.load(Ordering::Relaxed))
+                .collect();
         }
         out
     }

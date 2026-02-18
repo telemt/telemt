@@ -10,7 +10,7 @@ use std::os::raw::c_int;
 
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, TcpSocket};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -44,7 +44,28 @@ impl MePool {
     /// TCP connect with timeout + return RTT in milliseconds.
     pub(crate) async fn connect_tcp(&self, addr: SocketAddr) -> Result<(TcpStream, f64)> {
         let start = Instant::now();
-        let stream = timeout(Duration::from_secs(ME_CONNECT_TIMEOUT_SECS), TcpStream::connect(addr))
+        let connect_fut = async {
+            if addr.is_ipv6() {
+                if let Some(v6) = self.detected_ipv6 {
+                    match TcpSocket::new_v6() {
+                        Ok(sock) => {
+                            if let Err(e) = sock.bind(SocketAddr::new(IpAddr::V6(v6), 0)) {
+                                debug!(error = %e, bind_ip = %v6, "ME IPv6 bind failed, falling back to default bind");
+                            } else {
+                                match sock.connect(addr).await {
+                                    Ok(stream) => return Ok(stream),
+                                    Err(e) => debug!(error = %e, target = %addr, "ME IPv6 bound connect failed, retrying default connect"),
+                                }
+                            }
+                        }
+                        Err(e) => debug!(error = %e, "ME IPv6 socket creation failed, falling back to default connect"),
+                    }
+                }
+            }
+            TcpStream::connect(addr).await
+        };
+
+        let stream = timeout(Duration::from_secs(ME_CONNECT_TIMEOUT_SECS), connect_fut)
             .await
             .map_err(|_| ProxyError::ConnectionTimeout { addr: addr.to_string() })??;
         let connect_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -127,7 +148,7 @@ impl MePool {
         let nonce_payload = build_nonce_payload(ks, crypto_ts, &my_nonce);
         let nonce_frame = build_rpc_frame(-2, &nonce_payload);
         let dump = hex_dump(&nonce_frame[..nonce_frame.len().min(44)]);
-        info!(
+        debug!(
             key_selector = format_args!("0x{ks:08x}"),
             crypto_ts,
             frame_len = nonce_frame.len(),

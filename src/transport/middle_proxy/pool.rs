@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use bytes::BytesMut;
@@ -32,6 +32,7 @@ pub struct MeWriter {
     pub writer: Arc<Mutex<RpcWriter>>,
     pub cancel: CancellationToken,
     pub degraded: Arc<AtomicBool>,
+    pub draining: Arc<AtomicBool>,
 }
 
 pub struct MePool {
@@ -46,6 +47,11 @@ pub struct MePool {
     pub(super) nat_ip_detected: Arc<RwLock<Option<IpAddr>>>,
     pub(super) nat_probe: bool,
     pub(super) nat_stun: Option<String>,
+    pub(super) detected_ipv6: Option<Ipv6Addr>,
+    pub(super) nat_probe_attempts: std::sync::atomic::AtomicU8,
+    pub(super) nat_probe_disabled: std::sync::atomic::AtomicBool,
+    pub(super) me_one_retry: u8,
+    pub(super) me_one_timeout: Duration,
     pub(super) proxy_map_v4: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
     pub(super) proxy_map_v6: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
     pub(super) default_dc: AtomicI32,
@@ -69,6 +75,9 @@ impl MePool {
         nat_ip: Option<IpAddr>,
         nat_probe: bool,
         nat_stun: Option<String>,
+        detected_ipv6: Option<Ipv6Addr>,
+        me_one_retry: u8,
+        me_one_timeout_ms: u64,
         proxy_map_v4: HashMap<i32, Vec<(IpAddr, u16)>>,
         proxy_map_v6: HashMap<i32, Vec<(IpAddr, u16)>>,
         default_dc: Option<i32>,
@@ -87,6 +96,11 @@ impl MePool {
             nat_ip_detected: Arc::new(RwLock::new(None)),
             nat_probe,
             nat_stun,
+            detected_ipv6,
+            nat_probe_attempts: std::sync::atomic::AtomicU8::new(0),
+            nat_probe_disabled: std::sync::atomic::AtomicBool::new(false),
+            me_one_retry,
+            me_one_timeout: Duration::from_millis(me_one_timeout_ms),
             pool_size: 2,
             proxy_map_v4: Arc::new(RwLock::new(proxy_map_v4)),
             proxy_map_v6: Arc::new(RwLock::new(proxy_map_v6)),
@@ -243,6 +257,7 @@ impl MePool {
 
             // Ensure at least one connection per DC; run DCs in parallel.
             let mut join = tokio::task::JoinSet::new();
+            let mut dc_failures = 0usize;
             for (dc, addrs) in dc_addrs.iter().cloned() {
                 if addrs.is_empty() {
                     continue;
@@ -250,10 +265,17 @@ impl MePool {
                 let pool = Arc::clone(self);
                 let rng_clone = Arc::clone(rng);
                 join.spawn(async move {
-                    pool.connect_primary_for_dc(dc, addrs, rng_clone).await;
+                    pool.connect_primary_for_dc(dc, addrs, rng_clone).await
                 });
             }
-            while let Some(_res) = join.join_next().await {}
+            while let Some(res) = join.join_next().await {
+                if let Ok(false) = res {
+                    dc_failures += 1;
+                }
+            }
+            if dc_failures > 2 {
+                return Err(ProxyError::Proxy("Too many ME DC init failures, falling back to direct".into()));
+            }
 
             // Additional connections up to pool_size total (round-robin across DCs)
             for (dc, addrs) in dc_addrs.iter() {
@@ -294,6 +316,7 @@ impl MePool {
         let writer_id = self.next_writer_id.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
         let degraded = Arc::new(AtomicBool::new(false));
+        let draining = Arc::new(AtomicBool::new(false));
         let rpc_w = Arc::new(Mutex::new(RpcWriter {
             writer: hs.wr,
             key: hs.write_key,
@@ -306,6 +329,7 @@ impl MePool {
             writer: rpc_w.clone(),
             cancel: cancel.clone(),
             degraded: degraded.clone(),
+            draining: draining.clone(),
         };
         self.writers.write().await.push(writer.clone());
 
@@ -336,7 +360,7 @@ impl MePool {
             )
             .await;
             if let Some(pool) = pool.upgrade() {
-                pool.remove_writer_and_reroute(writer_id).await;
+                pool.remove_writer_and_close_clients(writer_id).await;
             }
             if let Err(e) = res {
                 warn!(error = %e, "ME reader ended");
@@ -368,11 +392,11 @@ impl MePool {
                     tracker.insert(sent_id, (std::time::Instant::now(), writer_id));
                 }
                 ping_id = ping_id.wrapping_add(1);
-                if let Err(e) = rpc_w_ping.lock().await.send(&p).await {
+                if let Err(e) = rpc_w_ping.lock().await.send_and_flush(&p).await {
                     debug!(error = %e, "Active ME ping failed, removing dead writer");
                     cancel_ping.cancel();
                     if let Some(pool) = pool_ping.upgrade() {
-                        pool.remove_writer_and_reroute(writer_id).await;
+                        pool.remove_writer_and_close_clients(writer_id).await;
                     }
                     break;
                 }
@@ -387,9 +411,9 @@ impl MePool {
         dc: i32,
         mut addrs: Vec<(IpAddr, u16)>,
         rng: Arc<SecureRandom>,
-    ) {
+    ) -> bool {
         if addrs.is_empty() {
-            return;
+            return false;
         }
         addrs.shuffle(&mut rand::rng());
         for (ip, port) in addrs {
@@ -397,20 +421,20 @@ impl MePool {
             match self.connect_one(addr, rng.as_ref()).await {
                 Ok(()) => {
                     info!(%addr, dc = %dc, "ME connected");
-                    return;
+                    return true;
                 }
                 Err(e) => warn!(%addr, dc = %dc, error = %e, "ME connect failed, trying next"),
             }
         }
         warn!(dc = %dc, "All ME servers for DC failed at init");
+        false
     }
 
-    pub(crate) async fn remove_writer_and_reroute(&self, writer_id: u64) {
-        let mut queue = self.remove_writer_only(writer_id).await;
-        while let Some(bound) = queue.pop() {
-            if !self.reroute_conn(&bound, &mut queue).await {
-                let _ = self.registry.route(bound.conn_id, super::MeResponse::Close).await;
-            }
+    pub(crate) async fn remove_writer_and_close_clients(&self, writer_id: u64) {
+        let conns = self.remove_writer_only(writer_id).await;
+        for bound in conns {
+            let _ = self.registry.route(bound.conn_id, super::MeResponse::Close).await;
+            let _ = self.registry.unregister(bound.conn_id).await;
         }
     }
 
@@ -425,79 +449,28 @@ impl MePool {
         self.registry.writer_lost(writer_id).await
     }
 
-    async fn reroute_conn(&self, bound: &BoundConn, backlog: &mut Vec<BoundConn>) -> bool {
-        let payload = super::wire::build_proxy_req_payload(
-            bound.conn_id,
-            bound.meta.client_addr,
-            bound.meta.our_addr,
-            &[],
-            self.proxy_tag.as_deref(),
-            bound.meta.proto_flags,
-        );
-
-        let mut attempts = 0;
-        loop {
-            let writers_snapshot = {
-                let ws = self.writers.read().await;
-                if ws.is_empty() {
-                    return false;
-                }
-                ws.clone()
-            };
-            let mut candidates = self.candidate_indices_for_dc(&writers_snapshot, bound.meta.target_dc).await;
-            if candidates.is_empty() {
-                return false;
-            }
-            candidates.sort_by_key(|idx| {
-                writers_snapshot[*idx]
-                    .degraded
-                    .load(Ordering::Relaxed)
-                    .then_some(1usize)
-                    .unwrap_or(0)
-            });
-            let start = self.rr.fetch_add(1, Ordering::Relaxed) as usize % candidates.len();
-
-            for offset in 0..candidates.len() {
-                let idx = candidates[(start + offset) % candidates.len()];
-                let w = &writers_snapshot[idx];
-                if let Ok(mut guard) = w.writer.try_lock() {
-                    let send_res = guard.send(&payload).await;
-                    drop(guard);
-                    match send_res {
-                        Ok(()) => {
-                            self.registry
-                                .bind_writer(bound.conn_id, w.id, w.writer.clone(), bound.meta.clone())
-                                .await;
-                            return true;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, writer_id = w.id, "ME reroute send failed");
-                            backlog.extend(self.remove_writer_only(w.id).await);
-                        }
-                    }
-                    continue;
-                }
-            }
-
-            let w = writers_snapshot[candidates[start]].clone();
-            match w.writer.lock().await.send(&payload).await {
-                Ok(()) => {
-                    self.registry
-                        .bind_writer(bound.conn_id, w.id, w.writer.clone(), bound.meta.clone())
-                        .await;
-                    return true;
-                }
-                Err(e) => {
-                    warn!(error = %e, writer_id = w.id, "ME reroute send failed (blocking)");
-                    backlog.extend(self.remove_writer_only(w.id).await);
-                }
-            }
-
-            attempts += 1;
-            if attempts > 3 {
-                return false;
+    pub(crate) async fn mark_writer_draining(self: &Arc<Self>, writer_id: u64) {
+        {
+            let mut ws = self.writers.write().await;
+            if let Some(w) = ws.iter_mut().find(|w| w.id == writer_id) {
+                w.draining.store(true, Ordering::Relaxed);
             }
         }
+
+        let pool = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                if let Some(p) = pool.upgrade() {
+                    if p.registry.is_writer_empty(writer_id).await {
+                        let _ = p.remove_writer_only(writer_id).await;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                } else {
+                    break;
+                }
+            }
+        });
     }
 
 }
