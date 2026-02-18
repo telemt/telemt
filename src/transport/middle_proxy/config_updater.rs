@@ -48,8 +48,7 @@ pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
         .await
         .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config read failed: {e}")))?;
 
-    // Matches both IPv4 `host:port` and IPv6 `[host]:port` formats
-    let re_proxy = Regex::new(r"proxy_for\s+(-?\d+)\s+\[?([^\]\s]+)\]?:(\d+)\s*;").unwrap();
+    let re_proxy = Regex::new(r"proxy_for\s+(-?\d+)\s+([^\s:]+):(\d+)\s*;").unwrap();
     let re_default = Regex::new(r"default\s+(-?\d+)\s*;").unwrap();
 
     let mut map: HashMap<i32, Vec<(IpAddr, u16)>> = HashMap::new();
