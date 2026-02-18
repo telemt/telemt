@@ -355,7 +355,6 @@ impl UpstreamManager {
         &self,
         prefer_ipv6: bool,
         dc_overrides: &HashMap<String, Vec<String>>,
-        ipv6_available: bool,
     ) -> Vec<StartupPingResult> {
         let upstreams: Vec<(usize, UpstreamConfig)> = {
             let guard = self.upstreams.read().await;
@@ -378,45 +377,43 @@ impl UpstreamManager {
             let mut v6_results = Vec::new();
             let mut v4_results = Vec::new();
 
-            // === Ping IPv6 first (skip if IPv6 not available) ===
-            if ipv6_available {
-                for dc_zero_idx in 0..NUM_DCS {
-                    let dc_v6 = TG_DATACENTERS_V6[dc_zero_idx];
-                    let addr_v6 = SocketAddr::new(dc_v6, TG_DATACENTER_PORT);
+            // === Ping IPv6 first ===
+            for dc_zero_idx in 0..NUM_DCS {
+                let dc_v6 = TG_DATACENTERS_V6[dc_zero_idx];
+                let addr_v6 = SocketAddr::new(dc_v6, TG_DATACENTER_PORT);
 
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                        self.ping_single_dc(&upstream_config, addr_v6)
-                    ).await;
+                let result = tokio::time::timeout(
+                    Duration::from_secs(DC_PING_TIMEOUT_SECS),
+                    self.ping_single_dc(&upstream_config, addr_v6)
+                ).await;
 
-                    let ping_result = match result {
-                        Ok(Ok(rtt_ms)) => {
-                            let mut guard = self.upstreams.write().await;
-                            if let Some(u) = guard.get_mut(*upstream_idx) {
-                                u.dc_latency[dc_zero_idx].update(rtt_ms);
-                            }
-                            DcPingResult {
-                                dc_idx: dc_zero_idx + 1,
-                                dc_addr: addr_v6,
-                                rtt_ms: Some(rtt_ms),
-                                error: None,
-                            }
+                let ping_result = match result {
+                    Ok(Ok(rtt_ms)) => {
+                        let mut guard = self.upstreams.write().await;
+                        if let Some(u) = guard.get_mut(*upstream_idx) {
+                            u.dc_latency[dc_zero_idx].update(rtt_ms);
                         }
-                        Ok(Err(e)) => DcPingResult {
+                        DcPingResult {
                             dc_idx: dc_zero_idx + 1,
                             dc_addr: addr_v6,
-                            rtt_ms: None,
-                            error: Some(e.to_string()),
-                        },
-                        Err(_) => DcPingResult {
-                            dc_idx: dc_zero_idx + 1,
-                            dc_addr: addr_v6,
-                            rtt_ms: None,
-                            error: Some("timeout".to_string()),
-                        },
-                    };
-                    v6_results.push(ping_result);
-                }
+                            rtt_ms: Some(rtt_ms),
+                            error: None,
+                        }
+                    }
+                    Ok(Err(e)) => DcPingResult {
+                        dc_idx: dc_zero_idx + 1,
+                        dc_addr: addr_v6,
+                        rtt_ms: None,
+                        error: Some(e.to_string()),
+                    },
+                    Err(_) => DcPingResult {
+                        dc_idx: dc_zero_idx + 1,
+                        dc_addr: addr_v6,
+                        rtt_ms: None,
+                        error: Some("timeout".to_string()),
+                    },
+                };
+                v6_results.push(ping_result);
             }
 
             // === Then ping IPv4 ===
@@ -520,12 +517,8 @@ impl UpstreamManager {
                 let mut guard = self.upstreams.write().await;
                 if let Some(u) = guard.get_mut(*upstream_idx) {
                     for dc_zero_idx in 0..NUM_DCS {
-                        let v6_ok = v6_results.get(dc_zero_idx)
-                            .map(|r| r.rtt_ms.is_some())
-                            .unwrap_or(false);
-                        let v4_ok = v4_results.get(dc_zero_idx)
-                            .map(|r| r.rtt_ms.is_some())
-                            .unwrap_or(false);
+                        let v6_ok = v6_results[dc_zero_idx].rtt_ms.is_some();
+                        let v4_ok = v4_results[dc_zero_idx].rtt_ms.is_some();
 
                         u.dc_ip_pref[dc_zero_idx] = match (v6_ok, v4_ok) {
                             (true, true) => IpPreference::BothWork,
@@ -558,7 +551,7 @@ impl UpstreamManager {
 
     /// Background health check: rotates through DCs, 30s interval.
     /// Uses preferred IP version based on config.
-    pub async fn run_health_checks(&self, prefer_ipv6: bool, ipv6_available: bool) {
+    pub async fn run_health_checks(&self, prefer_ipv6: bool) {
         let mut dc_rotation = 0usize;
 
         loop {
@@ -567,19 +560,16 @@ impl UpstreamManager {
             let dc_zero_idx = dc_rotation % NUM_DCS;
             dc_rotation += 1;
 
-            let dc_addr = if prefer_ipv6 && ipv6_available {
+            let dc_addr = if prefer_ipv6 {
                 SocketAddr::new(TG_DATACENTERS_V6[dc_zero_idx], TG_DATACENTER_PORT)
             } else {
                 SocketAddr::new(TG_DATACENTERS_V4[dc_zero_idx], TG_DATACENTER_PORT)
             };
 
-            // Skip IPv6 fallback if IPv6 is not available
-            let fallback_addr = if !ipv6_available {
-                None
-            } else if prefer_ipv6 {
-                Some(SocketAddr::new(TG_DATACENTERS_V4[dc_zero_idx], TG_DATACENTER_PORT))
+            let fallback_addr = if prefer_ipv6 {
+                SocketAddr::new(TG_DATACENTERS_V4[dc_zero_idx], TG_DATACENTER_PORT)
             } else {
-                Some(SocketAddr::new(TG_DATACENTERS_V6[dc_zero_idx], TG_DATACENTER_PORT))
+                SocketAddr::new(TG_DATACENTERS_V6[dc_zero_idx], TG_DATACENTER_PORT)
             };
 
             let count = self.upstreams.read().await.len();
@@ -615,67 +605,53 @@ impl UpstreamManager {
                         u.last_check = std::time::Instant::now();
                     }
                     Ok(Err(_)) | Err(_) => {
-                        // Try fallback (only if fallback address is available)
-                        if let Some(fb_addr) = fallback_addr {
-                            debug!(dc = dc_zero_idx + 1, "Health check failed, trying fallback");
+                        // Try fallback
+                        debug!(dc = dc_zero_idx + 1, "Health check failed, trying fallback");
 
-                            let start2 = Instant::now();
-                            let result2 = tokio::time::timeout(
-                                Duration::from_secs(10),
-                                self.connect_via_upstream(&config, fb_addr)
-                            ).await;
+                        let start2 = Instant::now();
+                        let result2 = tokio::time::timeout(
+                            Duration::from_secs(10),
+                            self.connect_via_upstream(&config, fallback_addr)
+                        ).await;
 
-                            let mut guard = self.upstreams.write().await;
-                            let u = &mut guard[i];
+                        let mut guard = self.upstreams.write().await;
+                        let u = &mut guard[i];
 
-                            match result2 {
-                                Ok(Ok(_stream)) => {
-                                    let rtt_ms = start2.elapsed().as_secs_f64() * 1000.0;
-                                    u.dc_latency[dc_zero_idx].update(rtt_ms);
+                        match result2 {
+                            Ok(Ok(_stream)) => {
+                                let rtt_ms = start2.elapsed().as_secs_f64() * 1000.0;
+                                u.dc_latency[dc_zero_idx].update(rtt_ms);
 
-                                    if !u.healthy {
-                                        info!(
-                                            rtt = format!("{:.0} ms", rtt_ms),
-                                            dc = dc_zero_idx + 1,
-                                            "Upstream recovered (fallback)"
-                                        );
-                                    }
-                                    u.healthy = true;
-                                    u.fails = 0;
+                                if !u.healthy {
+                                    info!(
+                                        rtt = format!("{:.0} ms", rtt_ms),
+                                        dc = dc_zero_idx + 1,
+                                        "Upstream recovered (fallback)"
+                                    );
                                 }
-                                Ok(Err(e)) => {
-                                    u.fails += 1;
-                                    debug!(dc = dc_zero_idx + 1, fails = u.fails,
-                                        "Health check failed (both): {}", e);
-                                    if u.fails > 3 {
-                                        u.healthy = false;
-                                        warn!("Upstream unhealthy (fails)");
-                                    }
-                                }
-                                Err(_) => {
-                                    u.fails += 1;
-                                    debug!(dc = dc_zero_idx + 1, fails = u.fails,
-                                        "Health check timeout (both)");
-                                    if u.fails > 3 {
-                                        u.healthy = false;
-                                        warn!("Upstream unhealthy (timeout)");
-                                    }
+                                u.healthy = true;
+                                u.fails = 0;
+                            }
+                            Ok(Err(e)) => {
+                                u.fails += 1;
+                                debug!(dc = dc_zero_idx + 1, fails = u.fails,
+                                    "Health check failed (both): {}", e);
+                                if u.fails > 3 {
+                                    u.healthy = false;
+                                    warn!("Upstream unhealthy (fails)");
                                 }
                             }
-                            u.last_check = std::time::Instant::now();
-                        } else {
-                            // No fallback available, mark failure directly
-                            let mut guard = self.upstreams.write().await;
-                            let u = &mut guard[i];
-                            u.fails += 1;
-                            debug!(dc = dc_zero_idx + 1, fails = u.fails,
-                                "Health check failed (no fallback)");
-                            if u.fails > 3 {
-                                u.healthy = false;
-                                warn!("Upstream unhealthy (fails)");
+                            Err(_) => {
+                                u.fails += 1;
+                                debug!(dc = dc_zero_idx + 1, fails = u.fails,
+                                    "Health check timeout (both)");
+                                if u.fails > 3 {
+                                    u.healthy = false;
+                                    warn!("Upstream unhealthy (timeout)");
+                                }
                             }
-                            u.last_check = std::time::Instant::now();
                         }
+                        u.last_check = std::time::Instant::now();
                     }
                 }
             }

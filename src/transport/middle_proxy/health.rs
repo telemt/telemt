@@ -10,7 +10,7 @@ use crate::crypto::SecureRandom;
 
 use super::MePool;
 
-pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize, ipv6_available: bool) {
+pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize) {
     let mut backoff: HashMap<i32, u64> = HashMap::new();
     let mut last_attempt: HashMap<i32, Instant> = HashMap::new();
     loop {
@@ -63,10 +63,7 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
             }
         }
 
-        // IPv6 coverage check (skip if IPv6 not available on host)
-        if !ipv6_available {
-            continue;
-        }
+        // IPv6 coverage check (if available)
         let map_v6 = pool.proxy_map_v6.read().await.clone();
         let writer_addrs_v6: std::collections::HashSet<SocketAddr> = pool
             .writers
