@@ -74,6 +74,7 @@ fn parse_cli() -> (String, bool, Option<String>) {
                 eprintln!("Options:");
                 eprintln!("  --silent, -s            Suppress info logs");
                 eprintln!("  --log-level <LEVEL>     debug|verbose|normal|silent");
+                eprintln!("  --version, -V           Print version information");
                 eprintln!("  --help, -h              Show this help");
                 eprintln!();
                 eprintln!("Setup (fire-and-forget):");
@@ -90,6 +91,10 @@ fn parse_cli() -> (String, bool, Option<String>) {
                 eprintln!("    --user <NAME>          Username (default: user)");
                 eprintln!("    --config-dir <DIR>     Config directory (default: /etc/telemt)");
                 eprintln!("    --no-start             Don't start the service after install");
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("telemt {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             s if !s.starts_with('-') => {
