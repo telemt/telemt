@@ -78,6 +78,30 @@ pub(crate) fn default_pool_size() -> usize {
     2
 }
 
+pub(crate) fn default_keepalive_interval() -> u64 {
+    25
+}
+
+pub(crate) fn default_keepalive_jitter() -> u64 {
+    5
+}
+
+pub(crate) fn default_warmup_step_delay_ms() -> u64 {
+    500
+}
+
+pub(crate) fn default_warmup_step_jitter_ms() -> u64 {
+    300
+}
+
+pub(crate) fn default_reconnect_backoff_base_ms() -> u64 {
+    500
+}
+
+pub(crate) fn default_reconnect_backoff_cap_ms() -> u64 {
+    30_000
+}
+
 // Custom deserializer helpers
 
 #[derive(Deserialize)]

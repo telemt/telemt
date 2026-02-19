@@ -8,6 +8,7 @@ use crate::protocol::constants::*;
 pub(crate) enum WriterCommand {
     Data(Vec<u8>),
     DataAndFlush(Vec<u8>),
+    Keepalive,
     Close,
 }
 
@@ -187,5 +188,13 @@ impl RpcWriter {
     pub(crate) async fn send_and_flush(&mut self, payload: &[u8]) -> Result<()> {
         self.send(payload).await?;
         self.writer.flush().await.map_err(ProxyError::Io)
+    }
+
+    pub(crate) async fn send_keepalive(&mut self, payload: [u8; 4]) -> Result<()> {
+        // Keepalive is a frame with fl == 4 and 4 bytes payload.
+        let mut frame = Vec::with_capacity(8);
+        frame.extend_from_slice(&4u32.to_le_bytes());
+        frame.extend_from_slice(&payload);
+        self.send(&frame).await
     }
 }

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 use rand::seq::SliceRandom;
+use rand::Rng;
 
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
@@ -12,13 +13,11 @@ use crate::network::IpFamily;
 use super::MePool;
 
 const HEALTH_INTERVAL_SECS: u64 = 1;
-const QUICK_RETRY_ATTEMPTS: u8 = 10;
-const QUICK_RETRY_DELAY_MS: u64 = 2500;
+const JITTER_FRAC_NUM: u64 = 2; // jitter up to 50% of backoff
 
 pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize) {
     let mut backoff: HashMap<(i32, IpFamily), u64> = HashMap::new();
-    let mut last_attempt: HashMap<(i32, IpFamily), Instant> = HashMap::new();
-    let mut inflight_single: HashSet<(i32, IpFamily)> = HashSet::new();
+    let mut next_attempt: HashMap<(i32, IpFamily), Instant> = HashMap::new();
     loop {
         tokio::time::sleep(Duration::from_secs(HEALTH_INTERVAL_SECS)).await;
         check_family(
@@ -26,8 +25,7 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
             &pool,
             &rng,
             &mut backoff,
-            &mut last_attempt,
-            &mut inflight_single,
+            &mut next_attempt,
         )
         .await;
         check_family(
@@ -35,8 +33,7 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
             &pool,
             &rng,
             &mut backoff,
-            &mut last_attempt,
-            &mut inflight_single,
+            &mut next_attempt,
         )
         .await;
     }
@@ -47,8 +44,7 @@ async fn check_family(
     pool: &Arc<MePool>,
     rng: &Arc<SecureRandom>,
     backoff: &mut HashMap<(i32, IpFamily), u64>,
-    last_attempt: &mut HashMap<(i32, IpFamily), Instant>,
-    inflight_single: &mut HashSet<(i32, IpFamily)>,
+    next_attempt: &mut HashMap<(i32, IpFamily), Instant>,
 ) {
     let enabled = match family {
         IpFamily::V4 => pool.decision.ipv4_me,
@@ -84,120 +80,46 @@ async fn check_family(
     for (dc, dc_addrs) in entries {
         let has_coverage = dc_addrs.iter().any(|a| writer_addrs.contains(a));
         if has_coverage {
-            inflight_single.remove(&(dc, family));
             continue;
         }
 
-        // Aggressive quick-retry burst: up to 10 attempts every 2.5s before falling back to exponential backoff.
         let key = (dc, family);
-        for attempt in 0..QUICK_RETRY_ATTEMPTS {
-            let mut shuffled = dc_addrs.clone();
-            shuffled.shuffle(&mut rand::rng());
-            let mut success = false;
-            for addr in &shuffled {
-                match pool.connect_one(*addr, rng.as_ref()).await {
-                    Ok(()) => {
-                        info!(%addr, dc = %dc, ?family, attempt, "ME reconnected (quick burst)");
-                        backoff.insert(key, HEALTH_INTERVAL_SECS);
-                        last_attempt.insert(key, Instant::now());
-                        inflight_single.remove(&key);
-                        success = true;
-                        break;
-                    }
-                    Err(e) => debug!(%addr, dc = %dc, error = %e, attempt, ?family, "ME reconnect failed (quick)"),
-                }
-            }
-            if success {
-                continue;
-            }
-            tokio::time::sleep(Duration::from_millis(QUICK_RETRY_DELAY_MS)).await;
-        }
-
-        let delay = *backoff.get(&key).unwrap_or(&HEALTH_INTERVAL_SECS);
         let now = Instant::now();
-        if let Some(last) = last_attempt.get(&key) {
-            if now.duration_since(*last).as_secs() < delay {
+        if let Some(ts) = next_attempt.get(&key) {
+            if now < *ts {
                 continue;
             }
-        }
-        if dc_addrs.len() == 1 {
-            // Single ME address: fast retries then slower background retries.
-            if inflight_single.contains(&key) {
-                continue;
-            }
-            inflight_single.insert(key);
-            let addr = dc_addrs[0];
-            let dc_id = dc;
-            let pool_clone = pool.clone();
-            let rng_clone = rng.clone();
-            let timeout = pool.me_one_timeout;
-            let quick_attempts = pool.me_one_retry.max(1);
-            tokio::spawn(async move {
-                let mut success = false;
-                for _ in 0..quick_attempts {
-                    let res = tokio::time::timeout(timeout, pool_clone.connect_one(addr, rng_clone.as_ref())).await;
-                    match res {
-                        Ok(Ok(())) => {
-                            info!(%addr, dc = %dc_id, ?family, "ME reconnected for DC coverage");
-                            success = true;
-                            break;
-                        }
-                        Ok(Err(e)) => debug!(%addr, dc = %dc_id, error = %e, ?family, "ME reconnect failed"),
-                        Err(_) => debug!(%addr, dc = %dc_id, ?family, "ME reconnect timed out"),
-                    }
-                    tokio::time::sleep(Duration::from_millis(1000)).await;
-                }
-                if success {
-                    return;
-                }
-                let timeout_ms = timeout.as_millis();
-                warn!(
-                    dc = %dc_id,
-                    ?family,
-                    attempts = quick_attempts,
-                    timeout_ms,
-                    "DC={} has no ME coverage: {} tries * {} ms... retry in 5 seconds...",
-                    dc_id,
-                    quick_attempts,
-                    timeout_ms
-                );
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let res = tokio::time::timeout(timeout, pool_clone.connect_one(addr, rng_clone.as_ref())).await;
-                    match res {
-                        Ok(Ok(())) => {
-                            info!(%addr, dc = %dc_id, ?family, "ME reconnected for DC coverage");
-                            break;
-                        }
-                        Ok(Err(e)) => debug!(%addr, dc = %dc_id, error = %e, ?family, "ME reconnect failed"),
-                        Err(_) => debug!(%addr, dc = %dc_id, ?family, "ME reconnect timed out"),
-                    }
-                }
-                // will drop inflight flag in outer loop when coverage detected
-            });
-            continue;
         }
 
-        warn!(dc = %dc, delay, ?family, "DC has no ME coverage, reconnecting (backoff)...");
         let mut shuffled = dc_addrs.clone();
         shuffled.shuffle(&mut rand::rng());
-        let mut reconnected = false;
+        let mut success = false;
         for addr in shuffled {
-            match pool.connect_one(addr, rng.as_ref()).await {
-                Ok(()) => {
+            let res = tokio::time::timeout(pool.me_one_timeout, pool.connect_one(addr, rng.as_ref())).await;
+            match res {
+                Ok(Ok(())) => {
                     info!(%addr, dc = %dc, ?family, "ME reconnected for DC coverage");
-                    backoff.insert(key, 30);
-                    last_attempt.insert(key, now);
-                    reconnected = true;
+                    backoff.insert(key, pool.me_reconnect_backoff_base.as_millis() as u64);
+                    let jitter = pool.me_reconnect_backoff_base.as_millis() as u64 / JITTER_FRAC_NUM;
+                    let wait = pool.me_reconnect_backoff_base
+                        + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
+                    next_attempt.insert(key, now + wait);
+                    success = true;
                     break;
                 }
-                Err(e) => debug!(%addr, dc = %dc, error = %e, ?family, "ME reconnect failed"),
+                Ok(Err(e)) => debug!(%addr, dc = %dc, error = %e, ?family, "ME reconnect failed"),
+                Err(_) => debug!(%addr, dc = %dc, ?family, "ME reconnect timed out"),
             }
         }
-        if !reconnected {
-            let next = (*backoff.get(&key).unwrap_or(&HEALTH_INTERVAL_SECS)).saturating_mul(2).min(60);
-            backoff.insert(key, next);
-            last_attempt.insert(key, now);
+        if !success {
+            let curr = *backoff.get(&key).unwrap_or(&(pool.me_reconnect_backoff_base.as_millis() as u64));
+            let next_ms = (curr.saturating_mul(2)).min(pool.me_reconnect_backoff_cap.as_millis() as u64);
+            backoff.insert(key, next_ms);
+            let jitter = next_ms / JITTER_FRAC_NUM;
+            let wait = Duration::from_millis(next_ms)
+                + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
+            next_attempt.insert(key, now + wait);
+            warn!(dc = %dc, backoff_ms = next_ms, ?family, "DC has no ME coverage, scheduled reconnect");
         }
     }
 }

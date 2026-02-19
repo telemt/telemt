@@ -333,6 +333,17 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     cfg_v4.default_dc.or(cfg_v6.default_dc),
                     decision.clone(),
                     rng.clone(),
+                    config.general.me_keepalive_enabled,
+                    config.general.me_keepalive_interval_secs,
+                    config.general.me_keepalive_jitter_secs,
+                    config.general.me_keepalive_payload_random,
+                    config.general.me_warmup_stagger_enabled,
+                    config.general.me_warmup_step_delay_ms,
+                    config.general.me_warmup_step_jitter_ms,
+                    config.general.me_reconnect_max_concurrent_per_dc,
+                    config.general.me_reconnect_backoff_base_ms,
+                    config.general.me_reconnect_backoff_cap_ms,
+                    config.general.me_reconnect_fast_retry_count,
                 );
 
                 let pool_size = config.general.middle_proxy_pool_size.max(1);
