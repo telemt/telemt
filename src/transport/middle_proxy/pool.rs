@@ -420,6 +420,7 @@ impl MePool {
         let (tx, mut rx) = mpsc::channel::<WriterCommand>(4096);
         let tx_for_keepalive = tx.clone();
         let keepalive_random = self.me_keepalive_payload_random;
+        let stats = self.stats.clone();
         let mut rpc_writer = RpcWriter {
             writer: hs.wr,
             key: hs.write_key,

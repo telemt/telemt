@@ -14,10 +14,12 @@ use super::MePool;
 
 const HEALTH_INTERVAL_SECS: u64 = 1;
 const JITTER_FRAC_NUM: u64 = 2; // jitter up to 50% of backoff
+const MAX_CONCURRENT_PER_DC_DEFAULT: usize = 1;
 
 pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize) {
     let mut backoff: HashMap<(i32, IpFamily), u64> = HashMap::new();
     let mut next_attempt: HashMap<(i32, IpFamily), Instant> = HashMap::new();
+    let mut inflight: HashMap<(i32, IpFamily), usize> = HashMap::new();
     loop {
         tokio::time::sleep(Duration::from_secs(HEALTH_INTERVAL_SECS)).await;
         check_family(
@@ -26,6 +28,7 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
             &rng,
             &mut backoff,
             &mut next_attempt,
+            &mut inflight,
         )
         .await;
         check_family(
@@ -34,6 +37,7 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
             &rng,
             &mut backoff,
             &mut next_attempt,
+            &mut inflight,
         )
         .await;
     }
@@ -45,6 +49,7 @@ async fn check_family(
     rng: &Arc<SecureRandom>,
     backoff: &mut HashMap<(i32, IpFamily), u64>,
     next_attempt: &mut HashMap<(i32, IpFamily), Instant>,
+    inflight: &mut HashMap<(i32, IpFamily), usize>,
 ) {
     let enabled = match family {
         IpFamily::V4 => pool.decision.ipv4_me,
@@ -91,6 +96,12 @@ async fn check_family(
             }
         }
 
+        let max_concurrent = pool.me_reconnect_max_concurrent_per_dc.max(1) as usize;
+        if *inflight.get(&key).unwrap_or(&0) >= max_concurrent {
+            return;
+        }
+        *inflight.entry(key).or_insert(0) += 1;
+
         let mut shuffled = dc_addrs.clone();
         shuffled.shuffle(&mut rand::rng());
         let mut success = false;
@@ -125,6 +136,9 @@ async fn check_family(
                 + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
             next_attempt.insert(key, now + wait);
             warn!(dc = %dc, backoff_ms = next_ms, ?family, "DC has no ME coverage, scheduled reconnect");
+        }
+        if let Some(v) = inflight.get_mut(&key) {
+            *v = v.saturating_sub(1);
         }
     }
 }
