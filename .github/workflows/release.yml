@@ -120,9 +120,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           # Commit and push changes
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"
-          git push origin HEAD:main
+          #git add Cargo.toml Cargo.lock
+          #git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"
+          #git push origin HEAD:main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
