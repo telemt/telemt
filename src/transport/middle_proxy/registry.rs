@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use super::codec::RpcWriter;
+use super::codec::WriterCommand;
 use super::MeResponse;
 
 #[derive(Clone)]
@@ -25,12 +25,12 @@ pub struct BoundConn {
 #[derive(Clone)]
 pub struct ConnWriter {
     pub writer_id: u64,
-    pub writer: Arc<Mutex<RpcWriter>>,
+    pub tx: mpsc::Sender<WriterCommand>,
 }
 
 struct RegistryInner {
     map: HashMap<u64, mpsc::Sender<MeResponse>>,
-    writers: HashMap<u64, Arc<Mutex<RpcWriter>>>,
+    writers: HashMap<u64, mpsc::Sender<WriterCommand>>,
     writer_for_conn: HashMap<u64, u64>,
     conns_for_writer: HashMap<u64, HashSet<u64>>,
     meta: HashMap<u64, ConnMeta>,
@@ -96,13 +96,13 @@ impl ConnRegistry {
         &self,
         conn_id: u64,
         writer_id: u64,
-        writer: Arc<Mutex<RpcWriter>>,
+        tx: mpsc::Sender<WriterCommand>,
         meta: ConnMeta,
     ) {
         let mut inner = self.inner.write().await;
         inner.meta.entry(conn_id).or_insert(meta);
         inner.writer_for_conn.insert(conn_id, writer_id);
-        inner.writers.entry(writer_id).or_insert_with(|| writer.clone());
+        inner.writers.entry(writer_id).or_insert_with(|| tx.clone());
         inner
             .conns_for_writer
             .entry(writer_id)
@@ -114,7 +114,7 @@ impl ConnRegistry {
         let inner = self.inner.read().await;
         let writer_id = inner.writer_for_conn.get(&conn_id).cloned()?;
         let writer = inner.writers.get(&writer_id).cloned()?;
-        Some(ConnWriter { writer_id, writer })
+        Some(ConnWriter { writer_id, tx: writer })
     }
 
     pub async fn writer_lost(&self, writer_id: u64) -> Vec<BoundConn> {

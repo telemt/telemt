@@ -25,10 +25,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             artifact_name: telemt
-            asset_name: telemt-x86_64-linux
+            asset_name: telemt-x86_64-linux-gnu
           - target: aarch64-unknown-linux-gnu
             artifact_name: telemt
-            asset_name: telemt-aarch64-linux
+            asset_name: telemt-aarch64-linux-gnu
+          - target: x86_64-unknown-linux-musl
+            artifact_name: telemt
+            asset_name: telemt-x86_64-linux-musl
+          - target: aarch64-unknown-linux-musl
+            artifact_name: telemt
+            asset_name: telemt-aarch64-linux-musl
 
     steps:
       - name: Checkout repository
@@ -56,12 +62,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
       - name: Build Release
-        uses: actions-rs/cargo@ae10961054e4aa8bff448f48a500763b90d5c550 # v1.0.1
-        with:
-          use-cross: true
-          command: build
-          args: --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=+crt-static' || '' }}
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
@@ -85,13 +92,42 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           path: artifacts
 
+      - name: Update version in Cargo.toml and Cargo.lock
+        run: |
+          # Extract version from tag (remove 'v' prefix if present)
+          VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${VERSION#v}"
+          
+          # Install cargo-edit for version bumping
+          cargo install cargo-edit
+          
+          # Update Cargo.toml version
+          cargo set-version "$VERSION"
+          
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Commit and push changes
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"
+          git push origin HEAD:main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create Release
-        uses: softprops/action-gh-release@c95fe1489396fe360a41fb53f90de6ddce8c4c8a # v2.2.1
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           generate_release_notes: true

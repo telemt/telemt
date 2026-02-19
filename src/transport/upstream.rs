@@ -167,20 +167,44 @@ impl UpstreamManager {
     }
 
     /// Select upstream using latency-weighted random selection.
-    async fn select_upstream(&self, dc_idx: Option<i16>) -> Option<usize> {
+    async fn select_upstream(&self, dc_idx: Option<i16>, scope: Option<&str>) -> Option<usize> {
         let upstreams = self.upstreams.read().await;
         if upstreams.is_empty() {
             return None;
         }
-
-        let healthy: Vec<usize> = upstreams.iter()
+        // Scope filter:
+        //   If scope is set: only scoped and matched items
+        //   If scope is not set: only unscoped items
+        let filtered_upstreams : Vec<usize> = upstreams.iter()
             .enumerate()
-            .filter(|(_, u)| u.healthy)
+            .filter(|(_, u)| {
+                scope.map_or(
+                    u.config.scopes.is_empty(),
+                    |req_scope| {
+                        u.config.scopes
+                            .split(',')
+                            .map(str::trim)
+                            .any(|s| s == req_scope)
+                    }
+                )
+            })
             .map(|(i, _)| i)
             .collect();
 
+        // Healthy filter
+        let healthy: Vec<usize> = filtered_upstreams.iter()
+            .filter(|&&i| upstreams[i].healthy)
+            .copied()
+            .collect();
+
+        if filtered_upstreams.is_empty() {
+            warn!(scope = scope, "No upstreams available! Using first (direct?)");
+            return None;
+        }
+
         if healthy.is_empty() {
-            return Some(rand::rng().gen_range(0..upstreams.len()));
+            warn!(scope = scope, "No healthy upstreams available! Using random.");
+            return Some(filtered_upstreams[rand::rng().gen_range(0..filtered_upstreams.len())]);
         }
 
         if healthy.len() == 1 {
@@ -222,14 +246,19 @@ impl UpstreamManager {
     }
 
     /// Connect to target through a selected upstream.
-    pub async fn connect(&self, target: SocketAddr, dc_idx: Option<i16>) -> Result<TcpStream> {
-        let idx = self.select_upstream(dc_idx).await
+    pub async fn connect(&self, target: SocketAddr, dc_idx: Option<i16>, scope: Option<&str>) -> Result<TcpStream> {
+        let idx = self.select_upstream(dc_idx, scope).await
             .ok_or_else(|| ProxyError::Config("No upstreams available".to_string()))?;
 
-        let upstream = {
+        let mut upstream = {
             let guard = self.upstreams.read().await;
             guard[idx].config.clone()
         };
+
+        // Set scope for configuration copy
+        if let Some(s) = scope {
+            upstream.selected_scope = s.to_string();
+        }
 
         let start = Instant::now();
 
@@ -313,8 +342,12 @@ impl UpstreamManager {
                 if let Some(e) = stream.take_error()? {
                     return Err(ProxyError::Io(e));
                 }
+                // replace socks user_id with config.selected_scope, if set
+                let scope: Option<&str> = Some(config.selected_scope.as_str())
+                    .filter(|s| !s.is_empty());
+                let _user_id: Option<&str> = scope.or(user_id.as_deref());
 
-                connect_socks4(&mut stream, target, user_id.as_deref()).await?;
+                connect_socks4(&mut stream, target, _user_id).await?;
                 Ok(stream)
             },
             UpstreamType::Socks5 { address, interface, username, password } => {
@@ -341,7 +374,14 @@ impl UpstreamManager {
                     return Err(ProxyError::Io(e));
                 }
 
-                connect_socks5(&mut stream, target, username.as_deref(), password.as_deref()).await?;
+                debug!(config = ?config, "Socks5 connection");
+                // replace socks user:pass with config.selected_scope, if set
+                let scope: Option<&str> = Some(config.selected_scope.as_str())
+                    .filter(|s| !s.is_empty());
+                let _username: Option<&str> = scope.or(username.as_deref());
+                let _password: Option<&str> = scope.or(password.as_deref());
+
+                connect_socks5(&mut stream, target, _username, _password).await?;
                 Ok(stream)
             },
         }

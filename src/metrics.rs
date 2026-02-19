@@ -91,6 +91,22 @@ fn render_metrics(stats: &Stats) -> String {
     let _ = writeln!(out, "# TYPE telemt_handshake_timeouts_total counter");
     let _ = writeln!(out, "telemt_handshake_timeouts_total {}", stats.get_handshake_timeouts());
 
+    let _ = writeln!(out, "# HELP telemt_me_keepalive_sent_total ME keepalive frames sent");
+    let _ = writeln!(out, "# TYPE telemt_me_keepalive_sent_total counter");
+    let _ = writeln!(out, "telemt_me_keepalive_sent_total {}", stats.get_me_keepalive_sent());
+
+    let _ = writeln!(out, "# HELP telemt_me_keepalive_failed_total ME keepalive send failures");
+    let _ = writeln!(out, "# TYPE telemt_me_keepalive_failed_total counter");
+    let _ = writeln!(out, "telemt_me_keepalive_failed_total {}", stats.get_me_keepalive_failed());
+
+    let _ = writeln!(out, "# HELP telemt_me_reconnect_attempts_total ME reconnect attempts");
+    let _ = writeln!(out, "# TYPE telemt_me_reconnect_attempts_total counter");
+    let _ = writeln!(out, "telemt_me_reconnect_attempts_total {}", stats.get_me_reconnect_attempts());
+
+    let _ = writeln!(out, "# HELP telemt_me_reconnect_success_total ME reconnect successes");
+    let _ = writeln!(out, "# TYPE telemt_me_reconnect_success_total counter");
+    let _ = writeln!(out, "telemt_me_reconnect_success_total {}", stats.get_me_reconnect_success());
+
     let _ = writeln!(out, "# HELP telemt_user_connections_total Per-user total connections");
     let _ = writeln!(out, "# TYPE telemt_user_connections_total counter");
     let _ = writeln!(out, "# HELP telemt_user_connections_current Per-user active connections");

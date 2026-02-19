@@ -13,6 +13,24 @@ use super::secret::download_proxy_secret;
 use crate::crypto::SecureRandom;
 use std::time::SystemTime;
 
+async fn retry_fetch(url: &str) -> Option<ProxyConfigData> {
+    let delays = [1u64, 5, 15];
+    for (i, d) in delays.iter().enumerate() {
+        match fetch_proxy_config(url).await {
+            Ok(cfg) => return Some(cfg),
+            Err(e) => {
+                if i == delays.len() - 1 {
+                    warn!(error = %e, url, "fetch_proxy_config failed");
+                } else {
+                    debug!(error = %e, url, "fetch_proxy_config retrying");
+                    tokio::time::sleep(Duration::from_secs(*d)).await;
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProxyConfigData {
     pub map: HashMap<i32, Vec<(IpAddr, u16)>>,
@@ -118,7 +136,8 @@ pub async fn me_config_updater(pool: Arc<MePool>, rng: Arc<SecureRandom>, interv
         tick.tick().await;
 
         // Update proxy config v4
-        if let Ok(cfg) = fetch_proxy_config("https://core.telegram.org/getProxyConfig").await {
+        let cfg_v4 = retry_fetch("https://core.telegram.org/getProxyConfig").await;
+        if let Some(cfg) = cfg_v4 {
             let changed = pool.update_proxy_maps(cfg.map.clone(), None).await;
             if let Some(dc) = cfg.default_dc {
                 pool.default_dc.store(dc, std::sync::atomic::Ordering::Relaxed);
@@ -129,14 +148,20 @@ pub async fn me_config_updater(pool: Arc<MePool>, rng: Arc<SecureRandom>, interv
             } else {
                 debug!("ME config v4 unchanged");
             }
-        } else {
-            warn!("getProxyConfig update failed");
         }
 
         // Update proxy config v6 (optional)
-        if let Ok(cfg_v6) = fetch_proxy_config("https://core.telegram.org/getProxyConfigV6").await {
-            let _ = pool.update_proxy_maps(HashMap::new(), Some(cfg_v6.map)).await;
+        let cfg_v6 = retry_fetch("https://core.telegram.org/getProxyConfigV6").await;
+        if let Some(cfg_v6) = cfg_v6 {
+            let changed = pool.update_proxy_maps(HashMap::new(), Some(cfg_v6.map)).await;
+            if changed {
+                info!("ME config updated (v6), reconciling connections");
+                pool.reconcile_connections(&rng).await;
+            } else {
+                debug!("ME config v6 unchanged");
+            }
         }
+        pool.reset_stun_state();
 
         // Update proxy-secret
         match download_proxy_secret().await {

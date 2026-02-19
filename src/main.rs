@@ -92,6 +92,10 @@ fn parse_cli() -> (String, bool, Option<String>) {
                 eprintln!("    --no-start             Don't start the service after install");
                 std::process::exit(0);
             }
+            "--version" | "-V" => {
+                println!("telemt {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             s if !s.starts_with('-') => {
                 config_path = s.to_string();
             }
@@ -106,18 +110,20 @@ fn parse_cli() -> (String, bool, Option<String>) {
 }
 
 fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
-    info!("--- Proxy Links ({}) ---", host);
+    info!(target: "telemt::links", "--- Proxy Links ({}) ---", host);
     for user_name in config.general.links.show.resolve_users(&config.access.users) {
         if let Some(secret) = config.access.users.get(user_name) {
-            info!("User: {}", user_name);
+            info!(target: "telemt::links", "User: {}", user_name);
             if config.general.modes.classic {
                 info!(
+                    target: "telemt::links",
                     "  Classic: tg://proxy?server={}&port={}&secret={}",
                     host, port, secret
                 );
             }
             if config.general.modes.secure {
                 info!(
+                    target: "telemt::links",
                     "  DD:      tg://proxy?server={}&port={}&secret=dd{}",
                     host, port, secret
                 );
@@ -125,15 +131,16 @@ fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
             if config.general.modes.tls {
                 let domain_hex = hex::encode(&config.censorship.tls_domain);
                 info!(
+                    target: "telemt::links",
                     "  EE-TLS:  tg://proxy?server={}&port={}&secret=ee{}{}",
                     host, port, secret, domain_hex
                 );
             }
         } else {
-            warn!("User '{}' in show_link not found", user_name);
+            warn!(target: "telemt::links", "User '{}' in show_link not found", user_name);
         }
     }
-    info!("------------------------");
+    info!(target: "telemt::links", "------------------------");
 }
 
 #[tokio::main]
@@ -317,6 +324,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     config.general.middle_proxy_nat_ip,
                     config.general.middle_proxy_nat_probe,
                     config.general.middle_proxy_nat_stun.clone(),
+                    config.general.middle_proxy_nat_stun_servers.clone(),
                     probe.detected_ipv6,
                     config.timeouts.me_one_retry,
                     config.timeouts.me_one_timeout_ms,
@@ -325,18 +333,32 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     cfg_v4.default_dc.or(cfg_v6.default_dc),
                     decision.clone(),
                     rng.clone(),
+                    stats.clone(),
+                    config.general.me_keepalive_enabled,
+                    config.general.me_keepalive_interval_secs,
+                    config.general.me_keepalive_jitter_secs,
+                    config.general.me_keepalive_payload_random,
+                    config.general.me_warmup_stagger_enabled,
+                    config.general.me_warmup_step_delay_ms,
+                    config.general.me_warmup_step_jitter_ms,
+                    config.general.me_reconnect_max_concurrent_per_dc,
+                    config.general.me_reconnect_backoff_base_ms,
+                    config.general.me_reconnect_backoff_cap_ms,
+                    config.general.me_reconnect_fast_retry_count,
                 );
 
-                match pool.init(2, &rng).await {
+                let pool_size = config.general.middle_proxy_pool_size.max(1);
+                match pool.init(pool_size, &rng).await {
                     Ok(()) => {
                         info!("Middle-End pool initialized successfully");
 
                         // Phase 4: Start health monitor
                         let pool_clone = pool.clone();
                         let rng_clone = rng.clone();
+                        let min_conns = pool_size;
                         tokio::spawn(async move {
                             crate::transport::middle_proxy::me_health_monitor(
-                                pool_clone, rng_clone, 2,
+                                pool_clone, rng_clone, min_conns,
                             )
                             .await;
                         });
@@ -740,6 +762,8 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
     // Switch to user-configured log level after startup
     let runtime_filter = if has_rust_log {
         EnvFilter::from_default_env()
+    } else if matches!(effective_log_level, LogLevel::Silent) {
+        EnvFilter::new("warn,telemt::links=info")
     } else {
         EnvFilter::new(effective_log_level.to_filter_str())
     };

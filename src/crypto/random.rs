@@ -11,6 +11,9 @@ pub struct SecureRandom {
     inner: Mutex<SecureRandomInner>,
 }
 
+unsafe impl Send for SecureRandom {}
+unsafe impl Sync for SecureRandom {}
+
 struct SecureRandomInner {
     rng: StdRng,
     cipher: AesCtr,

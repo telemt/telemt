@@ -31,8 +31,17 @@ pub async fn me_rotation_task(pool: Arc<MePool>, rng: Arc<SecureRandom>, interva
         info!(addr = %w.addr, writer_id = w.id, "Rotating ME connection");
         match pool.connect_one(w.addr, rng.as_ref()).await {
             Ok(()) => {
-                // Mark old writer for graceful drain; removal happens when sessions finish.
-                pool.mark_writer_draining(w.id).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let ws = pool.writers.read().await;
+                let new_alive = ws.iter().any(|nw|
+                    nw.id != w.id && nw.addr == w.addr && !nw.degraded.load(Ordering::Relaxed) && !nw.draining.load(Ordering::Relaxed)
+                );
+                drop(ws);
+                if new_alive {
+                    pool.mark_writer_draining(w.id).await;
+                } else {
+                    warn!(addr = %w.addr, writer_id = w.id, "New writer died, keeping old");
+                }
             }
             Err(e) => {
                 warn!(addr = %w.addr, writer_id = w.id, error = %e, "ME rotation connect failed");

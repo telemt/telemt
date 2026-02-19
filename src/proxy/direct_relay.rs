@@ -45,7 +45,7 @@ where
     );
 
     let tg_stream = upstream_manager
-        .connect(dc_addr, Some(success.dc_idx))
+        .connect(dc_addr, Some(success.dc_idx), user.strip_prefix("scope_").filter(|s| !s.is_empty()))
         .await?;
 
     debug!(peer = %success.peer, dc_addr = %dc_addr, "Connected, performing TG handshake");

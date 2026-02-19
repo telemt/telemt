@@ -143,6 +143,62 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub middle_proxy_nat_stun: Option<String>,
 
+    /// Optional list of STUN servers for NAT probing fallback.
+    #[serde(default)]
+    pub middle_proxy_nat_stun_servers: Vec<String>,
+
+    /// Desired size of active Middle-Proxy writer pool.
+    #[serde(default = "default_pool_size")]
+    pub middle_proxy_pool_size: usize,
+
+    /// Number of warm standby ME connections kept pre-initialized.
+    #[serde(default)]
+    pub middle_proxy_warm_standby: usize,
+
+    /// Enable ME keepalive padding frames.
+    #[serde(default = "default_true")]
+    pub me_keepalive_enabled: bool,
+
+    /// Keepalive interval in seconds.
+    #[serde(default = "default_keepalive_interval")]
+    pub me_keepalive_interval_secs: u64,
+
+    /// Keepalive jitter in seconds.
+    #[serde(default = "default_keepalive_jitter")]
+    pub me_keepalive_jitter_secs: u64,
+
+    /// Keepalive payload randomized (4 bytes); otherwise zeros.
+    #[serde(default = "default_true")]
+    pub me_keepalive_payload_random: bool,
+
+    /// Enable staggered warmup of extra ME writers.
+    #[serde(default = "default_true")]
+    pub me_warmup_stagger_enabled: bool,
+
+    /// Base delay between warmup connections in ms.
+    #[serde(default = "default_warmup_step_delay_ms")]
+    pub me_warmup_step_delay_ms: u64,
+
+    /// Jitter for warmup delay in ms.
+    #[serde(default = "default_warmup_step_jitter_ms")]
+    pub me_warmup_step_jitter_ms: u64,
+
+    /// Max concurrent reconnect attempts per DC.
+    #[serde(default)]
+    pub me_reconnect_max_concurrent_per_dc: u32,
+
+    /// Base backoff in ms for reconnect.
+    #[serde(default = "default_reconnect_backoff_base_ms")]
+    pub me_reconnect_backoff_base_ms: u64,
+
+    /// Cap backoff in ms for reconnect.
+    #[serde(default = "default_reconnect_backoff_cap_ms")]
+    pub me_reconnect_backoff_cap_ms: u64,
+
+    /// Fast retry attempts before backoff.
+    #[serde(default)]
+    pub me_reconnect_fast_retry_count: u32,
+
     /// Ignore STUN/interface IP mismatch (keep using Middle Proxy even if NAT detected).
     #[serde(default)]
     pub stun_iface_mismatch_ignore: bool,
@@ -175,6 +231,20 @@ impl Default for GeneralConfig {
             middle_proxy_nat_ip: None,
             middle_proxy_nat_probe: false,
             middle_proxy_nat_stun: None,
+            middle_proxy_nat_stun_servers: Vec::new(),
+            middle_proxy_pool_size: default_pool_size(),
+            middle_proxy_warm_standby: 0,
+            me_keepalive_enabled: true,
+            me_keepalive_interval_secs: default_keepalive_interval(),
+            me_keepalive_jitter_secs: default_keepalive_jitter(),
+            me_keepalive_payload_random: true,
+            me_warmup_stagger_enabled: true,
+            me_warmup_step_delay_ms: default_warmup_step_delay_ms(),
+            me_warmup_step_jitter_ms: default_warmup_step_jitter_ms(),
+            me_reconnect_max_concurrent_per_dc: 1,
+            me_reconnect_backoff_base_ms: default_reconnect_backoff_base_ms(),
+            me_reconnect_backoff_cap_ms: default_reconnect_backoff_cap_ms(),
+            me_reconnect_fast_retry_count: 1,
             stun_iface_mismatch_ignore: false,
             unknown_dc_log_path: default_unknown_dc_log_path(),
             log_level: LogLevel::Normal,
@@ -403,6 +473,10 @@ pub struct UpstreamConfig {
     pub weight: u16,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub scopes: String,
+    #[serde(skip)]
+    pub selected_scope: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

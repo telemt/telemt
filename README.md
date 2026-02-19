@@ -10,74 +10,40 @@
 
 ### 🇷🇺 RU
 
-15 февраля мы опубликовали `telemt 3` с поддержкой Middle-End Proxy, а значит:
+18 февраля мы опубликовали `telemt 3.0.3`, он имеет:
 
-- с функциональными медиа, в том числе с CDN/DC=203  
-- с Ad-tag — показывайте спонсорский канал и собирайте статистику через официального бота  
-- с новым подходом к безопасности и асинхронности  
-- с высокоточной диагностикой криптографии через `ME_DIAG`  
+- улучшенный механизм Middle-End Health Check
+- высокоскоростное восстановление инициализации Middle-End
+- меньше задержек на hot-path
+- более корректную работу в Dualstack, а именно - IPv6 Middle-End
+- аккуратное переподключение клиента без дрифта сессий между Middle-End
+- автоматическая деградация на Direct-DC при массовой (>2 ME-DC-групп) недоступности Middle-End
+- автодетект IP за NAT, при возможности - будет выполнен хендшейк с ME, при неудаче - автодеградация
+- единственный известный специальный DC=203 уже добавлен в код: медиа загружаются с CDN в Direct-DC режиме
 
-Для использования нужно:
+[Здесь вы можете найти релиз](https://github.com/telemt/telemt/releases/tag/3.0.3)
 
-1. Версия `telemt` ≥3.0.0
-2. Выполнение любого из наборов условий:
-   - публичный IP для исходящих соединений установлен на интерфейса инстанса с `telemt`
-     - ЛИБО
-   - вы используете NAT 1:1 + включили STUN-пробинг
-3. В конфиге, в секции `[general]` указать:
-```toml
-use_middle_proxy = true
-```
-
-Если условия из пункта 1 не выполняются:
-1. Выключите ME-режим:
-   - установите `use_middle_proxy = false`
-     - ЛИБО
-   - Middle-End Proxy будет выключен автоматически по таймауту, но это займёт больше времени при запуске
-2. В конфиге, добавьте в конец:
-```toml
-[dc_overrides]
-"203" = "91.105.192.100:443"
-```
-
-Если у вас есть компетенции в асинхронных сетевых приложениях, анализе трафика, реверс-инжиниринге или сетевых расследованиях — мы открыты к идеям и pull requests.
+Если у вас есть компетенции в асинхронных сетевых приложениях, анализе трафика, реверс-инжиниринге или сетевых расследованиях - мы открыты к идеям и pull requests!
 
 </td>
 <td width="50%" valign="top">
 
 ### 🇬🇧 EN
 
-On February 15, we released `telemt 3` with support for Middle-End Proxy, which means:
+On February 18, we released `telemt 3.0.3`. This version introduces:
 
-- functional media, including CDN/DC=203  
-- Ad-tag support – promote a sponsored channel and collect statistics via Telegram bot  
-- new approach to security and asynchronicity  
-- high-precision cryptography diagnostics via `ME_DIAG`  
+- improved Middle-End Health Check method  
+- high-speed recovery of Middle-End init
+- reduced latency on the hot path  
+- correct Dualstack support: proper handling of IPv6 Middle-End  
+- *clean* client reconnection without session "drift" between Middle-End
+- automatic degradation to Direct-DC mode in case of large-scale (>2 ME-DC groups) Middle-End unavailability  
+- automatic public IP detection behind NAT; first - Middle-End handshake is performed, otherwise automatic degradation is applied  
+- known special DC=203 is now handled natively: media is delivered from the CDN via Direct-DC mode  
 
-To use this feature, the following requirements must be met:
-1. `telemt` version ≥ 3.0.0
-2. One of the following conditions satisfied:
-   - the instance running `telemt` has a public IP address assigned to its network interface for outbound connections  
-     - OR
-   - you are using 1:1 NAT and have STUN probing enabled  
-3. In the config file, under the `[general]` section, specify:
-```toml
-use_middle_proxy = true
-````
+[Release is available here](https://github.com/telemt/telemt/releases/tag/3.0.3)
 
-If the conditions from step 1 are not satisfied:
-1. Disable Middle-End mode:
-   - set `use_middle_proxy = false`
-     - OR
-   - Middle-End Proxy will be disabled automatically after a timeout, but this will increase startup time
-
-2. In the config file, add the following at the end:
-```toml
-[dc_overrides]
-"203" = "91.105.192.100:443"
-```
-
-If you have expertise in asynchronous network applications, traffic analysis, reverse engineering, or network forensics — we welcome ideas, suggestions, and pull requests.
+If you have expertise in asynchronous network applications, traffic analysis, reverse engineering, or network forensics - we welcome ideas and pull requests!
 
 </td>
 </tr>
@@ -86,7 +52,9 @@ If you have expertise in asynchronous network applications, traffic analysis, re
 # Features
 💥 The configuration structure has changed since version 1.1.0.0. change it in your environment!
 
-⚓ Our implementation of **TLS-fronting** is one of the most deeply debugged, focused, advanced and *almost* **"behaviorally consistent to real"**:  we are confident we have it right - [see evidence on our validation and traces](#recognizability-for-dpi-and-crawler) 
+⚓ Our implementation of **TLS-fronting** is one of the most deeply debugged, focused, advanced and *almost* **"behaviorally consistent to real"**:  we are confident we have it right - [see evidence on our validation and traces](#recognizability-for-dpi-and-crawler)
+
+⚓ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared to other implementations of connecting to the Middle-End Proxy: non dramatically, but usual
 
 # GOTO
 - [Features](#features)
@@ -215,6 +183,7 @@ prefer_ipv6 = false
 fast_mode = true
 use_middle_proxy = false
 # ad_tag = "..."
+# disable_colors = false  # Disable colored output in logs (useful for files/systemd)
 
 [network]
 ipv4 = true
@@ -247,7 +216,9 @@ ip = "::"
 
 # Users to show in the startup log (tg:// links)
 [general.links]
-show = ["hello"] # Users to show in the startup log (tg:// links)
+show = ["hello"]          # Only show links for user "hello"
+# show = ["alice", "bob"] # Only show links for alice and bob
+# show = "*"              # Show links for all users
 # public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
 # public_port = 443                  # Port for tg:// links (default: server.port)
 

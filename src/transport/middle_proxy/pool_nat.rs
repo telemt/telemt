@@ -98,16 +98,18 @@ impl MePool {
         family: IpFamily,
     ) -> Option<std::net::SocketAddr> {
         const STUN_CACHE_TTL: Duration = Duration::from_secs(600);
-        // If STUN probing was disabled after attempts, reuse cached (even stale) or skip.
-        if self.nat_probe_disabled.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Ok(cache) = self.nat_reflection_cache.try_lock() {
-                let slot = match family {
-                    IpFamily::V4 => cache.v4,
-                    IpFamily::V6 => cache.v6,
-                };
-                return slot.map(|(_, addr)| addr);
+        // Backoff window
+        if let Some(until) = *self.stun_backoff_until.read().await {
+            if Instant::now() < until {
+                if let Ok(cache) = self.nat_reflection_cache.try_lock() {
+                    let slot = match family {
+                        IpFamily::V4 => cache.v4,
+                        IpFamily::V6 => cache.v6,
+                    };
+                    return slot.map(|(_, addr)| addr);
+                }
+                return None;
             }
-            return None;
         }
 
         if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
@@ -123,48 +125,42 @@ impl MePool {
         }
 
         let attempt = self.nat_probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if attempt >= 2 {
-            self.nat_probe_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
-            return None;
-        }
+        let servers = if !self.nat_stun_servers.is_empty() {
+            self.nat_stun_servers.clone()
+        } else if let Some(s) = &self.nat_stun {
+            vec![s.clone()]
+        } else {
+            vec!["stun.l.google.com:19302".to_string()]
+        };
 
-        let stun_addr = self
-            .nat_stun
-            .clone()
-            .unwrap_or_else(|| "stun.l.google.com:19302".to_string());
-        match stun_probe_dual(&stun_addr).await {
-            Ok(res) => {
-                let picked: Option<StunProbeResult> = match family {
-                    IpFamily::V4 => res.v4,
-                    IpFamily::V6 => res.v6,
-                };
-                if let Some(result) = picked {
-                    info!(local = %result.local_addr, reflected = %result.reflected_addr, family = ?family, "NAT probe: reflected address");
-                    if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
-                        let slot = match family {
-                            IpFamily::V4 => &mut cache.v4,
-                            IpFamily::V6 => &mut cache.v6,
-                        };
-                        *slot = Some((Instant::now(), result.reflected_addr));
+        for stun_addr in servers {
+            match stun_probe_dual(&stun_addr).await {
+                Ok(res) => {
+                    let picked: Option<StunProbeResult> = match family {
+                        IpFamily::V4 => res.v4,
+                        IpFamily::V6 => res.v6,
+                    };
+                    if let Some(result) = picked {
+                        info!(local = %result.local_addr, reflected = %result.reflected_addr, family = ?family, stun = %stun_addr, "NAT probe: reflected address");
+                        self.nat_probe_attempts.store(0, std::sync::atomic::Ordering::Relaxed);
+                        if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
+                            let slot = match family {
+                                IpFamily::V4 => &mut cache.v4,
+                                IpFamily::V6 => &mut cache.v6,
+                            };
+                            *slot = Some((Instant::now(), result.reflected_addr));
+                        }
+                        return Some(result.reflected_addr);
                     }
-                    Some(result.reflected_addr)
-                } else {
-                    None
                 }
-            }
-            Err(e) => {
-                let attempts = attempt + 1;
-                if attempts <= 2 {
-                    warn!(error = %e, attempt = attempts, "NAT probe failed");
-                } else {
-                    debug!(error = %e, attempt = attempts, "NAT probe suppressed after max attempts");
+                Err(e) => {
+                    warn!(error = %e, stun = %stun_addr, attempt = attempt + 1, "NAT probe failed, trying next server");
                 }
-                if attempts >= 2 {
-                    self.nat_probe_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                None
             }
         }
+        let backoff = Duration::from_secs(60 * 2u64.pow((attempt as u32).min(6)));
+        *self.stun_backoff_until.write().await = Some(Instant::now() + backoff);
+        None
     }
 }
 

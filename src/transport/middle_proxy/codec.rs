@@ -4,6 +4,14 @@ use crate::crypto::{AesCbc, crc32};
 use crate::error::{ProxyError, Result};
 use crate::protocol::constants::*;
 
+/// Commands sent to dedicated writer tasks to avoid mutex contention on TCP writes.
+pub(crate) enum WriterCommand {
+    Data(Vec<u8>),
+    DataAndFlush(Vec<u8>),
+    Keepalive,
+    Close,
+}
+
 pub(crate) fn build_rpc_frame(seq_no: i32, payload: &[u8]) -> Vec<u8> {
     let total_len = (4 + 4 + payload.len() + 4) as u32;
     let mut frame = Vec::with_capacity(total_len as usize);
@@ -180,5 +188,13 @@ impl RpcWriter {
     pub(crate) async fn send_and_flush(&mut self, payload: &[u8]) -> Result<()> {
         self.send(payload).await?;
         self.writer.flush().await.map_err(ProxyError::Io)
+    }
+
+    pub(crate) async fn send_keepalive(&mut self, payload: [u8; 4]) -> Result<()> {
+        // Keepalive is a frame with fl == 4 and 4 bytes payload.
+        let mut frame = Vec::with_capacity(8);
+        frame.extend_from_slice(&4u32.to_le_bytes());
+        frame.extend_from_slice(&payload);
+        self.send(&frame).await
     }
 }

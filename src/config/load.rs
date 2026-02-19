@@ -11,6 +11,32 @@ use crate::error::{ProxyError, Result};
 use super::defaults::*;
 use super::types::*;
 
+fn preprocess_includes(content: &str, base_dir: &Path, depth: u8) -> Result<String> {
+    if depth > 10 {
+        return Err(ProxyError::Config("Include depth > 10".into()));
+    }
+    let mut output = String::with_capacity(content.len());
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("include") {
+            let rest = rest.trim();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let path_str = rest.trim().trim_matches('"');
+                let resolved = base_dir.join(path_str);
+                let included = std::fs::read_to_string(&resolved)
+                    .map_err(|e| ProxyError::Config(e.to_string()))?;
+                let included_dir = resolved.parent().unwrap_or(base_dir);
+                output.push_str(&preprocess_includes(&included, included_dir, depth + 1)?);
+                output.push('\n');
+                continue;
+            }
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
 fn validate_network_cfg(net: &mut NetworkConfig) -> Result<()> {
     if !net.ipv4 && matches!(net.ipv6, Some(false)) {
         return Err(ProxyError::Config(
@@ -84,10 +110,12 @@ pub struct ProxyConfig {
 impl ProxyConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content =
-            std::fs::read_to_string(path).map_err(|e| ProxyError::Config(e.to_string()))?;
+            std::fs::read_to_string(&path).map_err(|e| ProxyError::Config(e.to_string()))?;
+        let base_dir = path.as_ref().parent().unwrap_or(Path::new("."));
+        let processed = preprocess_includes(&content, base_dir, 0)?;
 
         let mut config: ProxyConfig =
-            toml::from_str(&content).map_err(|e| ProxyError::Config(e.to_string()))?;
+            toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
 
         // Validate secrets.
         for (user, secret) in &config.access.users {
@@ -151,8 +179,10 @@ impl ProxyConfig {
 
         validate_network_cfg(&mut config.network)?;
 
-        // Random fake_cert_len.
-        config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
+        // Random fake_cert_len only when default is in use.
+        if config.censorship.fake_cert_len == default_fake_cert_len() {
+            config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
+        }
 
         // Resolve listen_tcp: explicit value wins, otherwise auto-detect.
         // If unix socket is set → TCP only when listen_addr_ipv4 or listeners are explicitly provided.
@@ -208,6 +238,8 @@ impl ProxyConfig {
                 upstream_type: UpstreamType::Direct { interface: None },
                 weight: 1,
                 enabled: true,
+                scopes: String::new(),
+                selected_scope: String::new(),
             });
         }
 
