@@ -1,18 +1,19 @@
 use std::convert::Infallible;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use http_body_util::Full;
+use http_body_util::{Full, BodyExt};
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
+use ipnetwork::IpNetwork;
 use tokio::net::TcpListener;
 use tracing::{info, warn, debug};
 
 use crate::stats::Stats;
 
-pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpAddr>) {
+pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpNetwork>) {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -32,7 +33,7 @@ pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpAddr>) {
             }
         };
 
-        if !whitelist.is_empty() && !whitelist.contains(&peer.ip()) {
+        if !whitelist.is_empty() && !whitelist.iter().any(|net| net.contains(peer.ip())) {
             debug!(peer = %peer, "Metrics request denied by whitelist");
             continue;
         }
@@ -53,7 +54,7 @@ pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpAddr>) {
     }
 }
 
-fn handle(req: Request<hyper::body::Incoming>, stats: &Stats) -> Result<Response<Full<Bytes>>, Infallible> {
+fn handle<B>(req: Request<B>, stats: &Stats) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.uri().path() != "/metrics" {
         let resp = Response::builder()
             .status(StatusCode::NOT_FOUND)
@@ -193,21 +194,20 @@ mod tests {
         stats.increment_connects_all();
         stats.increment_connects_all();
 
-        let port = 19091u16;
-        let s = stats.clone();
-        tokio::spawn(async move {
-            serve(port, s, vec![]).await;
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let req = Request::builder()
+            .uri("/metrics")
+            .body(())
+            .unwrap();
+        let resp = handle(req, &stats).unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(std::str::from_utf8(body.as_ref()).unwrap().contains("telemt_connections_total 3"));
 
-        let resp = reqwest::get(format!("http://127.0.0.1:{}/metrics", port))
-            .await.unwrap();
-        assert_eq!(resp.status(), 200);
-        let body = resp.text().await.unwrap();
-        assert!(body.contains("telemt_connections_total 3"));
-
-        let resp404 = reqwest::get(format!("http://127.0.0.1:{}/other", port))
-            .await.unwrap();
-        assert_eq!(resp404.status(), 404);
+        let req404 = Request::builder()
+            .uri("/other")
+            .body(())
+            .unwrap();
+        let resp404 = handle(req404, &stats).unwrap();
+        assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
     }
 }

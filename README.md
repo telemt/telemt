@@ -250,7 +250,12 @@ listen_addr_ipv6 = "::"
 # listen_unix_sock = "/var/run/telemt.sock" # Unix socket
 # listen_unix_sock_perm = "0666" # Socket file permissions
 # metrics_port = 9090
-# metrics_whitelist = ["127.0.0.1", "::1"]
+# metrics_whitelist = [
+#    "192.168.0.0/24",
+#    "172.16.0.0/12",
+#    "127.0.0.1/32",
+#    "::1/128"
+#]
 
 # Listen on multiple interfaces/IPs - IPv4
 [[server.listeners]]

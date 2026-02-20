@@ -31,6 +31,7 @@ use crate::stats::{ReplayChecker, Stats};
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::middle_proxy::MePool;
 use crate::transport::{UpstreamManager, configure_client_socket, parse_proxy_protocol};
+use crate::transport::socket::normalize_ip;
 use crate::tls_front::TlsFrontCache;
 
 use crate::proxy::direct_relay::handle_via_direct;
@@ -50,14 +51,15 @@ pub async fn handle_client_stream<S>(
     me_pool: Option<Arc<MePool>>,
     tls_cache: Option<Arc<TlsFrontCache>>,
     ip_tracker: Arc<UserIpTracker>,
+    proxy_protocol_enabled: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     stats.increment_connects_all();
-    let mut real_peer = peer;
+    let mut real_peer = normalize_ip(peer);
 
-    if config.server.proxy_protocol {
+    if proxy_protocol_enabled {
         match parse_proxy_protocol(&mut stream, peer).await {
             Ok(info) => {
                 debug!(
@@ -66,7 +68,7 @@ where
                     version = info.version,
                     "PROXY protocol header parsed"
                 );
-                real_peer = info.src_addr;
+                real_peer = normalize_ip(info.src_addr);
             }
             Err(e) => {
                 stats.increment_connects_bad();
@@ -228,6 +230,7 @@ pub struct RunningClientHandler {
     me_pool: Option<Arc<MePool>>,
     tls_cache: Option<Arc<TlsFrontCache>>,
     ip_tracker: Arc<UserIpTracker>,
+    proxy_protocol_enabled: bool,
 }
 
 impl ClientHandler {
@@ -243,6 +246,7 @@ impl ClientHandler {
         me_pool: Option<Arc<MePool>>,
         tls_cache: Option<Arc<TlsFrontCache>>,
         ip_tracker: Arc<UserIpTracker>,
+        proxy_protocol_enabled: bool,
     ) -> RunningClientHandler {
         RunningClientHandler {
             stream,
@@ -256,6 +260,7 @@ impl ClientHandler {
             me_pool,
             tls_cache,
             ip_tracker,
+            proxy_protocol_enabled,
         }
     }
 }
@@ -264,6 +269,7 @@ impl RunningClientHandler {
     pub async fn run(mut self) -> Result<()> {
         self.stats.increment_connects_all();
 
+        self.peer = normalize_ip(self.peer);
         let peer = self.peer;
         let ip_tracker = self.ip_tracker.clone();
         debug!(peer = %peer, "New connection");
@@ -301,7 +307,7 @@ impl RunningClientHandler {
     }
 
     async fn do_handshake(mut self) -> Result<HandshakeOutcome> {
-        if self.config.server.proxy_protocol {
+        if self.proxy_protocol_enabled {
             match parse_proxy_protocol(&mut self.stream, self.peer).await {
                 Ok(info) => {
                     debug!(
@@ -310,7 +316,7 @@ impl RunningClientHandler {
                         version = info.version,
                         "PROXY protocol header parsed"
                     );
-                    self.peer = info.src_addr;
+                    self.peer = normalize_ip(info.src_addr);
                 }
                 Err(e) => {
                     self.stats.increment_connects_bad();

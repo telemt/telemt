@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -304,7 +305,7 @@ pub struct ServerConfig {
     pub metrics_port: Option<u16>,
 
     #[serde(default = "default_metrics_whitelist")]
-    pub metrics_whitelist: Vec<IpAddr>,
+    pub metrics_whitelist: Vec<IpNetwork>,
 
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
@@ -513,6 +514,9 @@ pub struct ListenerConfig {
     /// Migrated to `announce` automatically if `announce` is not set.
     #[serde(default)]
     pub announce_ip: Option<IpAddr>,
+    /// Per-listener PROXY protocol override. When set, overrides global server.proxy_protocol.
+    #[serde(default)]
+    pub proxy_protocol: Option<bool>,
 }
 
 // ============= ShowLink =============

@@ -283,6 +283,58 @@ impl Default for ProxyProtocolV1Builder {
     }
 }
 
+/// Builder for PROXY protocol v2 header
+pub struct ProxyProtocolV2Builder {
+    src: Option<SocketAddr>,
+    dst: Option<SocketAddr>,
+}
+
+impl ProxyProtocolV2Builder {
+    pub fn new() -> Self {
+        Self { src: None, dst: None }
+    }
+
+    pub fn with_addrs(mut self, src: SocketAddr, dst: SocketAddr) -> Self {
+        self.src = Some(src);
+        self.dst = Some(dst);
+        self
+    }
+
+    pub fn build(&self) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(PROXY_V2_SIGNATURE);
+        // version 2, PROXY command
+        header.push(0x21);
+
+        match (self.src, self.dst) {
+            (Some(SocketAddr::V4(src)), Some(SocketAddr::V4(dst))) => {
+                header.push(0x11); // INET + STREAM
+                header.extend_from_slice(&(12u16).to_be_bytes());
+                header.extend_from_slice(&src.ip().octets());
+                header.extend_from_slice(&dst.ip().octets());
+                header.extend_from_slice(&src.port().to_be_bytes());
+                header.extend_from_slice(&dst.port().to_be_bytes());
+            }
+            (Some(SocketAddr::V6(src)), Some(SocketAddr::V6(dst))) => {
+                header.push(0x21); // INET6 + STREAM
+                header.extend_from_slice(&(36u16).to_be_bytes());
+                header.extend_from_slice(&src.ip().octets());
+                header.extend_from_slice(&dst.ip().octets());
+                header.extend_from_slice(&src.port().to_be_bytes());
+                header.extend_from_slice(&dst.port().to_be_bytes());
+            }
+            _ => {
+                // LOCAL/UNSPEC: no address information
+                header[12] = 0x20; // version 2, LOCAL command
+                header.push(0x00);
+                header.extend_from_slice(&0u16.to_be_bytes());
+            }
+        }
+
+        header
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

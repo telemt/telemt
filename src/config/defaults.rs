@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::collections::HashMap;
+use ipnetwork::IpNetwork;
 use serde::Deserialize;
 
 // Helper defaults kept private to the config module.
@@ -66,8 +67,11 @@ pub(crate) fn default_weight() -> u16 {
     1
 }
 
-pub(crate) fn default_metrics_whitelist() -> Vec<IpAddr> {
-    vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]
+pub(crate) fn default_metrics_whitelist() -> Vec<IpNetwork> {
+    vec![
+        "127.0.0.1/32".parse().unwrap(),
+        "::1/128".parse().unwrap(),
+    ]
 }
 
 pub(crate) fn default_prefer_4() -> u8 {

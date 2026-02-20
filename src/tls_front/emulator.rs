@@ -5,6 +5,28 @@ use crate::protocol::constants::{
 use crate::protocol::tls::{TLS_DIGEST_LEN, TLS_DIGEST_POS, gen_fake_x25519_key};
 use crate::tls_front::types::CachedTlsData;
 
+const MIN_APP_DATA: usize = 64;
+const MAX_APP_DATA: usize = 16640; // RFC 8446 §5.2 allows up to 2^14 + 256
+
+fn jitter_and_clamp_sizes(sizes: &[usize], rng: &SecureRandom) -> Vec<usize> {
+    sizes
+        .iter()
+        .map(|&size| {
+            let base = size.max(MIN_APP_DATA).min(MAX_APP_DATA);
+            let jitter_range = ((base as f64) * 0.03).round() as i64;
+            if jitter_range == 0 {
+                return base;
+            }
+            let mut rand_bytes = [0u8; 2];
+            rand_bytes.copy_from_slice(&rng.bytes(2));
+            let span = 2 * jitter_range + 1;
+            let delta = (u16::from_le_bytes(rand_bytes) as i64 % span) - jitter_range;
+            let adjusted = (base as i64 + delta).clamp(MIN_APP_DATA as i64, MAX_APP_DATA as i64);
+            adjusted as usize
+        })
+        .collect()
+}
+
 /// Build a ServerHello + CCS + ApplicationData sequence using cached TLS metadata.
 pub fn build_emulated_server_hello(
     secret: &[u8],
@@ -76,6 +98,7 @@ pub fn build_emulated_server_hello(
     if sizes.is_empty() {
         sizes.push(cached.total_app_data_len.max(1024));
     }
+    let sizes = jitter_and_clamp_sizes(&sizes, rng);
 
     let mut app_data = Vec::new();
     for size in sizes {
@@ -83,7 +106,14 @@ pub fn build_emulated_server_hello(
         rec.push(TLS_RECORD_APPLICATION);
         rec.extend_from_slice(&TLS_VERSION);
         rec.extend_from_slice(&(size as u16).to_be_bytes());
-        rec.extend_from_slice(&rng.bytes(size));
+        if size > 17 {
+            let body_len = size - 17;
+            rec.extend_from_slice(&rng.bytes(body_len));
+            rec.push(0x16); // inner content type marker (handshake)
+            rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
+        } else {
+            rec.extend_from_slice(&rng.bytes(size));
+        }
         app_data.extend_from_slice(&rec);
     }
 
