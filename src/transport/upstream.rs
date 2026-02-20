@@ -480,7 +480,7 @@ impl UpstreamManager {
 
         for (upstream_idx, upstream_config, bind_rr) in &upstreams {
             let upstream_name = match &upstream_config.upstream_type {
-                UpstreamType::Direct { interface } => {
+                UpstreamType::Direct { interface, .. } => {
                     format!("direct{}", interface.as_ref().map(|i| format!(" ({})", i)).unwrap_or_default())
                 }
                 UpstreamType::Socks4 { address, .. } => format!("socks4://{}", address),
