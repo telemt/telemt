@@ -895,4 +895,30 @@ mod tests {
         let sni = extract_sni_from_client_hello(&ch);
         assert_eq!(sni.as_deref(), Some("test.local"));
     }
+
+    #[test]
+    fn test_extract_alpn_single() {
+        let mut alpn_data = Vec::new();
+        alpn_data.extend_from_slice(&2u16.to_be_bytes()); // list len
+        alpn_data.push(2);
+        alpn_data.extend_from_slice(b"h2");
+        let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "alpn.test");
+        let alpn = extract_alpn_from_client_hello(&ch).unwrap();
+        assert_eq!(alpn, vec!["h2"]);
+    }
+
+    #[test]
+    fn test_extract_alpn_multiple() {
+        let mut alpn_data = Vec::new();
+        alpn_data.extend_from_slice(&9u16.to_be_bytes()); // list len
+        alpn_data.push(2);
+        alpn_data.extend_from_slice(b"h2");
+        alpn_data.push(3);
+        alpn_data.extend_from_slice(b"spdy");
+        alpn_data.push(2);
+        alpn_data.extend_from_slice(b"h3");
+        let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "alpn.test");
+        let alpn = extract_alpn_from_client_hello(&ch).unwrap();
+        assert_eq!(alpn, vec!["h2", "spdy", "h3"]);
+    }
 }
