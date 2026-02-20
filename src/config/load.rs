@@ -163,6 +163,21 @@ impl ProxyConfig {
             config.censorship.mask_host = Some(config.censorship.tls_domain.clone());
         }
 
+        // Merge primary + extra TLS domains, deduplicate (primary always first).
+        if !config.censorship.tls_domains.is_empty() {
+            let mut all = Vec::with_capacity(1 + config.censorship.tls_domains.len());
+            all.push(config.censorship.tls_domain.clone());
+            for d in std::mem::take(&mut config.censorship.tls_domains) {
+                if !d.is_empty() && !all.contains(&d) {
+                    all.push(d);
+                }
+            }
+            // keep primary as tls_domain; store remaining back to tls_domains
+            if all.len() > 1 {
+                config.censorship.tls_domains = all[1..].to_vec();
+            }
+        }
+
         // Migration: prefer_ipv6 -> network.prefer.
         if config.general.prefer_ipv6 {
             if config.network.prefer == 4 {
@@ -180,7 +195,7 @@ impl ProxyConfig {
         validate_network_cfg(&mut config.network)?;
 
         // Random fake_cert_len only when default is in use.
-        if config.censorship.fake_cert_len == default_fake_cert_len() {
+        if !config.censorship.tls_emulation && config.censorship.fake_cert_len == default_fake_cert_len() {
             config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
         }
 
@@ -235,7 +250,7 @@ impl ProxyConfig {
         // Migration: Populate upstreams if empty (Default Direct).
         if config.upstreams.is_empty() {
             config.upstreams.push(UpstreamConfig {
-                upstream_type: UpstreamType::Direct { interface: None },
+                upstream_type: UpstreamType::Direct { interface: None, bind_addresses: None },
                 weight: 1,
                 enabled: true,
                 scopes: String::new(),

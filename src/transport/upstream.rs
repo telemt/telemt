@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -15,7 +16,7 @@ use tracing::{debug, warn, info, trace};
 use crate::config::{UpstreamConfig, UpstreamType};
 use crate::error::{Result, ProxyError};
 use crate::protocol::constants::{TG_DATACENTERS_V4, TG_DATACENTERS_V6, TG_DATACENTER_PORT};
-use crate::transport::socket::create_outgoing_socket_bound;
+use crate::transport::socket::{create_outgoing_socket_bound, resolve_interface_ip};
 use crate::transport::socks::{connect_socks4, connect_socks5};
 
 /// Number of Telegram datacenters
@@ -84,6 +85,8 @@ struct UpstreamState {
     dc_latency: [LatencyEma; NUM_DCS],
     /// Per-DC IP version preference (learned from connectivity tests)
     dc_ip_pref: [IpPreference; NUM_DCS],
+    /// Round-robin counter for bind_addresses selection
+    bind_rr: Arc<AtomicUsize>,
 }
 
 impl UpstreamState {
@@ -95,6 +98,7 @@ impl UpstreamState {
             last_check: std::time::Instant::now(),
             dc_latency: [LatencyEma::new(0.3); NUM_DCS],
             dc_ip_pref: [IpPreference::Unknown; NUM_DCS],
+            bind_rr: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -164,6 +168,46 @@ impl UpstreamManager {
         Self {
             upstreams: Arc::new(RwLock::new(states)),
         }
+    }
+
+    fn resolve_bind_address(
+        interface: &Option<String>,
+        bind_addresses: &Option<Vec<String>>,
+        target: SocketAddr,
+        rr: Option<&AtomicUsize>,
+    ) -> Option<IpAddr> {
+        let want_ipv6 = target.is_ipv6();
+
+        if let Some(addrs) = bind_addresses {
+            let candidates: Vec<IpAddr> = addrs
+                .iter()
+                .filter_map(|s| s.parse::<IpAddr>().ok())
+                .filter(|ip| ip.is_ipv6() == want_ipv6)
+                .collect();
+
+            if !candidates.is_empty() {
+                if let Some(counter) = rr {
+                    let idx = counter.fetch_add(1, Ordering::Relaxed) % candidates.len();
+                    return Some(candidates[idx]);
+                }
+                return candidates.first().copied();
+            }
+        }
+
+        if let Some(iface) = interface {
+            if let Ok(ip) = iface.parse::<IpAddr>() {
+                if ip.is_ipv6() == want_ipv6 {
+                    return Some(ip);
+                }
+            } else {
+                #[cfg(unix)]
+                if let Some(ip) = resolve_interface_ip(iface, want_ipv6) {
+                    return Some(ip);
+                }
+            }
+        }
+
+        None
     }
 
     /// Select upstream using latency-weighted random selection.
@@ -262,7 +306,12 @@ impl UpstreamManager {
 
         let start = Instant::now();
 
-        match self.connect_via_upstream(&upstream, target).await {
+        let bind_rr = {
+            let guard = self.upstreams.read().await;
+            guard.get(idx).map(|u| u.bind_rr.clone())
+        };
+
+        match self.connect_via_upstream(&upstream, target, bind_rr).await {
             Ok(stream) => {
                 let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let mut guard = self.upstreams.write().await;
@@ -294,13 +343,27 @@ impl UpstreamManager {
         }
     }
 
-    async fn connect_via_upstream(&self, config: &UpstreamConfig, target: SocketAddr) -> Result<TcpStream> {
+    async fn connect_via_upstream(
+        &self,
+        config: &UpstreamConfig,
+        target: SocketAddr,
+        bind_rr: Option<Arc<AtomicUsize>>,
+    ) -> Result<TcpStream> {
         match &config.upstream_type {
-            UpstreamType::Direct { interface } => {
-                let bind_ip = interface.as_ref()
-                    .and_then(|s| s.parse::<IpAddr>().ok());
+            UpstreamType::Direct { interface, bind_addresses } => {
+                let bind_ip = Self::resolve_bind_address(
+                    interface,
+                    bind_addresses,
+                    target,
+                    bind_rr.as_deref(),
+                );
 
                 let socket = create_outgoing_socket_bound(target, bind_ip)?;
+                if let Some(ip) = bind_ip {
+                    debug!(bind = %ip, target = %target, "Bound outgoing socket");
+                } else if interface.is_some() || bind_addresses.is_some() {
+                    debug!(target = %target, "No matching bind address for target family");
+                }
 
                 socket.set_nonblocking(true)?;
                 match socket.connect(&target.into()) {
@@ -323,8 +386,12 @@ impl UpstreamManager {
                 let proxy_addr: SocketAddr = address.parse()
                     .map_err(|_| ProxyError::Config("Invalid SOCKS4 address".to_string()))?;
 
-                let bind_ip = interface.as_ref()
-                    .and_then(|s| s.parse::<IpAddr>().ok());
+                let bind_ip = Self::resolve_bind_address(
+                    interface,
+                    &None,
+                    proxy_addr,
+                    bind_rr.as_deref(),
+                );
 
                 let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
 
@@ -354,8 +421,12 @@ impl UpstreamManager {
                 let proxy_addr: SocketAddr = address.parse()
                     .map_err(|_| ProxyError::Config("Invalid SOCKS5 address".to_string()))?;
 
-                let bind_ip = interface.as_ref()
-                    .and_then(|s| s.parse::<IpAddr>().ok());
+                let bind_ip = Self::resolve_bind_address(
+                    interface,
+                    &None,
+                    proxy_addr,
+                    bind_rr.as_deref(),
+                );
 
                 let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
 
@@ -398,18 +469,18 @@ impl UpstreamManager {
         ipv4_enabled: bool,
         ipv6_enabled: bool,
     ) -> Vec<StartupPingResult> {
-        let upstreams: Vec<(usize, UpstreamConfig)> = {
+        let upstreams: Vec<(usize, UpstreamConfig, Arc<AtomicUsize>)> = {
             let guard = self.upstreams.read().await;
             guard.iter().enumerate()
-                .map(|(i, u)| (i, u.config.clone()))
+                .map(|(i, u)| (i, u.config.clone(), u.bind_rr.clone()))
                 .collect()
         };
 
         let mut all_results = Vec::new();
 
-        for (upstream_idx, upstream_config) in &upstreams {
+        for (upstream_idx, upstream_config, bind_rr) in &upstreams {
             let upstream_name = match &upstream_config.upstream_type {
-                UpstreamType::Direct { interface } => {
+                UpstreamType::Direct { interface, .. } => {
                     format!("direct{}", interface.as_ref().map(|i| format!(" ({})", i)).unwrap_or_default())
                 }
                 UpstreamType::Socks4 { address, .. } => format!("socks4://{}", address),
@@ -424,7 +495,7 @@ impl UpstreamManager {
 
                     let result = tokio::time::timeout(
                         Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                        self.ping_single_dc(&upstream_config, addr_v6)
+                        self.ping_single_dc(&upstream_config, Some(bind_rr.clone()), addr_v6)
                     ).await;
 
                     let ping_result = match result {
@@ -475,7 +546,7 @@ impl UpstreamManager {
 
                     let result = tokio::time::timeout(
                         Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                        self.ping_single_dc(&upstream_config, addr_v4)
+                        self.ping_single_dc(&upstream_config, Some(bind_rr.clone()), addr_v4)
                     ).await;
 
                     let ping_result = match result {
@@ -538,7 +609,7 @@ impl UpstreamManager {
                             }
                             let result = tokio::time::timeout(
                                 Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                                self.ping_single_dc(&upstream_config, addr)
+                                self.ping_single_dc(&upstream_config, Some(bind_rr.clone()), addr)
                             ).await;
 
                             let ping_result = match result {
@@ -607,9 +678,14 @@ impl UpstreamManager {
         all_results
     }
 
-    async fn ping_single_dc(&self, config: &UpstreamConfig, target: SocketAddr) -> Result<f64> {
+    async fn ping_single_dc(
+        &self,
+        config: &UpstreamConfig,
+        bind_rr: Option<Arc<AtomicUsize>>,
+        target: SocketAddr,
+    ) -> Result<f64> {
         let start = Instant::now();
-        let _stream = self.connect_via_upstream(config, target).await?;
+        let _stream = self.connect_via_upstream(config, target, bind_rr).await?;
         Ok(start.elapsed().as_secs_f64() * 1000.0)
     }
 
@@ -649,15 +725,16 @@ impl UpstreamManager {
             let count = self.upstreams.read().await.len();
 
             for i in 0..count {
-                let config = {
+                let (config, bind_rr) = {
                     let guard = self.upstreams.read().await;
-                    guard[i].config.clone()
+                    let u = &guard[i];
+                    (u.config.clone(), u.bind_rr.clone())
                 };
 
                 let start = Instant::now();
                 let result = tokio::time::timeout(
                     Duration::from_secs(10),
-                    self.connect_via_upstream(&config, dc_addr)
+                    self.connect_via_upstream(&config, dc_addr, Some(bind_rr.clone()))
                 ).await;
 
                 match result {
@@ -686,7 +763,7 @@ impl UpstreamManager {
                             let start2 = Instant::now();
                             let result2 = tokio::time::timeout(
                                 Duration::from_secs(10),
-                                self.connect_via_upstream(&config, fallback_addr)
+                                self.connect_via_upstream(&config, fallback_addr, Some(bind_rr.clone()))
                             ).await;
 
                             let mut guard = self.upstreams.write().await;

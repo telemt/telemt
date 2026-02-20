@@ -397,6 +397,84 @@ pub fn build_server_hello(
     response
 }
 
+/// Extract SNI (server_name) from a TLS ClientHello.
+pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
+    if handshake.len() < 43 || handshake[0] != TLS_RECORD_HANDSHAKE {
+        return None;
+    }
+
+    let mut pos = 5; // after record header
+    if handshake.get(pos).copied()? != 0x01 {
+        return None; // not ClientHello
+    }
+
+    // Handshake length bytes
+    pos += 4; // type + len (3)
+
+    // version (2) + random (32)
+    pos += 2 + 32;
+    if pos + 1 > handshake.len() {
+        return None;
+    }
+
+    let session_id_len = *handshake.get(pos)? as usize;
+    pos += 1 + session_id_len;
+    if pos + 2 > handshake.len() {
+        return None;
+    }
+
+    let cipher_suites_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    pos += 2 + cipher_suites_len;
+    if pos + 1 > handshake.len() {
+        return None;
+    }
+
+    let comp_len = *handshake.get(pos)? as usize;
+    pos += 1 + comp_len;
+    if pos + 2 > handshake.len() {
+        return None;
+    }
+
+    let ext_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    pos += 2;
+    let ext_end = pos + ext_len;
+    if ext_end > handshake.len() {
+        return None;
+    }
+
+    while pos + 4 <= ext_end {
+        let etype = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
+        let elen = u16::from_be_bytes([handshake[pos + 2], handshake[pos + 3]]) as usize;
+        pos += 4;
+        if pos + elen > ext_end {
+            break;
+        }
+        if etype == 0x0000 && elen >= 5 {
+            // server_name extension
+            let list_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+            let mut sn_pos = pos + 2;
+            let sn_end = std::cmp::min(sn_pos + list_len, pos + elen);
+            while sn_pos + 3 <= sn_end {
+                let name_type = handshake[sn_pos];
+                let name_len = u16::from_be_bytes([handshake[sn_pos + 1], handshake[sn_pos + 2]]) as usize;
+                sn_pos += 3;
+                if sn_pos + name_len > sn_end {
+                    break;
+                }
+                if name_type == 0 && name_len > 0 {
+                    if let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len]) {
+                        return Some(host.to_string());
+                    }
+                }
+                sn_pos += name_len;
+            }
+        }
+        pos += elen;
+    }
+
+    None
+}
+
 /// Check if bytes look like a TLS ClientHello
 pub fn is_tls_handshake(first_bytes: &[u8]) -> bool {
     if first_bytes.len() < 3 {

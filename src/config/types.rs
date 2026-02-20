@@ -295,6 +295,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub listen_tcp: Option<bool>,
 
+    /// Accept HAProxy PROXY protocol headers on incoming connections.
+    /// When enabled, real client IPs are extracted from PROXY v1/v2 headers.
+    #[serde(default)]
+    pub proxy_protocol: bool,
+
     #[serde(default)]
     pub metrics_port: Option<u16>,
 
@@ -314,6 +319,7 @@ impl Default for ServerConfig {
             listen_unix_sock: None,
             listen_unix_sock_perm: None,
             listen_tcp: None,
+            proxy_protocol: false,
             metrics_port: None,
             metrics_whitelist: default_metrics_whitelist(),
             listeners: Vec::new(),
@@ -362,6 +368,10 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_tls_domain")]
     pub tls_domain: String,
 
+    /// Additional TLS domains for generating multiple proxy links.
+    #[serde(default)]
+    pub tls_domains: Vec<String>,
+
     #[serde(default = "default_true")]
     pub mask: bool,
 
@@ -376,22 +386,33 @@ pub struct AntiCensorshipConfig {
 
     #[serde(default = "default_fake_cert_len")]
     pub fake_cert_len: usize,
+
+    /// Enable TLS certificate emulation using cached real certificates.
+    #[serde(default)]
+    pub tls_emulation: bool,
+
+    /// Directory to store TLS front cache (on disk).
+    #[serde(default = "default_tls_front_dir")]
+    pub tls_front_dir: String,
 }
 
 impl Default for AntiCensorshipConfig {
     fn default() -> Self {
         Self {
             tls_domain: default_tls_domain(),
+            tls_domains: Vec::new(),
             mask: true,
             mask_host: None,
             mask_port: default_mask_port(),
             mask_unix_sock: None,
             fake_cert_len: default_fake_cert_len(),
+            tls_emulation: false,
+            tls_front_dir: default_tls_front_dir(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccessConfig {
     #[serde(default)]
     pub users: HashMap<String, String>,
@@ -446,6 +467,8 @@ pub enum UpstreamType {
     Direct {
         #[serde(default)]
         interface: Option<String>,
+        #[serde(default)]
+        bind_addresses: Option<Vec<String>>,
     },
     Socks4 {
         address: String,

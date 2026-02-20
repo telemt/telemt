@@ -122,6 +122,38 @@ pub fn get_local_addr(stream: &TcpStream) -> Option<SocketAddr> {
     stream.local_addr().ok()
 }
 
+/// Resolve primary IP address of a network interface by name.
+/// Returns the first address matching the requested family (IPv4/IPv6).
+#[cfg(unix)]
+pub fn resolve_interface_ip(name: &str, want_ipv6: bool) -> Option<IpAddr> {
+    use nix::ifaddrs::getifaddrs;
+
+    if let Ok(addrs) = getifaddrs() {
+        for iface in addrs {
+            if iface.interface_name == name {
+                if let Some(address) = iface.address {
+                    if let Some(v4) = address.as_sockaddr_in() {
+                        if !want_ipv6 {
+                            return Some(IpAddr::V4(v4.ip()));
+                        }
+                    } else if let Some(v6) = address.as_sockaddr_in6() {
+                        if want_ipv6 {
+                            return Some(IpAddr::V6(v6.ip().clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Stub for non-Unix platforms: interface name resolution unsupported.
+#[cfg(not(unix))]
+pub fn resolve_interface_ip(_name: &str, _want_ipv6: bool) -> Option<IpAddr> {
+    None
+}
+
 /// Get peer address of a socket
 pub fn get_peer_addr(stream: &TcpStream) -> Option<SocketAddr> {
     stream.peer_addr().ok()

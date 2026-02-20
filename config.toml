@@ -1,16 +1,21 @@
 # === General Settings ===
 [general]
-# prefer_ipv6 is deprecated; use [network].prefer instead
-prefer_ipv6 = false
 fast_mode = true
 use_middle_proxy = true
-#ad_tag = "00000000000000000000000000000000"
+# ad_tag = "00000000000000000000000000000000"
 # Path to proxy-secret binary (auto-downloaded if missing).
 proxy_secret_path = "proxy-secret"
+# disable_colors = false  # Disable colored output in logs (useful for files/systemd)
 
-# === Middle Proxy (ME) ===
+# === Log Level ===
+# Log level: debug | verbose | normal | silent
+# Can be overridden with --silent or --log-level CLI flags
+# RUST_LOG env var takes absolute priority over all of these
+log_level = "normal"
+
+# === Middle Proxy - ME ===
 # Public IP override for ME KDF when behind NAT; leave unset to auto-detect.
-#middle_proxy_nat_ip = "203.0.113.10"
+# middle_proxy_nat_ip = "203.0.113.10"
 # Enable STUN probing to discover public IP:port for ME.
 middle_proxy_nat_probe = true
 # Primary STUN server (host:port); defaults to Telegram STUN when empty.
@@ -38,23 +43,26 @@ me_reconnect_backoff_base_ms = 500        # Backoff start
 me_reconnect_backoff_cap_ms = 30000       # Backoff cap
 me_reconnect_fast_retry_count = 11        # Quick retries before backoff
 
-[network]
-# Enable/disable families; ipv6 = true/false/auto(None)
-ipv4 = true
-ipv6 = true
-# prefer = 4 or 6
-prefer = 4
-multipath = false
-
-# Log level: debug | verbose | normal | silent
-# Can be overridden with --silent or --log-level CLI flags
-# RUST_LOG env var takes absolute priority over all of these
-log_level = "normal"
-
 [general.modes]
 classic = false
 secure = false
 tls = true
+
+[general.links]
+show = "*"
+# show = ["alice", "bob"] # Only show links for alice and bob
+# show = "*"              # Show links for all users
+# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
+# public_port = 443                  # Port for tg:// links (default: server.port)
+
+# === Network Parameters ===
+[network]
+# Enable/disable families: true/false/auto(None)
+ipv4 = true
+ipv6 = false # UNSTABLE WITH ME
+# prefer = 4 or 6
+prefer = 4
+multipath = false # EXPERIMENTAL!
 
 # === Server Binding ===
 [server]
@@ -63,22 +71,17 @@ listen_addr_ipv4 = "0.0.0.0"
 listen_addr_ipv6 = "::"
 # listen_unix_sock = "/var/run/telemt.sock" # Unix socket
 # listen_unix_sock_perm = "0666" # Socket file permissions
+# proxy_protocol = false           # Enable if behind HAProxy/nginx with PROXY protocol
 # metrics_port = 9090
 # metrics_whitelist = ["127.0.0.1", "::1"]
 
-# Listen on multiple interfaces/IPs (overrides listen_addr_*)
+# Listen on multiple interfaces/IPs - IPv4
 [[server.listeners]]
 ip = "0.0.0.0"
-# announce_ip = "1.2.3.4" # Optional: Public IP for tg:// links
 
+# Listen on multiple interfaces/IPs - IPv6
 [[server.listeners]]
 ip = "::"
-
-# Users to show in the startup log (tg:// links)
-[general.links]
-show = ["hello"] # Users to show in the startup log (tg:// links)
-# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
-# public_port = 443                  # Port for tg:// links (default: server.port)
 
 # === Timeouts (in seconds) ===
 [timeouts]
@@ -93,11 +96,14 @@ me_one_timeout_ms = 1200
 # === Anti-Censorship & Masking ===
 [censorship]
 tls_domain = "petrovich.ru"
+# tls_domains = ["example.com", "cdn.example.net"] # Additional domains for EE links
 mask = true
 mask_port = 443
 # mask_host = "petrovich.ru" # Defaults to tls_domain if not set
 # mask_unix_sock = "/var/run/nginx.sock" # Unix socket (mutually exclusive with mask_host)
 fake_cert_len = 2048
+# tls_emulation = false        # Fetch real cert lengths and emulate TLS records
+# tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 
 # === Access Control & Users ===
 [access]
@@ -123,6 +129,8 @@ hello = "00000000000000000000000000000000"
 type = "direct"
 enabled = true
 weight = 10
+# interface = "192.168.1.100"           # Bind outgoing to specific IP or iface name
+# bind_addresses = ["192.168.1.100"]    # List for round-robin binding (family must match target)
 
 # [[upstreams]]
 # type = "socks5"

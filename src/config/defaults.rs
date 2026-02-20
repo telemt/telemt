@@ -23,6 +23,10 @@ pub(crate) fn default_fake_cert_len() -> usize {
     2048
 }
 
+pub(crate) fn default_tls_front_dir() -> String {
+    "tlsfront".to_string()
+}
+
 pub(crate) fn default_replay_check_len() -> usize {
     65_536
 }

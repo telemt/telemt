@@ -95,7 +95,7 @@ If you have expertise in asynchronous network applications, traffic analysis, re
 **This software is designed for Debian-based OS: in addition to Debian, these are Ubuntu, Mint, Kali, MX and many other Linux**
 1. Download release
 ```bash
-wget https://github.com/telemt/telemt/releases/latest/download/telemt
+wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
 ```
 2. Move to Bin Folder
 ```bash
@@ -178,56 +178,97 @@ then Ctrl+X -> Y -> Enter to save
 ```toml
 # === General Settings ===
 [general]
-# prefer_ipv6 is deprecated; use [network].prefer
-prefer_ipv6 = false
 fast_mode = true
-use_middle_proxy = false
-# ad_tag = "..."
+use_middle_proxy = true
+# ad_tag = "00000000000000000000000000000000"
+# Path to proxy-secret binary (auto-downloaded if missing).
+proxy_secret_path = "proxy-secret"
 # disable_colors = false  # Disable colored output in logs (useful for files/systemd)
 
-[network]
-ipv4 = true
-ipv6 = true   # set false to disable, omit for auto
-prefer = 4    # 4 or 6
-multipath = false
+# === Log Level ===
+# Log level: debug | verbose | normal | silent
+# Can be overridden with --silent or --log-level CLI flags
+# RUST_LOG env var takes absolute priority over all of these
+log_level = "normal"
+
+# === Middle Proxy - ME ===
+# Public IP override for ME KDF when behind NAT; leave unset to auto-detect.
+# middle_proxy_nat_ip = "203.0.113.10"
+# Enable STUN probing to discover public IP:port for ME.
+middle_proxy_nat_probe = true
+# Primary STUN server (host:port); defaults to Telegram STUN when empty.
+middle_proxy_nat_stun = "stun.l.google.com:19302"
+# Optional fallback STUN servers list.
+middle_proxy_nat_stun_servers = ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
+# Desired number of concurrent ME writers in pool.
+middle_proxy_pool_size = 16
+# Pre-initialized warm-standby ME connections kept idle.
+middle_proxy_warm_standby = 8
+# Ignore STUN/interface mismatch and keep ME enabled even if IP differs.
+stun_iface_mismatch_ignore = false
+# Keepalive padding frames - fl==4
+me_keepalive_enabled = true
+me_keepalive_interval_secs = 25           # Period between keepalives
+me_keepalive_jitter_secs = 5              # Jitter added to interval
+me_keepalive_payload_random = true        # Randomize 4-byte payload (vs zeros)
+# Stagger extra ME connections on warmup to de-phase lifecycles.
+me_warmup_stagger_enabled = true
+me_warmup_step_delay_ms = 500             # Base delay between extra connects
+me_warmup_step_jitter_ms = 300            # Jitter for warmup delay
+# Reconnect policy knobs.
+me_reconnect_max_concurrent_per_dc = 1    # Parallel reconnects per DC - EXPERIMENTAL! UNSTABLE!
+me_reconnect_backoff_base_ms = 500        # Backoff start
+me_reconnect_backoff_cap_ms = 30000       # Backoff cap
+me_reconnect_fast_retry_count = 11        # Quick retries before backoff
 
 [general.modes]
 classic = false
 secure = false
 tls = true
 
-# === Server Binding ===
-[server]
-port = 443
-listen_addr_ipv4 = "0.0.0.0"
-listen_addr_ipv6 = "::"
-# metrics_port = 9090
-# metrics_whitelist = ["127.0.0.1", "::1"]
-
-# Listen on multiple interfaces/IPs (overrides listen_addr_*)
-[[server.listeners]]
-ip = "0.0.0.0"
-# announce = "my.hostname.tld" # Optional: hostname for tg:// links
-# OR
-# announce = "1.2.3.4" # Optional: Public IP for tg:// links
-
-[[server.listeners]]
-ip = "::"
-
-# Users to show in the startup log (tg:// links)
 [general.links]
-show = ["hello"]          # Only show links for user "hello"
+show = "*"
 # show = ["alice", "bob"] # Only show links for alice and bob
 # show = "*"              # Show links for all users
 # public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
 # public_port = 443                  # Port for tg:// links (default: server.port)
 
+# === Network Parameters ===
+[network]
+# Enable/disable families: true/false/auto(None)
+ipv4 = true
+ipv6 = false # UNSTABLE WITH ME
+# prefer = 4 or 6
+prefer = 4
+multipath = false # EXPERIMENTAL!
+
+# === Server Binding ===
+[server]
+port = 443
+listen_addr_ipv4 = "0.0.0.0"
+listen_addr_ipv6 = "::"
+# listen_unix_sock = "/var/run/telemt.sock" # Unix socket
+# listen_unix_sock_perm = "0666" # Socket file permissions
+# metrics_port = 9090
+# metrics_whitelist = ["127.0.0.1", "::1"]
+
+# Listen on multiple interfaces/IPs - IPv4
+[[server.listeners]]
+ip = "0.0.0.0"
+
+# Listen on multiple interfaces/IPs - IPv6
+[[server.listeners]]
+ip = "::"
+
 # === Timeouts (in seconds) ===
 [timeouts]
-client_handshake = 15
+client_handshake = 30
 tg_connect = 10
 client_keepalive = 60
 client_ack = 300
+# Quick ME reconnects for single-address DCs (count and per-attempt timeout, ms).
+me_one_retry = 12
+me_one_timeout_ms = 1200
 
 # === Anti-Censorship & Masking ===
 [censorship]
@@ -239,9 +280,9 @@ mask_port = 443
 fake_cert_len = 2048
 
 # === Access Control & Users ===
-# username "hello" is used for example
 [access]
 replay_check_len = 65536
+replay_window_secs = 1800
 ignore_time_skew = false
 
 [access.users]
@@ -251,28 +292,28 @@ hello = "00000000000000000000000000000000"
 # [access.user_max_tcp_conns]
 # hello = 50
 
+# [access.user_max_unique_ips]
+# hello = 5
+
 # [access.user_data_quota]
 # hello = 1073741824 # 1 GB
 
 # === Upstreams & Routing ===
-# By default, direct connection is used, but you can add SOCKS proxy
-
-# Direct - Default
 [[upstreams]]
 type = "direct"
 enabled = true
 weight = 10
 
-# SOCKS5
 # [[upstreams]]
 # type = "socks5"
-# address = "127.0.0.1:9050"
+# address = "127.0.0.1:1080"
 # enabled = false
 # weight = 1
 
 # === DC Address Overrides ===
 # [dc_overrides]
 # "203" = "91.105.192.100:443"
+
 ```
 ### Advanced
 #### Adtag

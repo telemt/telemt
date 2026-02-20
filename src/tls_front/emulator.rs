@@ -1,0 +1,104 @@
+use crate::crypto::{sha256_hmac, SecureRandom};
+use crate::protocol::constants::{
+    TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE, TLS_VERSION,
+};
+use crate::protocol::tls::{TLS_DIGEST_LEN, TLS_DIGEST_POS, gen_fake_x25519_key};
+use crate::tls_front::types::CachedTlsData;
+
+/// Build a ServerHello + CCS + ApplicationData sequence using cached TLS metadata.
+pub fn build_emulated_server_hello(
+    secret: &[u8],
+    client_digest: &[u8; TLS_DIGEST_LEN],
+    session_id: &[u8],
+    cached: &CachedTlsData,
+    rng: &SecureRandom,
+) -> Vec<u8> {
+    // --- ServerHello ---
+    let mut extensions = Vec::new();
+    // KeyShare (x25519)
+    let key = gen_fake_x25519_key(rng);
+    extensions.extend_from_slice(&0x0033u16.to_be_bytes()); // key_share
+    extensions.extend_from_slice(&(2 + 2 + 32u16).to_be_bytes()); // len
+    extensions.extend_from_slice(&0x001du16.to_be_bytes()); // X25519
+    extensions.extend_from_slice(&(32u16).to_be_bytes());
+    extensions.extend_from_slice(&key);
+    // supported_versions (TLS1.3)
+    extensions.extend_from_slice(&0x002bu16.to_be_bytes());
+    extensions.extend_from_slice(&(2u16).to_be_bytes());
+    extensions.extend_from_slice(&0x0304u16.to_be_bytes());
+
+    let extensions_len = extensions.len() as u16;
+
+    let body_len = 2 + // version
+        32 + // random
+        1 + session_id.len() + // session id
+        2 + // cipher
+        1 + // compression
+        2 + extensions.len(); // extensions
+
+    let mut message = Vec::with_capacity(4 + body_len);
+    message.push(0x02); // ServerHello
+    let len_bytes = (body_len as u32).to_be_bytes();
+    message.extend_from_slice(&len_bytes[1..4]);
+    message.extend_from_slice(&cached.server_hello_template.version); // 0x0303
+    message.extend_from_slice(&[0u8; 32]); // random placeholder
+    message.push(session_id.len() as u8);
+    message.extend_from_slice(session_id);
+    let cipher = if cached.server_hello_template.cipher_suite == [0, 0] {
+        [0x13, 0x01]
+    } else {
+        cached.server_hello_template.cipher_suite
+    };
+    message.extend_from_slice(&cipher);
+    message.push(cached.server_hello_template.compression);
+    message.extend_from_slice(&extensions_len.to_be_bytes());
+    message.extend_from_slice(&extensions);
+
+    let mut server_hello = Vec::with_capacity(5 + message.len());
+    server_hello.push(TLS_RECORD_HANDSHAKE);
+    server_hello.extend_from_slice(&TLS_VERSION);
+    server_hello.extend_from_slice(&(message.len() as u16).to_be_bytes());
+    server_hello.extend_from_slice(&message);
+
+    // --- ChangeCipherSpec ---
+    let change_cipher_spec = [
+        TLS_RECORD_CHANGE_CIPHER,
+        TLS_VERSION[0],
+        TLS_VERSION[1],
+        0x00,
+        0x01,
+        0x01,
+    ];
+
+    // --- ApplicationData (fake encrypted records) ---
+    // Use the same number and sizes of ApplicationData records as the cached server.
+    let mut sizes = cached.app_data_records_sizes.clone();
+    if sizes.is_empty() {
+        sizes.push(cached.total_app_data_len.max(1024));
+    }
+
+    let mut app_data = Vec::new();
+    for size in sizes {
+        let mut rec = Vec::with_capacity(5 + size);
+        rec.push(TLS_RECORD_APPLICATION);
+        rec.extend_from_slice(&TLS_VERSION);
+        rec.extend_from_slice(&(size as u16).to_be_bytes());
+        rec.extend_from_slice(&rng.bytes(size));
+        app_data.extend_from_slice(&rec);
+    }
+
+    // --- Combine ---
+    let mut response = Vec::with_capacity(server_hello.len() + change_cipher_spec.len() + app_data.len());
+    response.extend_from_slice(&server_hello);
+    response.extend_from_slice(&change_cipher_spec);
+    response.extend_from_slice(&app_data);
+
+    // --- HMAC ---
+    let mut hmac_input = Vec::with_capacity(TLS_DIGEST_LEN + response.len());
+    hmac_input.extend_from_slice(client_digest);
+    hmac_input.extend_from_slice(&response);
+    let digest = sha256_hmac(secret, &hmac_input);
+    response[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN].copy_from_slice(&digest);
+
+    response
+}
