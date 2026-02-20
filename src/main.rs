@@ -875,7 +875,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                             .run()
                             .await
                             {
-                                debug!(peer = %peer_addr, error = %e, "Connection error");
+                                warn!(peer = %peer_addr, error = %e, "Connection closed with error");
                             }
                         });
                     }
