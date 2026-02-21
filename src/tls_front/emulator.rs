@@ -34,6 +34,8 @@ pub fn build_emulated_server_hello(
     session_id: &[u8],
     cached: &CachedTlsData,
     rng: &SecureRandom,
+    alpn: Option<Vec<u8>>,
+    new_session_tickets: u8,
 ) -> Vec<u8> {
     // --- ServerHello ---
     let mut extensions = Vec::new();
@@ -48,6 +50,15 @@ pub fn build_emulated_server_hello(
     extensions.extend_from_slice(&0x002bu16.to_be_bytes());
     extensions.extend_from_slice(&(2u16).to_be_bytes());
     extensions.extend_from_slice(&0x0304u16.to_be_bytes());
+    if let Some(alpn_proto) = &alpn {
+        extensions.extend_from_slice(&0x0010u16.to_be_bytes());
+        let list_len: u16 = 1 + alpn_proto.len() as u16;
+        let ext_len: u16 = 2 + list_len;
+        extensions.extend_from_slice(&ext_len.to_be_bytes());
+        extensions.extend_from_slice(&list_len.to_be_bytes());
+        extensions.push(alpn_proto.len() as u8);
+        extensions.extend_from_slice(alpn_proto);
+    }
 
     let extensions_len = extensions.len() as u16;
 
@@ -118,10 +129,25 @@ pub fn build_emulated_server_hello(
     }
 
     // --- Combine ---
-    let mut response = Vec::with_capacity(server_hello.len() + change_cipher_spec.len() + app_data.len());
+    // Optional NewSessionTicket mimic records (opaque ApplicationData for fingerprint).
+    let mut tickets = Vec::new();
+    if new_session_tickets > 0 {
+        for _ in 0..new_session_tickets {
+            let ticket_len: usize = rng.range(48) + 48;
+            let mut rec = Vec::with_capacity(5 + ticket_len);
+            rec.push(TLS_RECORD_APPLICATION);
+            rec.extend_from_slice(&TLS_VERSION);
+            rec.extend_from_slice(&(ticket_len as u16).to_be_bytes());
+            rec.extend_from_slice(&rng.bytes(ticket_len));
+            tickets.extend_from_slice(&rec);
+        }
+    }
+
+    let mut response = Vec::with_capacity(server_hello.len() + change_cipher_spec.len() + app_data.len() + tickets.len());
     response.extend_from_slice(&server_hello);
     response.extend_from_slice(&change_cipher_spec);
     response.extend_from_slice(&app_data);
+    response.extend_from_slice(&tickets);
 
     // --- HMAC ---
     let mut hmac_input = Vec::with_capacity(TLS_DIGEST_LEN + response.len());

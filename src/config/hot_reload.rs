@@ -316,118 +316,106 @@ pub fn spawn_config_watcher(
     let (config_tx, config_rx) = watch::channel(initial);
     let (log_tx, log_rx)       = watch::channel(initial_level);
 
-    // Bridge: sync notify callback → async task via mpsc.
+    // Bridge: sync notify callbacks → async task via mpsc.
     let (notify_tx, mut notify_rx) = mpsc::channel::<()>(4);
 
-    // Canonicalize the config path so it matches what notify returns in events
-    // (notify always gives absolute paths, but config_path may be relative).
+    // Canonicalize so path matches what notify returns (absolute) in events.
     let config_path = match config_path.canonicalize() {
         Ok(p) => p,
-        Err(_) => config_path.to_path_buf(), // file doesn't exist yet, use as-is
+        Err(_) => config_path.to_path_buf(),
     };
 
     // Watch the parent directory rather than the file itself, because many
-    // editors (vim, nano, systemd-sysusers) write via rename, which would
-    // cause inotify to lose track of the original inode.
+    // editors (vim, nano) and systemd write via rename, which would cause
+    // inotify to lose track of the original inode.
     let watch_dir = config_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
 
+    // ── inotify watcher (instant on local fs) ────────────────────────────
     let config_file = config_path.clone();
-    let tx_clone    = notify_tx.clone();
-
-    let watcher_result = recommended_watcher(move |res: notify::Result<notify::Event>| {
+    let tx_inotify  = notify_tx.clone();
+    let inotify_ok = match recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else { return };
-
         let is_our_file = event.paths.iter().any(|p| p == &config_file);
-        if !is_our_file {
-            return;
+        if !is_our_file { return; }
+        if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+            let _ = tx_inotify.try_send(());
         }
-        let relevant = matches!(
-            event.kind,
-            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-        );
-        if relevant {
-            let _ = tx_clone.try_send(());
+    }) {
+        Ok(mut w) => match w.watch(&watch_dir, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                info!("config watcher: inotify active on {:?}", config_path);
+                Box::leak(Box::new(w));
+                true
+            }
+            Err(e) => { warn!("config watcher: inotify watch failed: {}", e); false }
+        },
+        Err(e) => { warn!("config watcher: inotify unavailable: {}", e); false }
+    };
+
+    // ── poll watcher (always active, fixes Docker bind mounts / NFS) ─────
+    // inotify does not receive events for files mounted from the host into
+    // a container. PollWatcher compares file contents every 3 s and fires
+    // on any change regardless of the underlying fs.
+    let config_file2 = config_path.clone();
+    let tx_poll      = notify_tx.clone();
+    match notify::poll::PollWatcher::new(
+        move |res: notify::Result<notify::Event>| {
+            let Ok(event) = res else { return };
+            let is_our_file = event.paths.iter().any(|p| p == &config_file2);
+            if !is_our_file { return; }
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+                let _ = tx_poll.try_send(());
+            }
+        },
+        notify::Config::default()
+            .with_poll_interval(std::time::Duration::from_secs(3))
+            .with_compare_contents(true),
+    ) {
+        Ok(mut w) => match w.watch(&config_path, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                if inotify_ok {
+                    info!("config watcher: poll watcher also active (Docker/NFS safe)");
+                } else {
+                    info!("config watcher: poll watcher active on {:?} (3s interval)", config_path);
+                }
+                Box::leak(Box::new(w));
+            }
+            Err(e) => warn!("config watcher: poll watch failed: {}", e),
+        },
+        Err(e) => warn!("config watcher: poll watcher unavailable: {}", e),
+    }
+
+    // ── event loop ───────────────────────────────────────────────────────
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        let mut sighup = {
+            use tokio::signal::unix::{SignalKind, signal};
+            signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler")
+        };
+
+        loop {
+            #[cfg(unix)]
+            tokio::select! {
+                msg = notify_rx.recv() => {
+                    if msg.is_none() { break; }
+                }
+                _ = sighup.recv() => {
+                    info!("SIGHUP received — reloading {:?}", config_path);
+                }
+            }
+            #[cfg(not(unix))]
+            if notify_rx.recv().await.is_none() { break; }
+
+            // Debounce: drain extra events that arrive within 50 ms.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            while notify_rx.try_recv().is_ok() {}
+
+            reload_config(&config_path, &config_tx, &log_tx, detected_ip_v4, detected_ip_v6);
         }
     });
-
-    match watcher_result {
-        Ok(mut watcher) => {
-            match watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
-                Ok(()) => info!("config watcher: watching {:?} via inotify", config_path),
-                Err(e) => warn!(
-                    "config watcher: failed to watch {:?}: {}; use SIGHUP to reload",
-                    watch_dir, e
-                ),
-            }
-
-            tokio::spawn(async move {
-                let _watcher = watcher; // keep alive
-
-                #[cfg(unix)]
-                let mut sighup = {
-                    use tokio::signal::unix::{SignalKind, signal};
-                    signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler")
-                };
-
-                loop {
-                    #[cfg(unix)]
-                    tokio::select! {
-                        msg = notify_rx.recv() => {
-                            if msg.is_none() { break; }
-                        }
-                        _ = sighup.recv() => {
-                            info!("SIGHUP received — reloading {:?}", config_path);
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    if notify_rx.recv().await.is_none() { break; }
-
-                    // Debounce: drain extra events fired within 50ms.
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    while notify_rx.try_recv().is_ok() {}
-
-                    reload_config(
-                        &config_path,
-                        &config_tx,
-                        &log_tx,
-                        detected_ip_v4,
-                        detected_ip_v6,
-                    );
-                }
-            });
-        }
-        Err(e) => {
-            warn!(
-                "config watcher: inotify unavailable ({}); only SIGHUP will trigger reload",
-                e
-            );
-            // Fall back to SIGHUP-only.
-            tokio::spawn(async move {
-                #[cfg(unix)]
-                {
-                    use tokio::signal::unix::{SignalKind, signal};
-                    let mut sighup = signal(SignalKind::hangup())
-                        .expect("Failed to register SIGHUP handler");
-                    loop {
-                        sighup.recv().await;
-                        info!("SIGHUP received — reloading {:?}", config_path);
-                        reload_config(
-                            &config_path,
-                            &config_tx,
-                            &log_tx,
-                            detected_ip_v4,
-                            detected_ip_v6,
-                        );
-                    }
-                }
-                #[cfg(not(unix))]
-                let _ = (config_tx, log_tx, config_path);
-            });
-        }
-    }
 
     (config_rx, log_rx)
 }

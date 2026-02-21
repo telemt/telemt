@@ -383,32 +383,43 @@ impl UpstreamManager {
                 Ok(stream)
             },
             UpstreamType::Socks4 { address, interface, user_id } => {
-                let proxy_addr: SocketAddr = address.parse()
-                    .map_err(|_| ProxyError::Config("Invalid SOCKS4 address".to_string()))?;
+                // Try to parse as SocketAddr first (IP:port), otherwise treat as hostname:port
+                let mut stream = if let Ok(proxy_addr) = address.parse::<SocketAddr>() {
+                    // IP:port format - use socket with optional interface binding
+                    let bind_ip = Self::resolve_bind_address(
+                        interface,
+                        &None,
+                        proxy_addr,
+                        bind_rr.as_deref(),
+                    );
 
-                let bind_ip = Self::resolve_bind_address(
-                    interface,
-                    &None,
-                    proxy_addr,
-                    bind_rr.as_deref(),
-                );
+                    let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
 
-                let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
+                    socket.set_nonblocking(true)?;
+                    match socket.connect(&proxy_addr.into()) {
+                        Ok(()) => {},
+                        Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) || err.kind() == std::io::ErrorKind::WouldBlock => {},
+                        Err(err) => return Err(ProxyError::Io(err)),
+                    }
 
-                socket.set_nonblocking(true)?;
-                match socket.connect(&proxy_addr.into()) {
-                    Ok(()) => {},
-                    Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) || err.kind() == std::io::ErrorKind::WouldBlock => {},
-                    Err(err) => return Err(ProxyError::Io(err)),
-                }
+                    let std_stream: std::net::TcpStream = socket.into();
+                    let stream = TcpStream::from_std(std_stream)?;
 
-                let std_stream: std::net::TcpStream = socket.into();
-                let mut stream = TcpStream::from_std(std_stream)?;
+                    stream.writable().await?;
+                    if let Some(e) = stream.take_error()? {
+                        return Err(ProxyError::Io(e));
+                    }
+                    stream
+                } else {
+                    // Hostname:port format - use tokio DNS resolution
+                    // Note: interface binding is not supported for hostnames
+                    if interface.is_some() {
+                        warn!("SOCKS4 interface binding is not supported for hostname addresses, ignoring");
+                    }
+                    TcpStream::connect(address).await
+                        .map_err(ProxyError::Io)?
+                };
 
-                stream.writable().await?;
-                if let Some(e) = stream.take_error()? {
-                    return Err(ProxyError::Io(e));
-                }
                 // replace socks user_id with config.selected_scope, if set
                 let scope: Option<&str> = Some(config.selected_scope.as_str())
                     .filter(|s| !s.is_empty());
@@ -418,32 +429,42 @@ impl UpstreamManager {
                 Ok(stream)
             },
             UpstreamType::Socks5 { address, interface, username, password } => {
-                let proxy_addr: SocketAddr = address.parse()
-                    .map_err(|_| ProxyError::Config("Invalid SOCKS5 address".to_string()))?;
+                // Try to parse as SocketAddr first (IP:port), otherwise treat as hostname:port
+                let mut stream = if let Ok(proxy_addr) = address.parse::<SocketAddr>() {
+                    // IP:port format - use socket with optional interface binding
+                    let bind_ip = Self::resolve_bind_address(
+                        interface,
+                        &None,
+                        proxy_addr,
+                        bind_rr.as_deref(),
+                    );
 
-                let bind_ip = Self::resolve_bind_address(
-                    interface,
-                    &None,
-                    proxy_addr,
-                    bind_rr.as_deref(),
-                );
+                    let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
 
-                let socket = create_outgoing_socket_bound(proxy_addr, bind_ip)?;
+                    socket.set_nonblocking(true)?;
+                    match socket.connect(&proxy_addr.into()) {
+                        Ok(()) => {},
+                        Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) || err.kind() == std::io::ErrorKind::WouldBlock => {},
+                        Err(err) => return Err(ProxyError::Io(err)),
+                    }
 
-                socket.set_nonblocking(true)?;
-                match socket.connect(&proxy_addr.into()) {
-                    Ok(()) => {},
-                    Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) || err.kind() == std::io::ErrorKind::WouldBlock => {},
-                    Err(err) => return Err(ProxyError::Io(err)),
-                }
+                    let std_stream: std::net::TcpStream = socket.into();
+                    let stream = TcpStream::from_std(std_stream)?;
 
-                let std_stream: std::net::TcpStream = socket.into();
-                let mut stream = TcpStream::from_std(std_stream)?;
-
-                stream.writable().await?;
-                if let Some(e) = stream.take_error()? {
-                    return Err(ProxyError::Io(e));
-                }
+                    stream.writable().await?;
+                    if let Some(e) = stream.take_error()? {
+                        return Err(ProxyError::Io(e));
+                    }
+                    stream
+                } else {
+                    // Hostname:port format - use tokio DNS resolution
+                    // Note: interface binding is not supported for hostnames
+                    if interface.is_some() {
+                        warn!("SOCKS5 interface binding is not supported for hostname addresses, ignoring");
+                    }
+                    TcpStream::connect(address).await
+                        .map_err(ProxyError::Io)?
+                };
 
                 debug!(config = ?config, "Socks5 connection");
                 // replace socks user:pass with config.selected_scope, if set

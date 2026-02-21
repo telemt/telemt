@@ -213,6 +213,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "Modes: classic={} secure={} tls={}",
         config.general.modes.classic, config.general.modes.secure, config.general.modes.tls
     );
+    if config.general.modes.classic {
+        warn!("Classic mode is vulnerable to DPI detection; enable only for legacy clients");
+    }
     info!("TLS domain: {}", config.censorship.tls_domain);
     if let Some(ref sock) = config.censorship.mask_unix_sock {
         info!("Mask: {} -> unix:{}", config.censorship.mask, sock);

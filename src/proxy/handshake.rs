@@ -7,6 +7,7 @@ use tracing::{debug, warn, trace, info};
 use zeroize::Zeroize;
 
 use crate::crypto::{sha256, AesCtr, SecureRandom};
+use rand::Rng;
 use crate::protocol::constants::*;
 use crate::protocol::tls;
 use crate::stream::{FakeTlsReader, FakeTlsWriter, CryptoReader, CryptoWriter};
@@ -119,6 +120,23 @@ where
         None
     };
 
+    let alpn_list = if config.censorship.alpn_enforce {
+        tls::extract_alpn_from_client_hello(handshake)
+    } else {
+        Vec::new()
+    };
+    let selected_alpn = if config.censorship.alpn_enforce {
+        if alpn_list.iter().any(|p| p == b"h2") {
+            Some(b"h2".to_vec())
+        } else if alpn_list.iter().any(|p| p == b"http/1.1") {
+            Some(b"http/1.1".to_vec())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let response = if let Some(cached_entry) = cached {
         emulator::build_emulated_server_hello(
             secret,
@@ -126,6 +144,8 @@ where
             &validation.session_id,
             &cached_entry,
             rng,
+            selected_alpn.clone(),
+            config.censorship.tls_new_session_tickets,
         )
     } else {
         tls::build_server_hello(
@@ -134,8 +154,24 @@ where
             &validation.session_id,
             config.censorship.fake_cert_len,
             rng,
+            selected_alpn.clone(),
+            config.censorship.tls_new_session_tickets,
         )
     };
+
+    // Optional anti-fingerprint delay before sending ServerHello.
+    if config.censorship.server_hello_delay_max_ms > 0 {
+        let min = config.censorship.server_hello_delay_min_ms;
+        let max = config.censorship.server_hello_delay_max_ms.max(min);
+        let delay_ms = if max == min {
+            max
+        } else {
+            rand::rng().random_range(min..=max)
+        };
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+    }
 
     debug!(peer = %peer, response_len = response.len(), "Sending TLS ServerHello");
 
@@ -264,9 +300,10 @@ where
             "MTProto handshake successful"
         );
 
+        let max_pending = config.general.crypto_pending_buffer;
         return HandshakeResult::Success((
             CryptoReader::new(reader, decryptor),
-            CryptoWriter::new(writer, encryptor),
+            CryptoWriter::new(writer, encryptor, max_pending),
             success,
         ));
     }

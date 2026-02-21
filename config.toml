@@ -124,6 +124,10 @@ hello = "00000000000000000000000000000000"
 # [access.user_data_quota]
 # hello = 1073741824 # 1 GB
 
+# [access.user_expirations]
+# format: username = "[year]-[month]-[day]T[hour]:[minute]:[second]Z" UTC
+# hello = "2027-01-01T00:00:00Z"
+
 # === Upstreams & Routing ===
 [[upstreams]]
 type = "direct"

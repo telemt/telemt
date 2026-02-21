@@ -567,12 +567,14 @@ impl MePool {
             let cancel_keepalive = cancel_keepalive_token;
             tokio::spawn(async move {
                 // Per-writer jittered start to avoid phase sync.
-                let initial_jitter_ms = rand::rng().random_range(0..=keepalive_jitter.as_millis().max(1) as u64);
+                let jitter_cap_ms = keepalive_interval.as_millis() / 2;
+                let effective_jitter_ms = keepalive_jitter.as_millis().min(jitter_cap_ms).max(1);
+                let initial_jitter_ms = rand::rng().random_range(0..=effective_jitter_ms as u64);
                 tokio::time::sleep(Duration::from_millis(initial_jitter_ms)).await;
                 loop {
                     tokio::select! {
                         _ = cancel_keepalive.cancelled() => break,
-                        _ = tokio::time::sleep(keepalive_interval + Duration::from_millis(rand::rng().random_range(0..=keepalive_jitter.as_millis() as u64))) => {}
+                        _ = tokio::time::sleep(keepalive_interval + Duration::from_millis(rand::rng().random_range(0..=effective_jitter_ms as u64))) => {}
                     }
                     if tx_keepalive.send(WriterCommand::Keepalive).await.is_err() {
                         break;

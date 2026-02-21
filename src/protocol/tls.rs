@@ -32,6 +32,7 @@ pub const TIME_SKEW_MAX: i64 = 10 * 60;  // 10 minutes after
 mod extension_type {
     pub const KEY_SHARE: u16 = 0x0033;
     pub const SUPPORTED_VERSIONS: u16 = 0x002b;
+    pub const ALPN: u16 = 0x0010;
 }
 
 /// TLS Cipher Suites
@@ -62,6 +63,7 @@ pub struct TlsValidation {
 // ============= TLS Extension Builder =============
 
 /// Builder for TLS extensions with correct length calculation
+#[derive(Clone)]
 struct TlsExtensionBuilder {
     extensions: Vec<u8>,
 }
@@ -108,6 +110,27 @@ impl TlsExtensionBuilder {
         
         self
     }
+
+    /// Add ALPN extension with a single selected protocol.
+    fn add_alpn(&mut self, proto: &[u8]) -> &mut Self {
+        // Extension type: ALPN (0x0010)
+        self.extensions.extend_from_slice(&extension_type::ALPN.to_be_bytes());
+
+        // ALPN extension format:
+        // extension_data length (2 bytes)
+        //   protocols length (2 bytes)
+        //     protocol name length (1 byte)
+        //     protocol name bytes
+        let proto_len = proto.len() as u8;
+        let list_len: u16 = 1 + proto_len as u16;
+        let ext_len: u16 = 2 + list_len;
+
+        self.extensions.extend_from_slice(&ext_len.to_be_bytes());
+        self.extensions.extend_from_slice(&list_len.to_be_bytes());
+        self.extensions.push(proto_len);
+        self.extensions.extend_from_slice(proto);
+        self
+    }
     
     /// Build final extensions with length prefix
     fn build(self) -> Vec<u8> {
@@ -144,6 +167,8 @@ struct ServerHelloBuilder {
     compression: u8,
     /// Extensions
     extensions: TlsExtensionBuilder,
+    /// Selected ALPN protocol (if any)
+    alpn: Option<Vec<u8>>,
 }
 
 impl ServerHelloBuilder {
@@ -154,6 +179,7 @@ impl ServerHelloBuilder {
             cipher_suite: cipher_suite::TLS_AES_128_GCM_SHA256,
             compression: 0x00,
             extensions: TlsExtensionBuilder::new(),
+            alpn: None,
         }
     }
     
@@ -167,10 +193,19 @@ impl ServerHelloBuilder {
         self.extensions.add_supported_versions(0x0304);
         self
     }
+
+    fn with_alpn(mut self, proto: Option<Vec<u8>>) -> Self {
+        self.alpn = proto;
+        self
+    }
     
     /// Build ServerHello message (without record header)
     fn build_message(&self) -> Vec<u8> {
-        let extensions = self.extensions.extensions.clone();
+        let mut ext_builder = self.extensions.clone();
+        if let Some(ref alpn) = self.alpn {
+            ext_builder.add_alpn(alpn);
+        }
+        let extensions = ext_builder.extensions.clone();
         let extensions_len = extensions.len() as u16;
         
         // Calculate total length
@@ -350,6 +385,8 @@ pub fn build_server_hello(
     session_id: &[u8],
     fake_cert_len: usize,
     rng: &SecureRandom,
+    alpn: Option<Vec<u8>>,
+    new_session_tickets: u8,
 ) -> Vec<u8> {
     const MIN_APP_DATA: usize = 64;
     const MAX_APP_DATA: usize = 16640; // RFC 8446 §5.2 upper bound
@@ -360,6 +397,7 @@ pub fn build_server_hello(
     let server_hello = ServerHelloBuilder::new(session_id.to_vec())
         .with_x25519_key(&x25519_key)
         .with_tls13_version()
+        .with_alpn(alpn)
         .build_record();
     
     // Build Change Cipher Spec record
@@ -376,21 +414,35 @@ pub fn build_server_hello(
     app_data_record.push(TLS_RECORD_APPLICATION);
     app_data_record.extend_from_slice(&TLS_VERSION);
     app_data_record.extend_from_slice(&(fake_cert_len as u16).to_be_bytes());
-    if fake_cert_len > 17 {
-        app_data_record.extend_from_slice(&fake_cert[..fake_cert_len - 17]);
-        app_data_record.push(0x16); // inner content type marker
-        app_data_record.extend_from_slice(&rng.bytes(16)); // AEAD-like tag mimic
-    } else {
-        app_data_record.extend_from_slice(&fake_cert);
-    }
+    // Fill ApplicationData with fully random bytes of desired length to avoid
+    // deterministic DPI fingerprints (fixed inner content type markers).
+    app_data_record.extend_from_slice(&fake_cert);
     
+    // Build optional NewSessionTicket records (TLS 1.3 handshake messages are encrypted;
+    // here we mimic with opaque ApplicationData records of plausible size).
+    let mut tickets = Vec::new();
+    if new_session_tickets > 0 {
+        for _ in 0..new_session_tickets {
+            let ticket_len: usize = rng.range(48) + 48; // 48-95 bytes
+            let mut record = Vec::with_capacity(5 + ticket_len);
+            record.push(TLS_RECORD_APPLICATION);
+            record.extend_from_slice(&TLS_VERSION);
+            record.extend_from_slice(&(ticket_len as u16).to_be_bytes());
+            record.extend_from_slice(&rng.bytes(ticket_len));
+            tickets.push(record);
+        }
+    }
+
     // Combine all records
     let mut response = Vec::with_capacity(
-        server_hello.len() + change_cipher_spec.len() + app_data_record.len()
+        server_hello.len() + change_cipher_spec.len() + app_data_record.len() + tickets.iter().map(|r| r.len()).sum::<usize>()
     );
     response.extend_from_slice(&server_hello);
     response.extend_from_slice(&change_cipher_spec);
     response.extend_from_slice(&app_data_record);
+    for t in &tickets {
+        response.extend_from_slice(t);
+    }
     
     // Compute HMAC for the response
     let mut hmac_input = Vec::with_capacity(TLS_DIGEST_LEN + response.len());
@@ -484,84 +536,52 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
     None
 }
 
-/// Extract ALPN protocol list from TLS ClientHello.
-pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Option<Vec<String>> {
-    if handshake.len() < 43 || handshake[0] != TLS_RECORD_HANDSHAKE {
-        return None;
-    }
-
+/// Extract ALPN protocol list from ClientHello, return in offered order.
+pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
     let mut pos = 5; // after record header
-    if handshake.get(pos).copied()? != 0x01 {
-        return None; // not ClientHello
+    if handshake.get(pos) != Some(&0x01) {
+        return Vec::new();
     }
-
-    // Handshake length bytes
-    pos += 4; // type + len (3)
-
-    // version (2) + random (32)
-    pos += 2 + 32;
-    if pos + 1 > handshake.len() {
-        return None;
-    }
-
-    let session_id_len = *handshake.get(pos)? as usize;
+    pos += 4; // type + len
+    pos += 2 + 32; // version + random
+    if pos >= handshake.len() { return Vec::new(); }
+    let session_id_len = *handshake.get(pos).unwrap_or(&0) as usize;
     pos += 1 + session_id_len;
-    if pos + 2 > handshake.len() {
-        return None;
-    }
-
-    let cipher_suites_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
-    pos += 2 + cipher_suites_len;
-    if pos + 1 > handshake.len() {
-        return None;
-    }
-
-    let comp_len = *handshake.get(pos)? as usize;
+    if pos + 2 > handshake.len() { return Vec::new(); }
+    let cipher_len = u16::from_be_bytes([handshake[pos], handshake[pos+1]]) as usize;
+    pos += 2 + cipher_len;
+    if pos >= handshake.len() { return Vec::new(); }
+    let comp_len = *handshake.get(pos).unwrap_or(&0) as usize;
     pos += 1 + comp_len;
-    if pos + 2 > handshake.len() {
-        return None;
-    }
-
-    let ext_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    if pos + 2 > handshake.len() { return Vec::new(); }
+    let ext_len = u16::from_be_bytes([handshake[pos], handshake[pos+1]]) as usize;
     pos += 2;
     let ext_end = pos + ext_len;
-    if ext_end > handshake.len() {
-        return None;
-    }
-
+    if ext_end > handshake.len() { return Vec::new(); }
+    let mut out = Vec::new();
     while pos + 4 <= ext_end {
-        let etype = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
-        let elen = u16::from_be_bytes([handshake[pos + 2], handshake[pos + 3]]) as usize;
+        let etype = u16::from_be_bytes([handshake[pos], handshake[pos+1]]);
+        let elen = u16::from_be_bytes([handshake[pos+2], handshake[pos+3]]) as usize;
         pos += 4;
-        if pos + elen > ext_end {
+        if pos + elen > ext_end { break; }
+        if etype == extension_type::ALPN && elen >= 3 {
+            let list_len = u16::from_be_bytes([handshake[pos], handshake[pos+1]]) as usize;
+            let mut lp = pos + 2;
+            let list_end = (pos + 2).saturating_add(list_len).min(pos + elen);
+            while lp + 1 <= list_end {
+                let plen = handshake[lp] as usize;
+                lp += 1;
+                if lp + plen > list_end { break; }
+                out.push(handshake[lp..lp+plen].to_vec());
+                lp += plen;
+            }
             break;
         }
-
-        if etype == 0x0010 && elen >= 3 {
-            // ALPN
-            let list_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
-            let mut alpn_pos = pos + 2;
-            let list_end = std::cmp::min(alpn_pos + list_len, pos + elen);
-            let mut protocols = Vec::new();
-            while alpn_pos < list_end {
-                let proto_len = *handshake.get(alpn_pos)? as usize;
-                alpn_pos += 1;
-                if alpn_pos + proto_len > list_end {
-                    break;
-                }
-                if let Ok(p) = std::str::from_utf8(&handshake[alpn_pos..alpn_pos + proto_len]) {
-                    protocols.push(p.to_string());
-                }
-                alpn_pos += proto_len;
-            }
-            return Some(protocols);
-        }
-
         pos += elen;
     }
-
-    None
+    out
 }
+
 
 /// Check if bytes look like a TLS ClientHello
 pub fn is_tls_handshake(first_bytes: &[u8]) -> bool {
@@ -741,7 +761,7 @@ mod tests {
         let session_id = vec![0xAA; 32];
         
         let rng = SecureRandom::new();
-        let response = build_server_hello(secret, &client_digest, &session_id, 2048, &rng);
+        let response = build_server_hello(secret, &client_digest, &session_id, 2048, &rng, None, 0);
         
         // Should have at least 3 records
         assert!(response.len() > 100);
@@ -774,8 +794,8 @@ mod tests {
         let session_id = vec![0xAA; 32];
         
         let rng = SecureRandom::new();
-        let response1 = build_server_hello(secret, &client_digest, &session_id, 1024, &rng);
-        let response2 = build_server_hello(secret, &client_digest, &session_id, 1024, &rng);
+        let response1 = build_server_hello(secret, &client_digest, &session_id, 1024, &rng, None, 0);
+        let response2 = build_server_hello(secret, &client_digest, &session_id, 1024, &rng, None, 0);
         
         // Digest position should have non-zero data
         let digest1 = &response1[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN];
@@ -904,8 +924,12 @@ mod tests {
         alpn_data.push(2);
         alpn_data.extend_from_slice(b"h2");
         let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "alpn.test");
-        let alpn = extract_alpn_from_client_hello(&ch).unwrap();
-        assert_eq!(alpn, vec!["h2"]);
+        let alpn = extract_alpn_from_client_hello(&ch);
+        let alpn_str: Vec<String> = alpn
+            .iter()
+            .map(|p| std::str::from_utf8(p).unwrap().to_string())
+            .collect();
+        assert_eq!(alpn_str, vec!["h2"]);
     }
 
     #[test]
@@ -920,7 +944,11 @@ mod tests {
         alpn_data.push(2);
         alpn_data.extend_from_slice(b"h3");
         let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "alpn.test");
-        let alpn = extract_alpn_from_client_hello(&ch).unwrap();
-        assert_eq!(alpn, vec!["h2", "spdy", "h3"]);
+        let alpn = extract_alpn_from_client_hello(&ch);
+        let alpn_str: Vec<String> = alpn
+            .iter()
+            .map(|p| std::str::from_utf8(p).unwrap().to_string())
+            .collect();
+        assert_eq!(alpn_str, vec!["h2", "spdy", "h3"]);
     }
 }

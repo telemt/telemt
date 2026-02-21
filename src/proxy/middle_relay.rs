@@ -2,12 +2,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tracing::{debug, info, trace};
+use tokio::sync::oneshot;
+use tracing::{debug, info, trace, warn};
 
 use crate::config::ProxyConfig;
 use crate::crypto::SecureRandom;
 use crate::error::{ProxyError, Result};
-use crate::protocol::constants::*;
+use crate::protocol::constants::{*, secure_padding_len};
 use crate::proxy::handshake::HandshakeSuccess;
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
@@ -15,11 +16,11 @@ use crate::transport::middle_proxy::{MePool, MeResponse, proto_flags_for_tag};
 
 pub(crate) async fn handle_via_middle_proxy<R, W>(
     mut crypto_reader: CryptoReader<R>,
-    mut crypto_writer: CryptoWriter<W>,
+    crypto_writer: CryptoWriter<W>,
     success: HandshakeSuccess,
     me_pool: Arc<MePool>,
     stats: Arc<Stats>,
-    _config: Arc<ProxyConfig>,
+    config: Arc<ProxyConfig>,
     _buffer_pool: Arc<BufferPool>,
     local_addr: SocketAddr,
     rng: Arc<SecureRandom>,
@@ -41,7 +42,7 @@ where
         "Routing via Middle-End"
     );
 
-    let (conn_id, mut me_rx) = me_pool.registry().register().await;
+    let (conn_id, me_rx) = me_pool.registry().register().await;
 
     stats.increment_user_connects(&user);
     stats.increment_user_curr_connects(&user);
@@ -56,59 +57,90 @@ where
 
     let translated_local_addr = me_pool.translate_our_addr(local_addr);
 
-    let result: Result<()> = loop {
-        tokio::select! {
-            client_frame = read_client_payload(&mut crypto_reader, proto_tag) => {
-                match client_frame {
-                    Ok(Some((payload, quickack))) => {
-                        trace!(conn_id, bytes = payload.len(), "C->ME frame");
-                        stats.add_user_octets_from(&user, payload.len() as u64);
-                        let mut flags = proto_flags;
-                        if quickack {
-                            flags |= RPC_FLAG_QUICKACK;
+    let frame_limit = config.general.max_client_frame;
+
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let mut me_rx_task = me_rx;
+    let stats_clone = stats.clone();
+    let rng_clone = rng.clone();
+    let user_clone = user.clone();
+    let me_writer = tokio::spawn(async move {
+        let mut writer = crypto_writer;
+        loop {
+            tokio::select! {
+                msg = me_rx_task.recv() => {
+                    match msg {
+                        Some(MeResponse::Data { flags, data }) => {
+                            trace!(conn_id, bytes = data.len(), flags, "ME->C data");
+                            stats_clone.add_user_octets_to(&user_clone, data.len() as u64);
+                            write_client_payload(&mut writer, proto_tag, flags, &data, rng_clone.as_ref()).await?;
                         }
-                        if payload.len() >= 8 && payload[..8].iter().all(|b| *b == 0) {
-                            flags |= RPC_FLAG_NOT_ENCRYPTED;
+                        Some(MeResponse::Ack(confirm)) => {
+                            trace!(conn_id, confirm, "ME->C quickack");
+                            write_client_ack(&mut writer, proto_tag, confirm).await?;
                         }
-                        me_pool.send_proxy_req(
-                            conn_id,
-                            success.dc_idx,
-                            peer,
-                            translated_local_addr,
-                            &payload,
-                            flags,
-                        ).await?;
+                        Some(MeResponse::Close) => {
+                            debug!(conn_id, "ME sent close");
+                            return Ok(());
+                        }
+                        None => {
+                            debug!(conn_id, "ME channel closed");
+                            return Err(ProxyError::Proxy("ME connection lost".into()));
+                        }
                     }
-                    Ok(None) => {
-                        debug!(conn_id, "Client EOF");
-                        let _ = me_pool.send_close(conn_id).await;
-                        break Ok(());
-                    }
-                    Err(e) => break Err(e),
                 }
-            }
-            me_msg = me_rx.recv() => {
-                match me_msg {
-                    Some(MeResponse::Data { flags, data }) => {
-                        trace!(conn_id, bytes = data.len(), flags, "ME->C data");
-                        stats.add_user_octets_to(&user, data.len() as u64);
-                        write_client_payload(&mut crypto_writer, proto_tag, flags, &data, rng.as_ref()).await?;
-                    }
-                    Some(MeResponse::Ack(confirm)) => {
-                        trace!(conn_id, confirm, "ME->C quickack");
-                        write_client_ack(&mut crypto_writer, proto_tag, confirm).await?;
-                    }
-                    Some(MeResponse::Close) => {
-                        debug!(conn_id, "ME sent close");
-                        break Ok(());
-                    }
-                    None => {
-                        debug!(conn_id, "ME channel closed");
-                        break Err(ProxyError::Proxy("ME connection lost".into()));
-                    }
+                _ = &mut stop_rx => {
+                    debug!(conn_id, "ME writer stop signal");
+                    return Ok(());
                 }
             }
         }
+    });
+
+    let mut main_result: Result<()> = Ok(());
+    loop {
+        match read_client_payload(&mut crypto_reader, proto_tag, frame_limit, &user).await {
+            Ok(Some((payload, quickack))) => {
+                trace!(conn_id, bytes = payload.len(), "C->ME frame");
+                stats.add_user_octets_from(&user, payload.len() as u64);
+                let mut flags = proto_flags;
+                if quickack {
+                    flags |= RPC_FLAG_QUICKACK;
+                }
+                if payload.len() >= 8 && payload[..8].iter().all(|b| *b == 0) {
+                    flags |= RPC_FLAG_NOT_ENCRYPTED;
+                }
+                if let Err(e) = me_pool.send_proxy_req(
+                    conn_id,
+                    success.dc_idx,
+                    peer,
+                    translated_local_addr,
+                    &payload,
+                    flags,
+                ).await {
+                    main_result = Err(e);
+                    break;
+                }
+            }
+            Ok(None) => {
+                debug!(conn_id, "Client EOF");
+                let _ = me_pool.send_close(conn_id).await;
+                break;
+            }
+            Err(e) => {
+                main_result = Err(e);
+                break;
+            }
+        }
+    }
+
+    let _ = stop_tx.send(());
+    let writer_result = me_writer.await.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))));
+
+    let result = match (main_result, writer_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), _) => Err(e),
+        (_, Err(e)) => Err(e),
     };
 
     debug!(user = %user, conn_id, "ME relay cleanup");
@@ -120,6 +152,8 @@ where
 async fn read_client_payload<R>(
     client_reader: &mut CryptoReader<R>,
     proto_tag: ProtoTag,
+    max_frame: usize,
+    user: &str,
 ) -> Result<Option<(Vec<u8>, bool)>>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -162,8 +196,15 @@ where
         }
     };
 
-    if len > 16 * 1024 * 1024 {
-        return Err(ProxyError::Proxy(format!("Frame too large: {len}")));
+    if len > max_frame {
+        warn!(
+            user = %user,
+            raw_len = len,
+            raw_len_hex = format_args!("0x{:08x}", len),
+            proto = ?proto_tag,
+            "Frame too large — possible crypto desync or TLS record error"
+        );
+        return Err(ProxyError::Proxy(format!("Frame too large: {len} (max {max_frame})")));
     }
 
     let mut payload = vec![0u8; len];
@@ -237,7 +278,7 @@ where
         }
         ProtoTag::Intermediate | ProtoTag::Secure => {
             let padding_len = if proto_tag == ProtoTag::Secure {
-                (rng.bytes(1)[0] % 4) as usize
+                secure_padding_len(data.len(), rng)
             } else {
                 0
             };

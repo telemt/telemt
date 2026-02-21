@@ -1,6 +1,8 @@
 //! Protocol constants and datacenter addresses
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use crate::crypto::SecureRandom;
 use std::sync::LazyLock;
 
 // ============= Telegram Datacenters =============
@@ -151,7 +153,18 @@ pub const TLS_RECORD_ALERT: u8 = 0x15;
 /// Maximum TLS record size
 pub const MAX_TLS_RECORD_SIZE: usize = 16384;
 /// Maximum TLS chunk size (with overhead)
-pub const MAX_TLS_CHUNK_SIZE: usize = 16384 + 24;
+/// RFC 8446 §5.2 allows up to 16384 + 256 bytes of ciphertext
+pub const MAX_TLS_CHUNK_SIZE: usize = 16384 + 256;
+
+/// Generate padding length for Secure Intermediate protocol.
+/// Total (data + padding) must not be divisible by 4 per MTProto spec.
+pub fn secure_padding_len(data_len: usize, rng: &SecureRandom) -> usize {
+    if data_len % 4 == 0 {
+        (rng.range(3) + 1) as usize // 1-3
+    } else {
+        rng.range(4) as usize // 0-3
+    }
+}
 
 // ============= Timeouts =============
 

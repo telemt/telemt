@@ -178,8 +178,9 @@ async fn do_tg_handshake_static(
 
     let (read_half, write_half) = stream.into_split();
 
+    let max_pending = config.general.crypto_pending_buffer;
     Ok((
         CryptoReader::new(read_half, tg_decryptor),
-        CryptoWriter::new(write_half, tg_encryptor),
+        CryptoWriter::new(write_half, tg_encryptor, max_pending),
     ))
 }

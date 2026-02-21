@@ -267,8 +267,8 @@ impl<W: AsyncWrite + Unpin> SecureIntermediateFrameWriter<W> {
             return Ok(());
         }
         
-        // Add random padding (0-3 bytes)
-        let padding_len = self.rng.range(4);
+        // Add padding so total length is never divisible by 4 (MTProto Secure)
+        let padding_len = secure_padding_len(data.len(), &self.rng);
         let padding = self.rng.bytes(padding_len);
         
         let total_len = data.len() + padding_len;

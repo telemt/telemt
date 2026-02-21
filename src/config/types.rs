@@ -96,6 +96,22 @@ pub struct NetworkConfig {
 
     #[serde(default)]
     pub multipath: bool,
+
+    /// STUN servers list for public IP discovery.
+    #[serde(default = "default_stun_servers")]
+    pub stun_servers: Vec<String>,
+
+    /// Enable TCP STUN fallback when UDP is blocked.
+    #[serde(default)]
+    pub stun_tcp_fallback: bool,
+
+    /// HTTP-based public IP detection endpoints (fallback after STUN).
+    #[serde(default = "default_http_ip_detect_urls")]
+    pub http_ip_detect_urls: Vec<String>,
+
+    /// Cache file path for detected public IP.
+    #[serde(default = "default_cache_public_ip_path")]
+    pub cache_public_ip_path: String,
 }
 
 impl Default for NetworkConfig {
@@ -105,6 +121,10 @@ impl Default for NetworkConfig {
             ipv6: None,
             prefer: 4,
             multipath: false,
+            stun_servers: default_stun_servers(),
+            stun_tcp_fallback: true,
+            http_ip_detect_urls: default_http_ip_detect_urls(),
+            cache_public_ip_path: default_cache_public_ip_path(),
         }
     }
 }
@@ -172,6 +192,15 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub me_keepalive_payload_random: bool,
 
+    /// Max pending ciphertext buffer per client writer (bytes).
+    /// Controls FakeTLS backpressure vs throughput.
+    #[serde(default = "default_crypto_pending_buffer")]
+    pub crypto_pending_buffer: usize,
+
+    /// Maximum allowed client MTProto frame size (bytes).
+    #[serde(default = "default_max_client_frame")]
+    pub max_client_frame: usize,
+
     /// Enable staggered warmup of extra ME writers.
     #[serde(default = "default_true")]
     pub me_warmup_stagger_enabled: bool,
@@ -218,6 +247,34 @@ pub struct GeneralConfig {
     /// [general.links] — proxy link generation overrides.
     #[serde(default)]
     pub links: LinksConfig,
+
+    /// Minimum TLS record size when fast_mode coalescing is enabled (0 = disabled).
+    #[serde(default = "default_fast_mode_min_tls_record")]
+    pub fast_mode_min_tls_record: usize,
+
+    /// Automatically reload proxy-secret every N seconds.
+    #[serde(default = "default_proxy_secret_reload_secs")]
+    pub proxy_secret_auto_reload_secs: u64,
+
+    /// Automatically reload proxy-multi.conf every N seconds.
+    #[serde(default = "default_proxy_config_reload_secs")]
+    pub proxy_config_auto_reload_secs: u64,
+
+    /// Enable NTP drift check at startup.
+    #[serde(default = "default_ntp_check")]
+    pub ntp_check: bool,
+
+    /// NTP servers for drift check.
+    #[serde(default = "default_ntp_servers")]
+    pub ntp_servers: Vec<String>,
+
+    /// Enable auto-degradation from ME to Direct-DC.
+    #[serde(default = "default_true")]
+    pub auto_degradation_enabled: bool,
+
+    /// Minimum unavailable ME DC groups before degrading.
+    #[serde(default = "default_degradation_min_unavailable_dc_groups")]
+    pub degradation_min_unavailable_dc_groups: u8,
 }
 
 impl Default for GeneralConfig {
@@ -251,6 +308,15 @@ impl Default for GeneralConfig {
             log_level: LogLevel::Normal,
             disable_colors: false,
             links: LinksConfig::default(),
+            crypto_pending_buffer: default_crypto_pending_buffer(),
+            max_client_frame: default_max_client_frame(),
+            fast_mode_min_tls_record: default_fast_mode_min_tls_record(),
+            proxy_secret_auto_reload_secs: default_proxy_secret_reload_secs(),
+            proxy_config_auto_reload_secs: default_proxy_config_reload_secs(),
+            ntp_check: default_ntp_check(),
+            ntp_servers: default_ntp_servers(),
+            auto_degradation_enabled: true,
+            degradation_min_unavailable_dc_groups: default_degradation_min_unavailable_dc_groups(),
         }
     }
 }
@@ -395,6 +461,22 @@ pub struct AntiCensorshipConfig {
     /// Directory to store TLS front cache (on disk).
     #[serde(default = "default_tls_front_dir")]
     pub tls_front_dir: String,
+
+    /// Minimum server_hello delay in milliseconds (anti-fingerprint).
+    #[serde(default = "default_server_hello_delay_min_ms")]
+    pub server_hello_delay_min_ms: u64,
+
+    /// Maximum server_hello delay in milliseconds.
+    #[serde(default = "default_server_hello_delay_max_ms")]
+    pub server_hello_delay_max_ms: u64,
+
+    /// Number of NewSessionTicket messages to emit post-handshake.
+    #[serde(default = "default_tls_new_session_tickets")]
+    pub tls_new_session_tickets: u8,
+
+    /// Enforce ALPN echo of client preference.
+    #[serde(default = "default_alpn_enforce")]
+    pub alpn_enforce: bool,
 }
 
 impl Default for AntiCensorshipConfig {
@@ -409,6 +491,10 @@ impl Default for AntiCensorshipConfig {
             fake_cert_len: default_fake_cert_len(),
             tls_emulation: false,
             tls_front_dir: default_tls_front_dir(),
+            server_hello_delay_min_ms: default_server_hello_delay_min_ms(),
+            server_hello_delay_max_ms: default_server_hello_delay_max_ms(),
+            tls_new_session_tickets: default_tls_new_session_tickets(),
+            alpn_enforce: default_alpn_enforce(),
         }
     }
 }
