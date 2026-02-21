@@ -461,10 +461,12 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         cache.load_from_disk().await;
 
         let port = config.censorship.mask_port;
+        let mask_host = config.censorship.mask_host.clone()
+            .unwrap_or_else(|| config.censorship.tls_domain.clone());
         // Initial synchronous fetch to warm cache before serving clients.
         for domain in tls_domains.clone() {
             match crate::tls_front::fetcher::fetch_real_tls(
-                &domain,
+                &mask_host,
                 port,
                 &domain,
                 Duration::from_secs(5),
@@ -488,7 +490,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                 tokio::time::sleep(Duration::from_secs(base_secs + jitter_secs)).await;
                 for domain in &domains {
                     match crate::tls_front::fetcher::fetch_real_tls(
-                        domain,
+                        &mask_host,
                         port,
                         domain,
                         Duration::from_secs(5),
