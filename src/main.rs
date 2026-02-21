@@ -940,42 +940,39 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                             .run()
                             .await
                             {
-                                let peer_closed = match &e {
-                                    crate::error::ProxyError::Io(ioe) => {
-                                        matches!(
+                                let peer_closed = matches!(
+                                    &e,
+                                    crate::error::ProxyError::Io(ioe)
+                                        if matches!(
                                             ioe.kind(),
                                             std::io::ErrorKind::ConnectionReset
                                                 | std::io::ErrorKind::ConnectionAborted
                                                 | std::io::ErrorKind::BrokenPipe
                                                 | std::io::ErrorKind::NotConnected
                                         )
-                                    }
+                                ) || matches!(
+                                    &e,
                                     crate::error::ProxyError::Stream(
-                                        crate::error::StreamError::Io(ioe),
-                                    ) => {
-                                        matches!(
+                                        crate::error::StreamError::Io(ioe)
+                                    )
+                                        if matches!(
                                             ioe.kind(),
                                             std::io::ErrorKind::ConnectionReset
                                                 | std::io::ErrorKind::ConnectionAborted
                                                 | std::io::ErrorKind::BrokenPipe
                                                 | std::io::ErrorKind::NotConnected
                                         )
-                                    }
-                                    _ => false,
-                                };
+                                );
 
-                                if peer_closed {
-                                    debug!(
-                                        peer = %peer_addr,
-                                        error = %e,
-                                        "Connection closed by peer"
-                                    );
-                                } else {
-                                    warn!(
-                                        peer = %peer_addr,
-                                        error = %e,
-                                        "Connection closed with error"
-                                    );
+                                let me_closed = matches!(
+                                    &e,
+                                    crate::error::ProxyError::Proxy(msg) if msg == "ME connection lost"
+                                );
+
+                                match (peer_closed, me_closed) {
+                                    (true, _) => debug!(peer = %peer_addr, error = %e, "Connection closed by client"),
+                                    (_, true) => warn!(peer = %peer_addr, error = %e, "Connection closed: Middle-End dropped session"),
+                                    _ => warn!(peer = %peer_addr, error = %e, "Connection closed with error"),
                                 }
                             }
                         });

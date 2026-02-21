@@ -98,6 +98,7 @@ where
     });
 
     let mut main_result: Result<()> = Ok(());
+    let mut client_closed = false;
     loop {
         match read_client_payload(&mut crypto_reader, proto_tag, frame_limit, &user).await {
             Ok(Some((payload, quickack))) => {
@@ -124,6 +125,7 @@ where
             }
             Ok(None) => {
                 debug!(conn_id, "Client EOF");
+                client_closed = true;
                 let _ = me_pool.send_close(conn_id).await;
                 break;
             }
@@ -135,7 +137,19 @@ where
     }
 
     let _ = stop_tx.send(());
-    let writer_result = me_writer.await.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))));
+    let mut writer_result = me_writer
+        .await
+        .unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))));
+
+    // When client closes, but ME channel stopped as unregistered - it isnt error
+    if client_closed {
+        if matches!(
+            writer_result,
+            Err(ProxyError::Proxy(ref msg)) if msg == "ME connection lost"
+        ) {
+            writer_result = Ok(());
+        }
+    }
 
     let result = match (main_result, writer_result) {
         (Ok(()), Ok(())) => Ok(()),
