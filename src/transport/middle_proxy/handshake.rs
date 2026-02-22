@@ -18,13 +18,14 @@ use crate::crypto::{SecureRandom, build_middleproxy_prekey, derive_middleproxy_k
 use crate::error::{ProxyError, Result};
 use crate::network::IpFamily;
 use crate::protocol::constants::{
-    ME_CONNECT_TIMEOUT_SECS, ME_HANDSHAKE_TIMEOUT_SECS, RPC_CRYPTO_AES_U32, RPC_HANDSHAKE_ERROR_U32,
-    RPC_HANDSHAKE_U32, RPC_PING_U32, RPC_PONG_U32, RPC_NONCE_U32,
+    ME_CONNECT_TIMEOUT_SECS, ME_HANDSHAKE_TIMEOUT_SECS, RPC_CRYPTO_AES_U32,
+    RPC_HANDSHAKE_ERROR_U32, rpc_crypto_flags,
 };
 
 use super::codec::{
-    build_handshake_payload, build_nonce_payload, build_rpc_frame, cbc_decrypt_inplace,
-    cbc_encrypt_padded, parse_nonce_payload, read_rpc_frame_plaintext,
+    RpcChecksumMode, build_handshake_payload, build_nonce_payload, build_rpc_frame,
+    cbc_decrypt_inplace, cbc_encrypt_padded, parse_handshake_flags, parse_nonce_payload,
+    read_rpc_frame_plaintext, rpc_crc,
 };
 use super::wire::{extract_ip_material, IpMaterial};
 use super::MePool;
@@ -37,6 +38,7 @@ pub(crate) struct HandshakeOutput {
     pub read_iv: [u8; 16],
     pub write_key: [u8; 32],
     pub write_iv: [u8; 16],
+    pub crc_mode: RpcChecksumMode,
     pub handshake_ms: f64,
 }
 
@@ -146,7 +148,7 @@ impl MePool {
 
         let ks = self.key_selector().await;
         let nonce_payload = build_nonce_payload(ks, crypto_ts, &my_nonce);
-        let nonce_frame = build_rpc_frame(-2, &nonce_payload);
+        let nonce_frame = build_rpc_frame(-2, &nonce_payload, RpcChecksumMode::Crc32);
         let dump = hex_dump(&nonce_frame[..nonce_frame.len().min(44)]);
         debug!(
             key_selector = format_args!("0x{ks:08x}"),
@@ -284,8 +286,15 @@ impl MePool {
             srv_v6_opt.as_ref(),
         );
 
-        let hs_payload = build_handshake_payload(hs_our_ip, local_addr.port(), hs_peer_ip, peer_addr.port());
-        let hs_frame = build_rpc_frame(-1, &hs_payload);
+        let requested_crc_mode = RpcChecksumMode::Crc32c;
+        let hs_payload = build_handshake_payload(
+            hs_our_ip,
+            local_addr.port(),
+            hs_peer_ip,
+            peer_addr.port(),
+            requested_crc_mode.advertised_flags(),
+        );
+        let hs_frame = build_rpc_frame(-1, &hs_payload, RpcChecksumMode::Crc32);
         if diag_level >= 1 {
             info!(
                 write_key = %hex_dump(&wk),
@@ -314,7 +323,7 @@ impl MePool {
             );
         }
 
-        let (encrypted_hs, mut write_iv) = cbc_encrypt_padded(&wk, &wi, &hs_frame)?;
+        let (encrypted_hs, write_iv) = cbc_encrypt_padded(&wk, &wi, &hs_frame)?;
         if diag_level >= 1 {
             info!(
                 hs_cipher = %hex_dump(&encrypted_hs),
@@ -328,6 +337,7 @@ impl MePool {
         let mut enc_buf = BytesMut::with_capacity(256);
         let mut dec_buf = BytesMut::with_capacity(256);
         let mut read_iv = ri;
+        let mut negotiated_crc_mode = RpcChecksumMode::Crc32;
         let mut handshake_ok = false;
 
         while Instant::now() < deadline && !handshake_ok {
@@ -375,17 +385,23 @@ impl MePool {
                 let frame = dec_buf.split_to(fl);
                 let pe = fl - 4;
                 let ec = u32::from_le_bytes(frame[pe..pe + 4].try_into().unwrap());
-                let ac = crate::crypto::crc32(&frame[..pe]);
+                let ac = rpc_crc(RpcChecksumMode::Crc32, &frame[..pe]);
                 if ec != ac {
                     return Err(ProxyError::InvalidHandshake(format!(
                         "HS CRC mismatch: 0x{ec:08x} vs 0x{ac:08x}"
                     )));
                 }
 
-                let hs_type = u32::from_le_bytes(frame[8..12].try_into().unwrap());
+                let hs_payload = &frame[8..pe];
+                if hs_payload.len() < 4 {
+                    return Err(ProxyError::InvalidHandshake(
+                        "Handshake payload too short".to_string(),
+                    ));
+                }
+                let hs_type = u32::from_le_bytes(hs_payload[0..4].try_into().unwrap());
                 if hs_type == RPC_HANDSHAKE_ERROR_U32 {
-                    let err_code = if frame.len() >= 16 {
-                        i32::from_le_bytes(frame[12..16].try_into().unwrap())
+                    let err_code = if hs_payload.len() >= 8 {
+                        i32::from_le_bytes(hs_payload[4..8].try_into().unwrap())
                     } else {
                         -1
                     };
@@ -393,11 +409,21 @@ impl MePool {
                         "ME rejected handshake (error={err_code})"
                     )));
                 }
-                if hs_type != RPC_HANDSHAKE_U32 {
+                let hs_flags = parse_handshake_flags(hs_payload)?;
+                if hs_flags & 0xff != 0 {
                     return Err(ProxyError::InvalidHandshake(format!(
-                        "Expected HANDSHAKE 0x{RPC_HANDSHAKE_U32:08x}, got 0x{hs_type:08x}"
+                        "Unsupported handshake flags: 0x{hs_flags:08x}"
                     )));
                 }
+                negotiated_crc_mode = if (hs_flags & requested_crc_mode.advertised_flags()) != 0 {
+                    RpcChecksumMode::from_handshake_flags(hs_flags)
+                } else if (hs_flags & rpc_crypto_flags::USE_CRC32C) != 0 {
+                    return Err(ProxyError::InvalidHandshake(format!(
+                        "Peer negotiated unsupported CRC flags: 0x{hs_flags:08x}"
+                    )));
+                } else {
+                    RpcChecksumMode::Crc32
+                };
 
                 handshake_ok = true;
                 break;
@@ -418,6 +444,7 @@ impl MePool {
             read_iv,
             write_key: wk,
             write_iv,
+            crc_mode: negotiated_crc_mode,
             handshake_ms,
         })
     }

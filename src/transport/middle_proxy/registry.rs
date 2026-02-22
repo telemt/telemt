@@ -1,12 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc::error::TrySendError;
 
 use super::codec::WriterCommand;
 use super::MeResponse;
+
+const ROUTE_CHANNEL_CAPACITY: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteResult {
+    Routed,
+    NoConn,
+    ChannelClosed,
+    QueueFull,
+}
 
 #[derive(Clone)]
 pub struct ConnMeta {
@@ -64,7 +74,7 @@ impl ConnRegistry {
 
     pub async fn register(&self) -> (u64, mpsc::Receiver<MeResponse>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(ROUTE_CHANNEL_CAPACITY);
         self.inner.write().await.map.insert(id, tx);
         (id, rx)
     }
@@ -83,12 +93,16 @@ impl ConnRegistry {
         None
     }
 
-    pub async fn route(&self, id: u64, resp: MeResponse) -> bool {
+    pub async fn route(&self, id: u64, resp: MeResponse) -> RouteResult {
         let inner = self.inner.read().await;
         if let Some(tx) = inner.map.get(&id) {
-            tx.try_send(resp).is_ok()
+            match tx.try_send(resp) {
+                Ok(()) => RouteResult::Routed,
+                Err(TrySendError::Closed(_)) => RouteResult::ChannelClosed,
+                Err(TrySendError::Full(_)) => RouteResult::QueueFull,
+            }
         } else {
-            false
+            RouteResult::NoConn
         }
     }
 

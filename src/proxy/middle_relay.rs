@@ -165,6 +165,7 @@ where
             frame_limit,
             &user,
             &mut frame_counter,
+            &stats,
         ).await {
             Ok(Some((payload, quickack))) => {
                 trace!(conn_id, bytes = payload.len(), "C->ME frame");
@@ -238,6 +239,7 @@ async fn read_client_payload<R>(
     max_frame: usize,
     user: &str,
     frame_counter: &mut u64,
+    stats: &Stats,
 ) -> Result<Option<(Vec<u8>, bool)>>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -326,18 +328,29 @@ where
             )));
         }
 
+        let secure_payload_len = if proto_tag == ProtoTag::Secure {
+            match secure_payload_len_from_wire_len(len) {
+                Some(payload_len) => payload_len,
+                None => {
+                    stats.increment_secure_padding_invalid();
+                    return Err(ProxyError::Proxy(format!(
+                        "Invalid secure frame length: {len}"
+                    )));
+                }
+            }
+        } else {
+            len
+        };
+
         let mut payload = vec![0u8; len];
         client_reader
             .read_exact(&mut payload)
             .await
             .map_err(ProxyError::Io)?;
 
-        // Secure Intermediate: remove random padding (last len%4 bytes)
+        // Secure Intermediate: strip validated trailing padding bytes.
         if proto_tag == ProtoTag::Secure {
-            let rem = len % 4;
-            if rem != 0 && payload.len() >= rem {
-                payload.truncate(len - rem);
-            }
+            payload.truncate(secure_payload_len);
         }
         *frame_counter += 1;
         return Ok(Some((payload, quickack)));
@@ -400,6 +413,12 @@ where
         }
         ProtoTag::Intermediate | ProtoTag::Secure => {
             let padding_len = if proto_tag == ProtoTag::Secure {
+                if !is_valid_secure_payload_len(data.len()) {
+                    return Err(ProxyError::Proxy(format!(
+                        "Secure payload must be 4-byte aligned, got {}",
+                        data.len()
+                    )));
+                }
                 secure_padding_len(data.len(), rng)
             } else {
                 0

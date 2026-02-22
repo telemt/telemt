@@ -8,7 +8,9 @@ use std::io::{self, Error, ErrorKind};
 use std::sync::Arc;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::protocol::constants::{ProtoTag, secure_padding_len};
+use crate::protocol::constants::{
+    ProtoTag, is_valid_secure_payload_len, secure_padding_len, secure_payload_len_from_wire_len,
+};
 use crate::crypto::SecureRandom;
 use super::frame::{Frame, FrameMeta, FrameCodec as FrameCodecTrait};
 
@@ -274,13 +276,13 @@ fn decode_secure(src: &mut BytesMut, max_size: usize) -> io::Result<Option<Frame
         return Ok(None);
     }
     
-    // Calculate padding (indicated by length not divisible by 4)
-    let padding_len = len % 4;
-    let data_len = if padding_len != 0 {
-        len - padding_len
-    } else {
-        len
-    };
+    let data_len = secure_payload_len_from_wire_len(len).ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("invalid secure frame length: {len}"),
+        )
+    })?;
+    let padding_len = len - data_len;
     
     meta.padding_len = padding_len as u8;
     
@@ -303,6 +305,13 @@ fn encode_secure(frame: &Frame, dst: &mut BytesMut, rng: &SecureRandom) -> io::R
         return Ok(());
     }
     
+    if !is_valid_secure_payload_len(data.len()) {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("secure payload must be 4-byte aligned, got {}", data.len()),
+        ));
+    }
+
     // Generate padding that keeps total length non-divisible by 4.
     let padding_len = secure_padding_len(data.len(), rng);
     

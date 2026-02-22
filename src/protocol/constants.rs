@@ -156,17 +156,37 @@ pub const MAX_TLS_RECORD_SIZE: usize = 16384;
 /// RFC 8446 §5.2 allows up to 16384 + 256 bytes of ciphertext
 pub const MAX_TLS_CHUNK_SIZE: usize = 16384 + 256;
 
-/// Generate padding length for Secure Intermediate protocol.
-/// Total (data + padding) must not be divisible by 4 per MTProto spec.
-pub fn secure_padding_len(data_len: usize, rng: &SecureRandom) -> usize {
-    let rem = data_len % 4;
-    match rem {
-        0 => (rng.range(3) + 1) as usize,           // {1, 2, 3}
-        1 => rng.range(3) as usize,                 // {0, 1, 2}
-        2 => [0usize, 1, 3][rng.range(3) as usize], // {0, 1, 3}
-        3 => [0usize, 2, 3][rng.range(3) as usize], // {0, 2, 3}
-        _ => unreachable!(),
+/// Secure Intermediate payload is expected to be 4-byte aligned.
+pub fn is_valid_secure_payload_len(data_len: usize) -> bool {
+    data_len % 4 == 0
+}
+
+/// Compute Secure Intermediate payload length from wire length.
+///
+/// Returns `None` for invalid Secure lengths (e.g. divisible by 4).
+pub fn secure_payload_len_from_wire_len(wire_len: usize) -> Option<usize> {
+    if wire_len < 4 {
+        return None;
     }
+    let padding_len = wire_len % 4;
+    if padding_len == 0 || wire_len < padding_len {
+        return None;
+    }
+    let payload_len = wire_len - padding_len;
+    if !is_valid_secure_payload_len(payload_len) {
+        return None;
+    }
+    Some(payload_len)
+}
+
+/// Generate padding length for Secure Intermediate protocol.
+/// Data must be 4-byte aligned; padding is 1..=3 so total is never divisible by 4.
+pub fn secure_padding_len(data_len: usize, rng: &SecureRandom) -> usize {
+    debug_assert!(
+        is_valid_secure_payload_len(data_len),
+        "Secure payload must be 4-byte aligned, got {data_len}"
+    );
+    (rng.range(3) + 1) as usize
 }
 
 // ============= Timeouts =============
@@ -300,6 +320,10 @@ pub mod rpc_flags {
         pub const FLAG_ABRIDGED: u32      = 0x40000000;
         pub const FLAG_QUICKACK: u32      = 0x80000000;
     }
+
+    pub mod rpc_crypto_flags {
+        pub const USE_CRC32C: u32 = 0x800;
+    }
     
     pub const ME_CONNECT_TIMEOUT_SECS: u64 = 5;
     pub const ME_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
@@ -339,7 +363,7 @@ mod tests {
     #[test]
     fn secure_padding_never_produces_aligned_total() {
         let rng = SecureRandom::new();
-        for data_len in 0..1000 {
+        for data_len in (0..1000).step_by(4) {
             for _ in 0..100 {
                 let padding = secure_padding_len(data_len, &rng);
                 assert!(
@@ -353,6 +377,24 @@ mod tests {
                     data_len + padding
                 );
             }
+        }
+    }
+
+    #[test]
+    fn secure_wire_len_roundtrip_for_aligned_payload() {
+        for payload_len in (4..4096).step_by(4) {
+            for padding in 1..=3usize {
+                let wire_len = payload_len + padding;
+                let recovered = secure_payload_len_from_wire_len(wire_len);
+                assert_eq!(recovered, Some(payload_len));
+            }
+        }
+    }
+
+    #[test]
+    fn secure_wire_len_rejects_aligned_totals() {
+        for wire_len in (0..1024).step_by(4) {
+            assert_eq!(secure_payload_len_from_wire_len(wire_len), None);
         }
     }
 }

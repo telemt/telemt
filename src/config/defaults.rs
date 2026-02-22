@@ -37,7 +37,7 @@ pub(crate) fn default_replay_window_secs() -> u64 {
 }
 
 pub(crate) fn default_handshake_timeout() -> u64 {
-    30
+    15
 }
 
 pub(crate) fn default_connect_timeout() -> u64 {
@@ -52,11 +52,11 @@ pub(crate) fn default_ack_timeout() -> u64 {
     300
 }
 pub(crate) fn default_me_one_retry() -> u8 {
-    12
+    3
 }
 
 pub(crate) fn default_me_one_timeout() -> u64 {
-    1200
+    1500
 }
 
 pub(crate) fn default_listen_addr() -> String {
@@ -83,7 +83,7 @@ pub(crate) fn default_unknown_dc_log_path() -> Option<String> {
 }
 
 pub(crate) fn default_pool_size() -> usize {
-    16
+    2
 }
 
 pub(crate) fn default_keepalive_interval() -> u64 {

@@ -118,7 +118,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             ipv4: true,
-            ipv6: Some(false),
+            ipv6: None,
             prefer: 4,
             multipath: false,
             stun_servers: default_stun_servers(),
@@ -140,7 +140,7 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub fast_mode: bool,
 
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub use_middle_proxy: bool,
 
     #[serde(default)]
@@ -157,7 +157,7 @@ pub struct GeneralConfig {
     pub middle_proxy_nat_ip: Option<IpAddr>,
 
     /// Enable STUN-based NAT probing to discover public IP:port for ME KDF.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub middle_proxy_nat_probe: bool,
 
     /// Optional STUN server address (host:port) for NAT probing.
@@ -283,15 +283,15 @@ impl Default for GeneralConfig {
             modes: ProxyModes::default(),
             prefer_ipv6: false,
             fast_mode: true,
-            use_middle_proxy: true,
+            use_middle_proxy: false,
             ad_tag: None,
             proxy_secret_path: None,
             middle_proxy_nat_ip: None,
-            middle_proxy_nat_probe: true,
+            middle_proxy_nat_probe: false,
             middle_proxy_nat_stun: None,
             middle_proxy_nat_stun_servers: Vec::new(),
             middle_proxy_pool_size: default_pool_size(),
-            middle_proxy_warm_standby: 8,
+            middle_proxy_warm_standby: 0,
             me_keepalive_enabled: true,
             me_keepalive_interval_secs: default_keepalive_interval(),
             me_keepalive_jitter_secs: default_keepalive_jitter(),
@@ -302,7 +302,7 @@ impl Default for GeneralConfig {
             me_reconnect_max_concurrent_per_dc: 1,
             me_reconnect_backoff_base_ms: default_reconnect_backoff_base_ms(),
             me_reconnect_backoff_cap_ms: default_reconnect_backoff_cap_ms(),
-            me_reconnect_fast_retry_count: 11,
+            me_reconnect_fast_retry_count: 1,
             stun_iface_mismatch_ignore: false,
             unknown_dc_log_path: default_unknown_dc_log_path(),
             log_level: LogLevel::Normal,
@@ -455,7 +455,7 @@ pub struct AntiCensorshipConfig {
     pub fake_cert_len: usize,
 
     /// Enable TLS certificate emulation using cached real certificates.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub tls_emulation: bool,
 
     /// Directory to store TLS front cache (on disk).
@@ -489,7 +489,7 @@ impl Default for AntiCensorshipConfig {
             mask_port: default_mask_port(),
             mask_unix_sock: None,
             fake_cert_len: default_fake_cert_len(),
-            tls_emulation: true,
+            tls_emulation: false,
             tls_front_dir: default_tls_front_dir(),
             server_hello_delay_min_ms: default_server_hello_delay_min_ms(),
             server_hello_delay_max_ms: default_server_hello_delay_max_ms(),
@@ -619,9 +619,9 @@ pub struct ListenerConfig {
 /// - omitted                    — show no links (default)
 #[derive(Debug, Clone)]
 pub enum ShowLink {
-    /// Don't show any links.
+    /// Don't show any links (default when omitted).
     None,
-    /// Show links for all configured users (default).
+    /// Show links for all configured users.
     All,
     /// Show links for specific users.
     Specific(Vec<String>),
@@ -629,7 +629,7 @@ pub enum ShowLink {
 
 impl Default for ShowLink {
     fn default() -> Self {
-        ShowLink::All
+        ShowLink::None
     }
 }
 

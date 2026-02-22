@@ -100,6 +100,14 @@ fn render_metrics(stats: &Stats) -> String {
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_failed_total counter");
     let _ = writeln!(out, "telemt_me_keepalive_failed_total {}", stats.get_me_keepalive_failed());
 
+    let _ = writeln!(out, "# HELP telemt_me_keepalive_pong_total ME keepalive pong replies");
+    let _ = writeln!(out, "# TYPE telemt_me_keepalive_pong_total counter");
+    let _ = writeln!(out, "telemt_me_keepalive_pong_total {}", stats.get_me_keepalive_pong());
+
+    let _ = writeln!(out, "# HELP telemt_me_keepalive_timeout_total ME keepalive ping timeouts");
+    let _ = writeln!(out, "# TYPE telemt_me_keepalive_timeout_total counter");
+    let _ = writeln!(out, "telemt_me_keepalive_timeout_total {}", stats.get_me_keepalive_timeout());
+
     let _ = writeln!(out, "# HELP telemt_me_reconnect_attempts_total ME reconnect attempts");
     let _ = writeln!(out, "# TYPE telemt_me_reconnect_attempts_total counter");
     let _ = writeln!(out, "telemt_me_reconnect_attempts_total {}", stats.get_me_reconnect_attempts());
@@ -107,6 +115,30 @@ fn render_metrics(stats: &Stats) -> String {
     let _ = writeln!(out, "# HELP telemt_me_reconnect_success_total ME reconnect successes");
     let _ = writeln!(out, "# TYPE telemt_me_reconnect_success_total counter");
     let _ = writeln!(out, "telemt_me_reconnect_success_total {}", stats.get_me_reconnect_success());
+
+    let _ = writeln!(out, "# HELP telemt_me_crc_mismatch_total ME CRC mismatches");
+    let _ = writeln!(out, "# TYPE telemt_me_crc_mismatch_total counter");
+    let _ = writeln!(out, "telemt_me_crc_mismatch_total {}", stats.get_me_crc_mismatch());
+
+    let _ = writeln!(out, "# HELP telemt_me_seq_mismatch_total ME sequence mismatches");
+    let _ = writeln!(out, "# TYPE telemt_me_seq_mismatch_total counter");
+    let _ = writeln!(out, "telemt_me_seq_mismatch_total {}", stats.get_me_seq_mismatch());
+
+    let _ = writeln!(out, "# HELP telemt_me_route_drop_no_conn_total ME route drops: no conn");
+    let _ = writeln!(out, "# TYPE telemt_me_route_drop_no_conn_total counter");
+    let _ = writeln!(out, "telemt_me_route_drop_no_conn_total {}", stats.get_me_route_drop_no_conn());
+
+    let _ = writeln!(out, "# HELP telemt_me_route_drop_channel_closed_total ME route drops: channel closed");
+    let _ = writeln!(out, "# TYPE telemt_me_route_drop_channel_closed_total counter");
+    let _ = writeln!(out, "telemt_me_route_drop_channel_closed_total {}", stats.get_me_route_drop_channel_closed());
+
+    let _ = writeln!(out, "# HELP telemt_me_route_drop_queue_full_total ME route drops: queue full");
+    let _ = writeln!(out, "# TYPE telemt_me_route_drop_queue_full_total counter");
+    let _ = writeln!(out, "telemt_me_route_drop_queue_full_total {}", stats.get_me_route_drop_queue_full());
+
+    let _ = writeln!(out, "# HELP telemt_secure_padding_invalid_total Invalid secure frame lengths");
+    let _ = writeln!(out, "# TYPE telemt_secure_padding_invalid_total counter");
+    let _ = writeln!(out, "telemt_secure_padding_invalid_total {}", stats.get_secure_padding_invalid());
 
     let _ = writeln!(out, "# HELP telemt_user_connections_total Per-user total connections");
     let _ = writeln!(out, "# TYPE telemt_user_connections_total counter");

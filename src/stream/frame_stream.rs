@@ -232,11 +232,13 @@ impl<R: AsyncRead + Unpin> SecureIntermediateFrameReader<R> {
         let mut data = vec![0u8; len];
         self.upstream.read_exact(&mut data).await?;
         
-        // Strip padding (not aligned to 4)
-        if len % 4 != 0 {
-            let actual_len = len - (len % 4);
-            data.truncate(actual_len);
-        }
+        let payload_len = secure_payload_len_from_wire_len(len).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid secure frame length: {len}"),
+            )
+        })?;
+        data.truncate(payload_len);
         
         Ok((Bytes::from(data), meta))
     }
@@ -267,6 +269,13 @@ impl<W: AsyncWrite + Unpin> SecureIntermediateFrameWriter<W> {
             return Ok(());
         }
         
+        if !is_valid_secure_payload_len(data.len()) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Secure payload must be 4-byte aligned, got {}", data.len()),
+            ));
+        }
+
         // Add padding so total length is never divisible by 4 (MTProto Secure)
         let padding_len = secure_padding_len(data.len(), &self.rng);
         let padding = self.rng.bytes(padding_len);
@@ -550,9 +559,7 @@ mod tests {
         writer.flush().await.unwrap();
         
         let (received, _meta) = reader.read_frame().await.unwrap();
-        // Received should have padding stripped to align to 4
-        let expected_len = (data.len() / 4) * 4;
-        assert_eq!(received.len(), expected_len);
+        assert_eq!(received.len(), data.len());
     }
     
     #[tokio::test]

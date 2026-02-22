@@ -253,7 +253,11 @@ where
 
         let mode_ok = match proto_tag {
             ProtoTag::Secure => {
-                if is_tls { config.general.modes.tls } else { config.general.modes.secure }
+                if is_tls {
+                    config.general.modes.tls || config.general.modes.secure
+                } else {
+                    config.general.modes.secure || config.general.modes.tls
+                }
             }
             ProtoTag::Intermediate | ProtoTag::Abridged => config.general.modes.classic,
         };
