@@ -227,6 +227,7 @@ impl ProxyConfig {
                     announce: None,
                     announce_ip: None,
                     proxy_protocol: None,
+                    reuse_allow: false,
                 });
             }
             if let Some(ipv6_str) = &config.server.listen_addr_ipv6 {
@@ -236,6 +237,7 @@ impl ProxyConfig {
                         announce: None,
                         announce_ip: None,
                         proxy_protocol: None,
+                        reuse_allow: false,
                     });
                 }
             }

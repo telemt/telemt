@@ -33,7 +33,6 @@ pub(crate) async fn reader_loop(
 ) -> Result<()> {
     let mut raw = enc_leftover;
     let mut expected_seq: i32 = 0;
-    let mut crc_errors = 0u32;
     let mut seq_mismatch = 0u32;
 
     loop {
@@ -80,13 +79,15 @@ pub(crate) async fn reader_loop(
             let frame = dec.split_to(fl);
             let pe = fl - 4;
             let ec = u32::from_le_bytes(frame[pe..pe + 4].try_into().unwrap());
-            if crc32(&frame[..pe]) != ec {
-                warn!("CRC mismatch in data frame");
-                crc_errors += 1;
-                if crc_errors > 3 {
-                    return Err(ProxyError::Proxy("Too many CRC mismatches".into()));
-                }
-                continue;
+            let actual_crc = crc32(&frame[..pe]);
+            if actual_crc != ec {
+                warn!(
+                    frame_len = fl,
+                    expected_crc = format_args!("0x{ec:08x}"),
+                    actual_crc = format_args!("0x{actual_crc:08x}"),
+                    "CRC mismatch — CBC crypto desync, aborting ME connection"
+                );
+                return Err(ProxyError::Proxy("CRC mismatch (crypto desync)".into()));
             }
 
             let seq_no = i32::from_le_bytes(frame[4..8].try_into().unwrap());

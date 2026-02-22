@@ -8,7 +8,7 @@ use std::io::{self, Error, ErrorKind};
 use std::sync::Arc;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::protocol::constants::ProtoTag;
+use crate::protocol::constants::{ProtoTag, secure_padding_len};
 use crate::crypto::SecureRandom;
 use super::frame::{Frame, FrameMeta, FrameCodec as FrameCodecTrait};
 
@@ -303,14 +303,8 @@ fn encode_secure(frame: &Frame, dst: &mut BytesMut, rng: &SecureRandom) -> io::R
         return Ok(());
     }
     
-    // Generate padding to make length not divisible by 4
-    let padding_len = if data.len() % 4 == 0 {
-        // Add 1-3 bytes to make it non-aligned
-        (rng.range(3) + 1) as usize
-    } else {
-        // Already non-aligned, can add 0-3
-        rng.range(4) as usize
-    };
+    // Generate padding that keeps total length non-divisible by 4.
+    let padding_len = secure_padding_len(data.len(), rng);
     
     let total_len = data.len() + padding_len;
     dst.reserve(4 + total_len);

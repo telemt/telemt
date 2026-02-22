@@ -213,6 +213,7 @@ listen_addr_ipv6 = "::"
 
 [[server.listeners]]
 ip = "0.0.0.0"
+# reuse_allow = false # Set true only when intentionally running multiple telemt instances on same port
 
 [[server.listeners]]
 ip = "::"

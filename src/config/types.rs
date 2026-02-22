@@ -603,6 +603,10 @@ pub struct ListenerConfig {
     /// Per-listener PROXY protocol override. When set, overrides global server.proxy_protocol.
     #[serde(default)]
     pub proxy_protocol: Option<bool>,
+    /// Allow multiple telemt instances to listen on the same IP:port (SO_REUSEPORT).
+    /// Default is false for safety.
+    #[serde(default)]
+    pub reuse_allow: bool,
 }
 
 // ============= ShowLink =============

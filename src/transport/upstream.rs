@@ -24,6 +24,8 @@ const NUM_DCS: usize = 5;
 
 /// Timeout for individual DC ping attempt
 const DC_PING_TIMEOUT_SECS: u64 = 5;
+/// Timeout for direct TG DC TCP connect readiness.
+const DIRECT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 // ============= RTT Tracking =============
 
@@ -375,7 +377,16 @@ impl UpstreamManager {
                 let std_stream: std::net::TcpStream = socket.into();
                 let stream = TcpStream::from_std(std_stream)?;
 
-                stream.writable().await?;
+                let connect_timeout = Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS);
+                match tokio::time::timeout(connect_timeout, stream.writable()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(ProxyError::Io(e)),
+                    Err(_) => {
+                        return Err(ProxyError::ConnectionTimeout {
+                            addr: target.to_string(),
+                        });
+                    }
+                }
                 if let Some(e) = stream.take_error()? {
                     return Err(ProxyError::Io(e));
                 }

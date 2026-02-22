@@ -38,7 +38,7 @@ use crate::stream::BufferPool;
 use crate::transport::middle_proxy::{
     MePool, fetch_proxy_config, run_me_ping, MePingFamily, MePingSample, format_sample_line,
 };
-use crate::transport::{ListenOptions, UpstreamManager, create_listener};
+use crate::transport::{ListenOptions, UpstreamManager, create_listener, find_listener_processes};
 use crate::tls_front::TlsFrontCache;
 
 fn parse_cli() -> (String, bool, Option<String>) {
@@ -715,6 +715,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
             continue;
         }
         let options = ListenOptions {
+            reuse_port: listener_conf.reuse_allow,
             ipv6_only: listener_conf.ip.is_ipv6(),
             ..Default::default()
         };
@@ -753,7 +754,33 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                 listeners.push((listener, listener_proxy_protocol));
             }
             Err(e) => {
-                error!("Failed to bind to {}: {}", addr, e);
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    let owners = find_listener_processes(addr);
+                    if owners.is_empty() {
+                        error!(
+                            %addr,
+                            "Failed to bind: address already in use (owner process unresolved)"
+                        );
+                    } else {
+                        for owner in owners {
+                            error!(
+                                %addr,
+                                pid = owner.pid,
+                                process = %owner.process,
+                                "Failed to bind: address already in use"
+                            );
+                        }
+                    }
+
+                    if !listener_conf.reuse_allow {
+                        error!(
+                            %addr,
+                            "reuse_allow=false; set [[server.listeners]].reuse_allow=true to allow multi-instance listening"
+                        );
+                    }
+                } else {
+                    error!("Failed to bind to {}: {}", addr, e);
+                }
             }
         }
     }

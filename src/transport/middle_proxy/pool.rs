@@ -23,7 +23,6 @@ use super::reader::reader_loop;
 use super::MeResponse;
 const ME_ACTIVE_PING_SECS: u64 = 25;
 const ME_ACTIVE_PING_JITTER_SECS: i64 = 5;
-const ME_KEEPALIVE_PAYLOAD_LEN: usize = 4;
 
 #[derive(Clone)]
 pub struct MeWriter {
@@ -361,7 +360,6 @@ impl MePool {
 
         // Additional connections up to pool_size total (round-robin across DCs), staggered to de-phase lifecycles.
         if self.me_warmup_stagger_enabled {
-            let mut delay_ms = 0u64;
             for (dc, addrs) in dc_addrs.iter() {
                 for (ip, port) in addrs {
                     if self.connection_count() >= pool_size {
@@ -369,7 +367,7 @@ impl MePool {
                     }
                     let addr = SocketAddr::new(*ip, *port);
                     let jitter = rand::rng().random_range(0..=self.me_warmup_step_jitter.as_millis() as u64);
-                    delay_ms = delay_ms.saturating_add(self.me_warmup_step_delay.as_millis() as u64 + jitter);
+                    let delay_ms = self.me_warmup_step_delay.as_millis() as u64 + jitter;
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     if let Err(e) = self.connect_one(addr, rng.as_ref()).await {
                         debug!(%addr, dc = %dc, error = %e, "Extra ME connect failed (staggered)");
@@ -419,7 +417,6 @@ impl MePool {
         let draining = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<WriterCommand>(4096);
         let tx_for_keepalive = tx.clone();
-        let keepalive_random = self.me_keepalive_payload_random;
         let stats = self.stats.clone();
         let mut rpc_writer = RpcWriter {
             writer: hs.wr,
@@ -440,11 +437,7 @@ impl MePool {
                                 if rpc_writer.send_and_flush(&payload).await.is_err() { break; }
                             }
                             Some(WriterCommand::Keepalive) => {
-                                let mut payload = [0u8; ME_KEEPALIVE_PAYLOAD_LEN];
-                                if keepalive_random {
-                                    rand::rng().fill(&mut payload);
-                                }
-                                match rpc_writer.send_keepalive(payload).await {
+                                match rpc_writer.send_keepalive().await {
                                     Ok(()) => {
                                         stats.increment_me_keepalive_sent();
                                     }

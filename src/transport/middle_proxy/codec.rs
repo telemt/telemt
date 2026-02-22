@@ -190,11 +190,26 @@ impl RpcWriter {
         self.writer.flush().await.map_err(ProxyError::Io)
     }
 
-    pub(crate) async fn send_keepalive(&mut self, payload: [u8; 4]) -> Result<()> {
-        // Keepalive is a frame with fl == 4 and 4 bytes payload.
-        let mut frame = Vec::with_capacity(8);
-        frame.extend_from_slice(&4u32.to_le_bytes());
-        frame.extend_from_slice(&payload);
-        self.send(&frame).await
+    /// Sends a 4-byte keepalive marker directly into the CBC stream.
+    /// This is not an RPC frame and must not consume sequence numbers.
+    pub(crate) async fn send_keepalive(&mut self) -> Result<()> {
+        let mut buf = [0u8; 16];
+        for i in 0..4 {
+            let start = i * 4;
+            let end = start + 4;
+            buf[start..end].copy_from_slice(&PADDING_FILLER);
+        }
+
+        let cipher = AesCbc::new(self.key, self.iv);
+        let mut v = buf.to_vec();
+        cipher
+            .encrypt_in_place(&mut v)
+            .map_err(|e| ProxyError::Crypto(format!("{e}")))?;
+
+        if v.len() >= 16 {
+            self.iv.copy_from_slice(&v[v.len() - 16..]);
+        }
+        self.writer.write_all(&v).await.map_err(ProxyError::Io)?;
+        self.writer.flush().await.map_err(ProxyError::Io)
     }
 }
