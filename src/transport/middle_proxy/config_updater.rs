@@ -77,10 +77,15 @@ fn parse_proxy_line(line: &str) -> Option<(i32, IpAddr, u16)> {
 }
 
 pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
-    let resp = reqwest::get(url)
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config client build failed: {e}")))?;
+    let resp = client
+        .get(url)
+        .send()
         .await
-        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}")))?
-        ;
+        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}")))?;
 
     if let Some(date) = resp.headers().get(reqwest::header::DATE) {
         if let Ok(date_str) = date.to_str() {

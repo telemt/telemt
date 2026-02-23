@@ -54,7 +54,13 @@ pub async fn fetch_proxy_secret(cache_path: Option<&str>) -> Result<Vec<u8>> {
 }
 
 pub async fn download_proxy_secret() -> Result<Vec<u8>> {
-    let resp = reqwest::get("https://core.telegram.org/getProxySecret")
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| ProxyError::Proxy(format!("Failed to build reqwest client: {e}")))?;
+    let resp = client
+        .get("https://core.telegram.org/getProxySecret")
+        .send()
         .await
         .map_err(|e| ProxyError::Proxy(format!("Failed to download proxy-secret: {e}")))?;
 
