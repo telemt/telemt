@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::collections::HashMap;
 use ipnetwork::IpNetwork;
 use serde::Deserialize;
@@ -172,11 +171,23 @@ pub(crate) fn default_proxy_config_reload_secs() -> u64 {
 }
 
 pub(crate) fn default_update_every_secs() -> u64 {
-    2 * 60 * 60
+    12 * 60 * 60
 }
 
 pub(crate) fn default_me_reinit_drain_timeout_secs() -> u64 {
-    300
+    120
+}
+
+pub(crate) fn default_me_pool_drain_ttl_secs() -> u64 {
+    90
+}
+
+pub(crate) fn default_me_pool_min_fresh_ratio() -> f32 {
+    0.8
+}
+
+pub(crate) fn default_hardswap() -> bool {
+    false
 }
 
 pub(crate) fn default_ntp_check() -> bool {

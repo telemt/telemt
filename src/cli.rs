@@ -196,7 +196,10 @@ use_middle_proxy = false
 log_level = "normal"
 desync_all_full = false
 update_every = 43200
-me_reinit_drain_timeout_secs = 300
+hardswap = false
+me_pool_drain_ttl_secs = 90
+me_pool_min_fresh_ratio = 0.8
+me_reinit_drain_timeout_secs = 120
 
 [network]
 ipv4 = true

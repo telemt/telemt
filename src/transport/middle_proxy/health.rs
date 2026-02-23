@@ -68,6 +68,7 @@ async fn check_family(
         .read()
         .await
         .iter()
+        .filter(|w| !w.draining.load(std::sync::atomic::Ordering::Relaxed))
         .map(|w| w.addr)
         .collect();
 

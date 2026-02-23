@@ -12,6 +12,9 @@
 //! | `general` | `me_keepalive_*`              | Passed on next connection         |
 //! | `general` | `desync_all_full`             | Applied immediately               |
 //! | `general` | `update_every`                | Applied to ME updater immediately |
+//! | `general` | `hardswap`                    | Applied on next ME map update     |
+//! | `general` | `me_pool_drain_ttl_secs`      | Applied on next ME map update     |
+//! | `general` | `me_pool_min_fresh_ratio`     | Applied on next ME map update     |
 //! | `general` | `me_reinit_drain_timeout_secs`| Applied on next ME map update     |
 //! | `access`  | All user/quota fields         | Effective immediately             |
 //!
@@ -39,6 +42,9 @@ pub struct HotFields {
     pub middle_proxy_pool_size:  usize,
     pub desync_all_full:         bool,
     pub update_every_secs:       u64,
+    pub hardswap:                bool,
+    pub me_pool_drain_ttl_secs:  u64,
+    pub me_pool_min_fresh_ratio: f32,
     pub me_reinit_drain_timeout_secs: u64,
     pub me_keepalive_enabled:    bool,
     pub me_keepalive_interval_secs: u64,
@@ -55,6 +61,9 @@ impl HotFields {
             middle_proxy_pool_size:  cfg.general.middle_proxy_pool_size,
             desync_all_full:         cfg.general.desync_all_full,
             update_every_secs:       cfg.general.effective_update_every_secs(),
+            hardswap:                cfg.general.hardswap,
+            me_pool_drain_ttl_secs:  cfg.general.me_pool_drain_ttl_secs,
+            me_pool_min_fresh_ratio: cfg.general.me_pool_min_fresh_ratio,
             me_reinit_drain_timeout_secs: cfg.general.me_reinit_drain_timeout_secs,
             me_keepalive_enabled:    cfg.general.me_keepalive_enabled,
             me_keepalive_interval_secs: cfg.general.me_keepalive_interval_secs,
@@ -195,6 +204,27 @@ fn log_changes(
         info!(
             "config reload: update_every(effective): {}s → {}s",
             old_hot.update_every_secs, new_hot.update_every_secs,
+        );
+    }
+
+    if old_hot.hardswap != new_hot.hardswap {
+        info!(
+            "config reload: hardswap: {} → {}",
+            old_hot.hardswap, new_hot.hardswap,
+        );
+    }
+
+    if old_hot.me_pool_drain_ttl_secs != new_hot.me_pool_drain_ttl_secs {
+        info!(
+            "config reload: me_pool_drain_ttl_secs: {}s → {}s",
+            old_hot.me_pool_drain_ttl_secs, new_hot.me_pool_drain_ttl_secs,
+        );
+    }
+
+    if (old_hot.me_pool_min_fresh_ratio - new_hot.me_pool_min_fresh_ratio).abs() > f32::EPSILON {
+        info!(
+            "config reload: me_pool_min_fresh_ratio: {:.3} → {:.3}",
+            old_hot.me_pool_min_fresh_ratio, new_hot.me_pool_min_fresh_ratio,
         );
     }
 

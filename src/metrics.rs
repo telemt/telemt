@@ -175,6 +175,30 @@ fn render_metrics(stats: &Stats) -> String {
         stats.get_desync_frames_bucket_gt_10()
     );
 
+    let _ = writeln!(out, "# HELP telemt_pool_swap_total Successful ME pool swaps");
+    let _ = writeln!(out, "# TYPE telemt_pool_swap_total counter");
+    let _ = writeln!(out, "telemt_pool_swap_total {}", stats.get_pool_swap_total());
+
+    let _ = writeln!(out, "# HELP telemt_pool_drain_active Active draining ME writers");
+    let _ = writeln!(out, "# TYPE telemt_pool_drain_active gauge");
+    let _ = writeln!(out, "telemt_pool_drain_active {}", stats.get_pool_drain_active());
+
+    let _ = writeln!(out, "# HELP telemt_pool_force_close_total Forced close events for draining writers");
+    let _ = writeln!(out, "# TYPE telemt_pool_force_close_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_pool_force_close_total {}",
+        stats.get_pool_force_close_total()
+    );
+
+    let _ = writeln!(out, "# HELP telemt_pool_stale_pick_total Stale writer fallback picks for new binds");
+    let _ = writeln!(out, "# TYPE telemt_pool_stale_pick_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_pool_stale_pick_total {}",
+        stats.get_pool_stale_pick_total()
+    );
+
     let _ = writeln!(out, "# HELP telemt_user_connections_total Per-user total connections");
     let _ = writeln!(out, "# TYPE telemt_user_connections_total counter");
     let _ = writeln!(out, "# HELP telemt_user_connections_current Per-user active connections");

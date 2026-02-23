@@ -131,6 +131,13 @@ pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
 }
 
 async fn run_update_cycle(pool: &Arc<MePool>, rng: &Arc<SecureRandom>, cfg: &ProxyConfig) {
+    pool.update_runtime_reinit_policy(
+        cfg.general.hardswap,
+        cfg.general.me_pool_drain_ttl_secs,
+        cfg.general.effective_me_pool_force_close_secs(),
+        cfg.general.me_pool_min_fresh_ratio,
+    );
+
     let mut maps_changed = false;
 
     // Update proxy config v4
@@ -162,12 +169,7 @@ async fn run_update_cycle(pool: &Arc<MePool>, rng: &Arc<SecureRandom>, cfg: &Pro
     }
 
     if maps_changed {
-        let drain_timeout = if cfg.general.me_reinit_drain_timeout_secs == 0 {
-            None
-        } else {
-            Some(Duration::from_secs(cfg.general.me_reinit_drain_timeout_secs))
-        };
-        pool.zero_downtime_reinit_after_map_change(rng.as_ref(), drain_timeout)
+        pool.zero_downtime_reinit_after_map_change(rng.as_ref())
             .await;
     }
 
@@ -224,6 +226,12 @@ pub async fn me_config_updater(
                     break;
                 }
                 let cfg = config_rx.borrow().clone();
+                pool.update_runtime_reinit_policy(
+                    cfg.general.hardswap,
+                    cfg.general.me_pool_drain_ttl_secs,
+                    cfg.general.effective_me_pool_force_close_secs(),
+                    cfg.general.me_pool_min_fresh_ratio,
+                );
                 let new_secs = cfg.general.effective_update_every_secs().max(1);
                 if new_secs == update_every_secs {
                     continue;

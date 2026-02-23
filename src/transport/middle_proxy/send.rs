@@ -134,8 +134,8 @@ impl MePool {
             candidate_indices.sort_by_key(|idx| {
                 let w = &writers_snapshot[*idx];
                 let degraded = w.degraded.load(Ordering::Relaxed);
-                let draining = w.draining.load(Ordering::Relaxed);
-                (draining as usize, degraded as usize)
+                let stale = (w.generation < self.current_generation()) as usize;
+                (stale, degraded as usize)
             });
 
             let start = self.rr.fetch_add(1, Ordering::Relaxed) as usize % candidate_indices.len();
@@ -143,13 +143,23 @@ impl MePool {
             for offset in 0..candidate_indices.len() {
                 let idx = candidate_indices[(start + offset) % candidate_indices.len()];
                 let w = &writers_snapshot[idx];
-                if w.draining.load(Ordering::Relaxed) {
+                if !self.writer_accepts_new_binding(w) {
                     continue;
                 }
                 if w.tx.send(WriterCommand::Data(payload.clone())).await.is_ok() {
                     self.registry
                         .bind_writer(conn_id, w.id, w.tx.clone(), meta.clone())
                         .await;
+                    if w.generation < self.current_generation() {
+                        self.stats.increment_pool_stale_pick_total();
+                        debug!(
+                            conn_id,
+                            writer_id = w.id,
+                            writer_generation = w.generation,
+                            current_generation = self.current_generation(),
+                            "Selected stale ME writer for fallback bind"
+                        );
+                    }
                     return Ok(());
                 } else {
                     warn!(writer_id = w.id, "ME writer channel closed");
@@ -159,7 +169,7 @@ impl MePool {
             }
 
             let w = writers_snapshot[candidate_indices[start]].clone();
-            if w.draining.load(Ordering::Relaxed) {
+            if !self.writer_accepts_new_binding(&w) {
                 continue;
             }
             match w.tx.send(WriterCommand::Data(payload.clone())).await {
@@ -167,6 +177,9 @@ impl MePool {
                     self.registry
                         .bind_writer(conn_id, w.id, w.tx.clone(), meta.clone())
                         .await;
+                    if w.generation < self.current_generation() {
+                        self.stats.increment_pool_stale_pick_total();
+                    }
                     return Ok(());
                 }
                 Err(_) => {
@@ -245,13 +258,13 @@ impl MePool {
 
         if preferred.is_empty() {
             return (0..writers.len())
-                .filter(|i| !writers[*i].draining.load(Ordering::Relaxed))
+                .filter(|i| self.writer_accepts_new_binding(&writers[*i]))
                 .collect();
         }
 
         let mut out = Vec::new();
         for (idx, w) in writers.iter().enumerate() {
-            if w.draining.load(Ordering::Relaxed) {
+            if !self.writer_accepts_new_binding(w) {
                 continue;
             }
             if preferred.iter().any(|p| *p == w.addr) {
@@ -260,7 +273,7 @@ impl MePool {
         }
         if out.is_empty() {
             return (0..writers.len())
-                .filter(|i| !writers[*i].draining.load(Ordering::Relaxed))
+                .filter(|i| self.writer_accepts_new_binding(&writers[*i]))
                 .collect();
         }
         out
