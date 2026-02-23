@@ -38,7 +38,7 @@ me_warmup_stagger_enabled = true
 me_warmup_step_delay_ms = 500             # Base delay between extra connects
 me_warmup_step_jitter_ms = 300            # Jitter for warmup delay
 # Reconnect policy knobs.
-me_reconnect_max_concurrent_per_dc = 1    # Parallel reconnects per DC - EXPERIMENTAL! UNSTABLE!
+me_reconnect_max_concurrent_per_dc = 4    # Parallel reconnects per DC - EXPERIMENTAL! UNSTABLE!
 me_reconnect_backoff_base_ms = 500        # Backoff start
 me_reconnect_backoff_cap_ms = 30000       # Backoff cap
 me_reconnect_fast_retry_count = 11        # Quick retries before backoff
