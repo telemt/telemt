@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -19,7 +19,13 @@ use x509_parser::certificate::X509Certificate;
 
 use crate::crypto::SecureRandom;
 use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE};
-use crate::tls_front::types::{ParsedServerHello, TlsExtension, TlsFetchResult, ParsedCertificateInfo};
+use crate::tls_front::types::{
+    ParsedCertificateInfo,
+    ParsedServerHello,
+    TlsCertPayload,
+    TlsExtension,
+    TlsFetchResult,
+};
 
 /// No-op verifier: accept any certificate (we only need lengths and metadata).
 #[derive(Debug)]
@@ -315,6 +321,46 @@ fn parse_cert_info(certs: &[CertificateDer<'static>]) -> Option<ParsedCertificat
     })
 }
 
+fn u24_bytes(value: usize) -> Option<[u8; 3]> {
+    if value > 0x00ff_ffff {
+        return None;
+    }
+    Some([
+        ((value >> 16) & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8,
+        (value & 0xff) as u8,
+    ])
+}
+
+fn encode_tls13_certificate_message(cert_chain_der: &[Vec<u8>]) -> Option<Vec<u8>> {
+    if cert_chain_der.is_empty() {
+        return None;
+    }
+
+    let mut certificate_list = Vec::new();
+    for cert in cert_chain_der {
+        if cert.is_empty() {
+            return None;
+        }
+        certificate_list.extend_from_slice(&u24_bytes(cert.len())?);
+        certificate_list.extend_from_slice(cert);
+        certificate_list.extend_from_slice(&0u16.to_be_bytes()); // cert_entry extensions
+    }
+
+    // Certificate = context_len(1) + certificate_list_len(3) + entries
+    let body_len = 1usize
+        .checked_add(3)?
+        .checked_add(certificate_list.len())?;
+
+    let mut message = Vec::with_capacity(4 + body_len);
+    message.push(0x0b); // HandshakeType::certificate
+    message.extend_from_slice(&u24_bytes(body_len)?);
+    message.push(0x00); // certificate_request_context length
+    message.extend_from_slice(&u24_bytes(certificate_list.len())?);
+    message.extend_from_slice(&certificate_list);
+    Some(message)
+}
+
 async fn fetch_via_raw_tls(
     host: &str,
     port: u16,
@@ -368,26 +414,18 @@ async fn fetch_via_raw_tls(
         },
         total_app_data_len,
         cert_info: None,
+        cert_payload: None,
     })
 }
 
-/// Fetch real TLS metadata for the given SNI: negotiated cipher and cert lengths.
-pub async fn fetch_real_tls(
+async fn fetch_via_rustls(
     host: &str,
     port: u16,
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
 ) -> Result<TlsFetchResult> {
-    // Preferred path: raw TLS probe for accurate record sizing
-    match fetch_via_raw_tls(host, port, sni, connect_timeout).await {
-        Ok(res) => return Ok(res),
-        Err(e) => {
-            warn!(sni = %sni, error = %e, "Raw TLS fetch failed, falling back to rustls");
-        }
-    }
-
-    // Fallback: rustls handshake to at least get certificate sizes
+    // rustls handshake path for certificate and basic negotiated metadata.
     let stream = if let Some(manager) = upstream {
         // Resolve host to SocketAddr
         if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
@@ -429,8 +467,19 @@ pub async fn fetch_real_tls(
         .peer_certificates()
         .map(|slice| slice.to_vec())
         .unwrap_or_default();
+    let cert_chain_der: Vec<Vec<u8>> = certs.iter().map(|c| c.as_ref().to_vec()).collect();
+    let cert_payload = encode_tls13_certificate_message(&cert_chain_der).map(|certificate_message| {
+        TlsCertPayload {
+            cert_chain_der: cert_chain_der.clone(),
+            certificate_message,
+        }
+    });
 
-    let total_cert_len: usize = certs.iter().map(|c| c.len()).sum::<usize>().max(1024);
+    let total_cert_len = cert_payload
+        .as_ref()
+        .map(|payload| payload.certificate_message.len())
+        .unwrap_or_else(|| cert_chain_der.iter().map(Vec::len).sum::<usize>())
+        .max(1024);
     let cert_info = parse_cert_info(&certs);
 
     // Heuristic: split across two records if large to mimic real servers a bit.
@@ -453,6 +502,7 @@ pub async fn fetch_real_tls(
         sni = %sni,
         len = total_cert_len,
         cipher = format!("0x{:04x}", u16::from_be_bytes(cipher_suite)),
+        has_cert_payload = cert_payload.is_some(),
         "Fetched TLS metadata via rustls"
     );
 
@@ -461,5 +511,81 @@ pub async fn fetch_real_tls(
         app_data_records_sizes: app_data_records_sizes.clone(),
         total_app_data_len: app_data_records_sizes.iter().sum(),
         cert_info,
+        cert_payload,
     })
+}
+
+/// Fetch real TLS metadata for the given SNI.
+///
+/// Strategy:
+/// 1) Probe raw TLS for realistic ServerHello and ApplicationData record sizes.
+/// 2) Fetch certificate chain via rustls to build cert payload.
+/// 3) Merge both when possible; otherwise auto-fallback to whichever succeeded.
+pub async fn fetch_real_tls(
+    host: &str,
+    port: u16,
+    sni: &str,
+    connect_timeout: Duration,
+    upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+) -> Result<TlsFetchResult> {
+    let raw_result = match fetch_via_raw_tls(host, port, sni, connect_timeout).await {
+        Ok(res) => Some(res),
+        Err(e) => {
+            warn!(sni = %sni, error = %e, "Raw TLS fetch failed");
+            None
+        }
+    };
+
+    match fetch_via_rustls(host, port, sni, connect_timeout, upstream).await {
+        Ok(rustls_result) => {
+            if let Some(mut raw) = raw_result {
+                raw.cert_info = rustls_result.cert_info;
+                raw.cert_payload = rustls_result.cert_payload;
+                debug!(sni = %sni, "Fetched TLS metadata via raw probe + rustls cert chain");
+                Ok(raw)
+            } else {
+                Ok(rustls_result)
+            }
+        }
+        Err(e) => {
+            if let Some(raw) = raw_result {
+                warn!(sni = %sni, error = %e, "Rustls cert fetch failed, using raw TLS metadata only");
+                Ok(raw)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_tls13_certificate_message;
+
+    fn read_u24(bytes: &[u8]) -> usize {
+        ((bytes[0] as usize) << 16) | ((bytes[1] as usize) << 8) | (bytes[2] as usize)
+    }
+
+    #[test]
+    fn test_encode_tls13_certificate_message_single_cert() {
+        let cert = vec![0x30, 0x03, 0x02, 0x01, 0x01];
+        let message = encode_tls13_certificate_message(&[cert.clone()]).expect("message");
+
+        assert_eq!(message[0], 0x0b);
+        assert_eq!(read_u24(&message[1..4]), message.len() - 4);
+        assert_eq!(message[4], 0x00);
+
+        let cert_list_len = read_u24(&message[5..8]);
+        assert_eq!(cert_list_len, cert.len() + 5);
+
+        let cert_len = read_u24(&message[8..11]);
+        assert_eq!(cert_len, cert.len());
+        assert_eq!(&message[11..11 + cert.len()], cert.as_slice());
+        assert_eq!(&message[11 + cert.len()..13 + cert.len()], &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_encode_tls13_certificate_message_empty_chain() {
+        assert!(encode_tls13_certificate_message(&[]).is_none());
+    }
 }

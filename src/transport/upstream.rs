@@ -24,6 +24,8 @@ const NUM_DCS: usize = 5;
 
 /// Timeout for individual DC ping attempt
 const DC_PING_TIMEOUT_SECS: u64 = 5;
+/// Timeout for direct TG DC TCP connect readiness.
+const DIRECT_CONNECT_TIMEOUT_SECS: u64 = 10;
 
 // ============= RTT Tracking =============
 
@@ -375,7 +377,16 @@ impl UpstreamManager {
                 let std_stream: std::net::TcpStream = socket.into();
                 let stream = TcpStream::from_std(std_stream)?;
 
-                stream.writable().await?;
+                let connect_timeout = Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS);
+                match tokio::time::timeout(connect_timeout, stream.writable()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(ProxyError::Io(e)),
+                    Err(_) => {
+                        return Err(ProxyError::ConnectionTimeout {
+                            addr: target.to_string(),
+                        });
+                    }
+                }
                 if let Some(e) = stream.take_error()? {
                     return Err(ProxyError::Io(e));
                 }
@@ -383,6 +394,7 @@ impl UpstreamManager {
                 Ok(stream)
             },
             UpstreamType::Socks4 { address, interface, user_id } => {
+                let connect_timeout = Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS);
                 // Try to parse as SocketAddr first (IP:port), otherwise treat as hostname:port
                 let mut stream = if let Ok(proxy_addr) = address.parse::<SocketAddr>() {
                     // IP:port format - use socket with optional interface binding
@@ -405,7 +417,15 @@ impl UpstreamManager {
                     let std_stream: std::net::TcpStream = socket.into();
                     let stream = TcpStream::from_std(std_stream)?;
 
-                    stream.writable().await?;
+                    match tokio::time::timeout(connect_timeout, stream.writable()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return Err(ProxyError::Io(e)),
+                        Err(_) => {
+                            return Err(ProxyError::ConnectionTimeout {
+                                addr: proxy_addr.to_string(),
+                            });
+                        }
+                    }
                     if let Some(e) = stream.take_error()? {
                         return Err(ProxyError::Io(e));
                     }
@@ -416,8 +436,15 @@ impl UpstreamManager {
                     if interface.is_some() {
                         warn!("SOCKS4 interface binding is not supported for hostname addresses, ignoring");
                     }
-                    TcpStream::connect(address).await
-                        .map_err(ProxyError::Io)?
+                    match tokio::time::timeout(connect_timeout, TcpStream::connect(address)).await {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(e)) => return Err(ProxyError::Io(e)),
+                        Err(_) => {
+                            return Err(ProxyError::ConnectionTimeout {
+                                addr: address.clone(),
+                            });
+                        }
+                    }
                 };
 
                 // replace socks user_id with config.selected_scope, if set
@@ -425,10 +452,19 @@ impl UpstreamManager {
                     .filter(|s| !s.is_empty());
                 let _user_id: Option<&str> = scope.or(user_id.as_deref());
 
-                connect_socks4(&mut stream, target, _user_id).await?;
+                match tokio::time::timeout(connect_timeout, connect_socks4(&mut stream, target, _user_id)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        return Err(ProxyError::ConnectionTimeout {
+                            addr: target.to_string(),
+                        });
+                    }
+                }
                 Ok(stream)
             },
             UpstreamType::Socks5 { address, interface, username, password } => {
+                let connect_timeout = Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS);
                 // Try to parse as SocketAddr first (IP:port), otherwise treat as hostname:port
                 let mut stream = if let Ok(proxy_addr) = address.parse::<SocketAddr>() {
                     // IP:port format - use socket with optional interface binding
@@ -451,7 +487,15 @@ impl UpstreamManager {
                     let std_stream: std::net::TcpStream = socket.into();
                     let stream = TcpStream::from_std(std_stream)?;
 
-                    stream.writable().await?;
+                    match tokio::time::timeout(connect_timeout, stream.writable()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return Err(ProxyError::Io(e)),
+                        Err(_) => {
+                            return Err(ProxyError::ConnectionTimeout {
+                                addr: proxy_addr.to_string(),
+                            });
+                        }
+                    }
                     if let Some(e) = stream.take_error()? {
                         return Err(ProxyError::Io(e));
                     }
@@ -462,8 +506,15 @@ impl UpstreamManager {
                     if interface.is_some() {
                         warn!("SOCKS5 interface binding is not supported for hostname addresses, ignoring");
                     }
-                    TcpStream::connect(address).await
-                        .map_err(ProxyError::Io)?
+                    match tokio::time::timeout(connect_timeout, TcpStream::connect(address)).await {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(e)) => return Err(ProxyError::Io(e)),
+                        Err(_) => {
+                            return Err(ProxyError::ConnectionTimeout {
+                                addr: address.clone(),
+                            });
+                        }
+                    }
                 };
 
                 debug!(config = ?config, "Socks5 connection");
@@ -473,7 +524,20 @@ impl UpstreamManager {
                 let _username: Option<&str> = scope.or(username.as_deref());
                 let _password: Option<&str> = scope.or(password.as_deref());
 
-                connect_socks5(&mut stream, target, _username, _password).await?;
+                match tokio::time::timeout(
+                    connect_timeout,
+                    connect_socks5(&mut stream, target, _username, _password),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        return Err(ProxyError::ConnectionTimeout {
+                            addr: target.to_string(),
+                        });
+                    }
+                }
                 Ok(stream)
             },
         }

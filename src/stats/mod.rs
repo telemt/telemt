@@ -21,8 +21,16 @@ pub struct Stats {
     handshake_timeouts: AtomicU64,
     me_keepalive_sent: AtomicU64,
     me_keepalive_failed: AtomicU64,
+    me_keepalive_pong: AtomicU64,
+    me_keepalive_timeout: AtomicU64,
     me_reconnect_attempts: AtomicU64,
     me_reconnect_success: AtomicU64,
+    me_crc_mismatch: AtomicU64,
+    me_seq_mismatch: AtomicU64,
+    me_route_drop_no_conn: AtomicU64,
+    me_route_drop_channel_closed: AtomicU64,
+    me_route_drop_queue_full: AtomicU64,
+    secure_padding_invalid: AtomicU64,
     user_stats: DashMap<String, UserStats>,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -49,14 +57,45 @@ impl Stats {
     pub fn increment_handshake_timeouts(&self) { self.handshake_timeouts.fetch_add(1, Ordering::Relaxed); }
     pub fn increment_me_keepalive_sent(&self) { self.me_keepalive_sent.fetch_add(1, Ordering::Relaxed); }
     pub fn increment_me_keepalive_failed(&self) { self.me_keepalive_failed.fetch_add(1, Ordering::Relaxed); }
+    pub fn increment_me_keepalive_pong(&self) { self.me_keepalive_pong.fetch_add(1, Ordering::Relaxed); }
+    pub fn increment_me_keepalive_timeout(&self) { self.me_keepalive_timeout.fetch_add(1, Ordering::Relaxed); }
+    pub fn increment_me_keepalive_timeout_by(&self, value: u64) {
+        self.me_keepalive_timeout.fetch_add(value, Ordering::Relaxed);
+    }
     pub fn increment_me_reconnect_attempt(&self) { self.me_reconnect_attempts.fetch_add(1, Ordering::Relaxed); }
     pub fn increment_me_reconnect_success(&self) { self.me_reconnect_success.fetch_add(1, Ordering::Relaxed); }
+    pub fn increment_me_crc_mismatch(&self) { self.me_crc_mismatch.fetch_add(1, Ordering::Relaxed); }
+    pub fn increment_me_seq_mismatch(&self) { self.me_seq_mismatch.fetch_add(1, Ordering::Relaxed); }
+    pub fn increment_me_route_drop_no_conn(&self) { self.me_route_drop_no_conn.fetch_add(1, Ordering::Relaxed); }
+    pub fn increment_me_route_drop_channel_closed(&self) {
+        self.me_route_drop_channel_closed.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_route_drop_queue_full(&self) {
+        self.me_route_drop_queue_full.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_secure_padding_invalid(&self) {
+        self.secure_padding_invalid.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn get_connects_all(&self) -> u64 { self.connects_all.load(Ordering::Relaxed) }
     pub fn get_connects_bad(&self) -> u64 { self.connects_bad.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_sent(&self) -> u64 { self.me_keepalive_sent.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_failed(&self) -> u64 { self.me_keepalive_failed.load(Ordering::Relaxed) }
+    pub fn get_me_keepalive_pong(&self) -> u64 { self.me_keepalive_pong.load(Ordering::Relaxed) }
+    pub fn get_me_keepalive_timeout(&self) -> u64 { self.me_keepalive_timeout.load(Ordering::Relaxed) }
     pub fn get_me_reconnect_attempts(&self) -> u64 { self.me_reconnect_attempts.load(Ordering::Relaxed) }
     pub fn get_me_reconnect_success(&self) -> u64 { self.me_reconnect_success.load(Ordering::Relaxed) }
+    pub fn get_me_crc_mismatch(&self) -> u64 { self.me_crc_mismatch.load(Ordering::Relaxed) }
+    pub fn get_me_seq_mismatch(&self) -> u64 { self.me_seq_mismatch.load(Ordering::Relaxed) }
+    pub fn get_me_route_drop_no_conn(&self) -> u64 { self.me_route_drop_no_conn.load(Ordering::Relaxed) }
+    pub fn get_me_route_drop_channel_closed(&self) -> u64 {
+        self.me_route_drop_channel_closed.load(Ordering::Relaxed)
+    }
+    pub fn get_me_route_drop_queue_full(&self) -> u64 {
+        self.me_route_drop_queue_full.load(Ordering::Relaxed)
+    }
+    pub fn get_secure_padding_invalid(&self) -> u64 {
+        self.secure_padding_invalid.load(Ordering::Relaxed)
+    }
     
     pub fn increment_user_connects(&self, user: &str) {
         self.user_stats.entry(user.to_string()).or_default()
@@ -70,7 +109,22 @@ impl Stats {
     
     pub fn decrement_user_curr_connects(&self, user: &str) {
         if let Some(stats) = self.user_stats.get(user) {
-            stats.curr_connects.fetch_sub(1, Ordering::Relaxed);
+            let counter = &stats.curr_connects;
+            let mut current = counter.load(Ordering::Relaxed);
+            loop {
+                if current == 0 {
+                    break;
+                }
+                match counter.compare_exchange_weak(
+                    current,
+                    current - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => current = actual,
+                }
+            }
         }
     }
     

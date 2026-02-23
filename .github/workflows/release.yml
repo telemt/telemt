@@ -3,8 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - '[0-9]+.[0-9]+.[0-9]+'  # Matches tags like 3.0.0, 3.1.2, etc.
-  workflow_dispatch:  # Manual trigger from GitHub Actions UI
+      - '[0-9]+.[0-9]+.[0-9]+' # Matches tags like 3.0.0, 3.1.2, etc.
+  workflow_dispatch: # Manual trigger from GitHub Actions UI
 
 permissions:
   contents: read
@@ -84,6 +84,32 @@ jobs:
             target/${{ matrix.target }}/release/${{ matrix.asset_name }}.tar.gz
             target/${{ matrix.target }}/release/${{ matrix.asset_name }}.sha256
 
+  build-docker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.TOKEN_GH_DEPLOY }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ github.ref }}
+
   release:
     name: Create Release
     needs: build
@@ -108,17 +134,17 @@ jobs:
           # Extract version from tag (remove 'v' prefix if present)
           VERSION="${GITHUB_REF#refs/tags/}"
           VERSION="${VERSION#v}"
-          
+
           # Install cargo-edit for version bumping
           cargo install cargo-edit
-          
+
           # Update Cargo.toml version
           cargo set-version "$VERSION"
-          
+
           # Configure git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
           # Commit and push changes
           #git add Cargo.toml Cargo.lock
           #git commit -m "chore: bump version to $VERSION" || echo "No changes to commit"

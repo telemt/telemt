@@ -74,8 +74,8 @@ pub struct ProxyModes {
 impl Default for ProxyModes {
     fn default() -> Self {
         Self {
-            classic: true,
-            secure: true,
+            classic: false,
+            secure: false,
             tls: true,
         }
     }
@@ -118,7 +118,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             ipv4: true,
-            ipv6: None,
+            ipv6: Some(false),
             prefer: 4,
             multipath: false,
             stun_servers: default_stun_servers(),
@@ -291,7 +291,7 @@ impl Default for GeneralConfig {
             middle_proxy_nat_stun: None,
             middle_proxy_nat_stun_servers: Vec::new(),
             middle_proxy_pool_size: default_pool_size(),
-            middle_proxy_warm_standby: 0,
+            middle_proxy_warm_standby: 8,
             me_keepalive_enabled: true,
             me_keepalive_interval_secs: default_keepalive_interval(),
             me_keepalive_jitter_secs: default_keepalive_jitter(),
@@ -299,10 +299,10 @@ impl Default for GeneralConfig {
             me_warmup_stagger_enabled: true,
             me_warmup_step_delay_ms: default_warmup_step_delay_ms(),
             me_warmup_step_jitter_ms: default_warmup_step_jitter_ms(),
-            me_reconnect_max_concurrent_per_dc: 1,
+            me_reconnect_max_concurrent_per_dc: 4,
             me_reconnect_backoff_base_ms: default_reconnect_backoff_base_ms(),
             me_reconnect_backoff_cap_ms: default_reconnect_backoff_cap_ms(),
-            me_reconnect_fast_retry_count: 1,
+            me_reconnect_fast_retry_count: 8,
             stun_iface_mismatch_ignore: false,
             unknown_dc_log_path: default_unknown_dc_log_path(),
             log_level: LogLevel::Normal,
@@ -474,6 +474,12 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_tls_new_session_tickets")]
     pub tls_new_session_tickets: u8,
 
+    /// TTL in seconds for sending full certificate payload per client IP.
+    /// First client connection per (SNI domain, client IP) gets full cert payload.
+    /// Subsequent handshakes within TTL use compact cert metadata payload.
+    #[serde(default = "default_tls_full_cert_ttl_secs")]
+    pub tls_full_cert_ttl_secs: u64,
+
     /// Enforce ALPN echo of client preference.
     #[serde(default = "default_alpn_enforce")]
     pub alpn_enforce: bool,
@@ -494,6 +500,7 @@ impl Default for AntiCensorshipConfig {
             server_hello_delay_min_ms: default_server_hello_delay_min_ms(),
             server_hello_delay_max_ms: default_server_hello_delay_max_ms(),
             tls_new_session_tickets: default_tls_new_session_tickets(),
+            tls_full_cert_ttl_secs: default_tls_full_cert_ttl_secs(),
             alpn_enforce: default_alpn_enforce(),
         }
     }
@@ -603,6 +610,10 @@ pub struct ListenerConfig {
     /// Per-listener PROXY protocol override. When set, overrides global server.proxy_protocol.
     #[serde(default)]
     pub proxy_protocol: Option<bool>,
+    /// Allow multiple telemt instances to listen on the same IP:port (SO_REUSEPORT).
+    /// Default is false for safety.
+    #[serde(default)]
+    pub reuse_allow: bool,
 }
 
 // ============= ShowLink =============

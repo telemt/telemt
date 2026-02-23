@@ -17,13 +17,11 @@ use crate::network::IpFamily;
 use crate::protocol::constants::*;
 
 use super::ConnRegistry;
-use super::registry::{BoundConn, ConnMeta};
+use super::registry::BoundConn;
 use super::codec::{RpcWriter, WriterCommand};
 use super::reader::reader_loop;
-use super::MeResponse;
 const ME_ACTIVE_PING_SECS: u64 = 25;
 const ME_ACTIVE_PING_JITTER_SECS: i64 = 5;
-const ME_KEEPALIVE_PAYLOAD_LEN: usize = 4;
 
 #[derive(Clone)]
 pub struct MeWriter {
@@ -361,7 +359,6 @@ impl MePool {
 
         // Additional connections up to pool_size total (round-robin across DCs), staggered to de-phase lifecycles.
         if self.me_warmup_stagger_enabled {
-            let mut delay_ms = 0u64;
             for (dc, addrs) in dc_addrs.iter() {
                 for (ip, port) in addrs {
                     if self.connection_count() >= pool_size {
@@ -369,7 +366,7 @@ impl MePool {
                     }
                     let addr = SocketAddr::new(*ip, *port);
                     let jitter = rand::rng().random_range(0..=self.me_warmup_step_jitter.as_millis() as u64);
-                    delay_ms = delay_ms.saturating_add(self.me_warmup_step_delay.as_millis() as u64 + jitter);
+                    let delay_ms = self.me_warmup_step_delay.as_millis() as u64 + jitter;
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     if let Err(e) = self.connect_one(addr, rng.as_ref()).await {
                         debug!(%addr, dc = %dc, error = %e, "Extra ME connect failed (staggered)");
@@ -418,14 +415,12 @@ impl MePool {
         let degraded = Arc::new(AtomicBool::new(false));
         let draining = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<WriterCommand>(4096);
-        let tx_for_keepalive = tx.clone();
-        let keepalive_random = self.me_keepalive_payload_random;
-        let stats = self.stats.clone();
         let mut rpc_writer = RpcWriter {
             writer: hs.wr,
             key: hs.write_key,
             iv: hs.write_iv,
             seq_no: 0,
+            crc_mode: hs.crc_mode,
         };
         let cancel_wr = cancel.clone();
         tokio::spawn(async move {
@@ -438,21 +433,6 @@ impl MePool {
                             }
                             Some(WriterCommand::DataAndFlush(payload)) => {
                                 if rpc_writer.send_and_flush(&payload).await.is_err() { break; }
-                            }
-                            Some(WriterCommand::Keepalive) => {
-                                let mut payload = [0u8; ME_KEEPALIVE_PAYLOAD_LEN];
-                                if keepalive_random {
-                                    rand::rng().fill(&mut payload);
-                                }
-                                match rpc_writer.send_keepalive(payload).await {
-                                    Ok(()) => {
-                                        stats.increment_me_keepalive_sent();
-                                    }
-                                    Err(_) => {
-                                        stats.increment_me_keepalive_failed();
-                                        break;
-                                    }
-                                }
                             }
                             Some(WriterCommand::Close) | None => break,
                         }
@@ -471,12 +451,15 @@ impl MePool {
         };
         self.writers.write().await.push(writer.clone());
         self.conn_count.fetch_add(1, Ordering::Relaxed);
-        self.writer_available.notify_waiters();
+        self.writer_available.notify_one();
 
         let reg = self.registry.clone();
         let writers_arc = self.writers_arc();
         let ping_tracker = self.ping_tracker.clone();
+        let ping_tracker_reader = ping_tracker.clone();
         let rtt_stats = self.rtt_stats.clone();
+        let stats_reader = self.stats.clone();
+        let stats_ping = self.stats.clone();
         let pool = Arc::downgrade(self);
         let cancel_ping = cancel.clone();
         let tx_ping = tx.clone();
@@ -489,19 +472,20 @@ impl MePool {
         let keepalive_jitter = self.me_keepalive_jitter;
         let cancel_reader_token = cancel.clone();
         let cancel_ping_token = cancel_ping.clone();
-        let cancel_keepalive_token = cancel.clone();
 
         tokio::spawn(async move {
             let res = reader_loop(
                 hs.rd,
                 hs.read_key,
                 hs.read_iv,
+                hs.crc_mode,
                 reg.clone(),
                 BytesMut::new(),
                 BytesMut::new(),
                 tx.clone(),
-                ping_tracker.clone(),
+                ping_tracker_reader,
                 rtt_stats.clone(),
+                stats_reader,
                 writer_id,
                 degraded.clone(),
                 cancel_reader_token.clone(),
@@ -526,15 +510,40 @@ impl MePool {
         let pool_ping = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut ping_id: i64 = rand::random::<i64>();
-            loop {
+            // Per-writer jittered start to avoid phase sync.
+            let startup_jitter = if keepalive_enabled {
+                let jitter_cap_ms = keepalive_interval.as_millis() / 2;
+                let effective_jitter_ms = keepalive_jitter.as_millis().min(jitter_cap_ms).max(1);
+                Duration::from_millis(rand::rng().random_range(0..=effective_jitter_ms as u64))
+            } else {
                 let jitter = rand::rng()
                     .random_range(-ME_ACTIVE_PING_JITTER_SECS..=ME_ACTIVE_PING_JITTER_SECS);
                 let wait = (ME_ACTIVE_PING_SECS as i64 + jitter).max(5) as u64;
+                Duration::from_secs(wait)
+            };
+            tokio::select! {
+                _ = cancel_ping_token.cancelled() => return,
+                _ = tokio::time::sleep(startup_jitter) => {}
+            }
+            loop {
+                let wait = if keepalive_enabled {
+                    let jitter_cap_ms = keepalive_interval.as_millis() / 2;
+                    let effective_jitter_ms = keepalive_jitter.as_millis().min(jitter_cap_ms).max(1);
+                    keepalive_interval
+                        + Duration::from_millis(
+                            rand::rng().random_range(0..=effective_jitter_ms as u64)
+                        )
+                } else {
+                    let jitter = rand::rng()
+                        .random_range(-ME_ACTIVE_PING_JITTER_SECS..=ME_ACTIVE_PING_JITTER_SECS);
+                    let secs = (ME_ACTIVE_PING_SECS as i64 + jitter).max(5) as u64;
+                    Duration::from_secs(secs)
+                };
                 tokio::select! {
                     _ = cancel_ping_token.cancelled() => {
                         break;
                     }
-                    _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+                    _ = tokio::time::sleep(wait) => {}
                 }
                 let sent_id = ping_id;
                 let mut p = Vec::with_capacity(12);
@@ -542,12 +551,19 @@ impl MePool {
                 p.extend_from_slice(&sent_id.to_le_bytes());
                 {
                     let mut tracker = ping_tracker_ping.lock().await;
+                    let before = tracker.len();
                     tracker.retain(|_, (ts, _)| ts.elapsed() < Duration::from_secs(120));
+                    let expired = before.saturating_sub(tracker.len());
+                    if expired > 0 {
+                        stats_ping.increment_me_keepalive_timeout_by(expired as u64);
+                    }
                     tracker.insert(sent_id, (std::time::Instant::now(), writer_id));
                 }
                 ping_id = ping_id.wrapping_add(1);
+                stats_ping.increment_me_keepalive_sent();
                 if tx_ping.send(WriterCommand::DataAndFlush(p)).await.is_err() {
-                    debug!("Active ME ping failed, removing dead writer");
+                    stats_ping.increment_me_keepalive_failed();
+                    debug!("ME ping failed, removing dead writer");
                     cancel_ping.cancel();
                     if let Some(pool) = pool_ping.upgrade() {
                         if cleanup_for_ping
@@ -561,27 +577,6 @@ impl MePool {
                 }
             }
         });
-
-        if keepalive_enabled {
-            let tx_keepalive = tx_for_keepalive;
-            let cancel_keepalive = cancel_keepalive_token;
-            tokio::spawn(async move {
-                // Per-writer jittered start to avoid phase sync.
-                let jitter_cap_ms = keepalive_interval.as_millis() / 2;
-                let effective_jitter_ms = keepalive_jitter.as_millis().min(jitter_cap_ms).max(1);
-                let initial_jitter_ms = rand::rng().random_range(0..=effective_jitter_ms as u64);
-                tokio::time::sleep(Duration::from_millis(initial_jitter_ms)).await;
-                loop {
-                    tokio::select! {
-                        _ = cancel_keepalive.cancelled() => break,
-                        _ = tokio::time::sleep(keepalive_interval + Duration::from_millis(rand::rng().random_range(0..=effective_jitter_ms as u64))) => {}
-                    }
-                    if tx_keepalive.send(WriterCommand::Keepalive).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
 
         Ok(())
     }
@@ -619,14 +614,18 @@ impl MePool {
     }
 
     async fn remove_writer_only(&self, writer_id: u64) -> Vec<BoundConn> {
+        let mut close_tx: Option<mpsc::Sender<WriterCommand>> = None;
         {
             let mut ws = self.writers.write().await;
             if let Some(pos) = ws.iter().position(|w| w.id == writer_id) {
                 let w = ws.remove(pos);
                 w.cancel.cancel();
-                let _ = w.tx.send(WriterCommand::Close).await;
+                close_tx = Some(w.tx.clone());
                 self.conn_count.fetch_sub(1, Ordering::Relaxed);
             }
+        }
+        if let Some(tx) = close_tx {
+            let _ = tx.send(WriterCommand::Close).await;
         }
         self.rtt_stats.lock().await.remove(&writer_id);
         self.registry.writer_lost(writer_id).await

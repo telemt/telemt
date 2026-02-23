@@ -5,5 +5,8 @@ pub mod hash;
 pub mod random;
 
 pub use aes::{AesCtr, AesCbc};
-pub use hash::{sha256, sha256_hmac, sha1, md5, crc32, derive_middleproxy_keys, build_middleproxy_prekey};
+pub use hash::{
+    build_middleproxy_prekey, crc32, crc32c, derive_middleproxy_keys, md5, sha1, sha256,
+    sha256_hmac,
+};
 pub use random::SecureRandom;

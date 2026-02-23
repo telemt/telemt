@@ -62,6 +62,8 @@ impl MePool {
             let mut writers_snapshot = {
                 let ws = self.writers.read().await;
                 if ws.is_empty() {
+                    // Create waiter before recovery attempts so notify_one permits are not missed.
+                    let waiter = self.writer_available.notified();
                     drop(ws);
                     for family in self.family_order() {
                         let map = match family {
@@ -72,13 +74,19 @@ impl MePool {
                             for (ip, port) in addrs {
                                 let addr = SocketAddr::new(*ip, *port);
                                 if self.connect_one(addr, self.rng.as_ref()).await.is_ok() {
-                                    self.writer_available.notify_waiters();
+                                    self.writer_available.notify_one();
                                     break;
                                 }
                             }
                         }
                     }
-                    if tokio::time::timeout(Duration::from_secs(3), self.writer_available.notified()).await.is_err() {
+                    if !self.writers.read().await.is_empty() {
+                        continue;
+                    }
+                    if tokio::time::timeout(Duration::from_secs(3), waiter).await.is_err() {
+                        if !self.writers.read().await.is_empty() {
+                            continue;
+                        }
                         return Err(ProxyError::Proxy("All ME connections dead (waited 3s)".into()));
                     }
                     continue;

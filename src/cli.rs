@@ -213,6 +213,7 @@ listen_addr_ipv6 = "::"
 
 [[server.listeners]]
 ip = "0.0.0.0"
+# reuse_allow = false # Set true only when intentionally running multiple telemt instances on same port
 
 [[server.listeners]]
 ip = "::"
@@ -228,6 +229,7 @@ tls_domain = "{domain}"
 mask = true
 mask_port = 443
 fake_cert_len = 2048
+tls_full_cert_ttl_secs = 90
 
 [access]
 replay_check_len = 65536

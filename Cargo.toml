@@ -1,6 +1,6 @@
 [package]
 name = "telemt"
-version = "3.0.8"
+version = "3.0.11"
 edition = "2024"
 
 [dependencies]
@@ -20,6 +20,7 @@ sha1 = "0.10"
 md-5 = "0.10"
 hmac = "0.12"
 crc32fast = "1.4"
+crc32c = "0.6"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # Network

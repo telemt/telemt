@@ -29,11 +29,23 @@ pub struct ParsedCertificateInfo {
     pub san_names: Vec<String>,
 }
 
+/// TLS certificate payload captured from profiled upstream.
+///
+/// `certificate_message` stores an encoded TLS 1.3 Certificate handshake
+/// message body that can be replayed as opaque ApplicationData bytes in FakeTLS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsCertPayload {
+    pub cert_chain_der: Vec<Vec<u8>>,
+    pub certificate_message: Vec<u8>,
+}
+
 /// Cached data per SNI used by the emulator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedTlsData {
     pub server_hello_template: ParsedServerHello,
     pub cert_info: Option<ParsedCertificateInfo>,
+    #[serde(default)]
+    pub cert_payload: Option<TlsCertPayload>,
     pub app_data_records_sizes: Vec<usize>,
     pub total_app_data_len: usize,
     #[serde(default = "now_system_time", skip_serializing, skip_deserializing)]
@@ -52,4 +64,5 @@ pub struct TlsFetchResult {
     pub app_data_records_sizes: Vec<usize>,
     pub total_app_data_len: usize,
     pub cert_info: Option<ParsedCertificateInfo>,
+    pub cert_payload: Option<TlsCertPayload>,
 }

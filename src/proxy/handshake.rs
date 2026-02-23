@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, warn, trace, info};
 use zeroize::Zeroize;
@@ -108,11 +109,23 @@ where
 
     let cached = if config.censorship.tls_emulation {
         if let Some(cache) = tls_cache.as_ref() {
-            if let Some(sni) = tls::extract_sni_from_client_hello(handshake) {
-                Some(cache.get(&sni).await)
+            let selected_domain = if let Some(sni) = tls::extract_sni_from_client_hello(handshake) {
+                if cache.contains_domain(&sni).await {
+                    sni
+                } else {
+                    config.censorship.tls_domain.clone()
+                }
             } else {
-                Some(cache.get(&config.censorship.tls_domain).await)
-            }
+                config.censorship.tls_domain.clone()
+            };
+            let cached_entry = cache.get(&selected_domain).await;
+            let use_full_cert_payload = cache
+                .take_full_cert_budget_for_ip(
+                    peer.ip(),
+                    Duration::from_secs(config.censorship.tls_full_cert_ttl_secs),
+                )
+                .await;
+            Some((cached_entry, use_full_cert_payload))
         } else {
             None
         }
@@ -137,12 +150,13 @@ where
         None
     };
 
-    let response = if let Some(cached_entry) = cached {
+    let response = if let Some((cached_entry, use_full_cert_payload)) = cached {
         emulator::build_emulated_server_hello(
             secret,
             &validation.digest,
             &validation.session_id,
             &cached_entry,
+            use_full_cert_payload,
             rng,
             selected_alpn.clone(),
             config.censorship.tls_new_session_tickets,
@@ -253,7 +267,11 @@ where
 
         let mode_ok = match proto_tag {
             ProtoTag::Secure => {
-                if is_tls { config.general.modes.tls } else { config.general.modes.secure }
+                if is_tls {
+                    config.general.modes.tls || config.general.modes.secure
+                } else {
+                    config.general.modes.secure || config.general.modes.tls
+                }
             }
             ProtoTag::Intermediate | ProtoTag::Abridged => config.general.modes.classic,
         };

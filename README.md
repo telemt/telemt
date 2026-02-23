@@ -10,41 +10,77 @@
 
 ### 🇷🇺 RU
 
-18 февраля мы опубликовали `telemt 3.0.3`, он имеет:
+#### Драфтинг LTS и текущие улучшения
 
-- улучшенный механизм Middle-End Health Check
-- высокоскоростное восстановление инициализации Middle-End
-- меньше задержек на hot-path
-- более корректную работу в Dualstack, а именно - IPv6 Middle-End
-- аккуратное переподключение клиента без дрифта сессий между Middle-End
-- автоматическая деградация на Direct-DC при массовой (>2 ME-DC-групп) недоступности Middle-End
-- автодетект IP за NAT, при возможности - будет выполнен хендшейк с ME, при неудаче - автодеградация
-- единственный известный специальный DC=203 уже добавлен в код: медиа загружаются с CDN в Direct-DC режиме
+С 21 февраля мы начали подготовку LTS-версии.
 
-[Здесь вы можете найти релиз](https://github.com/telemt/telemt/releases/tag/3.0.3)
+Мы внимательно анализируем весь доступный фидбек.  
+Наша цель — сделать LTS-кандидаты максимально стабильными, тщательно отлаженными и готовыми к long-run и highload production-сценариям.
 
-Если у вас есть компетенции в асинхронных сетевых приложениях, анализе трафика, реверс-инжиниринге или сетевых расследованиях - мы открыты к идеям и pull requests!
+---
 
+#### Улучшения от 23 февраля
+
+23 февраля были внесены улучшения производительности в режимах **DC** и **Middle-End (ME)**, с акцентом на обратный канал (путь клиент → DC / ME).
+
+Дополнительно реализован ряд изменений, направленных на повышение устойчивости системы:
+
+- Смягчение сетевой нестабильности  
+- Повышение устойчивости к десинхронизации криптографии  
+- Снижение дрейфа сессий при неблагоприятных условиях  
+- Улучшение обработки ошибок в edge-case транспортных сценариях  
+
+Релиз:  
+[3.0.9](https://github.com/telemt/telemt/releases/tag/3.0.9)
+
+---
+
+Если у вас есть компетенции в:
+
+- Асинхронных сетевых приложениях  
+- Анализе трафика  
+- Реверс-инжиниринге  
+- Сетевых расследованиях  
+
+Мы открыты к архитектурным предложениям, идеям и pull requests
 </td>
 <td width="50%" valign="top">
 
 ### 🇬🇧 EN
 
-On February 18, we released `telemt 3.0.3`. This version introduces:
+#### LTS Drafting and Ongoing Improvements
 
-- improved Middle-End Health Check method  
-- high-speed recovery of Middle-End init
-- reduced latency on the hot path  
-- correct Dualstack support: proper handling of IPv6 Middle-End  
-- *clean* client reconnection without session "drift" between Middle-End
-- automatic degradation to Direct-DC mode in case of large-scale (>2 ME-DC groups) Middle-End unavailability  
-- automatic public IP detection behind NAT; first - Middle-End handshake is performed, otherwise automatic degradation is applied  
-- known special DC=203 is now handled natively: media is delivered from the CDN via Direct-DC mode  
+Starting February 21, we began drafting the upcoming LTS version.
 
-[Release is available here](https://github.com/telemt/telemt/releases/tag/3.0.3)
+We are carefully reviewing and analyzing all available feedback.  
+The goal is to ensure that LTS candidates are максимально stable, thoroughly debugged, and ready for long-run and high-load production scenarios.
 
-If you have expertise in asynchronous network applications, traffic analysis, reverse engineering, or network forensics - we welcome ideas and pull requests!
+---
 
+#### February 23 Improvements
+
+On February 23, we introduced performance improvements for both **DC** and **Middle-End (ME)** modes, specifically optimizing the reverse channel (client → DC / ME data path).
+
+Additionally, we implemented a set of robustness enhancements designed to:
+
+- Mitigate network-related instability
+- Improve resilience against cryptographic desynchronization
+- Reduce session drift under adverse conditions
+- Improve error handling in edge-case transport scenarios
+
+Release:  
+[3.0.9](https://github.com/telemt/telemt/releases/tag/3.0.9)
+
+---
+
+If you have expertise in:
+
+- Asynchronous network applications  
+- Traffic analysis  
+- Reverse engineering  
+- Network forensics  
+
+We welcome ideas, architectural feedback, and pull requests.
 </td>
 </tr>
 </table>
@@ -178,146 +214,20 @@ then Ctrl+X -> Y -> Enter to save
 ```toml
 # === General Settings ===
 [general]
-fast_mode = true
-use_middle_proxy = true
 # ad_tag = "00000000000000000000000000000000"
-# Path to proxy-secret binary (auto-downloaded if missing).
-proxy_secret_path = "proxy-secret"
-# disable_colors = false  # Disable colored output in logs (useful for files/systemd)
-
-# === Log Level ===
-# Log level: debug | verbose | normal | silent
-# Can be overridden with --silent or --log-level CLI flags
-# RUST_LOG env var takes absolute priority over all of these
-log_level = "normal"
-
-# === Middle Proxy - ME ===
-# Public IP override for ME KDF when behind NAT; leave unset to auto-detect.
-# middle_proxy_nat_ip = "203.0.113.10"
-# Enable STUN probing to discover public IP:port for ME.
-middle_proxy_nat_probe = true
-# Primary STUN server (host:port); defaults to Telegram STUN when empty.
-middle_proxy_nat_stun = "stun.l.google.com:19302"
-# Optional fallback STUN servers list.
-middle_proxy_nat_stun_servers = ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
-# Desired number of concurrent ME writers in pool.
-middle_proxy_pool_size = 16
-# Pre-initialized warm-standby ME connections kept idle.
-middle_proxy_warm_standby = 8
-# Ignore STUN/interface mismatch and keep ME enabled even if IP differs.
-stun_iface_mismatch_ignore = false
-# Keepalive padding frames - fl==4
-me_keepalive_enabled = true
-me_keepalive_interval_secs = 25           # Period between keepalives
-me_keepalive_jitter_secs = 5              # Jitter added to interval
-me_keepalive_payload_random = true        # Randomize 4-byte payload (vs zeros)
-# Stagger extra ME connections on warmup to de-phase lifecycles.
-me_warmup_stagger_enabled = true
-me_warmup_step_delay_ms = 500             # Base delay between extra connects
-me_warmup_step_jitter_ms = 300            # Jitter for warmup delay
-# Reconnect policy knobs.
-me_reconnect_max_concurrent_per_dc = 1    # Parallel reconnects per DC - EXPERIMENTAL! UNSTABLE!
-me_reconnect_backoff_base_ms = 500        # Backoff start
-me_reconnect_backoff_cap_ms = 30000       # Backoff cap
-me_reconnect_fast_retry_count = 11        # Quick retries before backoff
 
 [general.modes]
 classic = false
 secure = false
 tls = true
 
-[general.links]
-show = "*"
-# show = ["alice", "bob"] # Only show links for alice and bob
-# show = "*"              # Show links for all users
-# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
-# public_port = 443                  # Port for tg:// links (default: server.port)
-
-# === Network Parameters ===
-[network]
-# Enable/disable families: true/false/auto(None)
-ipv4 = true
-ipv6 = false # UNSTABLE WITH ME
-# prefer = 4 or 6
-prefer = 4
-multipath = false # EXPERIMENTAL!
-
-# === Server Binding ===
-[server]
-port = 443
-listen_addr_ipv4 = "0.0.0.0"
-listen_addr_ipv6 = "::"
-# listen_unix_sock = "/var/run/telemt.sock" # Unix socket
-# listen_unix_sock_perm = "0666" # Socket file permissions
-# metrics_port = 9090
-# metrics_whitelist = [
-#    "192.168.0.0/24",
-#    "172.16.0.0/12",
-#    "127.0.0.1/32",
-#    "::1/128"
-#]
-
-# Listen on multiple interfaces/IPs - IPv4
-[[server.listeners]]
-ip = "0.0.0.0"
-
-# Listen on multiple interfaces/IPs - IPv6
-[[server.listeners]]
-ip = "::"
-
-# === Timeouts (in seconds) ===
-[timeouts]
-client_handshake = 30
-tg_connect = 10
-client_keepalive = 60
-client_ack = 300
-# Quick ME reconnects for single-address DCs (count and per-attempt timeout, ms).
-me_one_retry = 12
-me_one_timeout_ms = 1200
-
 # === Anti-Censorship & Masking ===
 [censorship]
 tls_domain = "petrovich.ru"
-mask = true
-mask_port = 443
-# mask_host = "petrovich.ru" # Defaults to tls_domain if not set
-# mask_unix_sock = "/var/run/nginx.sock" # Unix socket (mutually exclusive with mask_host)
-fake_cert_len = 2048
-
-# === Access Control & Users ===
-[access]
-replay_check_len = 65536
-replay_window_secs = 1800
-ignore_time_skew = false
 
 [access.users]
 # format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
-
-# [access.user_max_tcp_conns]
-# hello = 50
-
-# [access.user_max_unique_ips]
-# hello = 5
-
-# [access.user_data_quota]
-# hello = 1073741824 # 1 GB
-
-# === Upstreams & Routing ===
-[[upstreams]]
-type = "direct"
-enabled = true
-weight = 10
-
-# [[upstreams]]
-# type = "socks5"
-# address = "127.0.0.1:1080"
-# enabled = false
-# weight = 1
-
-# === DC Address Overrides ===
-# [dc_overrides]
-# "203" = "91.105.192.100:443"
 
 ```
 ### Advanced

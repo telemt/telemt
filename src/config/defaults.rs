@@ -122,6 +122,10 @@ pub(crate) fn default_tls_new_session_tickets() -> u8 {
     0
 }
 
+pub(crate) fn default_tls_full_cert_ttl_secs() -> u64 {
+    90
+}
+
 pub(crate) fn default_server_hello_delay_min_ms() -> u64 {
     0
 }
