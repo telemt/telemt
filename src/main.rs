@@ -392,18 +392,6 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                             .await;
                         });
 
-                        // Periodic updater: getProxyConfig + proxy-secret
-                        let pool_clone2 = pool.clone();
-                        let rng_clone2 = rng.clone();
-                        tokio::spawn(async move {
-                            crate::transport::middle_proxy::me_config_updater(
-                                pool_clone2,
-                                rng_clone2,
-                                std::time::Duration::from_secs(12 * 3600),
-                            )
-                            .await;
-                        });
-
                         Some(pool)
                     }
                     Err(e) => {
@@ -701,6 +689,20 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         detected_ip_v4,
         detected_ip_v6,
     );
+
+    if let Some(ref pool) = me_pool {
+        let pool_clone = pool.clone();
+        let rng_clone = rng.clone();
+        let config_rx_clone = config_rx.clone();
+        tokio::spawn(async move {
+            crate::transport::middle_proxy::me_config_updater(
+                pool_clone,
+                rng_clone,
+                config_rx_clone,
+            )
+            .await;
+        });
+    }
 
     let mut listeners = Vec::new();
 

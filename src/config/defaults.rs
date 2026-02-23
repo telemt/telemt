@@ -118,6 +118,10 @@ pub(crate) fn default_max_client_frame() -> usize {
     16 * 1024 * 1024
 }
 
+pub(crate) fn default_desync_all_full() -> bool {
+    false
+}
+
 pub(crate) fn default_tls_new_session_tickets() -> u8 {
     0
 }
@@ -165,6 +169,14 @@ pub(crate) fn default_proxy_secret_reload_secs() -> u64 {
 
 pub(crate) fn default_proxy_config_reload_secs() -> u64 {
     12 * 60 * 60
+}
+
+pub(crate) fn default_update_every_secs() -> u64 {
+    2 * 60 * 60
+}
+
+pub(crate) fn default_me_reinit_drain_timeout_secs() -> u64 {
+    300
 }
 
 pub(crate) fn default_ntp_check() -> bool {

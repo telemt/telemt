@@ -31,6 +31,13 @@ pub struct Stats {
     me_route_drop_channel_closed: AtomicU64,
     me_route_drop_queue_full: AtomicU64,
     secure_padding_invalid: AtomicU64,
+    desync_total: AtomicU64,
+    desync_full_logged: AtomicU64,
+    desync_suppressed: AtomicU64,
+    desync_frames_bucket_0: AtomicU64,
+    desync_frames_bucket_1_2: AtomicU64,
+    desync_frames_bucket_3_10: AtomicU64,
+    desync_frames_bucket_gt_10: AtomicU64,
     user_stats: DashMap<String, UserStats>,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -76,6 +83,31 @@ impl Stats {
     pub fn increment_secure_padding_invalid(&self) {
         self.secure_padding_invalid.fetch_add(1, Ordering::Relaxed);
     }
+    pub fn increment_desync_total(&self) {
+        self.desync_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_desync_full_logged(&self) {
+        self.desync_full_logged.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_desync_suppressed(&self) {
+        self.desync_suppressed.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn observe_desync_frames_ok(&self, frames_ok: u64) {
+        match frames_ok {
+            0 => {
+                self.desync_frames_bucket_0.fetch_add(1, Ordering::Relaxed);
+            }
+            1..=2 => {
+                self.desync_frames_bucket_1_2.fetch_add(1, Ordering::Relaxed);
+            }
+            3..=10 => {
+                self.desync_frames_bucket_3_10.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.desync_frames_bucket_gt_10.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
     pub fn get_connects_all(&self) -> u64 { self.connects_all.load(Ordering::Relaxed) }
     pub fn get_connects_bad(&self) -> u64 { self.connects_bad.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_sent(&self) -> u64 { self.me_keepalive_sent.load(Ordering::Relaxed) }
@@ -95,6 +127,27 @@ impl Stats {
     }
     pub fn get_secure_padding_invalid(&self) -> u64 {
         self.secure_padding_invalid.load(Ordering::Relaxed)
+    }
+    pub fn get_desync_total(&self) -> u64 {
+        self.desync_total.load(Ordering::Relaxed)
+    }
+    pub fn get_desync_full_logged(&self) -> u64 {
+        self.desync_full_logged.load(Ordering::Relaxed)
+    }
+    pub fn get_desync_suppressed(&self) -> u64 {
+        self.desync_suppressed.load(Ordering::Relaxed)
+    }
+    pub fn get_desync_frames_bucket_0(&self) -> u64 {
+        self.desync_frames_bucket_0.load(Ordering::Relaxed)
+    }
+    pub fn get_desync_frames_bucket_1_2(&self) -> u64 {
+        self.desync_frames_bucket_1_2.load(Ordering::Relaxed)
+    }
+    pub fn get_desync_frames_bucket_3_10(&self) -> u64 {
+        self.desync_frames_bucket_3_10.load(Ordering::Relaxed)
+    }
+    pub fn get_desync_frames_bucket_gt_10(&self) -> u64 {
+        self.desync_frames_bucket_gt_10.load(Ordering::Relaxed)
     }
     
     pub fn increment_user_connects(&self, user: &str) {

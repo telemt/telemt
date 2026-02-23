@@ -1,0 +1,276 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 43d0fe04c7094000829b0d28c6e3470c
+      name: 'Custom Templates'
+  templates:
+    - uuid: f2a694213c3d49d88cc03bffb111429e
+      template: Telemt
+      name: Telemt
+      description: |
+        A simple template using Prometheus metrics.
+        Set the {$TELEMT_URL} macro with the metrics URL
+      groups:
+        - name: 'Custom Templates'
+      items:
+        - uuid: fb95391c7f894e3eb6984b92885813a2
+          name: 'Connections bad total'
+          type: DEPENDENT
+          key: telemt.conn_bad_total
+          delay: '0'
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_connections_bad_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Server connections'
+        - uuid: f36c9632394a4af3853583857ca8dbf1
+          name: 'Connections total'
+          type: DEPENDENT
+          key: telemt.conn_total
+          delay: '0'
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_connections_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Server connections'
+        - uuid: 1618272cf68e44509425f5fab029db7b
+          name: 'Handshake timeouts total'
+          type: DEPENDENT
+          key: telemt.handshake_timeouts_total
+          delay: '0'
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_handshake_timeouts_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Server connections'
+        - uuid: fb95391c7f894e3eb6984b92885813d2
+          name: 'ME keepalive send failures'
+          type: DEPENDENT
+          key: telemt.me_keepalive_failed_total
+          delay: '0'
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_keepalive_failed_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: fb95391c7f894e3eb6984b92885813c2
+          name: 'ME keepalive frames sent'
+          type: DEPENDENT
+          key: telemt.me_keepalive_sent_total
+          delay: '0'
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_keepalive_sent_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: fb95391c7f894e3eb6984b92885811a2
+          name: 'ME reconnect attempts'
+          type: DEPENDENT
+          key: telemt.me_reconnect_attempts_total
+          delay: '0'
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_reconnect_attempts_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: fb95391c7f894e3eb6984b92885812a2
+          name: 'ME reconnect successes'
+          type: DEPENDENT
+          key: telemt.me_reconnect_success_total
+          delay: '0'
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_reconnect_success_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: 991b1858e3f94b3098ff0f84859efc41
+          name: 'Prometheus metrics'
+          type: HTTP_AGENT
+          key: telemt.prom_metrics
+          value_type: TEXT
+          trends: '0'
+          url: '{$TELEMT_URL}'
+        - uuid: fb95391c7f894e3eb6984b92885813b2
+          name: 'Telemt Uptime'
+          type: DEPENDENT
+          key: telemt.uptime
+          delay: '0'
+          trends: '0'
+          units: s
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_uptime_seconds
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Server connections'
+      discovery_rules:
+        - uuid: 22727585c14049fbb0863c15dd68634c
+          name: 'Get users'
+          type: DEPENDENT
+          key: telemt.users
+          delay: '0'
+          item_prototypes:
+            - uuid: 137e371a47714a21b5c0c89d535dd717
+              name: 'Active connections by {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.active_conn_[{#TELEMT_USER}]'
+              delay: '0'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_connections_current{user=~"{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users connections'
+            - uuid: 3ccce91ab5d54b4d972280c7b7bda910
+              name: 'Messages received from {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.msgs_from_[{#TELEMT_USER}]'
+              delay: '0'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_msgs_from_client{user=~"{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users connections'
+            - uuid: e539126215f2419bbfd0d8099aabe1cb
+              name: 'Messages sent to {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.msgs_to_[{#TELEMT_USER}]'
+              delay: '0'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_msgs_to_client{user=~"{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users connections'
+            - uuid: 810a8f6346a44ae7bd79a357dbfe2b3c
+              name: 'Bytes received from {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.octets_from_[{#TELEMT_USER}]'
+              delay: '0'
+              units: B
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_octets_from_client{user=~"{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users connections'
+            - uuid: d0cc3b4d618b4f0d97f8127b51f872c8
+              name: 'Bytes sent to {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.octets_to_[{#TELEMT_USER}]'
+              delay: '0'
+              units: B
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_octets_to_client{user=~"{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users connections'
+            - uuid: e9735aef967b4af28ed59f6c76ad493d
+              name: 'Total connections by {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.total_conn_[{#TELEMT_USER}]'
+              delay: '0'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_connections_total{user=~"{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users connections'
+          master_item:
+            key: telemt.prom_metrics
+          lld_macro_paths:
+            - lld_macro: '{#TELEMT_USER}'
+              path: '$.labels[''user'']'
+          preprocessing:
+            - type: PROMETHEUS_TO_JSON
+              parameters:
+                - ''
+      tags:
+        - tag: target
+          value: Telemt

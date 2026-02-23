@@ -1,5 +1,10 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -17,6 +22,148 @@ use crate::transport::middle_proxy::{MePool, MeResponse, proto_flags_for_tag};
 enum C2MeCommand {
     Data { payload: Vec<u8>, flags: u32 },
     Close,
+}
+
+const DESYNC_DEDUP_WINDOW: Duration = Duration::from_secs(60);
+const DESYNC_ERROR_CLASS: &str = "frame_too_large_crypto_desync";
+static DESYNC_DEDUP: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+
+struct RelayForensicsState {
+    trace_id: u64,
+    conn_id: u64,
+    user: String,
+    peer: SocketAddr,
+    peer_hash: u64,
+    started_at: Instant,
+    bytes_c2me: u64,
+    bytes_me2c: Arc<AtomicU64>,
+    desync_all_full: bool,
+}
+
+fn hash_value<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_ip(ip: IpAddr) -> u64 {
+    hash_value(&ip)
+}
+
+fn should_emit_full_desync(key: u64, all_full: bool, now: Instant) -> bool {
+    if all_full {
+        return true;
+    }
+
+    let dedup = DESYNC_DEDUP.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = dedup.lock().expect("desync dedup mutex poisoned");
+    guard.retain(|_, seen_at| now.duration_since(*seen_at) < DESYNC_DEDUP_WINDOW);
+
+    match guard.get_mut(&key) {
+        Some(seen_at) => {
+            if now.duration_since(*seen_at) >= DESYNC_DEDUP_WINDOW {
+                *seen_at = now;
+                true
+            } else {
+                false
+            }
+        }
+        None => {
+            guard.insert(key, now);
+            true
+        }
+    }
+}
+
+fn report_desync_frame_too_large(
+    state: &RelayForensicsState,
+    proto_tag: ProtoTag,
+    frame_counter: u64,
+    max_frame: usize,
+    len: usize,
+    raw_len_bytes: Option<[u8; 4]>,
+    stats: &Stats,
+) -> ProxyError {
+    let len_buf = raw_len_bytes.unwrap_or((len as u32).to_le_bytes());
+    let looks_like_tls = raw_len_bytes
+        .map(|b| b[0] == 0x16 && b[1] == 0x03)
+        .unwrap_or(false);
+    let looks_like_http = raw_len_bytes
+        .map(|b| matches!(b[0], b'G' | b'P' | b'H' | b'C' | b'D'))
+        .unwrap_or(false);
+    let now = Instant::now();
+    let dedup_key = hash_value(&(
+        state.user.as_str(),
+        state.peer_hash,
+        proto_tag,
+        DESYNC_ERROR_CLASS,
+    ));
+    let emit_full = should_emit_full_desync(dedup_key, state.desync_all_full, now);
+    let duration_ms = state.started_at.elapsed().as_millis() as u64;
+    let bytes_me2c = state.bytes_me2c.load(Ordering::Relaxed);
+
+    stats.increment_desync_total();
+    stats.observe_desync_frames_ok(frame_counter);
+    if emit_full {
+        stats.increment_desync_full_logged();
+        warn!(
+            trace_id = format_args!("0x{:016x}", state.trace_id),
+            conn_id = state.conn_id,
+            user = %state.user,
+            peer_hash = format_args!("0x{:016x}", state.peer_hash),
+            proto = ?proto_tag,
+            mode = "middle_proxy",
+            is_tls = true,
+            duration_ms,
+            bytes_c2me = state.bytes_c2me,
+            bytes_me2c,
+            raw_len = len,
+            raw_len_hex = format_args!("0x{:08x}", len),
+            raw_bytes = format_args!(
+                "{:02x} {:02x} {:02x} {:02x}",
+                len_buf[0], len_buf[1], len_buf[2], len_buf[3]
+            ),
+            max_frame,
+            tls_like = looks_like_tls,
+            http_like = looks_like_http,
+            frames_ok = frame_counter,
+            dedup_window_secs = DESYNC_DEDUP_WINDOW.as_secs(),
+            desync_all_full = state.desync_all_full,
+            full_reason = if state.desync_all_full { "desync_all_full" } else { "first_in_dedup_window" },
+            error_class = DESYNC_ERROR_CLASS,
+            "Frame too large — crypto desync forensics"
+        );
+        debug!(
+            trace_id = format_args!("0x{:016x}", state.trace_id),
+            conn_id = state.conn_id,
+            user = %state.user,
+            peer = %state.peer,
+            "Frame too large forensic peer detail"
+        );
+    } else {
+        stats.increment_desync_suppressed();
+        debug!(
+            trace_id = format_args!("0x{:016x}", state.trace_id),
+            conn_id = state.conn_id,
+            user = %state.user,
+            peer_hash = format_args!("0x{:016x}", state.peer_hash),
+            proto = ?proto_tag,
+            duration_ms,
+            bytes_c2me = state.bytes_c2me,
+            bytes_me2c,
+            raw_len = len,
+            frames_ok = frame_counter,
+            dedup_window_secs = DESYNC_DEDUP_WINDOW.as_secs(),
+            error_class = DESYNC_ERROR_CLASS,
+            "Frame too large — crypto desync forensic suppressed"
+        );
+    }
+
+    ProxyError::Proxy(format!(
+        "Frame too large: {len} (max {max_frame}), frames_ok={frame_counter}, conn_id={}, trace_id=0x{:016x}",
+        state.conn_id,
+        state.trace_id
+    ))
 }
 
 pub(crate) async fn handle_via_middle_proxy<R, W>(
@@ -48,14 +195,30 @@ where
     );
 
     let (conn_id, me_rx) = me_pool.registry().register().await;
+    let trace_id = conn_id;
+    let bytes_me2c = Arc::new(AtomicU64::new(0));
+    let mut forensics = RelayForensicsState {
+        trace_id,
+        conn_id,
+        user: user.clone(),
+        peer,
+        peer_hash: hash_ip(peer.ip()),
+        started_at: Instant::now(),
+        bytes_c2me: 0,
+        bytes_me2c: bytes_me2c.clone(),
+        desync_all_full: config.general.desync_all_full,
+    };
 
     stats.increment_user_connects(&user);
     stats.increment_user_curr_connects(&user);
 
     let proto_flags = proto_flags_for_tag(proto_tag, me_pool.has_proxy_tag());
     debug!(
+        trace_id = format_args!("0x{:016x}", trace_id),
         user = %user,
         conn_id,
+        peer_hash = format_args!("0x{:016x}", forensics.peer_hash),
+        desync_all_full = forensics.desync_all_full,
         proto_flags = format_args!("0x{:08x}", proto_flags),
         "ME relay started"
     );
@@ -93,6 +256,7 @@ where
     let stats_clone = stats.clone();
     let rng_clone = rng.clone();
     let user_clone = user.clone();
+    let bytes_me2c_clone = bytes_me2c.clone();
     let me_writer = tokio::spawn(async move {
         let mut writer = crypto_writer;
         let mut frame_buf = Vec::with_capacity(16 * 1024);
@@ -102,6 +266,7 @@ where
                     match msg {
                         Some(MeResponse::Data { flags, data }) => {
                             trace!(conn_id, bytes = data.len(), flags, "ME->C data");
+                            bytes_me2c_clone.fetch_add(data.len() as u64, Ordering::Relaxed);
                             stats_clone.add_user_octets_to(&user_clone, data.len() as u64);
                             write_client_payload(
                                 &mut writer,
@@ -118,6 +283,7 @@ where
                                 match next {
                                     MeResponse::Data { flags, data } => {
                                         trace!(conn_id, bytes = data.len(), flags, "ME->C data (batched)");
+                                        bytes_me2c_clone.fetch_add(data.len() as u64, Ordering::Relaxed);
                                         stats_clone.add_user_octets_to(&user_clone, data.len() as u64);
                                         write_client_payload(
                                             &mut writer,
@@ -173,12 +339,15 @@ where
             &mut crypto_reader,
             proto_tag,
             frame_limit,
-            &user,
+            &forensics,
             &mut frame_counter,
             &stats,
         ).await {
             Ok(Some((payload, quickack))) => {
                 trace!(conn_id, bytes = payload.len(), "C->ME frame");
+                forensics.bytes_c2me = forensics
+                    .bytes_c2me
+                    .saturating_add(payload.len() as u64);
                 stats.add_user_octets_from(&user, payload.len() as u64);
                 let mut flags = proto_flags;
                 if quickack {
@@ -237,7 +406,16 @@ where
         (_, _, Err(e)) => Err(e),
     };
 
-    debug!(user = %user, conn_id, "ME relay cleanup");
+    debug!(
+        user = %user,
+        conn_id,
+        trace_id = format_args!("0x{:016x}", trace_id),
+        duration_ms = forensics.started_at.elapsed().as_millis() as u64,
+        bytes_c2me = forensics.bytes_c2me,
+        bytes_me2c = forensics.bytes_me2c.load(Ordering::Relaxed),
+        frames_ok = frame_counter,
+        "ME relay cleanup"
+    );
     me_pool.registry().unregister(conn_id).await;
     stats.decrement_user_curr_connects(&user);
     result
@@ -247,7 +425,7 @@ async fn read_client_payload<R>(
     client_reader: &mut CryptoReader<R>,
     proto_tag: ProtoTag,
     max_frame: usize,
-    user: &str,
+    forensics: &RelayForensicsState,
     frame_counter: &mut u64,
     stats: &Stats,
 ) -> Result<Option<(Vec<u8>, bool)>>
@@ -302,7 +480,9 @@ where
         }
         if len < 4 && proto_tag != ProtoTag::Abridged {
             warn!(
-                user = %user,
+                trace_id = format_args!("0x{:016x}", forensics.trace_id),
+                conn_id = forensics.conn_id,
+                user = %forensics.user,
                 len,
                 proto = ?proto_tag,
                 "Frame too small — corrupt or probe"
@@ -311,31 +491,15 @@ where
         }
 
         if len > max_frame {
-            let len_buf = raw_len_bytes.unwrap_or((len as u32).to_le_bytes());
-            let looks_like_tls = raw_len_bytes
-                .map(|b| b[0] == 0x16 && b[1] == 0x03)
-                .unwrap_or(false);
-            let looks_like_http = raw_len_bytes
-                .map(|b| matches!(b[0], b'G' | b'P' | b'H' | b'C' | b'D'))
-                .unwrap_or(false);
-            warn!(
-                user = %user,
-                raw_len = len,
-                raw_len_hex = format_args!("0x{:08x}", len),
-                raw_bytes = format_args!(
-                    "{:02x} {:02x} {:02x} {:02x}",
-                    len_buf[0], len_buf[1], len_buf[2], len_buf[3]
-                ),
-                proto = ?proto_tag,
-                tls_like = looks_like_tls,
-                http_like = looks_like_http,
-                frames_ok = *frame_counter,
-                "Frame too large — crypto desync forensics"
-            );
-            return Err(ProxyError::Proxy(format!(
-                "Frame too large: {len} (max {max_frame}), frames_ok={}",
-                *frame_counter
-            )));
+            return Err(report_desync_frame_too_large(
+                forensics,
+                proto_tag,
+                *frame_counter,
+                max_frame,
+                len,
+                raw_len_bytes,
+                stats,
+            ));
         }
 
         let secure_payload_len = if proto_tag == ProtoTag::Secure {

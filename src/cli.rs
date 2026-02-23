@@ -194,6 +194,9 @@ prefer_ipv6 = false
 fast_mode = true
 use_middle_proxy = false
 log_level = "normal"
+desync_all_full = false
+update_every = 43200
+me_reinit_drain_timeout_secs = 300
 
 [network]
 ipv4 = true

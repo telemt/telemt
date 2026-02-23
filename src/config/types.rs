@@ -201,6 +201,11 @@ pub struct GeneralConfig {
     #[serde(default = "default_max_client_frame")]
     pub max_client_frame: usize,
 
+    /// Emit full crypto-desync forensic logs for every event.
+    /// When false, full forensic details are emitted once per key window.
+    #[serde(default = "default_desync_all_full")]
+    pub desync_all_full: bool,
+
     /// Enable staggered warmup of extra ME writers.
     #[serde(default = "default_true")]
     pub me_warmup_stagger_enabled: bool,
@@ -252,11 +257,23 @@ pub struct GeneralConfig {
     #[serde(default = "default_fast_mode_min_tls_record")]
     pub fast_mode_min_tls_record: usize,
 
-    /// Automatically reload proxy-secret every N seconds.
+    /// Unified ME updater interval in seconds for getProxyConfig/getProxyConfigV6/getProxySecret.
+    /// When omitted, effective value falls back to legacy proxy_*_auto_reload_secs fields.
+    #[serde(default)]
+    pub update_every: Option<u64>,
+
+    /// Drain timeout in seconds for stale ME writers after endpoint map changes.
+    /// Set to 0 to keep stale writers draining indefinitely (no force-close).
+    #[serde(default = "default_me_reinit_drain_timeout_secs")]
+    pub me_reinit_drain_timeout_secs: u64,
+
+    /// Deprecated legacy setting; kept for backward compatibility fallback.
+    /// Use `update_every` instead.
     #[serde(default = "default_proxy_secret_reload_secs")]
     pub proxy_secret_auto_reload_secs: u64,
 
-    /// Automatically reload proxy-multi.conf every N seconds.
+    /// Deprecated legacy setting; kept for backward compatibility fallback.
+    /// Use `update_every` instead.
     #[serde(default = "default_proxy_config_reload_secs")]
     pub proxy_config_auto_reload_secs: u64,
 
@@ -310,7 +327,10 @@ impl Default for GeneralConfig {
             links: LinksConfig::default(),
             crypto_pending_buffer: default_crypto_pending_buffer(),
             max_client_frame: default_max_client_frame(),
+            desync_all_full: default_desync_all_full(),
             fast_mode_min_tls_record: default_fast_mode_min_tls_record(),
+            update_every: Some(default_update_every_secs()),
+            me_reinit_drain_timeout_secs: default_me_reinit_drain_timeout_secs(),
             proxy_secret_auto_reload_secs: default_proxy_secret_reload_secs(),
             proxy_config_auto_reload_secs: default_proxy_config_reload_secs(),
             ntp_check: default_ntp_check(),
@@ -318,6 +338,15 @@ impl Default for GeneralConfig {
             auto_degradation_enabled: true,
             degradation_min_unavailable_dc_groups: default_degradation_min_unavailable_dc_groups(),
         }
+    }
+}
+
+impl GeneralConfig {
+    /// Resolve the active updater interval for ME infrastructure refresh tasks.
+    /// `update_every` has priority, otherwise legacy proxy_*_auto_reload_secs are used.
+    pub fn effective_update_every_secs(&self) -> u64 {
+        self.update_every
+            .unwrap_or_else(|| self.proxy_secret_auto_reload_secs.min(self.proxy_config_auto_reload_secs))
     }
 }
 

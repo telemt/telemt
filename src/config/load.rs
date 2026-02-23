@@ -117,6 +117,34 @@ impl ProxyConfig {
         let mut config: ProxyConfig =
             toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
 
+        if let Some(update_every) = config.general.update_every {
+            if update_every == 0 {
+                return Err(ProxyError::Config(
+                    "general.update_every must be > 0".to_string(),
+                ));
+            }
+        } else {
+            let legacy_secret = config.general.proxy_secret_auto_reload_secs;
+            let legacy_config = config.general.proxy_config_auto_reload_secs;
+            let effective = legacy_secret.min(legacy_config);
+            if effective == 0 {
+                return Err(ProxyError::Config(
+                    "legacy proxy_*_auto_reload_secs values must be > 0 when general.update_every is not set".to_string(),
+                ));
+            }
+
+            if legacy_secret != default_proxy_secret_reload_secs()
+                || legacy_config != default_proxy_config_reload_secs()
+            {
+                warn!(
+                    proxy_secret_auto_reload_secs = legacy_secret,
+                    proxy_config_auto_reload_secs = legacy_config,
+                    effective_update_every_secs = effective,
+                    "proxy_*_auto_reload_secs are deprecated; set general.update_every"
+                );
+            }
+        }
+
         // Validate secrets.
         for (user, secret) in &config.access.users {
             if !secret.chars().all(|c| c.is_ascii_hexdigit()) || secret.len() != 32 {
@@ -345,6 +373,70 @@ mod tests {
             .get("203")
             .map(|v| v.contains(&"91.105.192.100:443".to_string()))
             .unwrap_or(false));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_every_overrides_legacy_fields() {
+        let toml = r#"
+            [general]
+            update_every = 123
+            proxy_secret_auto_reload_secs = 700
+            proxy_config_auto_reload_secs = 800
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_update_every_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.effective_update_every_secs(), 123);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_every_fallback_to_legacy_min() {
+        let toml = r#"
+            [general]
+            proxy_secret_auto_reload_secs = 600
+            proxy_config_auto_reload_secs = 120
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_update_every_legacy_min_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.update_every, None);
+        assert_eq!(cfg.general.effective_update_every_secs(), 120);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_every_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            update_every = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_update_every_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.update_every must be > 0"));
         let _ = std::fs::remove_file(path);
     }
 }

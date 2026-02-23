@@ -140,6 +140,41 @@ fn render_metrics(stats: &Stats) -> String {
     let _ = writeln!(out, "# TYPE telemt_secure_padding_invalid_total counter");
     let _ = writeln!(out, "telemt_secure_padding_invalid_total {}", stats.get_secure_padding_invalid());
 
+    let _ = writeln!(out, "# HELP telemt_desync_total Total crypto-desync detections");
+    let _ = writeln!(out, "# TYPE telemt_desync_total counter");
+    let _ = writeln!(out, "telemt_desync_total {}", stats.get_desync_total());
+
+    let _ = writeln!(out, "# HELP telemt_desync_full_logged_total Full forensic desync logs emitted");
+    let _ = writeln!(out, "# TYPE telemt_desync_full_logged_total counter");
+    let _ = writeln!(out, "telemt_desync_full_logged_total {}", stats.get_desync_full_logged());
+
+    let _ = writeln!(out, "# HELP telemt_desync_suppressed_total Suppressed desync forensic events");
+    let _ = writeln!(out, "# TYPE telemt_desync_suppressed_total counter");
+    let _ = writeln!(out, "telemt_desync_suppressed_total {}", stats.get_desync_suppressed());
+
+    let _ = writeln!(out, "# HELP telemt_desync_frames_bucket_total Desync count by frames_ok bucket");
+    let _ = writeln!(out, "# TYPE telemt_desync_frames_bucket_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_desync_frames_bucket_total{{bucket=\"0\"}} {}",
+        stats.get_desync_frames_bucket_0()
+    );
+    let _ = writeln!(
+        out,
+        "telemt_desync_frames_bucket_total{{bucket=\"1_2\"}} {}",
+        stats.get_desync_frames_bucket_1_2()
+    );
+    let _ = writeln!(
+        out,
+        "telemt_desync_frames_bucket_total{{bucket=\"3_10\"}} {}",
+        stats.get_desync_frames_bucket_3_10()
+    );
+    let _ = writeln!(
+        out,
+        "telemt_desync_frames_bucket_total{{bucket=\"gt_10\"}} {}",
+        stats.get_desync_frames_bucket_gt_10()
+    );
+
     let _ = writeln!(out, "# HELP telemt_user_connections_total Per-user total connections");
     let _ = writeln!(out, "# TYPE telemt_user_connections_total counter");
     let _ = writeln!(out, "# HELP telemt_user_connections_current Per-user active connections");

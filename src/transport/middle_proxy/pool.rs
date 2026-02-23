@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
@@ -178,7 +178,6 @@ impl MePool {
     }
 
     pub async fn reconcile_connections(self: &Arc<Self>, rng: &SecureRandom) {
-        use std::collections::HashSet;
         let writers = self.writers.read().await;
         let current: HashSet<SocketAddr> = writers
             .iter()
@@ -207,6 +206,103 @@ impl MePool {
             if !self.decision.effective_multipath && !current.is_empty() {
                 break;
             }
+        }
+    }
+
+    async fn desired_dc_endpoints(&self) -> HashMap<i32, HashSet<SocketAddr>> {
+        let mut out: HashMap<i32, HashSet<SocketAddr>> = HashMap::new();
+
+        if self.decision.ipv4_me {
+            let map_v4 = self.proxy_map_v4.read().await.clone();
+            for (dc, addrs) in map_v4 {
+                let entry = out.entry(dc.abs()).or_default();
+                for (ip, port) in addrs {
+                    entry.insert(SocketAddr::new(ip, port));
+                }
+            }
+        }
+
+        if self.decision.ipv6_me {
+            let map_v6 = self.proxy_map_v6.read().await.clone();
+            for (dc, addrs) in map_v6 {
+                let entry = out.entry(dc.abs()).or_default();
+                for (ip, port) in addrs {
+                    entry.insert(SocketAddr::new(ip, port));
+                }
+            }
+        }
+
+        out
+    }
+
+    pub async fn zero_downtime_reinit_after_map_change(
+        self: &Arc<Self>,
+        rng: &SecureRandom,
+        drain_timeout: Option<Duration>,
+    ) {
+        // Stage 1: prewarm writers for new endpoint maps before draining old ones.
+        self.reconcile_connections(rng).await;
+
+        let desired_by_dc = self.desired_dc_endpoints().await;
+        if desired_by_dc.is_empty() {
+            warn!("ME endpoint map is empty after update; skipping stale writer drain");
+            return;
+        }
+
+        let writers = self.writers.read().await;
+        let active_writer_addrs: HashSet<SocketAddr> = writers
+            .iter()
+            .filter(|w| !w.draining.load(Ordering::Relaxed))
+            .map(|w| w.addr)
+            .collect();
+
+        let mut missing_dc = Vec::<i32>::new();
+        for (dc, endpoints) in &desired_by_dc {
+            if endpoints.is_empty() {
+                continue;
+            }
+            if !endpoints.iter().any(|addr| active_writer_addrs.contains(addr)) {
+                missing_dc.push(*dc);
+            }
+        }
+
+        if !missing_dc.is_empty() {
+            missing_dc.sort_unstable();
+            warn!(
+                missing_dc = ?missing_dc,
+                // Keep stale writers alive when fresh coverage is incomplete.
+                "ME reinit coverage incomplete after map update; keeping stale writers"
+            );
+            return;
+        }
+
+        let desired_addrs: HashSet<SocketAddr> = desired_by_dc
+            .values()
+            .flat_map(|set| set.iter().copied())
+            .collect();
+
+        let stale_writer_ids: Vec<u64> = writers
+            .iter()
+            .filter(|w| !w.draining.load(Ordering::Relaxed))
+            .filter(|w| !desired_addrs.contains(&w.addr))
+            .map(|w| w.id)
+            .collect();
+        drop(writers);
+
+        if stale_writer_ids.is_empty() {
+            debug!("ME map update completed with no stale writers");
+            return;
+        }
+
+        let drain_timeout_secs = drain_timeout.map(|d| d.as_secs()).unwrap_or(0);
+        info!(
+            stale_writers = stale_writer_ids.len(),
+            drain_timeout_secs,
+            "ME map update covered; draining stale writers"
+        );
+        for writer_id in stale_writer_ids {
+            self.mark_writer_draining_with_timeout(writer_id, drain_timeout)
+                .await;
         }
     }
 
@@ -631,23 +727,40 @@ impl MePool {
         self.registry.writer_lost(writer_id).await
     }
 
-    pub(crate) async fn mark_writer_draining(self: &Arc<Self>, writer_id: u64) {
-        {
+    pub(crate) async fn mark_writer_draining_with_timeout(
+        self: &Arc<Self>,
+        writer_id: u64,
+        timeout: Option<Duration>,
+    ) {
+        let timeout = timeout.filter(|d| !d.is_zero());
+        let found = {
             let mut ws = self.writers.write().await;
             if let Some(w) = ws.iter_mut().find(|w| w.id == writer_id) {
                 w.draining.store(true, Ordering::Relaxed);
+                true
+            } else {
+                false
             }
+        };
+
+        if !found {
+            return;
         }
+
+        let timeout_secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
+        debug!(writer_id, timeout_secs, "ME writer marked draining");
 
         let pool = Arc::downgrade(self);
         tokio::spawn(async move {
-            let deadline = Instant::now() + Duration::from_secs(300);
+            let deadline = timeout.map(|t| Instant::now() + t);
             loop {
                 if let Some(p) = pool.upgrade() {
-                    if Instant::now() >= deadline {
-                        warn!(writer_id, "Drain timeout, force-closing");
-                        let _ = p.remove_writer_and_close_clients(writer_id).await;
-                        break;
+                    if let Some(deadline_at) = deadline {
+                        if Instant::now() >= deadline_at {
+                            warn!(writer_id, "Drain timeout, force-closing");
+                            let _ = p.remove_writer_and_close_clients(writer_id).await;
+                            break;
+                        }
                     }
                     if p.registry.is_writer_empty(writer_id).await {
                         let _ = p.remove_writer_only(writer_id).await;
@@ -659,6 +772,11 @@ impl MePool {
                 }
             }
         });
+    }
+
+    pub(crate) async fn mark_writer_draining(self: &Arc<Self>, writer_id: u64) {
+        self.mark_writer_draining_with_timeout(writer_id, Some(Duration::from_secs(300)))
+            .await;
     }
 
 }
