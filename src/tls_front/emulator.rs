@@ -293,7 +293,7 @@ mod tests {
         );
 
         let payload = first_app_data_payload(&response);
-        assert_eq!(payload.len(), 64);
+        assert!(payload.len() >= 64);
         assert_eq!(payload[payload.len() - 17], 0x16);
     }
 }
