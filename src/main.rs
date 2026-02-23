@@ -73,27 +73,36 @@ fn parse_cli() -> (String, bool, Option<String>) {
                 log_level = Some(s.trim_start_matches("--log-level=").to_string());
             }
             "--help" | "-h" => {
-                eprintln!("Usage: telemt [config.toml] [OPTIONS]");
+                eprintln!("telemt - Telegram MTProto Proxy v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
-                eprintln!("Options:");
-                eprintln!("  --silent, -s            Suppress info logs");
-                eprintln!("  --log-level <LEVEL>     debug|verbose|normal|silent");
-                eprintln!("  --help, -h              Show this help");
+                eprintln!("USAGE:");
+                eprintln!("    telemt [CONFIG] [OPTIONS]");
+                eprintln!("    telemt --init [INIT_OPTIONS]");
                 eprintln!();
-                eprintln!("Setup (fire-and-forget):");
-                eprintln!(
-                    "  --init                  Generate config, install systemd service, start"
-                );
+                eprintln!("ARGS:");
+                eprintln!("    <CONFIG>       Path to config file (default: config.toml)");
+                eprintln!();
+                eprintln!("OPTIONS:");
+                eprintln!("    -s, --silent           Suppress info logs (equivalent to --log-level silent)");
+                eprintln!("    --log-level <LEVEL>    Set log level [possible values: debug, verbose, normal, silent]");
+                eprintln!("    -h, --help             Show this help message");
+                eprintln!("    -V, --version          Print version number");
+                eprintln!();
+                eprintln!("INIT OPTIONS (fire-and-forget setup):");
+                eprintln!("    --init                 Generate config, install systemd service, and start");
                 eprintln!("    --port <PORT>          Listen port (default: 443)");
-                eprintln!(
-                    "    --domain <DOMAIN>      TLS domain for masking (default: www.google.com)"
-                );
-                eprintln!(
-                    "    --secret <HEX>         32-char hex secret (auto-generated if omitted)"
-                );
-                eprintln!("    --user <NAME>          Username (default: user)");
+                eprintln!("    --domain <DOMAIN>      TLS domain for masking (default: www.google.com)");
+                eprintln!("    --secret <HEX>         32-char hex secret (auto-generated if omitted)");
+                eprintln!("    --user <NAME>          Username for proxy access (default: user)");
                 eprintln!("    --config-dir <DIR>     Config directory (default: /etc/telemt)");
-                eprintln!("    --no-start             Don't start the service after install");
+                eprintln!("    --no-start             Create config and service but don't start");
+                eprintln!();
+                eprintln!("EXAMPLES:");
+                eprintln!("    telemt                           # Run with default config");
+                eprintln!("    telemt /etc/telemt/config.toml   # Run with specific config");
+                eprintln!("    telemt --log-level debug         # Run with debug logging");
+                eprintln!("    telemt --init                    # Quick setup with defaults");
+                eprintln!("    telemt --init --port 8443 --user admin  # Custom setup");
                 std::process::exit(0);
             }
             "--version" | "-V" => {
