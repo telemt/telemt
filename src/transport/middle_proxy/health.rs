@@ -1,10 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
-use rand::seq::SliceRandom;
 use rand::Rng;
 
 use crate::crypto::SecureRandom;
@@ -64,31 +63,43 @@ async fn check_family(
         IpFamily::V4 => pool.proxy_map_v4.read().await.clone(),
         IpFamily::V6 => pool.proxy_map_v6.read().await.clone(),
     };
-    let writer_addrs: HashSet<SocketAddr> = pool
+
+    let mut dc_endpoints = HashMap::<i32, Vec<SocketAddr>>::new();
+    for (dc, addrs) in map {
+        let entry = dc_endpoints.entry(dc.abs()).or_default();
+        for (ip, port) in addrs {
+            entry.push(SocketAddr::new(ip, port));
+        }
+    }
+    for endpoints in dc_endpoints.values_mut() {
+        endpoints.sort_unstable();
+        endpoints.dedup();
+    }
+
+    let mut live_addr_counts = HashMap::<SocketAddr, usize>::new();
+    for writer in pool
         .writers
         .read()
         .await
         .iter()
         .filter(|w| !w.draining.load(std::sync::atomic::Ordering::Relaxed))
-        .map(|w| w.addr)
-        .collect();
+    {
+        *live_addr_counts.entry(writer.addr).or_insert(0) += 1;
+    }
 
-    let entries: Vec<(i32, Vec<SocketAddr>)> = map
-        .iter()
-        .map(|(dc, addrs)| {
-            let list = addrs
-                .iter()
-                .map(|(ip, port)| SocketAddr::new(*ip, *port))
-                .collect::<Vec<_>>();
-            (*dc, list)
-        })
-        .collect();
-
-    for (dc, dc_addrs) in entries {
-        let has_coverage = dc_addrs.iter().any(|a| writer_addrs.contains(a));
-        if has_coverage {
+    for (dc, endpoints) in dc_endpoints {
+        if endpoints.is_empty() {
             continue;
         }
+        let required = MePool::required_writers_for_dc(endpoints.len());
+        let alive = endpoints
+            .iter()
+            .map(|addr| *live_addr_counts.get(addr).unwrap_or(&0))
+            .sum::<usize>();
+        if alive >= required {
+            continue;
+        }
+        let missing = required - alive;
 
         let key = (dc, family);
         let now = Instant::now();
@@ -104,32 +115,45 @@ async fn check_family(
         }
         *inflight.entry(key).or_insert(0) += 1;
 
-        let mut shuffled = dc_addrs.clone();
-        shuffled.shuffle(&mut rand::rng());
-        let mut success = false;
-        for addr in shuffled {
-            let res = tokio::time::timeout(pool.me_one_timeout, pool.connect_one(addr, rng.as_ref())).await;
+        let mut restored = 0usize;
+        for _ in 0..missing {
+            let res = tokio::time::timeout(
+                pool.me_one_timeout,
+                pool.connect_endpoints_round_robin(&endpoints, rng.as_ref()),
+            )
+            .await;
             match res {
-                Ok(Ok(())) => {
-                    info!(%addr, dc = %dc, ?family, "ME reconnected for DC coverage");
+                Ok(true) => {
+                    restored += 1;
                     pool.stats.increment_me_reconnect_success();
-                    backoff.insert(key, pool.me_reconnect_backoff_base.as_millis() as u64);
-                    let jitter = pool.me_reconnect_backoff_base.as_millis() as u64 / JITTER_FRAC_NUM;
-                    let wait = pool.me_reconnect_backoff_base
-                        + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
-                    next_attempt.insert(key, now + wait);
-                    success = true;
-                    break;
                 }
-                Ok(Err(e)) => {
+                Ok(false) => {
                     pool.stats.increment_me_reconnect_attempt();
-                    debug!(%addr, dc = %dc, error = %e, ?family, "ME reconnect failed")
+                    debug!(dc = %dc, ?family, "ME round-robin reconnect failed")
                 }
-                Err(_) => debug!(%addr, dc = %dc, ?family, "ME reconnect timed out"),
+                Err(_) => {
+                    pool.stats.increment_me_reconnect_attempt();
+                    debug!(dc = %dc, ?family, "ME reconnect timed out");
+                }
             }
         }
-        if !success {
-            pool.stats.increment_me_reconnect_attempt();
+
+        let now_alive = alive + restored;
+        if now_alive >= required {
+            info!(
+                dc = %dc,
+                ?family,
+                alive = now_alive,
+                required,
+                endpoint_count = endpoints.len(),
+                "ME writer floor restored for DC"
+            );
+            backoff.insert(key, pool.me_reconnect_backoff_base.as_millis() as u64);
+            let jitter = pool.me_reconnect_backoff_base.as_millis() as u64 / JITTER_FRAC_NUM;
+            let wait = pool.me_reconnect_backoff_base
+                + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
+            next_attempt.insert(key, now + wait);
+        } else {
             let curr = *backoff.get(&key).unwrap_or(&(pool.me_reconnect_backoff_base.as_millis() as u64));
             let next_ms = (curr.saturating_mul(2)).min(pool.me_reconnect_backoff_cap.as_millis() as u64);
             backoff.insert(key, next_ms);
@@ -137,7 +161,15 @@ async fn check_family(
             let wait = Duration::from_millis(next_ms)
                 + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
             next_attempt.insert(key, now + wait);
-            warn!(dc = %dc, backoff_ms = next_ms, ?family, "DC has no ME coverage, scheduled reconnect");
+            warn!(
+                dc = %dc,
+                ?family,
+                alive = now_alive,
+                required,
+                endpoint_count = endpoints.len(),
+                backoff_ms = next_ms,
+                "DC writer floor is below required level, scheduled reconnect"
+            );
         }
         if let Some(v) = inflight.get_mut(&key) {
             *v = v.saturating_sub(1);

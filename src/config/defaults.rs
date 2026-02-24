@@ -182,6 +182,10 @@ pub(crate) fn default_update_every_secs() -> u64 {
     30 * 60
 }
 
+pub(crate) fn default_me_reinit_every_secs() -> u64 {
+    15 * 60
+}
+
 pub(crate) fn default_me_config_stable_snapshots() -> u8 {
     2
 }

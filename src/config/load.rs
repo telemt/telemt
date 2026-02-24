@@ -147,6 +147,12 @@ impl ProxyConfig {
             }
         }
 
+        if config.general.me_reinit_every_secs == 0 {
+            return Err(ProxyError::Config(
+                "general.me_reinit_every_secs must be > 0".to_string(),
+            ));
+        }
+
         if config.general.me_config_stable_snapshots == 0 {
             return Err(ProxyError::Config(
                 "general.me_config_stable_snapshots must be > 0".to_string(),
@@ -477,6 +483,46 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
         assert!(err.contains("general.update_every must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_reinit_every_default_is_set() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_reinit_every_default_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(
+            cfg.general.me_reinit_every_secs,
+            default_me_reinit_every_secs()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_reinit_every_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_reinit_every_secs = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_reinit_every_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_reinit_every_secs must be > 0"));
         let _ = std::fs::remove_file(path);
     }
 

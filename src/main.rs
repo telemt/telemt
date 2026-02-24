@@ -391,18 +391,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             .await;
                         });
 
-                        // Periodic ME connection rotation
-                        let pool_clone_rot = pool.clone();
-                        let rng_clone_rot = rng.clone();
-                        tokio::spawn(async move {
-                            crate::transport::middle_proxy::me_rotation_task(
-                                pool_clone_rot,
-                                rng_clone_rot,
-                                std::time::Duration::from_secs(1800),
-                            )
-                            .await;
-                        });
-
                         Some(pool)
                     }
                     Err(e) => {
@@ -709,6 +697,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 pool_clone,
                 rng_clone,
                 config_rx_clone,
+            )
+            .await;
+        });
+
+        let pool_clone_rot = pool.clone();
+        let rng_clone_rot = rng.clone();
+        let config_rx_clone_rot = config_rx.clone();
+        tokio::spawn(async move {
+            crate::transport::middle_proxy::me_rotation_task(
+                pool_clone_rot,
+                rng_clone_rot,
+                config_rx_clone_rot,
             )
             .await;
         });
