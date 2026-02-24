@@ -147,6 +147,24 @@ impl ProxyConfig {
             }
         }
 
+        if config.general.me_config_stable_snapshots == 0 {
+            return Err(ProxyError::Config(
+                "general.me_config_stable_snapshots must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.proxy_secret_stable_snapshots == 0 {
+            return Err(ProxyError::Config(
+                "general.proxy_secret_stable_snapshots must be > 0".to_string(),
+            ));
+        }
+
+        if !(32..=4096).contains(&config.general.proxy_secret_len_max) {
+            return Err(ProxyError::Config(
+                "general.proxy_secret_len_max must be within [32, 4096]".to_string(),
+            ));
+        }
+
         if !(0.0..=1.0).contains(&config.general.me_pool_min_fresh_ratio) {
             return Err(ProxyError::Config(
                 "general.me_pool_min_fresh_ratio must be within [0.0, 1.0]".to_string(),
@@ -459,6 +477,66 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
         assert!(err.contains("general.update_every must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_config_stable_snapshots_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_config_stable_snapshots = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_config_stable_snapshots_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_config_stable_snapshots must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn proxy_secret_stable_snapshots_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            proxy_secret_stable_snapshots = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_proxy_secret_stable_snapshots_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.proxy_secret_stable_snapshots must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn proxy_secret_len_max_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            proxy_secret_len_max = 16
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_proxy_secret_len_max_out_of_range_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.proxy_secret_len_max must be within [32, 4096]"));
         let _ = std::fs::remove_file(path);
     }
 

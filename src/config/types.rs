@@ -267,6 +267,26 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub update_every: Option<u64>,
 
+    /// Number of identical getProxyConfig snapshots required before applying ME map updates.
+    #[serde(default = "default_me_config_stable_snapshots")]
+    pub me_config_stable_snapshots: u8,
+
+    /// Cooldown in seconds between applied ME map updates.
+    #[serde(default = "default_me_config_apply_cooldown_secs")]
+    pub me_config_apply_cooldown_secs: u64,
+
+    /// Number of identical getProxySecret snapshots required before runtime secret rotation.
+    #[serde(default = "default_proxy_secret_stable_snapshots")]
+    pub proxy_secret_stable_snapshots: u8,
+
+    /// Enable runtime proxy-secret rotation from getProxySecret.
+    #[serde(default = "default_proxy_secret_rotate_runtime")]
+    pub proxy_secret_rotate_runtime: bool,
+
+    /// Maximum allowed proxy-secret length in bytes for startup and runtime refresh.
+    #[serde(default = "default_proxy_secret_len_max")]
+    pub proxy_secret_len_max: usize,
+
     /// Drain-TTL in seconds for stale ME writers after endpoint map changes.
     /// During TTL, stale writers may be used only as fallback for new bindings.
     #[serde(default = "default_me_pool_drain_ttl_secs")]
@@ -346,6 +366,11 @@ impl Default for GeneralConfig {
             hardswap: default_hardswap(),
             fast_mode_min_tls_record: default_fast_mode_min_tls_record(),
             update_every: Some(default_update_every_secs()),
+            me_config_stable_snapshots: default_me_config_stable_snapshots(),
+            me_config_apply_cooldown_secs: default_me_config_apply_cooldown_secs(),
+            proxy_secret_stable_snapshots: default_proxy_secret_stable_snapshots(),
+            proxy_secret_rotate_runtime: default_proxy_secret_rotate_runtime(),
+            proxy_secret_len_max: default_proxy_secret_len_max(),
             me_pool_drain_ttl_secs: default_me_pool_drain_ttl_secs(),
             me_pool_min_fresh_ratio: default_me_pool_min_fresh_ratio(),
             me_reinit_drain_timeout_secs: default_me_reinit_drain_timeout_secs(),

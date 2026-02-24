@@ -4,12 +4,42 @@ use httpdate;
 
 use crate::error::{ProxyError, Result};
 
+pub const PROXY_SECRET_MIN_LEN: usize = 32;
+
+pub(super) fn validate_proxy_secret_len(data_len: usize, max_len: usize) -> Result<()> {
+    if max_len < PROXY_SECRET_MIN_LEN {
+        return Err(ProxyError::Proxy(format!(
+            "proxy-secret max length is invalid: {} bytes (must be >= {})",
+            max_len,
+            PROXY_SECRET_MIN_LEN
+        )));
+    }
+
+    if data_len < PROXY_SECRET_MIN_LEN {
+        return Err(ProxyError::Proxy(format!(
+            "proxy-secret too short: {} bytes (need >= {})",
+            data_len,
+            PROXY_SECRET_MIN_LEN
+        )));
+    }
+
+    if data_len > max_len {
+        return Err(ProxyError::Proxy(format!(
+            "proxy-secret too long: {} bytes (limit = {})",
+            data_len,
+            max_len
+        )));
+    }
+
+    Ok(())
+}
+
 /// Fetch Telegram proxy-secret binary.
-pub async fn fetch_proxy_secret(cache_path: Option<&str>) -> Result<Vec<u8>> {
+pub async fn fetch_proxy_secret(cache_path: Option<&str>, max_len: usize) -> Result<Vec<u8>> {
     let cache = cache_path.unwrap_or("proxy-secret");
 
     // 1) Try fresh download first.
-    match download_proxy_secret().await {
+    match download_proxy_secret_with_max_len(max_len).await {
         Ok(data) => {
             if let Err(e) = tokio::fs::write(cache, &data).await {
                 warn!(error = %e, "Failed to cache proxy-secret (non-fatal)");
@@ -24,9 +54,9 @@ pub async fn fetch_proxy_secret(cache_path: Option<&str>) -> Result<Vec<u8>> {
         }
     }
 
-    // 2) Fallback to cache/file regardless of age; require len>=32.
+    // 2) Fallback to cache/file regardless of age; require len in bounds.
     match tokio::fs::read(cache).await {
-        Ok(data) if data.len() >= 32 => {
+        Ok(data) if validate_proxy_secret_len(data.len(), max_len).is_ok() => {
             let age_hours = tokio::fs::metadata(cache)
                 .await
                 .ok()
@@ -41,17 +71,14 @@ pub async fn fetch_proxy_secret(cache_path: Option<&str>) -> Result<Vec<u8>> {
             );
             Ok(data)
         }
-        Ok(data) => Err(ProxyError::Proxy(format!(
-            "Cached proxy-secret too short: {} bytes (need >= 32)",
-            data.len()
-        ))),
+        Ok(data) => validate_proxy_secret_len(data.len(), max_len).map(|_| data),
         Err(e) => Err(ProxyError::Proxy(format!(
             "Failed to read proxy-secret cache after download failure: {e}"
         ))),
     }
 }
 
-pub async fn download_proxy_secret() -> Result<Vec<u8>> {
+pub async fn download_proxy_secret_with_max_len(max_len: usize) -> Result<Vec<u8>> {
     let resp = reqwest::get("https://core.telegram.org/getProxySecret")
         .await
         .map_err(|e| ProxyError::Proxy(format!("Failed to download proxy-secret: {e}")))?;
@@ -84,12 +111,7 @@ pub async fn download_proxy_secret() -> Result<Vec<u8>> {
         .map_err(|e| ProxyError::Proxy(format!("Read proxy-secret body: {e}")))?
         .to_vec();
 
-    if data.len() < 32 {
-        return Err(ProxyError::Proxy(format!(
-            "proxy-secret too short: {} bytes (need >= 32)",
-            data.len()
-        )));
-    }
+    validate_proxy_secret_len(data.len(), max_len)?;
 
     info!(len = data.len(), "Downloaded proxy-secret OK");
     Ok(data)

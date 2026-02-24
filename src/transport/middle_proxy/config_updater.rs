@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +12,7 @@ use crate::config::ProxyConfig;
 use crate::error::Result;
 
 use super::MePool;
-use super::secret::download_proxy_secret;
+use super::secret::download_proxy_secret_with_max_len;
 use crate::crypto::SecureRandom;
 use std::time::SystemTime;
 
@@ -37,6 +38,92 @@ async fn retry_fetch(url: &str) -> Option<ProxyConfigData> {
 pub struct ProxyConfigData {
     pub map: HashMap<i32, Vec<(IpAddr, u16)>>,
     pub default_dc: Option<i32>,
+}
+
+#[derive(Debug, Default)]
+struct StableSnapshot {
+    candidate_hash: Option<u64>,
+    candidate_hits: u8,
+    applied_hash: Option<u64>,
+}
+
+impl StableSnapshot {
+    fn observe(&mut self, hash: u64) -> u8 {
+        if self.candidate_hash == Some(hash) {
+            self.candidate_hits = self.candidate_hits.saturating_add(1);
+        } else {
+            self.candidate_hash = Some(hash);
+            self.candidate_hits = 1;
+        }
+        self.candidate_hits
+    }
+
+    fn is_applied(&self, hash: u64) -> bool {
+        self.applied_hash == Some(hash)
+    }
+
+    fn mark_applied(&mut self, hash: u64) {
+        self.applied_hash = Some(hash);
+    }
+}
+
+#[derive(Debug, Default)]
+struct UpdaterState {
+    config_v4: StableSnapshot,
+    config_v6: StableSnapshot,
+    secret: StableSnapshot,
+    last_map_apply_at: Option<tokio::time::Instant>,
+}
+
+fn hash_proxy_config(cfg: &ProxyConfigData) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    cfg.default_dc.hash(&mut hasher);
+
+    let mut by_dc: Vec<(i32, Vec<(IpAddr, u16)>)> =
+        cfg.map.iter().map(|(dc, addrs)| (*dc, addrs.clone())).collect();
+    by_dc.sort_by_key(|(dc, _)| *dc);
+    for (dc, mut addrs) in by_dc {
+        dc.hash(&mut hasher);
+        addrs.sort_unstable();
+        for (ip, port) in addrs {
+            ip.hash(&mut hasher);
+            port.hash(&mut hasher);
+        }
+    }
+
+    hasher.finish()
+}
+
+fn hash_secret(secret: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    secret.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn map_apply_cooldown_ready(
+    last_applied: Option<tokio::time::Instant>,
+    cooldown: Duration,
+) -> bool {
+    if cooldown.is_zero() {
+        return true;
+    }
+    match last_applied {
+        Some(ts) => ts.elapsed() >= cooldown,
+        None => true,
+    }
+}
+
+fn map_apply_cooldown_remaining_secs(
+    last_applied: tokio::time::Instant,
+    cooldown: Duration,
+) -> u64 {
+    if cooldown.is_zero() {
+        return 0;
+    }
+    cooldown
+        .checked_sub(last_applied.elapsed())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn parse_host_port(s: &str) -> Option<(IpAddr, u16)> {
@@ -130,7 +217,12 @@ pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
     Ok(ProxyConfigData { map, default_dc })
 }
 
-async fn run_update_cycle(pool: &Arc<MePool>, rng: &Arc<SecureRandom>, cfg: &ProxyConfig) {
+async fn run_update_cycle(
+    pool: &Arc<MePool>,
+    rng: &Arc<SecureRandom>,
+    cfg: &ProxyConfig,
+    state: &mut UpdaterState,
+) {
     pool.update_runtime_reinit_policy(
         cfg.general.hardswap,
         cfg.general.me_pool_drain_ttl_secs,
@@ -138,33 +230,93 @@ async fn run_update_cycle(pool: &Arc<MePool>, rng: &Arc<SecureRandom>, cfg: &Pro
         cfg.general.me_pool_min_fresh_ratio,
     );
 
+    let required_cfg_snapshots = cfg.general.me_config_stable_snapshots.max(1);
+    let required_secret_snapshots = cfg.general.proxy_secret_stable_snapshots.max(1);
+    let apply_cooldown = Duration::from_secs(cfg.general.me_config_apply_cooldown_secs);
     let mut maps_changed = false;
 
-    // Update proxy config v4
+    let mut ready_v4: Option<(ProxyConfigData, u64)> = None;
     let cfg_v4 = retry_fetch("https://core.telegram.org/getProxyConfig").await;
     if let Some(cfg_v4) = cfg_v4 {
-        let changed = pool.update_proxy_maps(cfg_v4.map.clone(), None).await;
-        if let Some(dc) = cfg_v4.default_dc {
-            pool.default_dc
-                .store(dc, std::sync::atomic::Ordering::Relaxed);
-        }
-        if changed {
-            maps_changed = true;
-            info!("ME config updated (v4)");
+        let cfg_v4_hash = hash_proxy_config(&cfg_v4);
+        let stable_hits = state.config_v4.observe(cfg_v4_hash);
+        if stable_hits < required_cfg_snapshots {
+            debug!(
+                stable_hits,
+                required_cfg_snapshots,
+                snapshot = format_args!("0x{cfg_v4_hash:016x}"),
+                "ME config v4 candidate observed"
+            );
+        } else if state.config_v4.is_applied(cfg_v4_hash) {
+            debug!(
+                snapshot = format_args!("0x{cfg_v4_hash:016x}"),
+                "ME config v4 stable snapshot already applied"
+            );
         } else {
-            debug!("ME config v4 unchanged");
+            ready_v4 = Some((cfg_v4, cfg_v4_hash));
         }
     }
 
-    // Update proxy config v6 (optional)
+    let mut ready_v6: Option<(ProxyConfigData, u64)> = None;
     let cfg_v6 = retry_fetch("https://core.telegram.org/getProxyConfigV6").await;
     if let Some(cfg_v6) = cfg_v6 {
-        let changed = pool.update_proxy_maps(HashMap::new(), Some(cfg_v6.map)).await;
-        if changed {
-            maps_changed = true;
-            info!("ME config updated (v6)");
+        let cfg_v6_hash = hash_proxy_config(&cfg_v6);
+        let stable_hits = state.config_v6.observe(cfg_v6_hash);
+        if stable_hits < required_cfg_snapshots {
+            debug!(
+                stable_hits,
+                required_cfg_snapshots,
+                snapshot = format_args!("0x{cfg_v6_hash:016x}"),
+                "ME config v6 candidate observed"
+            );
+        } else if state.config_v6.is_applied(cfg_v6_hash) {
+            debug!(
+                snapshot = format_args!("0x{cfg_v6_hash:016x}"),
+                "ME config v6 stable snapshot already applied"
+            );
         } else {
-            debug!("ME config v6 unchanged");
+            ready_v6 = Some((cfg_v6, cfg_v6_hash));
+        }
+    }
+
+    if ready_v4.is_some() || ready_v6.is_some() {
+        if map_apply_cooldown_ready(state.last_map_apply_at, apply_cooldown) {
+            let update_v4 = ready_v4
+                .as_ref()
+                .map(|(snapshot, _)| snapshot.map.clone())
+                .unwrap_or_default();
+            let update_v6 = ready_v6
+                .as_ref()
+                .map(|(snapshot, _)| snapshot.map.clone());
+
+            let changed = pool.update_proxy_maps(update_v4, update_v6).await;
+
+            if let Some((snapshot, hash)) = ready_v4 {
+                if let Some(dc) = snapshot.default_dc {
+                    pool.default_dc
+                        .store(dc, std::sync::atomic::Ordering::Relaxed);
+                }
+                state.config_v4.mark_applied(hash);
+            }
+
+            if let Some((_snapshot, hash)) = ready_v6 {
+                state.config_v6.mark_applied(hash);
+            }
+
+            state.last_map_apply_at = Some(tokio::time::Instant::now());
+
+            if changed {
+                maps_changed = true;
+                info!("ME config update applied after stable-gate");
+            } else {
+                debug!("ME config stable-gate applied with no map delta");
+            }
+        } else if let Some(last) = state.last_map_apply_at {
+            let wait_secs = map_apply_cooldown_remaining_secs(last, apply_cooldown);
+            debug!(
+                wait_secs,
+                "ME config stable snapshot deferred by cooldown"
+            );
         }
     }
 
@@ -175,14 +327,37 @@ async fn run_update_cycle(pool: &Arc<MePool>, rng: &Arc<SecureRandom>, cfg: &Pro
 
     pool.reset_stun_state();
 
-    // Update proxy-secret
-    match download_proxy_secret().await {
-        Ok(secret) => {
-            if pool.update_secret(secret).await {
-                info!("proxy-secret updated and pool reconnect scheduled");
+    if cfg.general.proxy_secret_rotate_runtime {
+        match download_proxy_secret_with_max_len(cfg.general.proxy_secret_len_max).await {
+            Ok(secret) => {
+                let secret_hash = hash_secret(&secret);
+                let stable_hits = state.secret.observe(secret_hash);
+                if stable_hits < required_secret_snapshots {
+                    debug!(
+                        stable_hits,
+                        required_secret_snapshots,
+                        snapshot = format_args!("0x{secret_hash:016x}"),
+                        "proxy-secret candidate observed"
+                    );
+                } else if state.secret.is_applied(secret_hash) {
+                    debug!(
+                        snapshot = format_args!("0x{secret_hash:016x}"),
+                        "proxy-secret stable snapshot already applied"
+                    );
+                } else {
+                    let rotated = pool.update_secret(secret).await;
+                    state.secret.mark_applied(secret_hash);
+                    if rotated {
+                        info!("proxy-secret rotated after stable-gate");
+                    } else {
+                        debug!("proxy-secret stable snapshot confirmed as unchanged");
+                    }
+                }
             }
+            Err(e) => warn!(error = %e, "proxy-secret update failed"),
         }
-        Err(e) => warn!(error = %e, "proxy-secret update failed"),
+    } else {
+        debug!("proxy-secret runtime rotation disabled by config");
     }
 }
 
@@ -191,6 +366,7 @@ pub async fn me_config_updater(
     rng: Arc<SecureRandom>,
     mut config_rx: watch::Receiver<Arc<ProxyConfig>>,
 ) {
+    let mut state = UpdaterState::default();
     let mut update_every_secs = config_rx
         .borrow()
         .general
@@ -207,7 +383,7 @@ pub async fn me_config_updater(
         tokio::select! {
             _ = &mut sleep => {
                 let cfg = config_rx.borrow().clone();
-                run_update_cycle(&pool, &rng, cfg.as_ref()).await;
+                run_update_cycle(&pool, &rng, cfg.as_ref(), &mut state).await;
                 let refreshed_secs = cfg.general.effective_update_every_secs().max(1);
                 if refreshed_secs != update_every_secs {
                     info!(
@@ -245,7 +421,7 @@ pub async fn me_config_updater(
                     );
                     update_every_secs = new_secs;
                     update_every = Duration::from_secs(update_every_secs);
-                    run_update_cycle(&pool, &rng, cfg.as_ref()).await;
+                    run_update_cycle(&pool, &rng, cfg.as_ref(), &mut state).await;
                     next_tick = tokio::time::Instant::now() + update_every;
                 } else {
                     info!(

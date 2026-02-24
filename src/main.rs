@@ -298,25 +298,30 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // proxy-secret is from: https://core.telegram.org/getProxySecret
         // =============================================================
         let proxy_secret_path = config.general.proxy_secret_path.as_deref();
-match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
-    Ok(proxy_secret) => {
-        info!(
-            secret_len = proxy_secret.len(),
-            key_sig = format_args!(
-                "0x{:08x}",
-                if proxy_secret.len() >= 4 {
-                    u32::from_le_bytes([
-                        proxy_secret[0],
-                        proxy_secret[1],
-                        proxy_secret[2],
-                        proxy_secret[3],
-                    ])
-                } else {
-                    0
-                }
-            ),
-            "Proxy-secret loaded"
-        );
+        match crate::transport::middle_proxy::fetch_proxy_secret(
+            proxy_secret_path,
+            config.general.proxy_secret_len_max,
+        )
+        .await
+        {
+            Ok(proxy_secret) => {
+                info!(
+                    secret_len = proxy_secret.len(),
+                    key_sig = format_args!(
+                        "0x{:08x}",
+                        if proxy_secret.len() >= 4 {
+                            u32::from_le_bytes([
+                                proxy_secret[0],
+                                proxy_secret[1],
+                                proxy_secret[2],
+                                proxy_secret[3],
+                            ])
+                        } else {
+                            0
+                        }
+                    ),
+                    "Proxy-secret loaded"
+                );
 
                 // Load ME config (v4/v6) + default DC
                 let mut cfg_v4 = fetch_proxy_config(
