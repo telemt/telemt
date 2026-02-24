@@ -49,6 +49,10 @@ desync_all_full = false                   # Emit full crypto-desync forensic log
 auto_degradation_enabled = true           # Enable auto-degradation from ME to Direct-DC.
 degradation_min_unavailable_dc_groups = 2 # Minimum unavailable ME DC groups before degrading.
 hardswap = true                           # Enable C-like hard-swap for ME pool generations. When true, Telemt prewarms a new generation and switches once full coverage is reached.
+default_me_hardswap_warmup_delay_min_ms = 1000 # Minimum delay in ms between hardswap warmup connect attempts.
+default_me_hardswap_warmup_delay_max_ms = 2000 # Maximum delay in ms between hardswap warmup connect attempts.
+default_me_hardswap_warmup_extra_passes = 3 # Additional warmup passes in the same hardswap cycle after the base pass.
+default_me_hardswap_warmup_pass_backoff_base_ms = 500 # Base backoff in ms between hardswap warmup passes when floor is still incomplete.
 me_pool_drain_ttl_secs = 90               # Drain-TTL in seconds for stale ME writers after endpoint map changes. During TTL, stale writers may be used only as fallback for new bindings.
 me_pool_min_fresh_ratio = 0.8             # Minimum desired-DC coverage ratio required before draining stale writers. Range: 0.0..=1.0.
 me_reinit_drain_timeout_secs = 120        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
@@ -57,6 +61,7 @@ me_config_apply_cooldown_secs = 300       # Cooldown in seconds between applied 
 proxy_secret_rotate_runtime = true        # Enable runtime proxy-secret rotation from getProxySecret.
 proxy_secret_stable_snapshots = 2         # Number of identical getProxySecret snapshots required before runtime secret rotation.
 proxy_secret_len_max = 256                # Maximum allowed proxy-secret length in bytes for startup and runtime refresh.
+default_me_reinit_every_secs = 900        # Periodic ME pool reinitialization interval in seconds.
 
 [general.modes]
 classic = false
