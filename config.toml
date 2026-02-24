@@ -23,7 +23,7 @@ middle_proxy_nat_stun = "stun.l.google.com:19302"
 # Optional fallback STUN servers list.
 middle_proxy_nat_stun_servers = ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
 # Desired number of concurrent ME writers in pool.
-middle_proxy_pool_size = 16
+middle_proxy_pool_size = 8
 # Pre-initialized warm-standby ME connections kept idle.
 middle_proxy_warm_standby = 8
 # Ignore STUN/interface mismatch and keep ME enabled even if IP differs.
