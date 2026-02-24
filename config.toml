@@ -52,6 +52,11 @@ hardswap = true                           # Enable C-like hard-swap for ME pool 
 me_pool_drain_ttl_secs = 90               # Drain-TTL in seconds for stale ME writers after endpoint map changes. During TTL, stale writers may be used only as fallback for new bindings.
 me_pool_min_fresh_ratio = 0.8             # Minimum desired-DC coverage ratio required before draining stale writers. Range: 0.0..=1.0.
 me_reinit_drain_timeout_secs = 120        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
+me_config_stable_snapshots = 2            # Number of identical getProxyConfig snapshots required before applying ME map updates.
+me_config_apply_cooldown_secs = 300       # Cooldown in seconds between applied ME map updates.
+proxy_secret_rotate_runtime = true        # Enable runtime proxy-secret rotation from getProxySecret.
+proxy_secret_stable_snapshots = 2         # Number of identical getProxySecret snapshots required before runtime secret rotation.
+proxy_secret_len_max = 256                # Maximum allowed proxy-secret length in bytes for startup and runtime refresh.
 
 [general.modes]
 classic = false
