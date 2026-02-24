@@ -49,6 +49,10 @@ desync_all_full = false                   # Emit full crypto-desync forensic log
 me_reinit_drain_timeout_secs = 300        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
 auto_degradation_enabled = true           # Enable auto-degradation from ME to Direct-DC.
 degradation_min_unavailable_dc_groups = 2 # Minimum unavailable ME DC groups before degrading.
+hardswap = false                          # Enable C-like hard-swap for ME pool generations. When true, Telemt prewarms a new generation and switches once full coverage is reached.
+me_pool_drain_ttl_secs = 90               # Drain-TTL in seconds for stale ME writers after endpoint map changes. During TTL, stale writers may be used only as fallback for new bindings.
+me_pool_min_fresh_ratio = 0.8             # Minimum desired-DC coverage ratio required before draining stale writers. Range: 0.0..=1.0.
+me_reinit_drain_timeout_secs = 120        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
 
 [general.modes]
 classic = false
