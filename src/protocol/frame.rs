@@ -1,5 +1,7 @@
 //! MTProto frame types and metadata
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 /// Extra metadata associated with a frame

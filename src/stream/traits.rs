@@ -1,5 +1,7 @@
 //! Stream traits and common types
 
+#![allow(dead_code)]
+
 use bytes::Bytes;
 use std::io::Result;
 use std::pin::Pin;

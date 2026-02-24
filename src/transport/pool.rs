@@ -1,5 +1,7 @@
 //! Connection Pool
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -8,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use parking_lot::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 use crate::error::{ProxyError, Result};
 use super::socket::configure_tcp_socket;
 

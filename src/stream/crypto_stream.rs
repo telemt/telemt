@@ -18,6 +18,8 @@
 //!   is either written to upstream or stored in our pending buffer
 //! - when upstream is pending -> ciphertext is buffered/bounded and backpressure is applied
 //!
+
+#![allow(dead_code)]
 //! =======================
 //! Writer state machine
 //! =======================
@@ -55,7 +57,7 @@ use std::io::{self, ErrorKind, Result};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::crypto::AesCtr;
 use super::state::{StreamState, YieldBuffer};

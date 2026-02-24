@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use tracing::{info, warn, debug};
+use tracing::{info, warn};
 
 use crate::error::{ProxyError, Result};
 use crate::network::probe::is_bogon;
@@ -9,11 +9,14 @@ use crate::network::stun::{stun_probe_dual, IpFamily, StunProbeResult};
 
 use super::MePool;
 use std::time::Instant;
+
+#[allow(dead_code)]
 pub async fn stun_probe(stun_addr: Option<String>) -> Result<crate::network::stun::DualStunResult> {
     let stun_addr = stun_addr.unwrap_or_else(|| "stun.l.google.com:19302".to_string());
     stun_probe_dual(&stun_addr).await
 }
 
+#[allow(dead_code)]
 pub async fn detect_public_ip() -> Option<IpAddr> {
     fetch_public_ipv4_with_retry().await.ok().flatten().map(IpAddr::V4)
 }

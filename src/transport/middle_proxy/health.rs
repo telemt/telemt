@@ -14,6 +14,7 @@ use super::MePool;
 
 const HEALTH_INTERVAL_SECS: u64 = 1;
 const JITTER_FRAC_NUM: u64 = 2; // jitter up to 50% of backoff
+#[allow(dead_code)]
 const MAX_CONCURRENT_PER_DC_DEFAULT: usize = 1;
 
 pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize) {

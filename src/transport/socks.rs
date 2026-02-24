@@ -1,7 +1,7 @@
 //! SOCKS4/5 Client Implementation
 
 use std::net::{IpAddr, SocketAddr};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use crate::error::{ProxyError, Result};
 

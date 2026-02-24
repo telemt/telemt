@@ -1,3 +1,6 @@
+#![allow(unreachable_code)]
+#![allow(dead_code)]
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use tokio::net::{lookup_host, UdpSocket};

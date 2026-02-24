@@ -36,6 +36,7 @@ pub struct MeWriter {
     pub allow_drain_fallback: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 pub struct MePool {
     pub(super) registry: Arc<ConnRegistry>,
     pub(super) writers: Arc<RwLock<Vec<MeWriter>>>,
@@ -992,6 +993,7 @@ impl MePool {
 
 }
 
+#[allow(dead_code)]
 fn hex_dump(data: &[u8]) -> String {
     const MAX: usize = 64;
     let mut out = String::with_capacity(data.len() * 2 + 3);

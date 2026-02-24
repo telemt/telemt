@@ -17,8 +17,10 @@ mod wire;
 use bytes::Bytes;
 
 pub use health::me_health_monitor;
+#[allow(unused_imports)]
 pub use ping::{run_me_ping, format_sample_line, MePingReport, MePingSample, MePingFamily};
 pub use pool::MePool;
+#[allow(unused_imports)]
 pub use pool_nat::{stun_probe, detect_public_ip};
 pub use registry::ConnRegistry;
 pub use secret::fetch_proxy_secret;

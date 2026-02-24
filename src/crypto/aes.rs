@@ -11,6 +11,8 @@
 //!   `HandshakeSuccess`, `ObfuscationParams`) are responsible for
 //!   zeroizing their own copies.
 
+#![allow(dead_code)]
+
 use aes::Aes256;
 use ctr::{Ctr128BE, cipher::{KeyIvInit, StreamCipher}};
 use zeroize::Zeroize;

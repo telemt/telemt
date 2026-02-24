@@ -1,5 +1,7 @@
 //! telemt — Telegram MTProto Proxy
 
+#![allow(unused_assignments)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -417,6 +419,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
     if me_pool.is_some() {
         info!("Transport: Middle-End Proxy - all DC-over-RPC");
     } else {
+        let _ = use_middle_proxy;
         use_middle_proxy = false;
         // Make runtime config reflect direct-only mode for handlers.
         config.general.use_middle_proxy = false;

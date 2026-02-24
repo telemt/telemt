@@ -1,6 +1,8 @@
 //! MTProto frame stream wrappers
 
-use bytes::{Bytes, BytesMut};
+#![allow(dead_code)]
+
+use bytes::Bytes;
 use std::io::{Error, ErrorKind, Result};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 use crate::protocol::constants::*;

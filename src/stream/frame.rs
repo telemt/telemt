@@ -3,6 +3,8 @@
 //! This module defines the common types and traits used by all
 //! frame encoding/decoding implementations.
 
+#![allow(dead_code)]
+
 use bytes::{Bytes, BytesMut};
 use std::io::Result;
 use std::sync::Arc;

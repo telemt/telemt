@@ -21,6 +21,7 @@ pub enum RouteResult {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct ConnMeta {
     pub target_dc: i16,
     pub client_addr: SocketAddr,
@@ -29,6 +30,7 @@ pub struct ConnMeta {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct BoundConn {
     pub conn_id: u64,
     pub meta: ConnMeta,
@@ -167,6 +169,7 @@ impl ConnRegistry {
         out
     }
 
+    #[allow(dead_code)]
     pub async fn get_meta(&self, conn_id: u64) -> Option<ConnMeta> {
         let inner = self.inner.read().await;
         inner.meta.get(&conn_id).cloned()

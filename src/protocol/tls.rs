@@ -4,8 +4,9 @@
 //! for domain fronting. The handshake looks like valid TLS 1.3 but
 //! actually carries MTProto authentication data.
 
+#![allow(dead_code)]
+
 use crate::crypto::{sha256_hmac, SecureRandom};
-use crate::error::{ProxyError, Result};
 use super::constants::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use num_bigint::BigUint;
