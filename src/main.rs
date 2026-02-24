@@ -1,5 +1,7 @@
 //! telemt — Telegram MTProto Proxy
 
+#![allow(unused_assignments)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,36 +75,27 @@ fn parse_cli() -> (String, bool, Option<String>) {
                 log_level = Some(s.trim_start_matches("--log-level=").to_string());
             }
             "--help" | "-h" => {
-                eprintln!("telemt - Telegram MTProto Proxy v{}", env!("CARGO_PKG_VERSION"));
+                eprintln!("Usage: telemt [config.toml] [OPTIONS]");
                 eprintln!();
-                eprintln!("USAGE:");
-                eprintln!("    telemt [CONFIG] [OPTIONS]");
-                eprintln!("    telemt --init [INIT_OPTIONS]");
+                eprintln!("Options:");
+                eprintln!("  --silent, -s            Suppress info logs");
+                eprintln!("  --log-level <LEVEL>     debug|verbose|normal|silent");
+                eprintln!("  --help, -h              Show this help");
                 eprintln!();
-                eprintln!("ARGS:");
-                eprintln!("    <CONFIG>       Path to config file (default: config.toml)");
-                eprintln!();
-                eprintln!("OPTIONS:");
-                eprintln!("    -s, --silent           Suppress info logs (equivalent to --log-level silent)");
-                eprintln!("    --log-level <LEVEL>    Set log level [possible values: debug, verbose, normal, silent]");
-                eprintln!("    -h, --help             Show this help message");
-                eprintln!("    -V, --version          Print version number");
-                eprintln!();
-                eprintln!("INIT OPTIONS (fire-and-forget setup):");
-                eprintln!("    --init                 Generate config, install systemd service, and start");
+                eprintln!("Setup (fire-and-forget):");
+                eprintln!(
+                    "  --init                  Generate config, install systemd service, start"
+                );
                 eprintln!("    --port <PORT>          Listen port (default: 443)");
-                eprintln!("    --domain <DOMAIN>      TLS domain for masking (default: www.google.com)");
-                eprintln!("    --secret <HEX>         32-char hex secret (auto-generated if omitted)");
-                eprintln!("    --user <NAME>          Username for proxy access (default: user)");
+                eprintln!(
+                    "    --domain <DOMAIN>      TLS domain for masking (default: www.google.com)"
+                );
+                eprintln!(
+                    "    --secret <HEX>         32-char hex secret (auto-generated if omitted)"
+                );
+                eprintln!("    --user <NAME>          Username (default: user)");
                 eprintln!("    --config-dir <DIR>     Config directory (default: /etc/telemt)");
-                eprintln!("    --no-start             Create config and service but don't start");
-                eprintln!();
-                eprintln!("EXAMPLES:");
-                eprintln!("    telemt                           # Run with default config");
-                eprintln!("    telemt /etc/telemt/config.toml   # Run with specific config");
-                eprintln!("    telemt --log-level debug         # Run with debug logging");
-                eprintln!("    telemt --init                    # Quick setup with defaults");
-                eprintln!("    telemt --init --port 8443 --user admin  # Custom setup");
+                eprintln!("    --no-start             Don't start the service after install");
                 std::process::exit(0);
             }
             "--version" | "-V" => {
@@ -371,6 +364,10 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     config.general.me_reconnect_backoff_base_ms,
                     config.general.me_reconnect_backoff_cap_ms,
                     config.general.me_reconnect_fast_retry_count,
+                    config.general.hardswap,
+                    config.general.me_pool_drain_ttl_secs,
+                    config.general.effective_me_pool_force_close_secs(),
+                    config.general.me_pool_min_fresh_ratio,
                 );
 
                 let pool_size = config.general.middle_proxy_pool_size.max(1);
@@ -422,6 +419,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
     if me_pool.is_some() {
         info!("Transport: Middle-End Proxy - all DC-over-RPC");
     } else {
+        let _ = use_middle_proxy;
         use_middle_proxy = false;
         // Make runtime config reflect direct-only mode for handlers.
         config.general.use_middle_proxy = false;

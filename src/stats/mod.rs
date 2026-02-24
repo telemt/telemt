@@ -1,7 +1,8 @@
 //! Statistics and replay protection
 
+#![allow(dead_code)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Instant, Duration};
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -38,6 +39,10 @@ pub struct Stats {
     desync_frames_bucket_1_2: AtomicU64,
     desync_frames_bucket_3_10: AtomicU64,
     desync_frames_bucket_gt_10: AtomicU64,
+    pool_swap_total: AtomicU64,
+    pool_drain_active: AtomicU64,
+    pool_force_close_total: AtomicU64,
+    pool_stale_pick_total: AtomicU64,
     user_stats: DashMap<String, UserStats>,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -108,6 +113,35 @@ impl Stats {
             }
         }
     }
+    pub fn increment_pool_swap_total(&self) {
+        self.pool_swap_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_pool_drain_active(&self) {
+        self.pool_drain_active.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn decrement_pool_drain_active(&self) {
+        let mut current = self.pool_drain_active.load(Ordering::Relaxed);
+        loop {
+            if current == 0 {
+                break;
+            }
+            match self.pool_drain_active.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+    pub fn increment_pool_force_close_total(&self) {
+        self.pool_force_close_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_pool_stale_pick_total(&self) {
+        self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn get_connects_all(&self) -> u64 { self.connects_all.load(Ordering::Relaxed) }
     pub fn get_connects_bad(&self) -> u64 { self.connects_bad.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_sent(&self) -> u64 { self.me_keepalive_sent.load(Ordering::Relaxed) }
@@ -148,6 +182,18 @@ impl Stats {
     }
     pub fn get_desync_frames_bucket_gt_10(&self) -> u64 {
         self.desync_frames_bucket_gt_10.load(Ordering::Relaxed)
+    }
+    pub fn get_pool_swap_total(&self) -> u64 {
+        self.pool_swap_total.load(Ordering::Relaxed)
+    }
+    pub fn get_pool_drain_active(&self) -> u64 {
+        self.pool_drain_active.load(Ordering::Relaxed)
+    }
+    pub fn get_pool_force_close_total(&self) -> u64 {
+        self.pool_force_close_total.load(Ordering::Relaxed)
+    }
+    pub fn get_pool_stale_pick_total(&self) -> u64 {
+        self.pool_stale_pick_total.load(Ordering::Relaxed)
     }
     
     pub fn increment_user_connects(&self, user: &str) {
@@ -451,6 +497,7 @@ impl ReplayStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     
     #[test]
     fn test_stats_shared_counters() {

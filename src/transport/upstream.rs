@@ -1,6 +1,8 @@
 //! Upstream Management with per-DC latency-weighted selection
-//! 
+//!
 //! IPv6/IPv4 connectivity checks with configurable preference.
+
+#![allow(deprecated)]
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, IpAddr};
@@ -549,7 +551,7 @@ impl UpstreamManager {
     /// Tests BOTH IPv6 and IPv4, returns separate results for each.
     pub async fn ping_all_dcs(
         &self,
-        prefer_ipv6: bool,
+        _prefer_ipv6: bool,
         dc_overrides: &HashMap<String, Vec<String>>,
         ipv4_enabled: bool,
         ipv6_enabled: bool,
@@ -907,6 +909,7 @@ impl UpstreamManager {
     }
 
     /// Get the preferred IP for a DC (for use by other components)
+    #[allow(dead_code)]
     pub async fn get_dc_ip_preference(&self, dc_idx: i16) -> Option<IpPreference> {
         let guard = self.upstreams.read().await;
         if guard.is_empty() {
@@ -918,6 +921,7 @@ impl UpstreamManager {
     }
 
     /// Get preferred DC address based on config preference
+    #[allow(dead_code)]
     pub async fn get_dc_addr(&self, dc_idx: i16, prefer_ipv6: bool) -> Option<SocketAddr> {
         let arr_idx = UpstreamState::dc_array_idx(dc_idx)?;
 

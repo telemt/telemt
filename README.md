@@ -31,7 +31,7 @@
 - Улучшение обработки ошибок в edge-case транспортных сценариях  
 
 Релиз:  
-[3.0.9](https://github.com/telemt/telemt/releases/tag/3.0.9)
+[3.0.12](https://github.com/telemt/telemt/releases/tag/3.0.12)
 
 ---
 
@@ -69,7 +69,7 @@ Additionally, we implemented a set of robustness enhancements designed to:
 - Improve error handling in edge-case transport scenarios
 
 Release:  
-[3.0.9](https://github.com/telemt/telemt/releases/tag/3.0.9)
+[3.0.12](https://github.com/telemt/telemt/releases/tag/3.0.12)
 
 ---
 

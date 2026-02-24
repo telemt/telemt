@@ -1,5 +1,7 @@
 //! Error Types
 
+#![allow(dead_code)]
+
 use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;

@@ -18,6 +18,8 @@
 //! - Explicit state machines for all async operations
 //! - Never lose data on partial reads
 //! - Atomic TLS record formation for writes
+
+#![allow(dead_code)]
 //! - Proper handling of all TLS record types
 //!
 //! Important nuance (Telegram FakeTLS):

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
@@ -143,6 +145,24 @@ impl ProxyConfig {
                     "proxy_*_auto_reload_secs are deprecated; set general.update_every"
                 );
             }
+        }
+
+        if !(0.0..=1.0).contains(&config.general.me_pool_min_fresh_ratio) {
+            return Err(ProxyError::Config(
+                "general.me_pool_min_fresh_ratio must be within [0.0, 1.0]".to_string(),
+            ));
+        }
+
+        if config.general.effective_me_pool_force_close_secs() > 0
+            && config.general.effective_me_pool_force_close_secs()
+                < config.general.me_pool_drain_ttl_secs
+        {
+            warn!(
+                me_pool_drain_ttl_secs = config.general.me_pool_drain_ttl_secs,
+                me_reinit_drain_timeout_secs = config.general.effective_me_pool_force_close_secs(),
+                "force-close timeout is lower than drain TTL; bumping force-close timeout to TTL"
+            );
+            config.general.me_reinit_drain_timeout_secs = config.general.me_pool_drain_ttl_secs;
         }
 
         // Validate secrets.
@@ -437,6 +457,47 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
         assert!(err.contains("general.update_every must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_pool_min_fresh_ratio_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            me_pool_min_fresh_ratio = 1.5
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_pool_min_ratio_invalid_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_pool_min_fresh_ratio must be within [0.0, 1.0]"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn force_close_bumped_when_below_drain_ttl() {
+        let toml = r#"
+            [general]
+            me_pool_drain_ttl_secs = 90
+            me_reinit_drain_timeout_secs = 30
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_force_close_bump_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.me_reinit_drain_timeout_secs, 90);
         let _ = std::fs::remove_file(path);
     }
 }

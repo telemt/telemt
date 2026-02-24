@@ -184,6 +184,7 @@ where
     let user = success.user.clone();
     let peer = success.peer;
     let proto_tag = success.proto_tag;
+    let pool_generation = me_pool.current_generation();
 
     info!(
         user = %user,
@@ -191,6 +192,7 @@ where
         dc = success.dc_idx,
         proto = ?proto_tag,
         mode = "middle_proxy",
+        pool_generation,
         "Routing via Middle-End"
     );
 
@@ -220,6 +222,7 @@ where
         peer_hash = format_args!("0x{:016x}", forensics.peer_hash),
         desync_all_full = forensics.desync_all_full,
         proto_flags = format_args!("0x{:08x}", proto_flags),
+        pool_generation,
         "ME relay started"
     );
 

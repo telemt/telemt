@@ -3,6 +3,8 @@
 //! This module provides a thread-safe pool of BytesMut buffers
 //! that can be reused across connections to reduce allocation pressure.
 
+#![allow(dead_code)]
+
 use bytes::BytesMut;
 use crossbeam_queue::ArrayQueue;
 use std::ops::{Deref, DerefMut};

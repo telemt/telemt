@@ -4,8 +4,11 @@
 //! for domain fronting. The handshake looks like valid TLS 1.3 but
 //! actually carries MTProto authentication data.
 
+#![allow(dead_code)]
+
 use crate::crypto::{sha256_hmac, SecureRandom};
-use crate::error::{ProxyError, Result};
+#[cfg(test)]
+use crate::error::ProxyError;
 use super::constants::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use num_bigint::BigUint;
@@ -613,7 +616,7 @@ pub fn parse_tls_record_header(header: &[u8; 5]) -> Option<(u8, u16)> {
 ///
 /// This is useful for testing that our ServerHello is well-formed.
 #[cfg(test)]
-fn validate_server_hello_structure(data: &[u8]) -> Result<()> {
+fn validate_server_hello_structure(data: &[u8]) -> Result<(), ProxyError> {
     if data.len() < 5 {
         return Err(ProxyError::InvalidTlsRecord {
             record_type: 0,

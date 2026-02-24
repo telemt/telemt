@@ -3,6 +3,8 @@
 //! This module provides Encoder/Decoder implementations compatible
 //! with tokio-util's Framed wrapper for easy async frame I/O.
 
+#![allow(dead_code)]
+
 use bytes::{Bytes, BytesMut, BufMut};
 use std::io::{self, Error, ErrorKind};
 use std::sync::Arc;

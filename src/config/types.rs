@@ -206,6 +206,11 @@ pub struct GeneralConfig {
     #[serde(default = "default_desync_all_full")]
     pub desync_all_full: bool,
 
+    /// Enable C-like hard-swap for ME pool generations.
+    /// When true, Telemt prewarms a new generation and switches once full coverage is reached.
+    #[serde(default = "default_hardswap")]
+    pub hardswap: bool,
+
     /// Enable staggered warmup of extra ME writers.
     #[serde(default = "default_true")]
     pub me_warmup_stagger_enabled: bool,
@@ -262,6 +267,16 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub update_every: Option<u64>,
 
+    /// Drain-TTL in seconds for stale ME writers after endpoint map changes.
+    /// During TTL, stale writers may be used only as fallback for new bindings.
+    #[serde(default = "default_me_pool_drain_ttl_secs")]
+    pub me_pool_drain_ttl_secs: u64,
+
+    /// Minimum desired-DC coverage ratio required before draining stale writers.
+    /// Range: 0.0..=1.0.
+    #[serde(default = "default_me_pool_min_fresh_ratio")]
+    pub me_pool_min_fresh_ratio: f32,
+
     /// Drain timeout in seconds for stale ME writers after endpoint map changes.
     /// Set to 0 to keep stale writers draining indefinitely (no force-close).
     #[serde(default = "default_me_reinit_drain_timeout_secs")]
@@ -308,7 +323,7 @@ impl Default for GeneralConfig {
             middle_proxy_nat_stun: None,
             middle_proxy_nat_stun_servers: Vec::new(),
             middle_proxy_pool_size: default_pool_size(),
-            middle_proxy_warm_standby: 8,
+            middle_proxy_warm_standby: 16,
             me_keepalive_enabled: true,
             me_keepalive_interval_secs: default_keepalive_interval(),
             me_keepalive_jitter_secs: default_keepalive_jitter(),
@@ -316,7 +331,7 @@ impl Default for GeneralConfig {
             me_warmup_stagger_enabled: true,
             me_warmup_step_delay_ms: default_warmup_step_delay_ms(),
             me_warmup_step_jitter_ms: default_warmup_step_jitter_ms(),
-            me_reconnect_max_concurrent_per_dc: 4,
+            me_reconnect_max_concurrent_per_dc: 8,
             me_reconnect_backoff_base_ms: default_reconnect_backoff_base_ms(),
             me_reconnect_backoff_cap_ms: default_reconnect_backoff_cap_ms(),
             me_reconnect_fast_retry_count: 8,
@@ -328,8 +343,11 @@ impl Default for GeneralConfig {
             crypto_pending_buffer: default_crypto_pending_buffer(),
             max_client_frame: default_max_client_frame(),
             desync_all_full: default_desync_all_full(),
+            hardswap: default_hardswap(),
             fast_mode_min_tls_record: default_fast_mode_min_tls_record(),
             update_every: Some(default_update_every_secs()),
+            me_pool_drain_ttl_secs: default_me_pool_drain_ttl_secs(),
+            me_pool_min_fresh_ratio: default_me_pool_min_fresh_ratio(),
             me_reinit_drain_timeout_secs: default_me_reinit_drain_timeout_secs(),
             proxy_secret_auto_reload_secs: default_proxy_secret_reload_secs(),
             proxy_config_auto_reload_secs: default_proxy_config_reload_secs(),
@@ -347,6 +365,12 @@ impl GeneralConfig {
     pub fn effective_update_every_secs(&self) -> u64 {
         self.update_every
             .unwrap_or_else(|| self.proxy_secret_auto_reload_secs.min(self.proxy_config_auto_reload_secs))
+    }
+
+    /// Resolve force-close timeout for stale writers.
+    /// `me_reinit_drain_timeout_secs` remains backward-compatible alias.
+    pub fn effective_me_pool_force_close_secs(&self) -> u64 {
+        self.me_reinit_drain_timeout_secs
     }
 }
 

@@ -38,10 +38,21 @@ me_warmup_stagger_enabled = true
 me_warmup_step_delay_ms = 500             # Base delay between extra connects
 me_warmup_step_jitter_ms = 300            # Jitter for warmup delay
 # Reconnect policy knobs.
-me_reconnect_max_concurrent_per_dc = 1    # Parallel reconnects per DC - EXPERIMENTAL! UNSTABLE!
+me_reconnect_max_concurrent_per_dc = 4    # Parallel reconnects per DC - EXPERIMENTAL! UNSTABLE!
 me_reconnect_backoff_base_ms = 500        # Backoff start
 me_reconnect_backoff_cap_ms = 30000       # Backoff cap
 me_reconnect_fast_retry_count = 11        # Quick retries before backoff
+update_every = 7200                       # Resolve the active updater interval for ME infrastructure refresh tasks.
+crypto_pending_buffer = 262144            # Max pending ciphertext buffer per client writer (bytes). Controls FakeTLS backpressure vs throughput.
+max_client_frame = 16777216               # Maximum allowed client MTProto frame size (bytes).
+desync_all_full = false                   # Emit full crypto-desync forensic logs for every event. When false, full forensic details are emitted once per key window.
+me_reinit_drain_timeout_secs = 300        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
+auto_degradation_enabled = true           # Enable auto-degradation from ME to Direct-DC.
+degradation_min_unavailable_dc_groups = 2 # Minimum unavailable ME DC groups before degrading.
+hardswap = true                           # Enable C-like hard-swap for ME pool generations. When true, Telemt prewarms a new generation and switches once full coverage is reached.
+me_pool_drain_ttl_secs = 90               # Drain-TTL in seconds for stale ME writers after endpoint map changes. During TTL, stale writers may be used only as fallback for new bindings.
+me_pool_min_fresh_ratio = 0.8             # Minimum desired-DC coverage ratio required before draining stale writers. Range: 0.0..=1.0.
+me_reinit_drain_timeout_secs = 120        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
 
 [general.modes]
 classic = false

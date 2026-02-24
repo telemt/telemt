@@ -19,6 +19,7 @@ pub struct TlsFrontCache {
     disk_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl TlsFrontCache {
     pub fn new(domains: &[String], default_len: usize, disk_path: impl AsRef<Path>) -> Self {
         let default_template = ParsedServerHello {
@@ -173,7 +174,7 @@ impl TlsFrontCache {
         tokio::spawn(async move {
             loop {
                 for domain in &domains {
-                    fetcher(domain.clone()).await;
+                    let _ = fetcher(domain.clone()).await;
                 }
                 sleep(interval).await;
             }

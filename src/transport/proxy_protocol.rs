@@ -28,6 +28,7 @@ mod address_family {
 
 /// Information extracted from PROXY protocol header
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ProxyProtocolInfo {
     /// Source (client) address
     pub src_addr: SocketAddr,
@@ -37,6 +38,7 @@ pub struct ProxyProtocolInfo {
     pub version: u8,
 }
 
+#[allow(dead_code)]
 impl ProxyProtocolInfo {
     /// Create info with just source address
     pub fn new(src_addr: SocketAddr) -> Self {
@@ -231,12 +233,14 @@ async fn parse_v2<R: AsyncRead + Unpin>(
 }
 
 /// Builder for PROXY protocol v1 header
+#[allow(dead_code)]
 pub struct ProxyProtocolV1Builder {
     family: &'static str,
     src_addr: Option<SocketAddr>,
     dst_addr: Option<SocketAddr>,
 }
 
+#[allow(dead_code)]
 impl ProxyProtocolV1Builder {
     pub fn new() -> Self {
         Self {
@@ -284,11 +288,13 @@ impl Default for ProxyProtocolV1Builder {
 }
 
 /// Builder for PROXY protocol v2 header
+#[allow(dead_code)]
 pub struct ProxyProtocolV2Builder {
     src: Option<SocketAddr>,
     dst: Option<SocketAddr>,
 }
 
+#[allow(dead_code)]
 impl ProxyProtocolV2Builder {
     pub fn new() -> Self {
         Self { src: None, dst: None }

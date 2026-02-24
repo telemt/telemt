@@ -24,6 +24,7 @@ pub struct MePingSample {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MePingReport {
     pub dc: i32,
     pub family: MePingFamily,

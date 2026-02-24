@@ -1,5 +1,8 @@
 //! Pseudorandom
 
+#![allow(deprecated)]
+#![allow(dead_code)]
+
 use rand::{Rng, RngCore, SeedableRng};
 use rand::rngs::StdRng;
 use parking_lot::Mutex;
