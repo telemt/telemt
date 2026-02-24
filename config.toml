@@ -58,7 +58,6 @@ proxy_secret_rotate_runtime = true        # Enable runtime proxy-secret rotation
 proxy_secret_stable_snapshots = 2         # Number of identical getProxySecret snapshots required before runtime secret rotation.
 proxy_secret_len_max = 256                # Maximum allowed proxy-secret length in bytes for startup and runtime refresh.
 
-
 [general.modes]
 classic = false
 secure = false
