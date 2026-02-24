@@ -497,6 +497,7 @@ impl ReplayStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     
     #[test]
     fn test_stats_shared_counters() {

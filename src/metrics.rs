@@ -229,6 +229,7 @@ fn render_metrics(stats: &Stats) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     #[test]
     fn test_render_metrics_format() {
