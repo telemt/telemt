@@ -8,12 +8,12 @@ show_link = [] # example: "*" or ["alice", "bob"]
 [general]
 fast_mode = true
 use_middle_proxy = false
-# ad_tag = "0123456789abcdef0123456789abcdef" # example
+# ad_tag = "00000000000000000000000000000000" # example
 # proxy_secret_path = "proxy-secret" # example custom path
 # middle_proxy_nat_ip = "203.0.113.10" # example public NAT IP override
 middle_proxy_nat_probe = true
 # middle_proxy_nat_stun = "stun.l.google.com:19302" # example
-middle_proxy_nat_stun_servers = [] # example: ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
+# middle_proxy_nat_stun_servers = [] # example: ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
 middle_proxy_pool_size = 8
 middle_proxy_warm_standby = 16
 me_keepalive_enabled = true
@@ -68,7 +68,7 @@ secure = false
 tls = true
 
 [general.links]
-show = [] # example: "*" or ["alice", "bob"]
+show ="*" # example: "*" or ["alice", "bob"]
 # public_host = "proxy.example.com" # example explicit host/IP for tg:// links
 # public_port = 443 # example explicit port for tg:// links
 
@@ -152,20 +152,21 @@ ignore_time_skew = false
 [access.users]
 # format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
-default = "00000000000000000000000000000000"
 # alice = "11111111111111111111111111111111" # example
 
 [access.user_max_tcp_conns]
 # alice = 100 # example
 
 [access.user_expirations]
-# alice = "2027-01-01T00:00:00Z" # example
+# alice = "2078-01-01T00:00:00Z" # example
 
 [access.user_data_quota]
+# hello = 10737418240 # example bytes
 # alice = 10737418240 # example bytes
 
 [access.user_max_unique_ips]
-# alice = 10 # example
+# hello = 10 # example
+# alice = 100 # example
 
 # Default behavior if [[upstreams]] is omitted: loader injects one direct upstream.
 # Example explicit upstreams:
