@@ -19,6 +19,7 @@ use x509_parser::certificate::X509Certificate;
 
 use crate::crypto::SecureRandom;
 use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE};
+use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 use crate::tls_front::types::{
     ParsedCertificateInfo,
     ParsedServerHello,
@@ -366,6 +367,7 @@ async fn fetch_via_raw_tls(
     port: u16,
     sni: &str,
     connect_timeout: Duration,
+    proxy_protocol: u8,
 ) -> Result<TlsFetchResult> {
     let addr = format!("{host}:{port}");
     let mut stream = timeout(connect_timeout, TcpStream::connect(addr)).await??;
@@ -373,6 +375,13 @@ async fn fetch_via_raw_tls(
     let rng = SecureRandom::new();
     let client_hello = build_client_hello(sni, &rng);
     timeout(connect_timeout, async {
+        if proxy_protocol > 0 {
+            let header = match proxy_protocol {
+                2 => ProxyProtocolV2Builder::new().build(),
+                _ => ProxyProtocolV1Builder::new().build(),
+            };
+            stream.write_all(&header).await?;
+        }
         stream.write_all(&client_hello).await?;
         stream.flush().await?;
         Ok::<(), std::io::Error>(())
@@ -424,9 +433,10 @@ async fn fetch_via_rustls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    proxy_protocol: u8,
 ) -> Result<TlsFetchResult> {
     // rustls handshake path for certificate and basic negotiated metadata.
-    let stream = if let Some(manager) = upstream {
+    let mut stream = if let Some(manager) = upstream {
         // Resolve host to SocketAddr
         if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
             if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
@@ -446,6 +456,15 @@ async fn fetch_via_rustls(
     } else {
         timeout(connect_timeout, TcpStream::connect((host, port))).await??
     };
+
+    if proxy_protocol > 0 {
+        let header = match proxy_protocol {
+            2 => ProxyProtocolV2Builder::new().build(),
+            _ => ProxyProtocolV1Builder::new().build(),
+        };
+        stream.write_all(&header).await?;
+        stream.flush().await?;
+    }
 
     let config = build_client_config();
     let connector = TlsConnector::from(config);
@@ -527,8 +546,9 @@ pub async fn fetch_real_tls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    proxy_protocol: u8,
 ) -> Result<TlsFetchResult> {
-    let raw_result = match fetch_via_raw_tls(host, port, sni, connect_timeout).await {
+    let raw_result = match fetch_via_raw_tls(host, port, sni, connect_timeout, proxy_protocol).await {
         Ok(res) => Some(res),
         Err(e) => {
             warn!(sni = %sni, error = %e, "Raw TLS fetch failed");
@@ -536,7 +556,7 @@ pub async fn fetch_real_tls(
         }
     };
 
-    match fetch_via_rustls(host, port, sni, connect_timeout, upstream).await {
+    match fetch_via_rustls(host, port, sni, connect_timeout, upstream, proxy_protocol).await {
         Ok(rustls_result) => {
             if let Some(mut raw) = raw_result {
                 raw.cert_info = rustls_result.cert_info;

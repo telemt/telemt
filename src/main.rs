@@ -474,6 +474,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 &domain,
                 Duration::from_secs(5),
                 Some(upstream_manager.clone()),
+                config.censorship.mask_proxy_protocol,
             )
             .await
             {
@@ -486,6 +487,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let cache_clone = cache.clone();
         let domains = tls_domains.clone();
         let upstream_for_task = upstream_manager.clone();
+        let proxy_protocol = config.censorship.mask_proxy_protocol;
         tokio::spawn(async move {
             loop {
                 let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
@@ -498,6 +500,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         domain,
                         Duration::from_secs(5),
                         Some(upstream_for_task.clone()),
+                        proxy_protocol,
                     )
                     .await
                     {
