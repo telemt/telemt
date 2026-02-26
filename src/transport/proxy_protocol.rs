@@ -291,6 +291,12 @@ pub struct ProxyProtocolV2Builder {
     dst: Option<SocketAddr>,
 }
 
+impl Default for ProxyProtocolV2Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProxyProtocolV2Builder {
     pub fn new() -> Self {
         Self { src: None, dst: None }

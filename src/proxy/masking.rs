@@ -125,14 +125,7 @@ where
                 version => {
                     let header = if let Ok(local_addr) = stream.local_addr() {
                         match version {
-                            2 => match (peer, local_addr) {
-                                (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
-                                    ProxyProtocolV2Builder::new().with_addrs(src.into(), dst.into()).build(),
-                                (SocketAddr::V6(src), SocketAddr::V6(dst)) =>
-                                    ProxyProtocolV2Builder::new().with_addrs(src.into(), dst.into()).build(),
-                                _ =>
-                                    ProxyProtocolV2Builder::new().build(),
-                            },
+                            2 => ProxyProtocolV2Builder::new().with_addrs(peer, local_addr).build(),
                             _ => match (peer, local_addr) {
                                 (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
                                     ProxyProtocolV1Builder::new().tcp4(src.into(), dst.into()).build(),
