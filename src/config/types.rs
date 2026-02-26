@@ -87,7 +87,7 @@ pub struct NetworkConfig {
     pub ipv4: bool,
 
     /// None = auto-detect IPv6 availability.
-    #[serde(default)]
+    #[serde(default = "default_network_ipv6")]
     pub ipv6: Option<bool>,
 
     /// 4 or 6.
@@ -102,7 +102,7 @@ pub struct NetworkConfig {
     pub stun_servers: Vec<String>,
 
     /// Enable TCP STUN fallback when UDP is blocked.
-    #[serde(default)]
+    #[serde(default = "default_stun_tcp_fallback")]
     pub stun_tcp_fallback: bool,
 
     /// HTTP-based public IP detection endpoints (fallback after STUN).
@@ -140,7 +140,7 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub fast_mode: bool,
 
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub use_middle_proxy: bool,
 
     #[serde(default)]
@@ -148,7 +148,7 @@ pub struct GeneralConfig {
 
     /// Path to proxy-secret binary file (auto-downloaded if absent).
     /// Infrastructure secret from https://core.telegram.org/getProxySecret.
-    #[serde(default)]
+    #[serde(default = "default_proxy_secret_path")]
     pub proxy_secret_path: Option<String>,
 
     /// Public IP override for middle-proxy NAT environments.
@@ -157,15 +157,15 @@ pub struct GeneralConfig {
     pub middle_proxy_nat_ip: Option<IpAddr>,
 
     /// Enable STUN-based NAT probing to discover public IP:port for ME KDF.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub middle_proxy_nat_probe: bool,
 
     /// Optional STUN server address (host:port) for NAT probing.
-    #[serde(default)]
+    #[serde(default = "default_middle_proxy_nat_stun")]
     pub middle_proxy_nat_stun: Option<String>,
 
     /// Optional list of STUN servers for NAT probing fallback.
-    #[serde(default)]
+    #[serde(default = "default_middle_proxy_nat_stun_servers")]
     pub middle_proxy_nat_stun_servers: Vec<String>,
 
     /// Desired size of active Middle-Proxy writer pool.
@@ -173,7 +173,7 @@ pub struct GeneralConfig {
     pub middle_proxy_pool_size: usize,
 
     /// Number of warm standby ME connections kept pre-initialized.
-    #[serde(default)]
+    #[serde(default = "default_middle_proxy_warm_standby")]
     pub middle_proxy_warm_standby: usize,
 
     /// Enable ME keepalive padding frames.
@@ -207,7 +207,7 @@ pub struct GeneralConfig {
     pub desync_all_full: bool,
 
     /// Enable per-IP forensic observation buckets for scanners and handshake failures.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub beobachten: bool,
 
     /// Observation retention window in minutes for per-IP forensic buckets.
@@ -240,7 +240,7 @@ pub struct GeneralConfig {
     pub me_warmup_step_jitter_ms: u64,
 
     /// Max concurrent reconnect attempts per DC.
-    #[serde(default)]
+    #[serde(default = "default_me_reconnect_max_concurrent_per_dc")]
     pub me_reconnect_max_concurrent_per_dc: u32,
 
     /// Base backoff in ms for reconnect.
@@ -252,7 +252,7 @@ pub struct GeneralConfig {
     pub me_reconnect_backoff_cap_ms: u64,
 
     /// Fast retry attempts before backoff.
-    #[serde(default)]
+    #[serde(default = "default_me_reconnect_fast_retry_count")]
     pub me_reconnect_fast_retry_count: u32,
 
     /// Ignore STUN/interface IP mismatch (keep using Middle Proxy even if NAT detected).
@@ -280,7 +280,7 @@ pub struct GeneralConfig {
 
     /// Unified ME updater interval in seconds for getProxyConfig/getProxyConfigV6/getProxySecret.
     /// When omitted, effective value falls back to legacy proxy_*_auto_reload_secs fields.
-    #[serde(default)]
+    #[serde(default = "default_update_every")]
     pub update_every: Option<u64>,
 
     /// Periodic ME pool reinitialization interval in seconds.
@@ -371,13 +371,13 @@ impl Default for GeneralConfig {
             modes: ProxyModes::default(),
             prefer_ipv6: false,
             fast_mode: default_true(),
-            use_middle_proxy: false,
+            use_middle_proxy: default_true(),
             ad_tag: None,
-            proxy_secret_path: None,
+            proxy_secret_path: default_proxy_secret_path(),
             middle_proxy_nat_ip: None,
-            middle_proxy_nat_probe: true,
-            middle_proxy_nat_stun: None,
-            middle_proxy_nat_stun_servers: Vec::new(),
+            middle_proxy_nat_probe: default_true(),
+            middle_proxy_nat_stun: default_middle_proxy_nat_stun(),
+            middle_proxy_nat_stun_servers: default_middle_proxy_nat_stun_servers(),
             middle_proxy_pool_size: default_pool_size(),
             middle_proxy_warm_standby: default_middle_proxy_warm_standby(),
             me_keepalive_enabled: default_true(),
@@ -399,7 +399,7 @@ impl Default for GeneralConfig {
             crypto_pending_buffer: default_crypto_pending_buffer(),
             max_client_frame: default_max_client_frame(),
             desync_all_full: default_desync_all_full(),
-            beobachten: true,
+            beobachten: default_true(),
             beobachten_minutes: default_beobachten_minutes(),
             beobachten_flush_secs: default_beobachten_flush_secs(),
             beobachten_file: default_beobachten_file(),
@@ -450,11 +450,11 @@ impl GeneralConfig {
 }
 
 /// `[general.links]` — proxy link generation settings.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinksConfig {
     /// List of usernames whose tg:// links to display at startup.
     /// `"*"` = all users, `["alice", "bob"]` = specific users.
-    #[serde(default)]
+    #[serde(default = "default_links_show")]
     pub show: ShowLink,
 
     /// Public hostname/IP for tg:// link generation (overrides detected IP).
@@ -466,15 +466,25 @@ pub struct LinksConfig {
     pub public_port: Option<u16>,
 }
 
+impl Default for LinksConfig {
+    fn default() -> Self {
+        Self {
+            show: default_links_show(),
+            public_host: None,
+            public_port: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
 
-    #[serde(default)]
+    #[serde(default = "default_listen_addr_ipv4")]
     pub listen_addr_ipv4: Option<String>,
 
-    #[serde(default)]
+    #[serde(default = "default_listen_addr_ipv6_opt")]
     pub listen_addr_ipv6: Option<String>,
 
     #[serde(default)]
@@ -509,8 +519,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
-            listen_addr_ipv4: Some(default_listen_addr()),
-            listen_addr_ipv6: Some(default_listen_addr_ipv6()),
+            listen_addr_ipv4: default_listen_addr_ipv4(),
+            listen_addr_ipv6: default_listen_addr_ipv6_opt(),
             listen_unix_sock: None,
             listen_unix_sock_perm: None,
             listen_tcp: None,
@@ -583,7 +593,7 @@ pub struct AntiCensorshipConfig {
     pub fake_cert_len: usize,
 
     /// Enable TLS certificate emulation using cached real certificates.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub tls_emulation: bool,
 
     /// Directory to store TLS front cache (on disk).
@@ -636,7 +646,7 @@ impl Default for AntiCensorshipConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccessConfig {
-    #[serde(default)]
+    #[serde(default = "default_access_users")]
     pub users: HashMap<String, String>,
 
     #[serde(default)]
@@ -746,7 +756,7 @@ pub struct ListenerConfig {
 /// In TOML, this can be:
 /// - `show_link = "*"`          — show links for all users
 /// - `show_link = ["a", "b"]`   — show links for specific users
-/// - omitted                    — show no links (default)
+/// - omitted                    — default depends on the owning config field
 #[derive(Debug, Clone, Default)]
 pub enum ShowLink {
     /// Don't show any links (default when omitted).
@@ -756,6 +766,10 @@ pub enum ShowLink {
     All,
     /// Show links for specific users.
     Specific(Vec<String>),
+}
+
+fn default_links_show() -> ShowLink {
+    ShowLink::All
 }
 
 impl ShowLink {

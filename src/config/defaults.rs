@@ -7,7 +7,7 @@ const DEFAULT_NETWORK_IPV6: Option<bool> = Some(false);
 const DEFAULT_STUN_TCP_FALLBACK: bool = true;
 const DEFAULT_MIDDLE_PROXY_WARM_STANDBY: usize = 16;
 const DEFAULT_ME_RECONNECT_MAX_CONCURRENT_PER_DC: u32 = 8;
-const DEFAULT_ME_RECONNECT_FAST_RETRY_COUNT: u32 = 12;
+const DEFAULT_ME_RECONNECT_FAST_RETRY_COUNT: u32 = 11;
 const DEFAULT_LISTEN_ADDR_IPV6: &str = "::";
 const DEFAULT_ACCESS_USER: &str = "default";
 const DEFAULT_ACCESS_SECRET: &str = "00000000000000000000000000000000";
@@ -21,7 +21,7 @@ pub(crate) fn default_port() -> u16 {
 }
 
 pub(crate) fn default_tls_domain() -> String {
-    "www.google.com".to_string()
+    "petrovich.ru".to_string()
 }
 
 pub(crate) fn default_mask_port() -> u16 {
@@ -45,7 +45,7 @@ pub(crate) fn default_replay_window_secs() -> u64 {
 }
 
 pub(crate) fn default_handshake_timeout() -> u64 {
-    15
+    30
 }
 
 pub(crate) fn default_connect_timeout() -> u64 {
@@ -60,15 +60,19 @@ pub(crate) fn default_ack_timeout() -> u64 {
     300
 }
 pub(crate) fn default_me_one_retry() -> u8 {
-    3
+    12
 }
 
 pub(crate) fn default_me_one_timeout() -> u64 {
-    1500
+    1200
 }
 
 pub(crate) fn default_listen_addr() -> String {
     "0.0.0.0".to_string()
+}
+
+pub(crate) fn default_listen_addr_ipv4() -> Option<String> {
+    Some(default_listen_addr())
 }
 
 pub(crate) fn default_weight() -> u16 {
@@ -100,6 +104,21 @@ pub(crate) fn default_unknown_dc_log_path() -> Option<String> {
 
 pub(crate) fn default_pool_size() -> usize {
     8
+}
+
+pub(crate) fn default_proxy_secret_path() -> Option<String> {
+    Some("proxy-secret".to_string())
+}
+
+pub(crate) fn default_middle_proxy_nat_stun() -> Option<String> {
+    Some("stun.l.google.com:19302".to_string())
+}
+
+pub(crate) fn default_middle_proxy_nat_stun_servers() -> Vec<String> {
+    vec![
+        "stun1.l.google.com:19302".to_string(),
+        "stun2.l.google.com:19302".to_string(),
+    ]
 }
 
 pub(crate) fn default_middle_proxy_warm_standby() -> usize {
@@ -301,6 +320,10 @@ pub(crate) fn default_degradation_min_unavailable_dc_groups() -> u8 {
 
 pub(crate) fn default_listen_addr_ipv6() -> String {
     DEFAULT_LISTEN_ADDR_IPV6.to_string()
+}
+
+pub(crate) fn default_listen_addr_ipv6_opt() -> Option<String> {
+    Some(default_listen_addr_ipv6())
 }
 
 pub(crate) fn default_access_users() -> HashMap<String, String> {

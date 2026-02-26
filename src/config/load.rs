@@ -116,8 +116,27 @@ impl ProxyConfig {
         let base_dir = path.as_ref().parent().unwrap_or(Path::new("."));
         let processed = preprocess_includes(&content, base_dir, 0)?;
 
-        let mut config: ProxyConfig =
+        let parsed_toml: toml::Value =
             toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
+        let general_table = parsed_toml
+            .get("general")
+            .and_then(|value| value.as_table());
+        let update_every_is_explicit = general_table
+            .map(|table| table.contains_key("update_every"))
+            .unwrap_or(false);
+        let legacy_secret_is_explicit = general_table
+            .map(|table| table.contains_key("proxy_secret_auto_reload_secs"))
+            .unwrap_or(false);
+        let legacy_config_is_explicit = general_table
+            .map(|table| table.contains_key("proxy_config_auto_reload_secs"))
+            .unwrap_or(false);
+
+        let mut config: ProxyConfig =
+            parsed_toml.try_into().map_err(|e| ProxyError::Config(e.to_string()))?;
+
+        if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
+            config.general.update_every = None;
+        }
 
         if let Some(update_every) = config.general.update_every {
             if update_every == 0 {
@@ -437,15 +456,24 @@ mod tests {
         "#;
         let cfg: ProxyConfig = toml::from_str(toml).unwrap();
 
-        assert_eq!(cfg.network.ipv6, None);
-        assert!(!cfg.network.stun_tcp_fallback);
-        assert_eq!(cfg.general.middle_proxy_warm_standby, 0);
-        assert_eq!(cfg.general.me_reconnect_max_concurrent_per_dc, 0);
-        assert_eq!(cfg.general.me_reconnect_fast_retry_count, 0);
-        assert_eq!(cfg.general.update_every, None);
-        assert_eq!(cfg.server.listen_addr_ipv4, None);
-        assert_eq!(cfg.server.listen_addr_ipv6, None);
-        assert!(cfg.access.users.is_empty());
+        assert_eq!(cfg.network.ipv6, default_network_ipv6());
+        assert_eq!(cfg.network.stun_tcp_fallback, default_stun_tcp_fallback());
+        assert_eq!(
+            cfg.general.middle_proxy_warm_standby,
+            default_middle_proxy_warm_standby()
+        );
+        assert_eq!(
+            cfg.general.me_reconnect_max_concurrent_per_dc,
+            default_me_reconnect_max_concurrent_per_dc()
+        );
+        assert_eq!(
+            cfg.general.me_reconnect_fast_retry_count,
+            default_me_reconnect_fast_retry_count()
+        );
+        assert_eq!(cfg.general.update_every, default_update_every());
+        assert_eq!(cfg.server.listen_addr_ipv4, default_listen_addr_ipv4());
+        assert_eq!(cfg.server.listen_addr_ipv6, default_listen_addr_ipv6_opt());
+        assert_eq!(cfg.access.users, default_access_users());
     }
 
     #[test]
