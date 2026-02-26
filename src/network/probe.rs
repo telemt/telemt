@@ -95,23 +95,21 @@ pub async fn run_probe(config: &NetworkConfig, stun_addr: Option<String>, nat_pr
 }
 
 pub fn decide_network_capabilities(config: &NetworkConfig, probe: &NetworkProbe) -> NetworkDecision {
-    let mut decision = NetworkDecision::default();
+    let ipv4_dc = config.ipv4 && probe.detected_ipv4.is_some();
+    let ipv6_dc = config.ipv6.unwrap_or(probe.detected_ipv6.is_some()) && probe.detected_ipv6.is_some();
 
-    decision.ipv4_dc = config.ipv4 && probe.detected_ipv4.is_some();
-    decision.ipv6_dc = config.ipv6.unwrap_or(probe.detected_ipv6.is_some()) && probe.detected_ipv6.is_some();
-
-    decision.ipv4_me = config.ipv4
+    let ipv4_me = config.ipv4
         && probe.detected_ipv4.is_some()
         && (!probe.ipv4_is_bogon || probe.reflected_ipv4.is_some());
 
     let ipv6_enabled = config.ipv6.unwrap_or(probe.detected_ipv6.is_some());
-    decision.ipv6_me = ipv6_enabled
+    let ipv6_me = ipv6_enabled
         && probe.detected_ipv6.is_some()
         && (!probe.ipv6_is_bogon || probe.reflected_ipv6.is_some());
 
-    decision.effective_prefer = match config.prefer {
-        6 if decision.ipv6_me || decision.ipv6_dc => 6,
-        4 if decision.ipv4_me || decision.ipv4_dc => 4,
+    let effective_prefer = match config.prefer {
+        6 if ipv6_me || ipv6_dc => 6,
+        4 if ipv4_me || ipv4_dc => 4,
         6 => {
             warn!("prefer=6 requested but IPv6 unavailable; falling back to IPv4");
             4
@@ -119,10 +117,17 @@ pub fn decide_network_capabilities(config: &NetworkConfig, probe: &NetworkProbe)
         _ => 4,
     };
 
-    let me_families = decision.ipv4_me as u8 + decision.ipv6_me as u8;
-    decision.effective_multipath = config.multipath && me_families >= 2;
+    let me_families = ipv4_me as u8 + ipv6_me as u8;
+    let effective_multipath = config.multipath && me_families >= 2;
 
-    decision
+    NetworkDecision {
+        ipv4_dc,
+        ipv6_dc,
+        ipv4_me,
+        ipv6_me,
+        effective_prefer,
+        effective_multipath,
+    }
 }
 
 fn detect_local_ip_v4() -> Option<Ipv4Addr> {

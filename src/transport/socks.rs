@@ -27,11 +27,11 @@ pub async fn connect_socks4(
     buf.extend_from_slice(user);
     buf.push(0); // NULL
     
-    stream.write_all(&buf).await.map_err(|e| ProxyError::Io(e))?;
+    stream.write_all(&buf).await.map_err(ProxyError::Io)?;
     
     // Response: VN (1) | CD (1) | DSTPORT (2) | DSTIP (4)
     let mut resp = [0u8; 8];
-    stream.read_exact(&mut resp).await.map_err(|e| ProxyError::Io(e))?;
+    stream.read_exact(&mut resp).await.map_err(ProxyError::Io)?;
     
     if resp[1] != 90 {
         return Err(ProxyError::Proxy(format!("SOCKS4 request rejected: code {}", resp[1])));
@@ -56,10 +56,10 @@ pub async fn connect_socks5(
     let mut buf = vec![5u8, methods.len() as u8];
     buf.extend_from_slice(&methods);
     
-    stream.write_all(&buf).await.map_err(|e| ProxyError::Io(e))?;
+    stream.write_all(&buf).await.map_err(ProxyError::Io)?;
     
     let mut resp = [0u8; 2];
-    stream.read_exact(&mut resp).await.map_err(|e| ProxyError::Io(e))?;
+    stream.read_exact(&mut resp).await.map_err(ProxyError::Io)?;
     
     if resp[0] != 5 {
         return Err(ProxyError::Proxy("Invalid SOCKS5 version".to_string()));
@@ -80,10 +80,10 @@ pub async fn connect_socks5(
                 auth_buf.push(p_bytes.len() as u8);
                 auth_buf.extend_from_slice(p_bytes);
                 
-                stream.write_all(&auth_buf).await.map_err(|e| ProxyError::Io(e))?;
+                stream.write_all(&auth_buf).await.map_err(ProxyError::Io)?;
                 
                 let mut auth_resp = [0u8; 2];
-                stream.read_exact(&mut auth_resp).await.map_err(|e| ProxyError::Io(e))?;
+                stream.read_exact(&mut auth_resp).await.map_err(ProxyError::Io)?;
                 
                 if auth_resp[1] != 0 {
                     return Err(ProxyError::Proxy("SOCKS5 authentication failed".to_string()));
@@ -112,11 +112,11 @@ pub async fn connect_socks5(
     
     req.extend_from_slice(&target.port().to_be_bytes());
     
-    stream.write_all(&req).await.map_err(|e| ProxyError::Io(e))?;
+    stream.write_all(&req).await.map_err(ProxyError::Io)?;
     
     // Response
     let mut head = [0u8; 4];
-    stream.read_exact(&mut head).await.map_err(|e| ProxyError::Io(e))?;
+    stream.read_exact(&mut head).await.map_err(ProxyError::Io)?;
     
     if head[1] != 0 {
         return Err(ProxyError::Proxy(format!("SOCKS5 request failed: code {}", head[1])));
@@ -126,17 +126,17 @@ pub async fn connect_socks5(
     match head[3] {
         1 => { // IPv4
             let mut addr = [0u8; 4 + 2];
-            stream.read_exact(&mut addr).await.map_err(|e| ProxyError::Io(e))?;
+            stream.read_exact(&mut addr).await.map_err(ProxyError::Io)?;
         },
         3 => { // Domain
             let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await.map_err(|e| ProxyError::Io(e))?;
+            stream.read_exact(&mut len).await.map_err(ProxyError::Io)?;
             let mut addr = vec![0u8; len[0] as usize + 2];
-            stream.read_exact(&mut addr).await.map_err(|e| ProxyError::Io(e))?;
+            stream.read_exact(&mut addr).await.map_err(ProxyError::Io)?;
         },
         4 => { // IPv6
             let mut addr = [0u8; 16 + 2];
-            stream.read_exact(&mut addr).await.map_err(|e| ProxyError::Io(e))?;
+            stream.read_exact(&mut addr).await.map_err(ProxyError::Io)?;
         },
         _ => return Err(ProxyError::Proxy("Invalid address type in SOCKS5 response".to_string())),
     }

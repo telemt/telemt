@@ -384,7 +384,7 @@ async fn fetch_via_raw_tls(
     for _ in 0..4 {
         match timeout(connect_timeout, read_tls_record(&mut stream)).await {
             Ok(Ok(rec)) => records.push(rec),
-            Ok(Err(e)) => return Err(e.into()),
+            Ok(Err(e)) => return Err(e),
             Err(_) => break,
         }
         if records.len() >= 3 && records.iter().any(|(t, _)| *t == TLS_RECORD_APPLICATION) {

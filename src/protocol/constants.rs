@@ -160,7 +160,7 @@ pub const MAX_TLS_CHUNK_SIZE: usize = 16384 + 256;
 
 /// Secure Intermediate payload is expected to be 4-byte aligned.
 pub fn is_valid_secure_payload_len(data_len: usize) -> bool {
-    data_len % 4 == 0
+    data_len.is_multiple_of(4)
 }
 
 /// Compute Secure Intermediate payload length from wire length.
@@ -179,7 +179,7 @@ pub fn secure_padding_len(data_len: usize, rng: &SecureRandom) -> usize {
         is_valid_secure_payload_len(data_len),
         "Secure payload must be 4-byte aligned, got {data_len}"
     );
-    (rng.range(3) + 1) as usize
+    rng.range(3) + 1
 }
 
 // ============= Timeouts =============
@@ -231,7 +231,6 @@ pub static RESERVED_NONCE_CONTINUES: &[[u8; 4]] = &[
 // ============= RPC Constants (for Middle Proxy) =============
 
 /// RPC Proxy Request
-
 /// RPC Flags (from Erlang mtp_rpc.erl)
 pub const RPC_FLAG_NOT_ENCRYPTED: u32 = 0x2;
 pub const RPC_FLAG_HAS_AD_TAG: u32    = 0x8;

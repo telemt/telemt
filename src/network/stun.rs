@@ -198,16 +198,11 @@ async fn resolve_stun_addr(stun_addr: &str, family: IpFamily) -> Result<Option<S
         });
     }
 
-    let addrs = lookup_host(stun_addr)
+    let mut addrs = lookup_host(stun_addr)
         .await
         .map_err(|e| ProxyError::Proxy(format!("STUN resolve failed: {e}")))?;
 
     let target = addrs
-        .filter(|a| match (a.is_ipv4(), family) {
-            (true, IpFamily::V4) => true,
-            (false, IpFamily::V6) => true,
-            _ => false,
-        })
-        .next();
+        .find(|a| matches!((a.is_ipv4(), family), (true, IpFamily::V4) | (false, IpFamily::V6)));
     Ok(target)
 }

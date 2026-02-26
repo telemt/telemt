@@ -95,7 +95,7 @@ impl SecureRandom {
             return 0;
         }
         
-        let bytes_needed = (k + 7) / 8;
+        let bytes_needed = k.div_ceil(8);
         let bytes = self.bytes(bytes_needed.min(8));
         
         let mut result = 0u64;

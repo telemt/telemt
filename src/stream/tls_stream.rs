@@ -135,7 +135,7 @@ impl TlsRecordHeader {
     }
 
     /// Build header bytes
-    fn to_bytes(&self) -> [u8; 5] {
+    fn to_bytes(self) -> [u8; 5] {
         [
             self.record_type,
             self.version[0],
@@ -260,9 +260,9 @@ impl<R> FakeTlsReader<R> {
     fn take_poison_error(&mut self) -> io::Error {
         match &mut self.state {
             TlsReaderState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::new(ErrorKind::Other, "stream previously poisoned")
+                io::Error::other("stream previously poisoned")
             }),
-            _ => io::Error::new(ErrorKind::Other, "stream not poisoned"),
+            _ => io::Error::other("stream not poisoned"),
         }
     }
 }
@@ -297,7 +297,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for FakeTlsReader<R> {
                 TlsReaderState::Poisoned { error } => {
                     this.state = TlsReaderState::Poisoned { error: None };
                     let err = error.unwrap_or_else(|| {
-                        io::Error::new(ErrorKind::Other, "stream previously poisoned")
+                        io::Error::other("stream previously poisoned")
                     });
                     return Poll::Ready(Err(err));
                 }
@@ -616,9 +616,9 @@ impl<W> FakeTlsWriter<W> {
     fn take_poison_error(&mut self) -> io::Error {
         match &mut self.state {
             TlsWriterState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::new(ErrorKind::Other, "stream previously poisoned")
+                io::Error::other("stream previously poisoned")
             }),
-            _ => io::Error::new(ErrorKind::Other, "stream not poisoned"),
+            _ => io::Error::other("stream not poisoned"),
         }
     }
 
@@ -682,7 +682,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FakeTlsWriter<W> {
             TlsWriterState::Poisoned { error } => {
                 this.state = TlsWriterState::Poisoned { error: None };
                 let err = error.unwrap_or_else(|| {
-                    Error::new(ErrorKind::Other, "stream previously poisoned")
+                    Error::other("stream previously poisoned")
                 });
                 return Poll::Ready(Err(err));
             }
@@ -771,7 +771,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FakeTlsWriter<W> {
             TlsWriterState::Poisoned { error } => {
                 this.state = TlsWriterState::Poisoned { error: None };
                 let err = error.unwrap_or_else(|| {
-                    Error::new(ErrorKind::Other, "stream previously poisoned")
+                    Error::other("stream previously poisoned")
                 });
                 return Poll::Ready(Err(err));
             }

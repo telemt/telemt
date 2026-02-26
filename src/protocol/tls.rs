@@ -335,7 +335,7 @@ pub fn validate_tls_handshake(
             // This is a quirk in some clients that use uptime instead of real time
             let is_boot_time = timestamp < 60 * 60 * 24 * 1000; // < ~2.7 years in seconds
             
-            if !is_boot_time && (time_diff < TIME_SKEW_MIN || time_diff > TIME_SKEW_MAX) {
+            if !is_boot_time && !(TIME_SKEW_MIN..=TIME_SKEW_MAX).contains(&time_diff) {
                 continue;
             }
         }
@@ -393,7 +393,7 @@ pub fn build_server_hello(
 ) -> Vec<u8> {
     const MIN_APP_DATA: usize = 64;
     const MAX_APP_DATA: usize = 16640; // RFC 8446 §5.2 upper bound
-    let fake_cert_len = fake_cert_len.max(MIN_APP_DATA).min(MAX_APP_DATA);
+    let fake_cert_len = fake_cert_len.clamp(MIN_APP_DATA, MAX_APP_DATA);
     let x25519_key = gen_fake_x25519_key(rng);
     
     // Build ServerHello
@@ -525,10 +525,10 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
                 if sn_pos + name_len > sn_end {
                     break;
                 }
-                if name_type == 0 && name_len > 0 {
-                    if let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len]) {
-                        return Some(host.to_string());
-                    }
+                if name_type == 0 && name_len > 0
+                    && let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len])
+                {
+                    return Some(host.to_string());
                 }
                 sn_pos += name_len;
             }
@@ -571,7 +571,7 @@ pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
             let list_len = u16::from_be_bytes([handshake[pos], handshake[pos+1]]) as usize;
             let mut lp = pos + 2;
             let list_end = (pos + 2).saturating_add(list_len).min(pos + elen);
-            while lp + 1 <= list_end {
+            while lp < list_end {
                 let plen = handshake[lp] as usize;
                 lp += 1;
                 if lp + plen > list_end { break; }

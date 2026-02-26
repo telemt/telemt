@@ -57,9 +57,10 @@ impl LatencyEma {
 // ============= Per-DC IP Preference Tracking =============
 
 /// Tracks which IP version works for each DC
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpPreference {
     /// Not yet tested
+    #[default]
     Unknown,
     /// IPv6 works
     PreferV6,
@@ -69,12 +70,6 @@ pub enum IpPreference {
     BothWork,
     /// Both failed
     Unavailable,
-}
-
-impl Default for IpPreference {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 // ============= Upstream State =============
@@ -112,7 +107,7 @@ impl UpstreamState {
         if abs_dc == 0 {
             return None;
         }
-        if abs_dc >= 1 && abs_dc <= NUM_DCS {
+        if (1..=NUM_DCS).contains(&abs_dc) {
             Some(abs_dc - 1)
         } else {
             // Unknown DC → default cluster (DC 2, index 1)
@@ -122,10 +117,10 @@ impl UpstreamState {
 
     /// Get latency for a specific DC, falling back to average across all known DCs
     fn effective_latency(&self, dc_idx: Option<i16>) -> Option<f64> {
-        if let Some(di) = dc_idx.and_then(Self::dc_array_idx) {
-            if let Some(ms) = self.dc_latency[di].get() {
-                return Some(ms);
-            }
+        if let Some(di) = dc_idx.and_then(Self::dc_array_idx)
+            && let Some(ms) = self.dc_latency[di].get()
+        {
+            return Some(ms);
         }
 
         let (sum, count) = self.dc_latency.iter()
@@ -582,7 +577,7 @@ impl UpstreamManager {
 
                     let result = tokio::time::timeout(
                         Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                        self.ping_single_dc(&upstream_config, Some(bind_rr.clone()), addr_v6)
+                        self.ping_single_dc(upstream_config, Some(bind_rr.clone()), addr_v6)
                     ).await;
 
                     let ping_result = match result {
@@ -633,7 +628,7 @@ impl UpstreamManager {
 
                     let result = tokio::time::timeout(
                         Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                        self.ping_single_dc(&upstream_config, Some(bind_rr.clone()), addr_v4)
+                        self.ping_single_dc(upstream_config, Some(bind_rr.clone()), addr_v4)
                     ).await;
 
                     let ping_result = match result {
@@ -696,7 +691,7 @@ impl UpstreamManager {
                             }
                             let result = tokio::time::timeout(
                                 Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                                self.ping_single_dc(&upstream_config, Some(bind_rr.clone()), addr)
+                                self.ping_single_dc(upstream_config, Some(bind_rr.clone()), addr)
                             ).await;
 
                             let ping_result = match result {

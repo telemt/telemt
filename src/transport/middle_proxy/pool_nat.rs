@@ -25,7 +25,7 @@ impl MePool {
     pub(super) fn translate_ip_for_nat(&self, ip: IpAddr) -> IpAddr {
         let nat_ip = self
             .nat_ip_cfg
-            .or_else(|| self.nat_ip_detected.try_read().ok().and_then(|g| (*g).clone()));
+            .or_else(|| self.nat_ip_detected.try_read().ok().and_then(|g| *g));
 
         let Some(nat_ip) = nat_ip else {
             return ip;
@@ -75,7 +75,7 @@ impl MePool {
             return None;
         }
 
-        if let Some(ip) = self.nat_ip_detected.read().await.clone() {
+        if let Some(ip) = *self.nat_ip_detected.read().await {
             return Some(ip);
         }
 
@@ -102,17 +102,17 @@ impl MePool {
     ) -> Option<std::net::SocketAddr> {
         const STUN_CACHE_TTL: Duration = Duration::from_secs(600);
         // Backoff window
-        if let Some(until) = *self.stun_backoff_until.read().await {
-            if Instant::now() < until {
-                if let Ok(cache) = self.nat_reflection_cache.try_lock() {
-                    let slot = match family {
-                        IpFamily::V4 => cache.v4,
-                        IpFamily::V6 => cache.v6,
-                    };
-                    return slot.map(|(_, addr)| addr);
-                }
-                return None;
+        if let Some(until) = *self.stun_backoff_until.read().await
+            && Instant::now() < until
+        {
+            if let Ok(cache) = self.nat_reflection_cache.try_lock() {
+                let slot = match family {
+                    IpFamily::V4 => cache.v4,
+                    IpFamily::V6 => cache.v6,
+                };
+                return slot.map(|(_, addr)| addr);
             }
+            return None;
         }
 
         if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
@@ -120,10 +120,10 @@ impl MePool {
                 IpFamily::V4 => &mut cache.v4,
                 IpFamily::V6 => &mut cache.v6,
             };
-            if let Some((ts, addr)) = slot {
-                if ts.elapsed() < STUN_CACHE_TTL {
-                    return Some(*addr);
-                }
+            if let Some((ts, addr)) = slot
+                && ts.elapsed() < STUN_CACHE_TTL
+            {
+                return Some(*addr);
             }
         }
 

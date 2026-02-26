@@ -139,7 +139,7 @@ fn encode_abridged(frame: &Frame, dst: &mut BytesMut) -> io::Result<()> {
     let data = &frame.data;
     
     // Validate alignment
-    if data.len() % 4 != 0 {
+    if !data.len().is_multiple_of(4) {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!("abridged frame must be 4-byte aligned, got {} bytes", data.len())

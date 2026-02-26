@@ -393,13 +393,13 @@ where
         .unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))));
 
     // When client closes, but ME channel stopped as unregistered - it isnt error
-    if client_closed {
-        if matches!(
+    if client_closed
+        && matches!(
             writer_result,
             Err(ProxyError::Proxy(ref msg)) if msg == "ME connection lost"
-        ) {
-            writer_result = Ok(());
-        }
+        )
+    {
+        writer_result = Ok(());
     }
 
     let result = match (main_result, c2me_result, writer_result) {
@@ -549,7 +549,7 @@ where
 
     match proto_tag {
         ProtoTag::Abridged => {
-            if data.len() % 4 != 0 {
+            if !data.len().is_multiple_of(4) {
                 return Err(ProxyError::Proxy(format!(
                     "Abridged payload must be 4-byte aligned, got {}",
                     data.len()
@@ -567,7 +567,7 @@ where
                 frame_buf.push(first);
                 frame_buf.extend_from_slice(data);
                 client_writer
-                    .write_all(&frame_buf)
+                    .write_all(frame_buf)
                     .await
                     .map_err(ProxyError::Io)?;
             } else if len_words < (1 << 24) {
@@ -581,7 +581,7 @@ where
                 frame_buf.extend_from_slice(&[first, lw[0], lw[1], lw[2]]);
                 frame_buf.extend_from_slice(data);
                 client_writer
-                    .write_all(&frame_buf)
+                    .write_all(frame_buf)
                     .await
                     .map_err(ProxyError::Io)?;
             } else {
@@ -618,7 +618,7 @@ where
                 rng.fill(&mut frame_buf[start..]);
             }
             client_writer
-                .write_all(&frame_buf)
+                .write_all(frame_buf)
                 .await
                 .map_err(ProxyError::Io)?;
         }

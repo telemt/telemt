@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -11,9 +12,17 @@ use ipnetwork::IpNetwork;
 use tokio::net::TcpListener;
 use tracing::{info, warn, debug};
 
+use crate::config::ProxyConfig;
+use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::Stats;
 
-pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpNetwork>) {
+pub async fn serve(
+    port: u16,
+    stats: Arc<Stats>,
+    beobachten: Arc<BeobachtenStore>,
+    config_rx: tokio::sync::watch::Receiver<Arc<ProxyConfig>>,
+    whitelist: Vec<IpNetwork>,
+) {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -22,7 +31,7 @@ pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpNetwork>) {
             return;
         }
     };
-    info!("Metrics endpoint: http://{}/metrics", addr);
+    info!("Metrics endpoint: http://{}/metrics and /beobachten", addr);
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -39,10 +48,14 @@ pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpNetwork>) {
         }
 
         let stats = stats.clone();
+        let beobachten = beobachten.clone();
+        let config_rx_conn = config_rx.clone();
         tokio::spawn(async move {
             let svc = service_fn(move |req| {
                 let stats = stats.clone();
-                async move { handle(req, &stats) }
+                let beobachten = beobachten.clone();
+                let config = config_rx_conn.borrow().clone();
+                async move { handle(req, &stats, &beobachten, &config) }
             });
             if let Err(e) = http1::Builder::new()
                 .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
@@ -54,22 +67,46 @@ pub async fn serve(port: u16, stats: Arc<Stats>, whitelist: Vec<IpNetwork>) {
     }
 }
 
-fn handle<B>(req: Request<B>, stats: &Stats) -> Result<Response<Full<Bytes>>, Infallible> {
-    if req.uri().path() != "/metrics" {
+fn handle<B>(
+    req: Request<B>,
+    stats: &Stats,
+    beobachten: &BeobachtenStore,
+    config: &ProxyConfig,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    if req.uri().path() == "/metrics" {
+        let body = render_metrics(stats);
         let resp = Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Full::new(Bytes::from("Not Found\n")))
+            .status(StatusCode::OK)
+            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+            .body(Full::new(Bytes::from(body)))
             .unwrap();
         return Ok(resp);
     }
 
-    let body = render_metrics(stats);
+    if req.uri().path() == "/beobachten" {
+        let body = render_beobachten(beobachten, config);
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap();
+        return Ok(resp);
+    }
+
     let resp = Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-        .body(Full::new(Bytes::from(body)))
+        .status(StatusCode::NOT_FOUND)
+        .body(Full::new(Bytes::from("Not Found\n")))
         .unwrap();
     Ok(resp)
+}
+
+fn render_beobachten(beobachten: &BeobachtenStore, config: &ProxyConfig) -> String {
+    if !config.general.beobachten {
+        return "beobachten disabled\n".to_string();
+    }
+
+    let ttl = Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60));
+    beobachten.snapshot_text(ttl)
 }
 
 fn render_metrics(stats: &Stats) -> String {
@@ -199,6 +236,95 @@ fn render_metrics(stats: &Stats) -> String {
         stats.get_pool_stale_pick_total()
     );
 
+    let _ = writeln!(out, "# HELP telemt_me_writer_removed_total Total ME writer removals");
+    let _ = writeln!(out, "# TYPE telemt_me_writer_removed_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_removed_total {}",
+        stats.get_me_writer_removed_total()
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_removed_unexpected_total Unexpected ME writer removals that triggered refill"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_removed_unexpected_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_removed_unexpected_total {}",
+        stats.get_me_writer_removed_unexpected_total()
+    );
+
+    let _ = writeln!(out, "# HELP telemt_me_refill_triggered_total Immediate ME refill runs started");
+    let _ = writeln!(out, "# TYPE telemt_me_refill_triggered_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_refill_triggered_total {}",
+        stats.get_me_refill_triggered_total()
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_refill_skipped_inflight_total Immediate ME refill skips due to inflight dedup"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_refill_skipped_inflight_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_refill_skipped_inflight_total {}",
+        stats.get_me_refill_skipped_inflight_total()
+    );
+
+    let _ = writeln!(out, "# HELP telemt_me_refill_failed_total Immediate ME refill failures");
+    let _ = writeln!(out, "# TYPE telemt_me_refill_failed_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_refill_failed_total {}",
+        stats.get_me_refill_failed_total()
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_restored_same_endpoint_total Refilled ME writer restored on the same endpoint"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_restored_same_endpoint_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_restored_same_endpoint_total {}",
+        stats.get_me_writer_restored_same_endpoint_total()
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_restored_fallback_total Refilled ME writer restored via fallback endpoint"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_restored_fallback_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_restored_fallback_total {}",
+        stats.get_me_writer_restored_fallback_total()
+    );
+
+    let unresolved_writer_losses = stats
+        .get_me_writer_removed_unexpected_total()
+        .saturating_sub(
+            stats
+                .get_me_writer_restored_same_endpoint_total()
+                .saturating_add(stats.get_me_writer_restored_fallback_total()),
+        );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_removed_unexpected_minus_restored_total Unexpected writer removals not yet compensated by restore"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_removed_unexpected_minus_restored_total gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_removed_unexpected_minus_restored_total {}",
+        unresolved_writer_losses
+    );
+
     let _ = writeln!(out, "# HELP telemt_user_connections_total Per-user total connections");
     let _ = writeln!(out, "# TYPE telemt_user_connections_total counter");
     let _ = writeln!(out, "# HELP telemt_user_connections_current Per-user active connections");
@@ -229,6 +355,7 @@ fn render_metrics(stats: &Stats) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
     use http_body_util::BodyExt;
 
     #[test]
@@ -277,11 +404,17 @@ mod tests {
         assert!(output.contains("# TYPE telemt_connections_total counter"));
         assert!(output.contains("# TYPE telemt_connections_bad_total counter"));
         assert!(output.contains("# TYPE telemt_handshake_timeouts_total counter"));
+        assert!(output.contains("# TYPE telemt_me_writer_removed_total counter"));
+        assert!(output.contains(
+            "# TYPE telemt_me_writer_removed_unexpected_minus_restored_total gauge"
+        ));
     }
 
     #[tokio::test]
     async fn test_endpoint_integration() {
         let stats = Arc::new(Stats::new());
+        let beobachten = Arc::new(BeobachtenStore::new());
+        let mut config = ProxyConfig::default();
         stats.increment_connects_all();
         stats.increment_connects_all();
         stats.increment_connects_all();
@@ -290,16 +423,34 @@ mod tests {
             .uri("/metrics")
             .body(())
             .unwrap();
-        let resp = handle(req, &stats).unwrap();
+        let resp = handle(req, &stats, &beobachten, &config).unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(std::str::from_utf8(body.as_ref()).unwrap().contains("telemt_connections_total 3"));
+
+        config.general.beobachten = true;
+        config.general.beobachten_minutes = 10;
+        beobachten.record(
+            "TLS-scanner",
+            "203.0.113.10".parse::<IpAddr>().unwrap(),
+            Duration::from_secs(600),
+        );
+        let req_beob = Request::builder()
+            .uri("/beobachten")
+            .body(())
+            .unwrap();
+        let resp_beob = handle(req_beob, &stats, &beobachten, &config).unwrap();
+        assert_eq!(resp_beob.status(), StatusCode::OK);
+        let body_beob = resp_beob.into_body().collect().await.unwrap().to_bytes();
+        let beob_text = std::str::from_utf8(body_beob.as_ref()).unwrap();
+        assert!(beob_text.contains("[TLS-scanner]"));
+        assert!(beob_text.contains("203.0.113.10-1"));
 
         let req404 = Request::builder()
             .uri("/other")
             .body(())
             .unwrap();
-        let resp404 = handle(req404, &stats).unwrap();
+        let resp404 = handle(req404, &stats, &beobachten, &config).unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
     }
 }

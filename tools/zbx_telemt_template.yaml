@@ -172,7 +172,7 @@ zabbix_export:
               preprocessing:
                 - type: PROMETHEUS_PATTERN
                   parameters:
-                    - 'telemt_user_connections_current{user=~"{#TELEMT_USER}"}'
+                    - 'telemt_user_connections_current{user="{#TELEMT_USER}"}'
                     - value
                     - ''
               master_item:
@@ -188,7 +188,7 @@ zabbix_export:
               preprocessing:
                 - type: PROMETHEUS_PATTERN
                   parameters:
-                    - 'telemt_user_msgs_from_client{user=~"{#TELEMT_USER}"}'
+                    - 'telemt_user_msgs_from_client{user="{#TELEMT_USER}"}'
                     - value
                     - ''
               master_item:
@@ -204,7 +204,7 @@ zabbix_export:
               preprocessing:
                 - type: PROMETHEUS_PATTERN
                   parameters:
-                    - 'telemt_user_msgs_to_client{user=~"{#TELEMT_USER}"}'
+                    - 'telemt_user_msgs_to_client{user="{#TELEMT_USER}"}'
                     - value
                     - ''
               master_item:
@@ -221,7 +221,7 @@ zabbix_export:
               preprocessing:
                 - type: PROMETHEUS_PATTERN
                   parameters:
-                    - 'telemt_user_octets_from_client{user=~"{#TELEMT_USER}"}'
+                    - 'telemt_user_octets_from_client{user="{#TELEMT_USER}"}'
                     - value
                     - ''
               master_item:
@@ -238,7 +238,7 @@ zabbix_export:
               preprocessing:
                 - type: PROMETHEUS_PATTERN
                   parameters:
-                    - 'telemt_user_octets_to_client{user=~"{#TELEMT_USER}"}'
+                    - 'telemt_user_octets_to_client{user="{#TELEMT_USER}"}'
                     - value
                     - ''
               master_item:
@@ -254,7 +254,7 @@ zabbix_export:
               preprocessing:
                 - type: PROMETHEUS_PATTERN
                   parameters:
-                    - 'telemt_user_connections_total{user=~"{#TELEMT_USER}"}'
+                    - 'telemt_user_connections_total{user="{#TELEMT_USER}"}'
                     - value
                     - ''
               master_item:

@@ -242,10 +242,10 @@ impl MePool {
             }
             if preferred.is_empty() {
                 let def = self.default_dc.load(Ordering::Relaxed);
-                if def != 0 {
-                    if let Some(v) = map_guard.get(&def) {
-                        preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
-                    }
+                if def != 0
+                    && let Some(v) = map_guard.get(&def)
+                {
+                    preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
                 }
             }
 
@@ -267,7 +267,7 @@ impl MePool {
             if !self.writer_accepts_new_binding(w) {
                 continue;
             }
-            if preferred.iter().any(|p| *p == w.addr) {
+            if preferred.contains(&w.addr) {
                 out.push(idx);
             }
         }

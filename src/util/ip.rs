@@ -67,54 +67,56 @@ pub async fn detect_ip() -> IpInfo {
 
     // Try to get local interface IP first (default gateway interface)
     // We connect to Google DNS to find out which interface is used for routing
-    if let Some(ip) = get_local_ip("8.8.8.8:80") {
-        if ip.is_ipv4() && !ip.is_loopback() {
-             info.ipv4 = Some(ip);
-             debug!(ip = %ip, "Detected local IPv4 address via routing");
-        }
+    if let Some(ip) = get_local_ip("8.8.8.8:80")
+        && ip.is_ipv4()
+        && !ip.is_loopback()
+    {
+        info.ipv4 = Some(ip);
+        debug!(ip = %ip, "Detected local IPv4 address via routing");
     }
 
-    if let Some(ip) = get_local_ipv6("[2001:4860:4860::8888]:80") {
-        if ip.is_ipv6() && !ip.is_loopback() {
-            info.ipv6 = Some(ip);
-            debug!(ip = %ip, "Detected local IPv6 address via routing");
-        }
+    if let Some(ip) = get_local_ipv6("[2001:4860:4860::8888]:80")
+        && ip.is_ipv6()
+        && !ip.is_loopback()
+    {
+        info.ipv6 = Some(ip);
+        debug!(ip = %ip, "Detected local IPv6 address via routing");
     }
-    
-    // If local detection failed or returned private IP (and we want public), 
+
+    // If local detection failed or returned private IP (and we want public),
     // or just as a fallback/verification, we might want to check external services.
-    // However, the requirement is: "if IP for listening is not set... it should be IP from interface... 
+    // However, the requirement is: "if IP for listening is not set... it should be IP from interface...
     // if impossible - request external resources".
-    
+
     // So if we found a local IP, we might be good. But often servers are behind NAT.
     // If the local IP is private, we probably want the public IP for the tg:// link.
     // Let's check if the detected IPs are private.
-    
-    let need_external_v4 = info.ipv4.map_or(true, |ip| is_private_ip(ip));
-    let need_external_v6 = info.ipv6.map_or(true, |ip| is_private_ip(ip));
+
+    let need_external_v4 = info.ipv4.is_none_or(is_private_ip);
+    let need_external_v6 = info.ipv6.is_none_or(is_private_ip);
 
     if need_external_v4 {
         debug!("Local IPv4 is private or missing, checking external services...");
         for url in IPV4_URLS {
-            if let Some(ip) = fetch_ip(url).await {
-                if ip.is_ipv4() {
-                    info.ipv4 = Some(ip);
-                    debug!(ip = %ip, "Detected public IPv4 address");
-                    break;
-                }
+            if let Some(ip) = fetch_ip(url).await
+                && ip.is_ipv4()
+            {
+                info.ipv4 = Some(ip);
+                debug!(ip = %ip, "Detected public IPv4 address");
+                break;
             }
         }
     }
-    
+
     if need_external_v6 {
         debug!("Local IPv6 is private or missing, checking external services...");
         for url in IPV6_URLS {
-            if let Some(ip) = fetch_ip(url).await {
-                if ip.is_ipv6() {
-                    info.ipv6 = Some(ip);
-                    debug!(ip = %ip, "Detected public IPv6 address");
-                    break;
-                }
+            if let Some(ip) = fetch_ip(url).await
+                && ip.is_ipv6()
+            {
+                info.ipv6 = Some(ip);
+                debug!(ip = %ip, "Detected public IPv6 address");
+                break;
             }
         }
     }

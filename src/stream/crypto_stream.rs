@@ -47,7 +47,7 @@
 //! - when upstream is Pending but pending still has room: accept `to_accept` bytes and
 //!   encrypt+append ciphertext directly into pending (in-place encryption of appended range)
 
-//! Encrypted stream wrappers using AES-CTR
+//!   Encrypted stream wrappers using AES-CTR
 //!
 //! This module provides stateful async stream wrappers that handle
 //! encryption/decryption with proper partial read/write handling.
@@ -153,9 +153,9 @@ impl<R> CryptoReader<R> {
     fn take_poison_error(&mut self) -> io::Error {
         match &mut self.state {
             CryptoReaderState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::new(ErrorKind::Other, "stream previously poisoned")
+                io::Error::other("stream previously poisoned")
             }),
-            _ => io::Error::new(ErrorKind::Other, "stream not poisoned"),
+            _ => io::Error::other("stream not poisoned"),
         }
     }
 }
@@ -168,6 +168,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for CryptoReader<R> {
     ) -> Poll<Result<()>> {
         let this = self.get_mut();
 
+        #[allow(clippy::never_loop)]
         loop {
             match &mut this.state {
                 CryptoReaderState::Poisoned { .. } => {
@@ -485,14 +486,14 @@ impl<W> CryptoWriter<W> {
     fn take_poison_error(&mut self) -> io::Error {
         match &mut self.state {
             CryptoWriterState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::new(ErrorKind::Other, "stream previously poisoned")
+                io::Error::other("stream previously poisoned")
             }),
-            _ => io::Error::new(ErrorKind::Other, "stream not poisoned"),
+            _ => io::Error::other("stream not poisoned"),
         }
     }
 
     /// Ensure we are in Flushing state and return mutable pending buffer.
-    fn ensure_pending<'a>(state: &'a mut CryptoWriterState, max_pending: usize) -> &'a mut PendingCiphertext {
+    fn ensure_pending(state: &mut CryptoWriterState, max_pending: usize) -> &mut PendingCiphertext {
         if matches!(state, CryptoWriterState::Idle) {
             *state = CryptoWriterState::Flushing {
                 pending: PendingCiphertext::new(max_pending),

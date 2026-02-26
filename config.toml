@@ -1,58 +1,17 @@
+### Telemt Based Config.toml
+# We believe that these settings are sufficient for most scenarios 
+# where cutting-egde methods and parameters or special solutions are not needed
+
 # === General Settings ===
 [general]
-fast_mode = true
-use_middle_proxy = true
+use_middle_proxy = false
 # ad_tag = "00000000000000000000000000000000"
-# Path to proxy-secret binary (auto-downloaded if missing).
-proxy_secret_path = "proxy-secret"
-# disable_colors = false  # Disable colored output in logs (useful for files/systemd)
 
 # === Log Level ===
 # Log level: debug | verbose | normal | silent
 # Can be overridden with --silent or --log-level CLI flags
 # RUST_LOG env var takes absolute priority over all of these
 log_level = "normal"
-
-# === Middle Proxy - ME ===
-# Public IP override for ME KDF when behind NAT; leave unset to auto-detect.
-# middle_proxy_nat_ip = "203.0.113.10"
-# Enable STUN probing to discover public IP:port for ME.
-middle_proxy_nat_probe = true
-# Primary STUN server (host:port); defaults to Telegram STUN when empty.
-middle_proxy_nat_stun = "stun.l.google.com:19302"
-# Optional fallback STUN servers list.
-middle_proxy_nat_stun_servers = ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
-# Desired number of concurrent ME writers in pool.
-middle_proxy_pool_size = 16
-# Pre-initialized warm-standby ME connections kept idle.
-middle_proxy_warm_standby = 8
-# Ignore STUN/interface mismatch and keep ME enabled even if IP differs.
-stun_iface_mismatch_ignore = false
-# Keepalive padding frames - fl==4
-me_keepalive_enabled = true
-me_keepalive_interval_secs = 25           # Period between keepalives
-me_keepalive_jitter_secs = 5              # Jitter added to interval
-me_keepalive_payload_random = true        # Randomize 4-byte payload (vs zeros)
-# Stagger extra ME connections on warmup to de-phase lifecycles.
-me_warmup_stagger_enabled = true
-me_warmup_step_delay_ms = 500             # Base delay between extra connects
-me_warmup_step_jitter_ms = 300            # Jitter for warmup delay
-# Reconnect policy knobs.
-me_reconnect_max_concurrent_per_dc = 4    # Parallel reconnects per DC - EXPERIMENTAL! UNSTABLE!
-me_reconnect_backoff_base_ms = 500        # Backoff start
-me_reconnect_backoff_cap_ms = 30000       # Backoff cap
-me_reconnect_fast_retry_count = 11        # Quick retries before backoff
-update_every = 7200                       # Resolve the active updater interval for ME infrastructure refresh tasks.
-crypto_pending_buffer = 262144            # Max pending ciphertext buffer per client writer (bytes). Controls FakeTLS backpressure vs throughput.
-max_client_frame = 16777216               # Maximum allowed client MTProto frame size (bytes).
-desync_all_full = false                   # Emit full crypto-desync forensic logs for every event. When false, full forensic details are emitted once per key window.
-me_reinit_drain_timeout_secs = 300        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
-auto_degradation_enabled = true           # Enable auto-degradation from ME to Direct-DC.
-degradation_min_unavailable_dc_groups = 2 # Minimum unavailable ME DC groups before degrading.
-hardswap = true                           # Enable C-like hard-swap for ME pool generations. When true, Telemt prewarms a new generation and switches once full coverage is reached.
-me_pool_drain_ttl_secs = 90               # Drain-TTL in seconds for stale ME writers after endpoint map changes. During TTL, stale writers may be used only as fallback for new bindings.
-me_pool_min_fresh_ratio = 0.8             # Minimum desired-DC coverage ratio required before draining stale writers. Range: 0.0..=1.0.
-me_reinit_drain_timeout_secs = 120        # Drain timeout in seconds for stale ME writers after endpoint map changes. Set to 0 to keep stale writers draining indefinitely (no force-close).
 
 [general.modes]
 classic = false
@@ -66,93 +25,24 @@ show = "*"
 # public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
 # public_port = 443                  # Port for tg:// links (default: server.port)
 
-# === Network Parameters ===
-[network]
-# Enable/disable families: true/false/auto(None)
-ipv4 = true
-ipv6 = false # UNSTABLE WITH ME
-# prefer = 4 or 6
-prefer = 4
-multipath = false # EXPERIMENTAL!
-
 # === Server Binding ===
 [server]
 port = 443
-listen_addr_ipv4 = "0.0.0.0"
-listen_addr_ipv6 = "::"
-# listen_unix_sock = "/var/run/telemt.sock" # Unix socket
-# listen_unix_sock_perm = "0666" # Socket file permissions
 # proxy_protocol = false           # Enable if behind HAProxy/nginx with PROXY protocol
 # metrics_port = 9090
-# metrics_whitelist = ["127.0.0.1", "::1"]
+# metrics_whitelist = ["127.0.0.1", "::1", "0.0.0.0/0"]
 
 # Listen on multiple interfaces/IPs - IPv4
 [[server.listeners]]
 ip = "0.0.0.0"
 
-# Listen on multiple interfaces/IPs - IPv6
-[[server.listeners]]
-ip = "::"
-
-# === Timeouts (in seconds) ===
-[timeouts]
-client_handshake = 30
-tg_connect = 10
-client_keepalive = 60
-client_ack = 300
-# Quick ME reconnects for single-address DCs (count and per-attempt timeout, ms).
-me_one_retry = 12
-me_one_timeout_ms = 1200
-
 # === Anti-Censorship & Masking ===
 [censorship]
 tls_domain = "petrovich.ru"
-# tls_domains = ["example.com", "cdn.example.net"] # Additional domains for EE links
 mask = true
-mask_port = 443
-# mask_host = "petrovich.ru" # Defaults to tls_domain if not set
-# mask_unix_sock = "/var/run/nginx.sock" # Unix socket (mutually exclusive with mask_host)
-fake_cert_len = 2048
-# tls_emulation = false        # Fetch real cert lengths and emulate TLS records
-# tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
-
-# === Access Control & Users ===
-[access]
-replay_check_len = 65536
-replay_window_secs = 1800
-ignore_time_skew = false
+tls_emulation = true        # Fetch real cert lengths and emulate TLS records
+tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 
 [access.users]
 # format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
-
-# [access.user_max_tcp_conns]
-# hello = 50
-
-# [access.user_max_unique_ips]
-# hello = 5
-
-# [access.user_data_quota]
-# hello = 1073741824 # 1 GB
-
-# [access.user_expirations]
-# format: username = "[year]-[month]-[day]T[hour]:[minute]:[second]Z" UTC
-# hello = "2027-01-01T00:00:00Z"
-
-# === Upstreams & Routing ===
-[[upstreams]]
-type = "direct"
-enabled = true
-weight = 10
-# interface = "192.168.1.100"           # Bind outgoing to specific IP or iface name
-# bind_addresses = ["192.168.1.100"]    # List for round-robin binding (family must match target)
-
-# [[upstreams]]
-# type = "socks5"
-# address = "127.0.0.1:1080"
-# enabled = false
-# weight = 1
-
-# === DC Address Overrides ===
-# [dc_overrides]
-# "203" = "91.105.192.100:443"

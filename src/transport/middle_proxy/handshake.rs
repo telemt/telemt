@@ -47,21 +47,21 @@ impl MePool {
     pub(crate) async fn connect_tcp(&self, addr: SocketAddr) -> Result<(TcpStream, f64)> {
         let start = Instant::now();
         let connect_fut = async {
-            if addr.is_ipv6() {
-                if let Some(v6) = self.detected_ipv6 {
-                    match TcpSocket::new_v6() {
-                        Ok(sock) => {
-                            if let Err(e) = sock.bind(SocketAddr::new(IpAddr::V6(v6), 0)) {
-                                debug!(error = %e, bind_ip = %v6, "ME IPv6 bind failed, falling back to default bind");
-                            } else {
-                                match sock.connect(addr).await {
-                                    Ok(stream) => return Ok(stream),
-                                    Err(e) => debug!(error = %e, target = %addr, "ME IPv6 bound connect failed, retrying default connect"),
-                                }
+            if addr.is_ipv6()
+                && let Some(v6) = self.detected_ipv6
+            {
+                match TcpSocket::new_v6() {
+                    Ok(sock) => {
+                        if let Err(e) = sock.bind(SocketAddr::new(IpAddr::V6(v6), 0)) {
+                            debug!(error = %e, bind_ip = %v6, "ME IPv6 bind failed, falling back to default bind");
+                        } else {
+                            match sock.connect(addr).await {
+                                Ok(stream) => return Ok(stream),
+                                Err(e) => debug!(error = %e, target = %addr, "ME IPv6 bound connect failed, retrying default connect"),
                             }
                         }
-                        Err(e) => debug!(error = %e, "ME IPv6 socket creation failed, falling back to default connect"),
                     }
+                    Err(e) => debug!(error = %e, "ME IPv6 socket creation failed, falling back to default connect"),
                 }
             }
             TcpStream::connect(addr).await

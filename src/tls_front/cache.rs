@@ -115,32 +115,32 @@ impl TlsFrontCache {
                     if !name.ends_with(".json") {
                         continue;
                     }
-                    if let Ok(data) = tokio::fs::read(entry.path()).await {
-                        if let Ok(mut cached) = serde_json::from_slice::<CachedTlsData>(&data) {
-                            if cached.domain.is_empty()
-                                || cached.domain.len() > 255
-                                || !cached.domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-                            {
-                                warn!(file = %name, "Skipping TLS cache entry with invalid domain");
-                                continue;
-                            }
-                            // fetched_at is skipped during deserialization; approximate with file mtime if available.
-                            if let Ok(meta) = entry.metadata().await {
-                                if let Ok(modified) = meta.modified() {
-                                    cached.fetched_at = modified;
-                                }
-                            }
-                            // Drop entries older than 72h
-                            if let Ok(age) = cached.fetched_at.elapsed() {
-                                if age > Duration::from_secs(72 * 3600) {
-                                    warn!(domain = %cached.domain, "Skipping stale TLS cache entry (>72h)");
-                                    continue;
-                                }
-                            }
-                            let domain = cached.domain.clone();
-                            self.set(&domain, cached).await;
-                            loaded += 1;
+                    if let Ok(data) = tokio::fs::read(entry.path()).await
+                        && let Ok(mut cached) = serde_json::from_slice::<CachedTlsData>(&data)
+                    {
+                        if cached.domain.is_empty()
+                            || cached.domain.len() > 255
+                            || !cached.domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                        {
+                            warn!(file = %name, "Skipping TLS cache entry with invalid domain");
+                            continue;
                         }
+                        // fetched_at is skipped during deserialization; approximate with file mtime if available.
+                        if let Ok(meta) = entry.metadata().await
+                            && let Ok(modified) = meta.modified()
+                        {
+                            cached.fetched_at = modified;
+                        }
+                        // Drop entries older than 72h
+                        if let Ok(age) = cached.fetched_at.elapsed()
+                            && age > Duration::from_secs(72 * 3600)
+                        {
+                            warn!(domain = %cached.domain, "Skipping stale TLS cache entry (>72h)");
+                            continue;
+                        }
+                        let domain = cached.domain.clone();
+                        self.set(&domain, cached).await;
+                        loaded += 1;
                     }
                 }
             }

@@ -12,7 +12,7 @@ fn jitter_and_clamp_sizes(sizes: &[usize], rng: &SecureRandom) -> Vec<usize> {
     sizes
         .iter()
         .map(|&size| {
-            let base = size.max(MIN_APP_DATA).min(MAX_APP_DATA);
+            let base = size.clamp(MIN_APP_DATA, MAX_APP_DATA);
             let jitter_range = ((base as f64) * 0.03).round() as i64;
             if jitter_range == 0 {
                 return base;
@@ -50,7 +50,7 @@ fn ensure_payload_capacity(mut sizes: Vec<usize>, payload_len: usize) -> Vec<usi
 
     while body_total < payload_len {
         let remaining = payload_len - body_total;
-        let chunk = (remaining + 17).min(MAX_APP_DATA).max(MIN_APP_DATA);
+        let chunk = (remaining + 17).clamp(MIN_APP_DATA, MAX_APP_DATA);
         sizes.push(chunk);
         body_total += chunk.saturating_sub(17);
     }
@@ -189,7 +189,7 @@ pub fn build_emulated_server_hello(
             .as_ref()
             .map(|payload| payload.certificate_message.as_slice())
             .filter(|payload| !payload.is_empty())
-            .or_else(|| compact_payload.as_deref())
+            .or(compact_payload.as_deref())
     } else {
         compact_payload.as_deref()
     };
@@ -223,15 +223,13 @@ pub fn build_emulated_server_hello(
             } else {
                 rec.extend_from_slice(&rng.bytes(size));
             }
+        } else if size > 17 {
+            let body_len = size - 17;
+            rec.extend_from_slice(&rng.bytes(body_len));
+            rec.push(0x16); // inner content type marker (handshake)
+            rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
         } else {
-            if size > 17 {
-                let body_len = size - 17;
-                rec.extend_from_slice(&rng.bytes(body_len));
-                rec.push(0x16); // inner content type marker (handshake)
-                rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
-            } else {
-                rec.extend_from_slice(&rng.bytes(size));
-            }
+            rec.extend_from_slice(&rng.bytes(size));
         }
         app_data.extend_from_slice(&rec);
     }

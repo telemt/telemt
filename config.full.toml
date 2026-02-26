@@ -1,0 +1,204 @@
+# Telemt full config with default values.
+# Examples are kept in comments after '#'.
+
+# Top-level legacy field.
+show_link = [] # example: "*" or ["alice", "bob"]
+# default_dc = 2 # example: default DC for unmapped non-standard DCs
+
+[general]
+fast_mode = true
+use_middle_proxy = false
+# ad_tag = "00000000000000000000000000000000" # example
+# proxy_secret_path = "proxy-secret" # example custom path
+# middle_proxy_nat_ip = "203.0.113.10" # example public NAT IP override
+middle_proxy_nat_probe = true
+# middle_proxy_nat_stun = "stun.l.google.com:19302" # example
+# middle_proxy_nat_stun_servers = [] # example: ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
+middle_proxy_pool_size = 8
+middle_proxy_warm_standby = 16
+me_keepalive_enabled = true
+me_keepalive_interval_secs = 25
+me_keepalive_jitter_secs = 5
+me_keepalive_payload_random = true
+crypto_pending_buffer = 262144
+max_client_frame = 16777216
+desync_all_full = false
+beobachten = true
+beobachten_minutes = 10
+beobachten_flush_secs = 15
+beobachten_file = "cache/beobachten.txt"
+hardswap = true
+me_warmup_stagger_enabled = true
+me_warmup_step_delay_ms = 500
+me_warmup_step_jitter_ms = 300
+me_reconnect_max_concurrent_per_dc = 8
+me_reconnect_backoff_base_ms = 500
+me_reconnect_backoff_cap_ms = 30000
+me_reconnect_fast_retry_count = 12
+stun_iface_mismatch_ignore = false
+unknown_dc_log_path = "unknown-dc.txt" # to disable: set to null
+log_level = "normal" # debug | verbose | normal | silent
+disable_colors = false
+fast_mode_min_tls_record = 0
+update_every = 300
+me_reinit_every_secs = 900
+me_hardswap_warmup_delay_min_ms = 1000
+me_hardswap_warmup_delay_max_ms = 2000
+me_hardswap_warmup_extra_passes = 3
+me_hardswap_warmup_pass_backoff_base_ms = 500
+me_config_stable_snapshots = 2
+me_config_apply_cooldown_secs = 300
+proxy_secret_stable_snapshots = 2
+proxy_secret_rotate_runtime = true
+proxy_secret_len_max = 256
+me_pool_drain_ttl_secs = 90
+me_pool_min_fresh_ratio = 0.8
+me_reinit_drain_timeout_secs = 120
+# Legacy compatibility fields used when update_every is omitted.
+proxy_secret_auto_reload_secs = 3600
+proxy_config_auto_reload_secs = 3600
+ntp_check = true
+ntp_servers = ["pool.ntp.org"] # example: ["pool.ntp.org", "time.cloudflare.com"]
+auto_degradation_enabled = true
+degradation_min_unavailable_dc_groups = 2
+
+[general.modes]
+classic = false
+secure = false
+tls = true
+
+[general.links]
+show ="*" # example: "*" or ["alice", "bob"]
+# public_host = "proxy.example.com" # example explicit host/IP for tg:// links
+# public_port = 443 # example explicit port for tg:// links
+
+[network]
+ipv4 = true
+ipv6 = false # set true to enable IPv6
+prefer = 4 # 4 or 6
+multipath = false
+stun_servers = [
+  "stun.l.google.com:5349",
+  "stun1.l.google.com:3478",
+  "stun.gmx.net:3478",
+  "stun.l.google.com:19302",
+  "stun.1und1.de:3478",
+  "stun1.l.google.com:19302",
+  "stun2.l.google.com:19302",
+  "stun3.l.google.com:19302",
+  "stun4.l.google.com:19302",
+  "stun.services.mozilla.com:3478",
+  "stun.stunprotocol.org:3478",
+  "stun.nextcloud.com:3478",
+  "stun.voip.eutelia.it:3478",
+]
+stun_tcp_fallback = true
+http_ip_detect_urls = ["https://ifconfig.me/ip", "https://api.ipify.org"]
+cache_public_ip_path = "cache/public_ip.txt"
+
+[server]
+port = 443
+listen_addr_ipv4 = "0.0.0.0"
+listen_addr_ipv6 = "::"
+# listen_unix_sock = "/var/run/telemt.sock" # example
+# listen_unix_sock_perm = "0660" # example unix socket mode
+# listen_tcp = true # example explicit override (auto-detected when omitted)
+proxy_protocol = false
+# metrics_port = 9090 # example
+metrics_whitelist = ["127.0.0.1/32", "::1/128"]
+# Example explicit listeners (default: omitted, auto-generated from listen_addr_*):
+# [[server.listeners]]
+# ip = "0.0.0.0"
+# announce = "proxy-v4.example.com"
+# # announce_ip = "203.0.113.10" # deprecated alias
+# proxy_protocol = false
+# reuse_allow = false
+#
+# [[server.listeners]]
+# ip = "::"
+# announce = "proxy-v6.example.com"
+# proxy_protocol = false
+# reuse_allow = false
+
+[timeouts]
+client_handshake = 15
+tg_connect = 10
+client_keepalive = 60
+client_ack = 300
+me_one_retry = 3
+me_one_timeout_ms = 1500
+
+[censorship]
+tls_domain = "petrovich.ru"
+# tls_domains = ["example.com", "cdn.example.net"] # Additional domains for EE links
+mask = true
+# mask_host = "www.google.com" # example, defaults to tls_domain when both mask_host/mask_unix_sock are unset
+# mask_unix_sock = "/var/run/nginx.sock" # example, mutually exclusive with mask_host
+mask_port = 443
+fake_cert_len = 2048 # if tls_emulation=false and default value is used, loader may randomize this value at runtime
+tls_emulation = true
+tls_front_dir = "tlsfront"
+server_hello_delay_min_ms = 0
+server_hello_delay_max_ms = 0
+tls_new_session_tickets = 0
+tls_full_cert_ttl_secs = 90
+alpn_enforce = true
+
+[access]
+replay_check_len = 65536
+replay_window_secs = 1800
+ignore_time_skew = false
+
+[access.users]
+# format: "username" = "32_hex_chars_secret"
+hello = "00000000000000000000000000000000"
+# alice = "11111111111111111111111111111111" # example
+
+[access.user_max_tcp_conns]
+# alice = 100 # example
+
+[access.user_expirations]
+# alice = "2078-01-01T00:00:00Z" # example
+
+[access.user_data_quota]
+# hello = 10737418240 # example bytes
+# alice = 10737418240 # example bytes
+
+[access.user_max_unique_ips]
+# hello = 10 # example
+# alice = 100 # example
+
+# Default behavior if [[upstreams]] is omitted: loader injects one direct upstream.
+# Example explicit upstreams:
+# [[upstreams]]
+# type = "direct"
+# interface = "eth0"
+# bind_addresses = ["192.0.2.10"]
+# weight = 1
+# enabled = true
+# scopes = "*"
+#
+# [[upstreams]]
+# type = "socks4"
+# address = "198.51.100.20:1080"
+# interface = "eth0"
+# user_id = "telemt"
+# weight = 1
+# enabled = true
+# scopes = "*"
+#
+# [[upstreams]]
+# type = "socks5"
+# address = "198.51.100.30:1080"
+# interface = "eth0"
+# username = "proxy-user"
+# password = "proxy-pass"
+# weight = 1
+# enabled = true
+# scopes = "*"
+
+# === DC Address Overrides ===
+# [dc_overrides]
+# "201" = "149.154.175.50:443" # example
+# "202" = ["149.154.167.51:443", "149.154.175.100:443"] # example
+# "203" = "91.105.192.100:443" # loader auto-adds this one when omitted

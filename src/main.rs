@@ -35,6 +35,7 @@ use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
 use crate::proxy::ClientHandler;
+use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::transport::middle_proxy::{
@@ -159,6 +160,15 @@ fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
     info!(target: "telemt::links", "------------------------");
 }
 
+async fn write_beobachten_snapshot(path: &str, payload: &str) -> std::io::Result<()> {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, payload).await
+}
+
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (config_path, cli_silent, cli_log_level) = parse_cli();
@@ -193,14 +203,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
 
     let (filter_layer, filter_handle) = reload::Layer::new(EnvFilter::new("info"));
-    
+
     // Configure color output based on config
     let fmt_layer = if config.general.disable_colors {
         fmt::Layer::default().with_ansi(false)
     } else {
         fmt::Layer::default().with_ansi(true)
     };
-    
+
     tracing_subscriber::registry()
         .with(filter_layer)
         .with(fmt_layer)
@@ -256,6 +266,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let prefer_ipv6 = decision.prefer_ipv6();
     let mut use_middle_proxy = config.general.use_middle_proxy && (decision.ipv4_me || decision.ipv6_me);
     let stats = Arc::new(Stats::new());
+    let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
 
     // IP Tracker initialization
@@ -298,25 +309,30 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // proxy-secret is from: https://core.telegram.org/getProxySecret
         // =============================================================
         let proxy_secret_path = config.general.proxy_secret_path.as_deref();
-match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).await {
-    Ok(proxy_secret) => {
-        info!(
-            secret_len = proxy_secret.len() as usize,  // ← ЯВНЫЙ ТИП usize
-            key_sig = format_args!(
-                "0x{:08x}",
-                if proxy_secret.len() >= 4 {
-                    u32::from_le_bytes([
-                        proxy_secret[0],
-                        proxy_secret[1],
-                        proxy_secret[2],
-                        proxy_secret[3],
-                    ])
-                } else {
-                    0
-                }
-            ),
-            "Proxy-secret loaded"
-        );
+        match crate::transport::middle_proxy::fetch_proxy_secret(
+            proxy_secret_path,
+            config.general.proxy_secret_len_max,
+        )
+        .await
+        {
+            Ok(proxy_secret) => {
+                info!(
+                    secret_len = proxy_secret.len(),
+                    key_sig = format_args!(
+                        "0x{:08x}",
+                        if proxy_secret.len() >= 4 {
+                            u32::from_le_bytes([
+                                proxy_secret[0],
+                                proxy_secret[1],
+                                proxy_secret[2],
+                                proxy_secret[3],
+                            ])
+                        } else {
+                            0
+                        }
+                    ),
+                    "Proxy-secret loaded"
+                );
 
                 // Load ME config (v4/v6) + default DC
                 let mut cfg_v4 = fetch_proxy_config(
@@ -368,6 +384,10 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                     config.general.me_pool_drain_ttl_secs,
                     config.general.effective_me_pool_force_close_secs(),
                     config.general.me_pool_min_fresh_ratio,
+                    config.general.me_hardswap_warmup_delay_min_ms,
+                    config.general.me_hardswap_warmup_delay_max_ms,
+                    config.general.me_hardswap_warmup_extra_passes,
+                    config.general.me_hardswap_warmup_pass_backoff_base_ms,
                 );
 
                 let pool_size = config.general.middle_proxy_pool_size.max(1);
@@ -382,18 +402,6 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                         tokio::spawn(async move {
                             crate::transport::middle_proxy::me_health_monitor(
                                 pool_clone, rng_clone, min_conns,
-                            )
-                            .await;
-                        });
-
-                        // Periodic ME connection rotation
-                        let pool_clone_rot = pool.clone();
-                        let rng_clone_rot = rng.clone();
-                        tokio::spawn(async move {
-                            crate::transport::middle_proxy::me_rotation_task(
-                                pool_clone_rot,
-                                rng_clone_rot,
-                                std::time::Duration::from_secs(1800),
                             )
                             .await;
                         });
@@ -597,14 +605,12 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
 			} else {
 				info!("  IPv4 in use / IPv6 is fallback");
 			}
-		} else {
-			if v6_works && !v4_works {
-				info!("  IPv6 only / IPv4 unavailable)");
-			} else if v4_works && !v6_works {
-				info!("  IPv4 only / IPv6 unavailable)");
-			} else if !v6_works && !v4_works {
-				info!("  No DC connectivity");
-			}
+		} else if v6_works && !v4_works {
+			info!("  IPv6 only / IPv4 unavailable");
+		} else if v4_works && !v6_works {
+			info!("  IPv4 only / IPv6 unavailable");
+		} else if !v6_works && !v4_works {
+			info!("  No DC connectivity");
 		}
 
 		info!("  via {}", upstream_result.upstream_name);
@@ -671,14 +677,8 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         rc_clone.run_periodic_cleanup().await;
     });
 
-    let detected_ip_v4: Option<std::net::IpAddr> = probe
-        .reflected_ipv4
-        .map(|s| s.ip())
-        .or_else(|| probe.detected_ipv4.map(std::net::IpAddr::V4));
-    let detected_ip_v6: Option<std::net::IpAddr> = probe
-        .reflected_ipv6
-        .map(|s| s.ip())
-        .or_else(|| probe.detected_ipv6.map(std::net::IpAddr::V6));
+    let detected_ip_v4: Option<std::net::IpAddr> = probe.detected_ipv4.map(std::net::IpAddr::V4);
+    let detected_ip_v6: Option<std::net::IpAddr> = probe.detected_ipv6.map(std::net::IpAddr::V6);
     debug!(
         "Detected IPs: v4={:?} v6={:?}",
         detected_ip_v4, detected_ip_v6
@@ -697,6 +697,26 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         detected_ip_v6,
     );
 
+    let beobachten_writer = beobachten.clone();
+    let config_rx_beobachten = config_rx.clone();
+    tokio::spawn(async move {
+        loop {
+            let cfg = config_rx_beobachten.borrow().clone();
+            let sleep_secs = cfg.general.beobachten_flush_secs.max(1);
+
+            if cfg.general.beobachten {
+                let ttl = Duration::from_secs(cfg.general.beobachten_minutes.saturating_mul(60));
+                let path = cfg.general.beobachten_file.clone();
+                let snapshot = beobachten_writer.snapshot_text(ttl);
+                if let Err(e) = write_beobachten_snapshot(&path, &snapshot).await {
+                    warn!(error = %e, path = %path, "Failed to flush beobachten snapshot");
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+        }
+    });
+
     if let Some(ref pool) = me_pool {
         let pool_clone = pool.clone();
         let rng_clone = rng.clone();
@@ -706,6 +726,18 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                 pool_clone,
                 rng_clone,
                 config_rx_clone,
+            )
+            .await;
+        });
+
+        let pool_clone_rot = pool.clone();
+        let rng_clone_rot = rng.clone();
+        let config_rx_clone_rot = config_rx.clone();
+        tokio::spawn(async move {
+            crate::transport::middle_proxy::me_rotation_task(
+                pool_clone_rot,
+                rng_clone_rot,
+                config_rx_clone_rot,
             )
             .await;
         });
@@ -853,6 +885,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         let me_pool = me_pool.clone();
         let tls_cache = tls_cache.clone();
         let ip_tracker = ip_tracker.clone();
+        let beobachten = beobachten.clone();
         let max_connections_unix = max_connections.clone();
 
         tokio::spawn(async move {
@@ -880,6 +913,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                         let me_pool = me_pool.clone();
                         let tls_cache = tls_cache.clone();
                         let ip_tracker = ip_tracker.clone();
+                        let beobachten = beobachten.clone();
                         let proxy_protocol_enabled = config.server.proxy_protocol;
 
                         tokio::spawn(async move {
@@ -887,7 +921,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                             if let Err(e) = crate::proxy::client::handle_client_stream(
                                 stream, fake_peer, config, stats,
                                 upstream_manager, replay_checker, buffer_pool, rng,
-                                me_pool, tls_cache, ip_tracker, proxy_protocol_enabled,
+                                me_pool, tls_cache, ip_tracker, beobachten, proxy_protocol_enabled,
                             ).await {
                                 debug!(error = %e, "Unix socket connection error");
                             }
@@ -935,9 +969,11 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
 
     if let Some(port) = config.server.metrics_port {
         let stats = stats.clone();
+        let beobachten = beobachten.clone();
+        let config_rx_metrics = config_rx.clone();
         let whitelist = config.server.metrics_whitelist.clone();
         tokio::spawn(async move {
-            metrics::serve(port, stats, whitelist).await;
+            metrics::serve(port, stats, beobachten, config_rx_metrics, whitelist).await;
         });
     }
 
@@ -951,6 +987,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
         let me_pool = me_pool.clone();
         let tls_cache = tls_cache.clone();
         let ip_tracker = ip_tracker.clone();
+        let beobachten = beobachten.clone();
         let max_connections_tcp = max_connections.clone();
 
         tokio::spawn(async move {
@@ -973,6 +1010,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                         let me_pool = me_pool.clone();
                         let tls_cache = tls_cache.clone();
                         let ip_tracker = ip_tracker.clone();
+                        let beobachten = beobachten.clone();
                         let proxy_protocol_enabled = listener_proxy_protocol;
 
                         tokio::spawn(async move {
@@ -989,6 +1027,7 @@ match crate::transport::middle_proxy::fetch_proxy_secret(proxy_secret_path).awai
                                 me_pool,
                                 tls_cache,
                                 ip_tracker,
+                                beobachten,
                                 proxy_protocol_enabled,
                             )
                             .run()

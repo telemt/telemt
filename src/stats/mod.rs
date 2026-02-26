@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod beobachten;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, Duration};
 use dashmap::DashMap;
@@ -43,6 +45,13 @@ pub struct Stats {
     pool_drain_active: AtomicU64,
     pool_force_close_total: AtomicU64,
     pool_stale_pick_total: AtomicU64,
+    me_writer_removed_total: AtomicU64,
+    me_writer_removed_unexpected_total: AtomicU64,
+    me_refill_triggered_total: AtomicU64,
+    me_refill_skipped_inflight_total: AtomicU64,
+    me_refill_failed_total: AtomicU64,
+    me_writer_restored_same_endpoint_total: AtomicU64,
+    me_writer_restored_fallback_total: AtomicU64,
     user_stats: DashMap<String, UserStats>,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -142,6 +151,27 @@ impl Stats {
     pub fn increment_pool_stale_pick_total(&self) {
         self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
     }
+    pub fn increment_me_writer_removed_total(&self) {
+        self.me_writer_removed_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_writer_removed_unexpected_total(&self) {
+        self.me_writer_removed_unexpected_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_refill_triggered_total(&self) {
+        self.me_refill_triggered_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_refill_skipped_inflight_total(&self) {
+        self.me_refill_skipped_inflight_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_refill_failed_total(&self) {
+        self.me_refill_failed_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_writer_restored_same_endpoint_total(&self) {
+        self.me_writer_restored_same_endpoint_total.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_writer_restored_fallback_total(&self) {
+        self.me_writer_restored_fallback_total.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn get_connects_all(&self) -> u64 { self.connects_all.load(Ordering::Relaxed) }
     pub fn get_connects_bad(&self) -> u64 { self.connects_bad.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_sent(&self) -> u64 { self.me_keepalive_sent.load(Ordering::Relaxed) }
@@ -194,6 +224,27 @@ impl Stats {
     }
     pub fn get_pool_stale_pick_total(&self) -> u64 {
         self.pool_stale_pick_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_removed_total(&self) -> u64 {
+        self.me_writer_removed_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_removed_unexpected_total(&self) -> u64 {
+        self.me_writer_removed_unexpected_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_refill_triggered_total(&self) -> u64 {
+        self.me_refill_triggered_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_refill_skipped_inflight_total(&self) -> u64 {
+        self.me_refill_skipped_inflight_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_refill_failed_total(&self) -> u64 {
+        self.me_refill_failed_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_restored_same_endpoint_total(&self) -> u64 {
+        self.me_writer_restored_same_endpoint_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_restored_fallback_total(&self) -> u64 {
+        self.me_writer_restored_fallback_total.load(Ordering::Relaxed)
     }
     
     pub fn increment_user_connects(&self, user: &str) {
@@ -326,10 +377,10 @@ impl ReplayShard {
             
             // Use key.as_ref() to get &[u8] — avoids Borrow<Q> ambiguity
             // between Borrow<[u8]> and Borrow<Box<[u8]>>
-            if let Some(entry) = self.cache.peek(key.as_ref()) {
-                if entry.seq == queue_seq {
-                    self.cache.pop(key.as_ref());
-                }
+            if let Some(entry) = self.cache.peek(key.as_ref())
+                && entry.seq == queue_seq
+            {
+                self.cache.pop(key.as_ref());
             }
         }
     }
