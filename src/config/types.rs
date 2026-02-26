@@ -636,6 +636,7 @@ impl Default for AntiCensorshipConfig {
             tls_new_session_tickets: default_tls_new_session_tickets(),
             tls_full_cert_ttl_secs: default_tls_full_cert_ttl_secs(),
             alpn_enforce: default_alpn_enforce(),
+            mask_proxy_protocol: 0,
         }
     }
 }
