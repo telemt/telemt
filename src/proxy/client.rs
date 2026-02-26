@@ -143,7 +143,7 @@ where
                     reader,
                     writer,
                     &first_bytes,
-                    real_peer.ip(),
+                    real_peer,
                     &config,
                     &beobachten,
                 )
@@ -168,7 +168,7 @@ where
                         reader,
                         writer,
                         &handshake,
-                        real_peer.ip(),
+                        real_peer,
                         &config,
                         &beobachten,
                     )
@@ -212,7 +212,7 @@ where
                     reader,
                     writer,
                     &first_bytes,
-                    real_peer.ip(),
+                    real_peer,
                     &config,
                     &beobachten,
                 )
@@ -237,7 +237,7 @@ where
                         reader,
                         writer,
                         &handshake,
-                        real_peer.ip(),
+                        real_peer,
                         &config,
                         &beobachten,
                     )
@@ -462,7 +462,7 @@ impl RunningClientHandler {
                 reader,
                 writer,
                 &first_bytes,
-                peer.ip(),
+                peer,
                 &self.config,
                 &self.beobachten,
             )
@@ -501,7 +501,7 @@ impl RunningClientHandler {
                     reader,
                     writer,
                     &handshake,
-                    peer.ip(),
+                    peer,
                     &config,
                     &self.beobachten,
                 )
@@ -570,7 +570,7 @@ impl RunningClientHandler {
                 reader,
                 writer,
                 &first_bytes,
-                peer.ip(),
+                peer,
                 &self.config,
                 &self.beobachten,
             )
@@ -608,7 +608,7 @@ impl RunningClientHandler {
                     reader,
                     writer,
                     &handshake,
-                    peer.ip(),
+                    peer,
                     &config,
                     &self.beobachten,
                 )

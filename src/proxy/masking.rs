@@ -1,7 +1,7 @@
 //! Masking - forward unrecognized traffic to mask host
 
 use std::str;
-use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
 #[cfg(unix)]
@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use tracing::debug;
 use crate::config::ProxyConfig;
 use crate::stats::beobachten::BeobachtenStore;
+use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 
 const MASK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum duration for the entire masking relay.
@@ -52,7 +53,7 @@ pub async fn handle_bad_client<R, W>(
     reader: R,
     writer: W,
     initial_data: &[u8],
-    peer_ip: IpAddr,
+    peer: SocketAddr,
     config: &ProxyConfig,
     beobachten: &BeobachtenStore,
 )
@@ -63,7 +64,7 @@ where
     let client_type = detect_client_type(initial_data);
     if config.general.beobachten {
         let ttl = Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60));
-        beobachten.record(client_type, peer_ip, ttl);
+        beobachten.record(client_type, peer.ip(), ttl);
     }
 
     if !config.censorship.mask {
@@ -119,7 +120,44 @@ where
     let connect_result = timeout(MASK_TIMEOUT, TcpStream::connect(&mask_addr)).await;
     match connect_result {
         Ok(Ok(stream)) => {
-            let (mask_read, mask_write) = stream.into_split();
+            let proxy_header: Option<Vec<u8>> = match config.censorship.mask_proxy_protocol {
+                0 => None,
+                version => {
+                    let header = if let Ok(local_addr) = stream.local_addr() {
+                        match version {
+                            2 => match (peer, local_addr) {
+                                (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
+                                    ProxyProtocolV2Builder::new().with_addrs(src.into(), dst.into()).build(),
+                                (SocketAddr::V6(src), SocketAddr::V6(dst)) =>
+                                    ProxyProtocolV2Builder::new().with_addrs(src.into(), dst.into()).build(),
+                                _ =>
+                                    ProxyProtocolV2Builder::new().build(),
+                            },
+                            _ => match (peer, local_addr) {
+                                (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
+                                    ProxyProtocolV1Builder::new().tcp4(src.into(), dst.into()).build(),
+                                (SocketAddr::V6(src), SocketAddr::V6(dst)) =>
+                                    ProxyProtocolV1Builder::new().tcp6(src.into(), dst.into()).build(),
+                                _ =>
+                                    ProxyProtocolV1Builder::new().build(),
+                            },
+                        }
+                    } else {
+                        match version {
+                            2 => ProxyProtocolV2Builder::new().build(),
+                            _ => ProxyProtocolV1Builder::new().build(),
+                        }
+                    };
+                    Some(header)
+                }
+            };
+
+            let (mask_read, mut mask_write) = stream.into_split();
+            if let Some(header) = proxy_header {
+                if mask_write.write_all(&header).await.is_err() {
+                    return;
+                }
+            }
             if timeout(MASK_RELAY_TIMEOUT, relay_to_mask(reader, writer, mask_read, mask_write, initial_data)).await.is_err() {
                 debug!("Mask relay timed out");
             }

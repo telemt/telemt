@@ -135,6 +135,7 @@ mask = true
 # mask_host = "www.google.com" # example, defaults to tls_domain when both mask_host/mask_unix_sock are unset
 # mask_unix_sock = "/var/run/nginx.sock" # example, mutually exclusive with mask_host
 mask_port = 443
+# mask_proxy_protocol = 0 # Send PROXY protocol header to mask_host: 0 = off, 1 = v1 (text), 2 = v2 (binary)
 fake_cert_len = 2048 # if tls_emulation=false and default value is used, loader may randomize this value at runtime
 tls_emulation = true
 tls_front_dir = "tlsfront"

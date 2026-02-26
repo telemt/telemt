@@ -611,6 +611,12 @@ pub struct AntiCensorshipConfig {
     /// Enforce ALPN echo of client preference.
     #[serde(default = "default_alpn_enforce")]
     pub alpn_enforce: bool,
+
+    /// Send PROXY protocol header when connecting to mask_host.
+    /// 0 = disabled, 1 = v1 (text), 2 = v2 (binary).
+    /// Allows the backend to see the real client IP.
+    #[serde(default)]
+    pub mask_proxy_protocol: u8,
 }
 
 impl Default for AntiCensorshipConfig {
