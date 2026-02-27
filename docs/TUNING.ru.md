@@ -96,7 +96,7 @@
 | `username` | `socks5` | `Option<String>` | нет | `null` | Логин SOCKS5 auth. |
 | `password` | `socks5` | `Option<String>` | нет | `null` | Пароль SOCKS5 auth. |
 
-### Runtime-правила (важно)
+### Runtime-правила
 
 1. Если `[[upstreams]]` отсутствует, loader добавляет один upstream `direct` по умолчанию.
 2. Scope-фильтрация — по точному совпадению токена:
