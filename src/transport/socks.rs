@@ -5,11 +5,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use crate::error::{ProxyError, Result};
 
+#[derive(Debug, Clone, Copy)]
+pub struct SocksBoundAddr {
+    pub addr: SocketAddr,
+}
+
 pub async fn connect_socks4(
     stream: &mut TcpStream,
     target: SocketAddr,
     user_id: Option<&str>,
-) -> Result<()> {
+) -> Result<SocksBoundAddr> {
     let ip = match target.ip() {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(_) => return Err(ProxyError::Proxy("SOCKS4 does not support IPv6".to_string())),
@@ -36,8 +41,13 @@ pub async fn connect_socks4(
     if resp[1] != 90 {
         return Err(ProxyError::Proxy(format!("SOCKS4 request rejected: code {}", resp[1])));
     }
-    
-    Ok(())
+
+    let bound_port = u16::from_be_bytes([resp[2], resp[3]]);
+    let bound_ip = IpAddr::from([resp[4], resp[5], resp[6], resp[7]]);
+
+    Ok(SocksBoundAddr {
+        addr: SocketAddr::new(bound_ip, bound_port),
+    })
 }
 
 pub async fn connect_socks5(
@@ -45,7 +55,7 @@ pub async fn connect_socks5(
     target: SocketAddr,
     username: Option<&str>,
     password: Option<&str>,
-) -> Result<()> {
+) -> Result<SocksBoundAddr> {
     // 1. Auth negotiation
     // VER (1) | NMETHODS (1) | METHODS (variable)
     let mut methods = vec![0u8]; // No auth
@@ -122,24 +132,36 @@ pub async fn connect_socks5(
         return Err(ProxyError::Proxy(format!("SOCKS5 request failed: code {}", head[1])));
     }
     
-    // Skip address part of response
-    match head[3] {
+    // Parse bound address from response.
+    let bound_addr = match head[3] {
         1 => { // IPv4
             let mut addr = [0u8; 4 + 2];
             stream.read_exact(&mut addr).await.map_err(ProxyError::Io)?;
+            let ip = IpAddr::from([addr[0], addr[1], addr[2], addr[3]]);
+            let port = u16::from_be_bytes([addr[4], addr[5]]);
+            SocketAddr::new(ip, port)
         },
         3 => { // Domain
             let mut len = [0u8; 1];
             stream.read_exact(&mut len).await.map_err(ProxyError::Io)?;
             let mut addr = vec![0u8; len[0] as usize + 2];
             stream.read_exact(&mut addr).await.map_err(ProxyError::Io)?;
+            // Domain-bound response is not useful for KDF IP material.
+            let port_pos = addr.len().saturating_sub(2);
+            let port = u16::from_be_bytes([addr[port_pos], addr[port_pos + 1]]);
+            SocketAddr::new(IpAddr::from([0, 0, 0, 0]), port)
         },
         4 => { // IPv6
             let mut addr = [0u8; 16 + 2];
             stream.read_exact(&mut addr).await.map_err(ProxyError::Io)?;
+            let ip = IpAddr::from(<[u8; 16]>::try_from(&addr[..16]).map_err(|_| {
+                ProxyError::Proxy("Invalid SOCKS5 IPv6 bound address".to_string())
+            })?);
+            let port = u16::from_be_bytes([addr[16], addr[17]]);
+            SocketAddr::new(ip, port)
         },
         _ => return Err(ProxyError::Proxy("Invalid address type in SOCKS5 response".to_string())),
-    }
-    
-    Ok(())
+    };
+
+    Ok(SocksBoundAddr { addr: bound_addr })
 }

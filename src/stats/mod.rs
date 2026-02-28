@@ -3,8 +3,9 @@
 #![allow(dead_code)]
 
 pub mod beobachten;
+pub mod telemetry;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Instant, Duration};
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -14,6 +15,9 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
 use tracing::debug;
+
+use crate::config::MeTelemetryLevel;
+use self::telemetry::TelemetryPolicy;
 
 // ============= Stats =============
 
@@ -33,6 +37,10 @@ pub struct Stats {
     me_route_drop_no_conn: AtomicU64,
     me_route_drop_channel_closed: AtomicU64,
     me_route_drop_queue_full: AtomicU64,
+    me_route_drop_queue_full_base: AtomicU64,
+    me_route_drop_queue_full_high: AtomicU64,
+    me_socks_kdf_strict_reject: AtomicU64,
+    me_socks_kdf_compat_fallback: AtomicU64,
     secure_padding_invalid: AtomicU64,
     desync_total: AtomicU64,
     desync_full_logged: AtomicU64,
@@ -52,6 +60,9 @@ pub struct Stats {
     me_refill_failed_total: AtomicU64,
     me_writer_restored_same_endpoint_total: AtomicU64,
     me_writer_restored_fallback_total: AtomicU64,
+    telemetry_core_enabled: AtomicBool,
+    telemetry_user_enabled: AtomicBool,
+    telemetry_me_level: AtomicU8,
     user_stats: DashMap<String, UserStats>,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -69,44 +80,167 @@ pub struct UserStats {
 impl Stats {
     pub fn new() -> Self {
         let stats = Self::default();
+        stats.apply_telemetry_policy(TelemetryPolicy::default());
         *stats.start_time.write() = Some(Instant::now());
         stats
     }
-    
-    pub fn increment_connects_all(&self) { self.connects_all.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_connects_bad(&self) { self.connects_bad.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_handshake_timeouts(&self) { self.handshake_timeouts.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_keepalive_sent(&self) { self.me_keepalive_sent.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_keepalive_failed(&self) { self.me_keepalive_failed.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_keepalive_pong(&self) { self.me_keepalive_pong.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_keepalive_timeout(&self) { self.me_keepalive_timeout.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_keepalive_timeout_by(&self, value: u64) {
-        self.me_keepalive_timeout.fetch_add(value, Ordering::Relaxed);
+
+    fn telemetry_me_level(&self) -> MeTelemetryLevel {
+        MeTelemetryLevel::from_u8(self.telemetry_me_level.load(Ordering::Relaxed))
     }
-    pub fn increment_me_reconnect_attempt(&self) { self.me_reconnect_attempts.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_reconnect_success(&self) { self.me_reconnect_success.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_crc_mismatch(&self) { self.me_crc_mismatch.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_seq_mismatch(&self) { self.me_seq_mismatch.fetch_add(1, Ordering::Relaxed); }
-    pub fn increment_me_route_drop_no_conn(&self) { self.me_route_drop_no_conn.fetch_add(1, Ordering::Relaxed); }
+
+    fn telemetry_core_enabled(&self) -> bool {
+        self.telemetry_core_enabled.load(Ordering::Relaxed)
+    }
+
+    fn telemetry_user_enabled(&self) -> bool {
+        self.telemetry_user_enabled.load(Ordering::Relaxed)
+    }
+
+    fn telemetry_me_allows_normal(&self) -> bool {
+        self.telemetry_me_level().allows_normal()
+    }
+
+    fn telemetry_me_allows_debug(&self) -> bool {
+        self.telemetry_me_level().allows_debug()
+    }
+
+    pub fn apply_telemetry_policy(&self, policy: TelemetryPolicy) {
+        self.telemetry_core_enabled
+            .store(policy.core_enabled, Ordering::Relaxed);
+        self.telemetry_user_enabled
+            .store(policy.user_enabled, Ordering::Relaxed);
+        self.telemetry_me_level
+            .store(policy.me_level.as_u8(), Ordering::Relaxed);
+    }
+
+    pub fn telemetry_policy(&self) -> TelemetryPolicy {
+        TelemetryPolicy {
+            core_enabled: self.telemetry_core_enabled(),
+            user_enabled: self.telemetry_user_enabled(),
+            me_level: self.telemetry_me_level(),
+        }
+    }
+    
+    pub fn increment_connects_all(&self) {
+        if self.telemetry_core_enabled() {
+            self.connects_all.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_connects_bad(&self) {
+        if self.telemetry_core_enabled() {
+            self.connects_bad.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_handshake_timeouts(&self) {
+        if self.telemetry_core_enabled() {
+            self.handshake_timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_keepalive_sent(&self) {
+        if self.telemetry_me_allows_debug() {
+            self.me_keepalive_sent.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_keepalive_failed(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_keepalive_failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_keepalive_pong(&self) {
+        if self.telemetry_me_allows_debug() {
+            self.me_keepalive_pong.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_keepalive_timeout(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_keepalive_timeout.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_keepalive_timeout_by(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_keepalive_timeout.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_reconnect_attempt(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_reconnect_attempts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_reconnect_success(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_reconnect_success.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_crc_mismatch(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_crc_mismatch.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_seq_mismatch(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_seq_mismatch.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_route_drop_no_conn(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_route_drop_no_conn.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_route_drop_channel_closed(&self) {
-        self.me_route_drop_channel_closed.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.me_route_drop_channel_closed.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_route_drop_queue_full(&self) {
-        self.me_route_drop_queue_full.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.me_route_drop_queue_full.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_route_drop_queue_full_base(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_route_drop_queue_full_base.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_route_drop_queue_full_high(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_route_drop_queue_full_high.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_socks_kdf_strict_reject(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_socks_kdf_strict_reject.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_socks_kdf_compat_fallback(&self) {
+        if self.telemetry_me_allows_debug() {
+            self.me_socks_kdf_compat_fallback.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_secure_padding_invalid(&self) {
-        self.secure_padding_invalid.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.secure_padding_invalid.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_desync_total(&self) {
-        self.desync_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.desync_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_desync_full_logged(&self) {
-        self.desync_full_logged.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.desync_full_logged.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_desync_suppressed(&self) {
-        self.desync_suppressed.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.desync_suppressed.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn observe_desync_frames_ok(&self, frames_ok: u64) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
         match frames_ok {
             0 => {
                 self.desync_frames_bucket_0.fetch_add(1, Ordering::Relaxed);
@@ -123,12 +257,19 @@ impl Stats {
         }
     }
     pub fn increment_pool_swap_total(&self) {
-        self.pool_swap_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_debug() {
+            self.pool_swap_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_pool_drain_active(&self) {
-        self.pool_drain_active.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_debug() {
+            self.pool_drain_active.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn decrement_pool_drain_active(&self) {
+        if !self.telemetry_me_allows_debug() {
+            return;
+        }
         let mut current = self.pool_drain_active.load(Ordering::Relaxed);
         loop {
             if current == 0 {
@@ -146,31 +287,51 @@ impl Stats {
         }
     }
     pub fn increment_pool_force_close_total(&self) {
-        self.pool_force_close_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.pool_force_close_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_pool_stale_pick_total(&self) {
-        self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_writer_removed_total(&self) {
-        self.me_writer_removed_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_debug() {
+            self.me_writer_removed_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_writer_removed_unexpected_total(&self) {
-        self.me_writer_removed_unexpected_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_removed_unexpected_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_refill_triggered_total(&self) {
-        self.me_refill_triggered_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_debug() {
+            self.me_refill_triggered_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_refill_skipped_inflight_total(&self) {
-        self.me_refill_skipped_inflight_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_debug() {
+            self.me_refill_skipped_inflight_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_refill_failed_total(&self) {
-        self.me_refill_failed_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.me_refill_failed_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_writer_restored_same_endpoint_total(&self) {
-        self.me_writer_restored_same_endpoint_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_restored_same_endpoint_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn increment_me_writer_restored_fallback_total(&self) {
-        self.me_writer_restored_fallback_total.fetch_add(1, Ordering::Relaxed);
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_restored_fallback_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
     pub fn get_connects_all(&self) -> u64 { self.connects_all.load(Ordering::Relaxed) }
     pub fn get_connects_bad(&self) -> u64 { self.connects_bad.load(Ordering::Relaxed) }
@@ -188,6 +349,18 @@ impl Stats {
     }
     pub fn get_me_route_drop_queue_full(&self) -> u64 {
         self.me_route_drop_queue_full.load(Ordering::Relaxed)
+    }
+    pub fn get_me_route_drop_queue_full_base(&self) -> u64 {
+        self.me_route_drop_queue_full_base.load(Ordering::Relaxed)
+    }
+    pub fn get_me_route_drop_queue_full_high(&self) -> u64 {
+        self.me_route_drop_queue_full_high.load(Ordering::Relaxed)
+    }
+    pub fn get_me_socks_kdf_strict_reject(&self) -> u64 {
+        self.me_socks_kdf_strict_reject.load(Ordering::Relaxed)
+    }
+    pub fn get_me_socks_kdf_compat_fallback(&self) -> u64 {
+        self.me_socks_kdf_compat_fallback.load(Ordering::Relaxed)
     }
     pub fn get_secure_padding_invalid(&self) -> u64 {
         self.secure_padding_invalid.load(Ordering::Relaxed)
@@ -248,11 +421,17 @@ impl Stats {
     }
     
     pub fn increment_user_connects(&self, user: &str) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
         self.user_stats.entry(user.to_string()).or_default()
             .connects.fetch_add(1, Ordering::Relaxed);
     }
     
     pub fn increment_user_curr_connects(&self, user: &str) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
         self.user_stats.entry(user.to_string()).or_default()
             .curr_connects.fetch_add(1, Ordering::Relaxed);
     }
@@ -285,21 +464,33 @@ impl Stats {
     }
     
     pub fn add_user_octets_from(&self, user: &str, bytes: u64) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
         self.user_stats.entry(user.to_string()).or_default()
             .octets_from_client.fetch_add(bytes, Ordering::Relaxed);
     }
     
     pub fn add_user_octets_to(&self, user: &str, bytes: u64) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
         self.user_stats.entry(user.to_string()).or_default()
             .octets_to_client.fetch_add(bytes, Ordering::Relaxed);
     }
     
     pub fn increment_user_msgs_from(&self, user: &str) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
         self.user_stats.entry(user.to_string()).or_default()
             .msgs_from_client.fetch_add(1, Ordering::Relaxed);
     }
     
     pub fn increment_user_msgs_to(&self, user: &str) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
         self.user_stats.entry(user.to_string()).or_default()
             .msgs_to_client.fetch_add(1, Ordering::Relaxed);
     }
@@ -548,6 +739,7 @@ impl ReplayStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MeTelemetryLevel;
     use std::sync::Arc;
     
     #[test]
@@ -557,6 +749,40 @@ mod tests {
         stats.increment_connects_all();
         stats.increment_connects_all();
         assert_eq!(stats.get_connects_all(), 3);
+    }
+
+    #[test]
+    fn test_telemetry_policy_disables_core_and_user_counters() {
+        let stats = Stats::new();
+        stats.apply_telemetry_policy(TelemetryPolicy {
+            core_enabled: false,
+            user_enabled: false,
+            me_level: MeTelemetryLevel::Normal,
+        });
+
+        stats.increment_connects_all();
+        stats.increment_user_connects("alice");
+        stats.add_user_octets_from("alice", 1024);
+        assert_eq!(stats.get_connects_all(), 0);
+        assert_eq!(stats.get_user_curr_connects("alice"), 0);
+        assert_eq!(stats.get_user_total_octets("alice"), 0);
+    }
+
+    #[test]
+    fn test_telemetry_policy_me_silent_blocks_me_counters() {
+        let stats = Stats::new();
+        stats.apply_telemetry_policy(TelemetryPolicy {
+            core_enabled: true,
+            user_enabled: true,
+            me_level: MeTelemetryLevel::Silent,
+        });
+
+        stats.increment_me_crc_mismatch();
+        stats.increment_me_keepalive_sent();
+        stats.increment_me_route_drop_queue_full();
+        assert_eq!(stats.get_me_crc_mismatch(), 0);
+        assert_eq!(stats.get_me_keepalive_sent(), 0);
+        assert_eq!(stats.get_me_route_drop_queue_full(), 0);
     }
     
     #[test]

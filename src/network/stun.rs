@@ -7,6 +7,7 @@ use tokio::net::{lookup_host, UdpSocket};
 use tokio::time::{timeout, Duration, sleep};
 
 use crate::error::{ProxyError, Result};
+use crate::network::dns_overrides::{resolve, split_host_port};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IpFamily {
@@ -40,16 +41,31 @@ pub async fn stun_probe_dual(stun_addr: &str) -> Result<DualStunResult> {
 }
 
 pub async fn stun_probe_family(stun_addr: &str, family: IpFamily) -> Result<Option<StunProbeResult>> {
+    stun_probe_family_with_bind(stun_addr, family, None).await
+}
+
+pub async fn stun_probe_family_with_bind(
+    stun_addr: &str,
+    family: IpFamily,
+    bind_ip: Option<IpAddr>,
+) -> Result<Option<StunProbeResult>> {
     use rand::RngCore;
 
-    let bind_addr = match family {
-        IpFamily::V4 => "0.0.0.0:0",
-        IpFamily::V6 => "[::]:0",
+    let bind_addr = match (family, bind_ip) {
+        (IpFamily::V4, Some(IpAddr::V4(ip))) => SocketAddr::new(IpAddr::V4(ip), 0),
+        (IpFamily::V6, Some(IpAddr::V6(ip))) => SocketAddr::new(IpAddr::V6(ip), 0),
+        (IpFamily::V4, Some(IpAddr::V6(_))) | (IpFamily::V6, Some(IpAddr::V4(_))) => {
+            return Ok(None);
+        }
+        (IpFamily::V4, None) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        (IpFamily::V6, None) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
     };
 
-    let socket = UdpSocket::bind(bind_addr)
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("STUN bind failed: {e}")))?;
+    let socket = match UdpSocket::bind(bind_addr).await {
+        Ok(socket) => socket,
+        Err(_) if bind_ip.is_some() => return Ok(None),
+        Err(e) => return Err(ProxyError::Proxy(format!("STUN bind failed: {e}"))),
+    };
 
     let target_addr = resolve_stun_addr(stun_addr, family).await?;
     if let Some(addr) = target_addr {
@@ -192,6 +208,16 @@ pub async fn stun_probe_family(stun_addr: &str, family: IpFamily) -> Result<Opti
 
 async fn resolve_stun_addr(stun_addr: &str, family: IpFamily) -> Result<Option<SocketAddr>> {
     if let Ok(addr) = stun_addr.parse::<SocketAddr>() {
+        return Ok(match (addr.is_ipv4(), family) {
+            (true, IpFamily::V4) | (false, IpFamily::V6) => Some(addr),
+            _ => None,
+        });
+    }
+
+    if let Some((host, port)) = split_host_port(stun_addr)
+        && let Some(ip) = resolve(&host, port)
+    {
+        let addr = SocketAddr::new(ip, port);
         return Ok(match (addr.is_ipv4(), family) {
             (true, IpFamily::V4) | (false, IpFamily::V6) => Some(addr),
             _ => None,

@@ -14,5 +14,5 @@ pub use socket::*;
 #[allow(unused_imports)]
 pub use socks::*;
 #[allow(unused_imports)]
-pub use upstream::{DcPingResult, StartupPingResult, UpstreamManager};
+pub use upstream::{DcPingResult, StartupPingResult, UpstreamEgressInfo, UpstreamManager, UpstreamRouteKind};
 pub mod middle_proxy;

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, RwLock};
@@ -10,14 +10,17 @@ use super::codec::WriterCommand;
 use super::MeResponse;
 
 const ROUTE_CHANNEL_CAPACITY: usize = 4096;
-const ROUTE_BACKPRESSURE_TIMEOUT: Duration = Duration::from_millis(25);
+const ROUTE_BACKPRESSURE_BASE_TIMEOUT_MS: u64 = 25;
+const ROUTE_BACKPRESSURE_HIGH_TIMEOUT_MS: u64 = 120;
+const ROUTE_BACKPRESSURE_HIGH_WATERMARK_PCT: u8 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteResult {
     Routed,
     NoConn,
     ChannelClosed,
-    QueueFull,
+    QueueFullBase,
+    QueueFullHigh,
 }
 
 #[derive(Clone)]
@@ -65,6 +68,9 @@ impl RegistryInner {
 pub struct ConnRegistry {
     inner: RwLock<RegistryInner>,
     next_id: AtomicU64,
+    route_backpressure_base_timeout_ms: AtomicU64,
+    route_backpressure_high_timeout_ms: AtomicU64,
+    route_backpressure_high_watermark_pct: AtomicU8,
 }
 
 impl ConnRegistry {
@@ -73,7 +79,33 @@ impl ConnRegistry {
         Self {
             inner: RwLock::new(RegistryInner::new()),
             next_id: AtomicU64::new(start),
+            route_backpressure_base_timeout_ms: AtomicU64::new(
+                ROUTE_BACKPRESSURE_BASE_TIMEOUT_MS,
+            ),
+            route_backpressure_high_timeout_ms: AtomicU64::new(
+                ROUTE_BACKPRESSURE_HIGH_TIMEOUT_MS,
+            ),
+            route_backpressure_high_watermark_pct: AtomicU8::new(
+                ROUTE_BACKPRESSURE_HIGH_WATERMARK_PCT,
+            ),
         }
+    }
+
+    pub fn update_route_backpressure_policy(
+        &self,
+        base_timeout_ms: u64,
+        high_timeout_ms: u64,
+        high_watermark_pct: u8,
+    ) {
+        let base = base_timeout_ms.max(1);
+        let high = high_timeout_ms.max(base);
+        let watermark = high_watermark_pct.clamp(1, 100);
+        self.route_backpressure_base_timeout_ms
+            .store(base, Ordering::Relaxed);
+        self.route_backpressure_high_timeout_ms
+            .store(high, Ordering::Relaxed);
+        self.route_backpressure_high_watermark_pct
+            .store(watermark, Ordering::Relaxed);
     }
 
     pub async fn register(&self) -> (u64, mpsc::Receiver<MeResponse>) {
@@ -112,10 +144,40 @@ impl ConnRegistry {
             Err(TrySendError::Closed(_)) => RouteResult::ChannelClosed,
             Err(TrySendError::Full(resp)) => {
                 // Absorb short bursts without dropping/closing the session immediately.
-                match tokio::time::timeout(ROUTE_BACKPRESSURE_TIMEOUT, tx.send(resp)).await {
+                let base_timeout_ms =
+                    self.route_backpressure_base_timeout_ms.load(Ordering::Relaxed).max(1);
+                let high_timeout_ms = self
+                    .route_backpressure_high_timeout_ms
+                    .load(Ordering::Relaxed)
+                    .max(base_timeout_ms);
+                let high_watermark_pct = self
+                    .route_backpressure_high_watermark_pct
+                    .load(Ordering::Relaxed)
+                    .clamp(1, 100);
+                let used = ROUTE_CHANNEL_CAPACITY.saturating_sub(tx.capacity());
+                let used_pct = if ROUTE_CHANNEL_CAPACITY == 0 {
+                    100
+                } else {
+                    (used.saturating_mul(100) / ROUTE_CHANNEL_CAPACITY) as u8
+                };
+                let high_profile = used_pct >= high_watermark_pct;
+                let timeout_ms = if high_profile {
+                    high_timeout_ms
+                } else {
+                    base_timeout_ms
+                };
+                let timeout_dur = Duration::from_millis(timeout_ms);
+
+                match tokio::time::timeout(timeout_dur, tx.send(resp)).await {
                     Ok(Ok(())) => RouteResult::Routed,
                     Ok(Err(_)) => RouteResult::ChannelClosed,
-                    Err(_) => RouteResult::QueueFull,
+                    Err(_) => {
+                        if high_profile {
+                            RouteResult::QueueFullHigh
+                        } else {
+                            RouteResult::QueueFullBase
+                        }
+                    }
                 }
             }
         }

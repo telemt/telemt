@@ -1,15 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::MeSocksKdfPolicy;
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
 use crate::network::probe::NetworkDecision;
+use crate::transport::UpstreamManager;
 
 use super::ConnRegistry;
 use super::codec::WriterCommand;
@@ -33,6 +35,7 @@ pub struct MePool {
     pub(super) writers: Arc<RwLock<Vec<MeWriter>>>,
     pub(super) rr: AtomicU64,
     pub(super) decision: NetworkDecision,
+    pub(super) upstream: Option<Arc<UpstreamManager>>,
     pub(super) rng: Arc<SecureRandom>,
     pub(super) proxy_tag: Option<Vec<u8>>,
     pub(super) proxy_secret: Arc<RwLock<Vec<u8>>>,
@@ -80,6 +83,7 @@ pub struct MePool {
     pub(super) me_hardswap_warmup_delay_max_ms: AtomicU64,
     pub(super) me_hardswap_warmup_extra_passes: AtomicU32,
     pub(super) me_hardswap_warmup_pass_backoff_base_ms: AtomicU64,
+    pub(super) me_socks_kdf_policy: AtomicU8,
     pool_size: usize,
 }
 
@@ -121,6 +125,7 @@ impl MePool {
         proxy_map_v6: HashMap<i32, Vec<(IpAddr, u16)>>,
         default_dc: Option<i32>,
         decision: NetworkDecision,
+        upstream: Option<Arc<UpstreamManager>>,
         rng: Arc<SecureRandom>,
         stats: Arc<crate::stats::Stats>,
         me_keepalive_enabled: bool,
@@ -142,12 +147,23 @@ impl MePool {
         me_hardswap_warmup_delay_max_ms: u64,
         me_hardswap_warmup_extra_passes: u8,
         me_hardswap_warmup_pass_backoff_base_ms: u64,
+        me_socks_kdf_policy: MeSocksKdfPolicy,
+        me_route_backpressure_base_timeout_ms: u64,
+        me_route_backpressure_high_timeout_ms: u64,
+        me_route_backpressure_high_watermark_pct: u8,
     ) -> Arc<Self> {
+        let registry = Arc::new(ConnRegistry::new());
+        registry.update_route_backpressure_policy(
+            me_route_backpressure_base_timeout_ms,
+            me_route_backpressure_high_timeout_ms,
+            me_route_backpressure_high_watermark_pct,
+        );
         Arc::new(Self {
-            registry: Arc::new(ConnRegistry::new()),
+            registry,
             writers: Arc::new(RwLock::new(Vec::new())),
             rr: AtomicU64::new(0),
             decision,
+            upstream,
             rng,
             proxy_tag,
             proxy_secret: Arc::new(RwLock::new(proxy_secret)),
@@ -200,6 +216,7 @@ impl MePool {
             me_hardswap_warmup_pass_backoff_base_ms: AtomicU64::new(
                 me_hardswap_warmup_pass_backoff_base_ms,
             ),
+            me_socks_kdf_policy: AtomicU8::new(me_socks_kdf_policy.as_u8()),
         })
     }
 
@@ -254,6 +271,26 @@ impl MePool {
 
     pub fn registry(&self) -> &Arc<ConnRegistry> {
         &self.registry
+    }
+
+    pub fn update_runtime_transport_policy(
+        &self,
+        socks_kdf_policy: MeSocksKdfPolicy,
+        route_backpressure_base_timeout_ms: u64,
+        route_backpressure_high_timeout_ms: u64,
+        route_backpressure_high_watermark_pct: u8,
+    ) {
+        self.me_socks_kdf_policy
+            .store(socks_kdf_policy.as_u8(), Ordering::Relaxed);
+        self.registry.update_route_backpressure_policy(
+            route_backpressure_base_timeout_ms,
+            route_backpressure_high_timeout_ms,
+            route_backpressure_high_watermark_pct,
+        );
+    }
+
+    pub(super) fn socks_kdf_policy(&self) -> MeSocksKdfPolicy {
+        MeSocksKdfPolicy::from_u8(self.me_socks_kdf_policy.load(Ordering::Relaxed))
     }
 
     pub(super) fn writers_arc(&self) -> Arc<RwLock<Vec<MeWriter>>> {

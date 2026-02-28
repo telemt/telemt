@@ -36,10 +36,12 @@ use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
 use crate::proxy::ClientHandler;
 use crate::stats::beobachten::BeobachtenStore;
+use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::transport::middle_proxy::{
     MePool, fetch_proxy_config, run_me_ping, MePingFamily, MePingSample, format_sample_line,
+    format_me_route,
 };
 use crate::transport::{ListenOptions, UpstreamManager, create_listener, find_listener_processes};
 use crate::tls_front::TlsFrontCache;
@@ -193,6 +195,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    if let Err(e) = crate::network::dns_overrides::install_entries(&config.network.dns_overrides) {
+        eprintln!("[telemt] Invalid network.dns_overrides: {}", e);
+        std::process::exit(1);
+    }
+
     let has_rust_log = std::env::var("RUST_LOG").is_ok();
     let effective_log_level = if cli_silent {
         LogLevel::Silent
@@ -254,7 +261,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         warn!("Using default tls_domain. Consider setting a custom domain.");
     }
 
-    let upstream_manager = Arc::new(UpstreamManager::new(config.upstreams.clone()));
+    let upstream_manager = Arc::new(UpstreamManager::new(
+        config.upstreams.clone(),
+        config.general.upstream_connect_retry_attempts,
+        config.general.upstream_connect_retry_backoff_ms,
+        config.general.upstream_unhealthy_fail_threshold,
+    ));
 
     let mut tls_domains = Vec::with_capacity(1 + config.censorship.tls_domains.len());
     tls_domains.push(config.censorship.tls_domain.clone());
@@ -280,17 +292,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .mask_host
             .clone()
             .unwrap_or_else(|| config.censorship.tls_domain.clone());
+        let mask_unix_sock = config.censorship.mask_unix_sock.clone();
         let fetch_timeout = Duration::from_secs(5);
 
         let cache_initial = cache.clone();
         let domains_initial = tls_domains.clone();
         let host_initial = mask_host.clone();
+        let unix_sock_initial = mask_unix_sock.clone();
         let upstream_initial = upstream_manager.clone();
         tokio::spawn(async move {
             let mut join = tokio::task::JoinSet::new();
             for domain in domains_initial {
                 let cache_domain = cache_initial.clone();
                 let host_domain = host_initial.clone();
+                let unix_sock_domain = unix_sock_initial.clone();
                 let upstream_domain = upstream_initial.clone();
                 join.spawn(async move {
                     match crate::tls_front::fetcher::fetch_real_tls(
@@ -300,6 +315,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         fetch_timeout,
                         Some(upstream_domain),
                         proxy_protocol,
+                        unix_sock_domain.as_deref(),
                     )
                     .await
                     {
@@ -339,6 +355,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let cache_refresh = cache.clone();
         let domains_refresh = tls_domains.clone();
         let host_refresh = mask_host.clone();
+        let unix_sock_refresh = mask_unix_sock.clone();
         let upstream_refresh = upstream_manager.clone();
         tokio::spawn(async move {
             loop {
@@ -350,6 +367,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 for domain in domains_refresh.clone() {
                     let cache_domain = cache_refresh.clone();
                     let host_domain = host_refresh.clone();
+                    let unix_sock_domain = unix_sock_refresh.clone();
                     let upstream_domain = upstream_refresh.clone();
                     join.spawn(async move {
                         match crate::tls_front::fetcher::fetch_real_tls(
@@ -359,6 +377,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                             fetch_timeout,
                             Some(upstream_domain),
                             proxy_protocol,
+                            unix_sock_domain.as_deref(),
                         )
                         .await
                         {
@@ -393,6 +412,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let prefer_ipv6 = decision.prefer_ipv6();
     let mut use_middle_proxy = config.general.use_middle_proxy && (decision.ipv4_me || decision.ipv6_me);
     let stats = Arc::new(Stats::new());
+    stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
     let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
 
@@ -402,6 +422,12 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     
     if !config.access.user_max_unique_ips.is_empty() {
         info!("IP limits configured for {} users", config.access.user_max_unique_ips.len());
+    }
+    if !config.network.dns_overrides.is_empty() {
+        info!(
+            "Runtime DNS overrides configured: {} entries",
+            config.network.dns_overrides.len()
+        );
     }
 
     // Connection concurrency limit
@@ -417,14 +443,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // =====================================================================
     let me_pool: Option<Arc<MePool>> = if use_middle_proxy {
         info!("=== Middle Proxy Mode ===");
+        let me_nat_probe = config.general.middle_proxy_nat_probe && config.network.stun_use;
+        if config.general.middle_proxy_nat_probe && !config.network.stun_use {
+            info!("Middle-proxy STUN probing disabled by network.stun_use=false");
+        }
 
         // ad_tag (proxy_tag) for advertising
-        let proxy_tag = config.general.ad_tag.as_ref().map(|tag| {
-            hex::decode(tag).unwrap_or_else(|_| {
-                warn!("Invalid ad_tag hex, middle proxy ad_tag will be empty");
-                Vec::new()
-            })
-        });
+        let proxy_tag = config
+            .general
+            .ad_tag
+            .as_ref()
+            .map(|tag| hex::decode(tag).expect("general.ad_tag must be validated before startup"));
 
         // =============================================================
         // CRITICAL: Download Telegram proxy-secret (NOT user secret!)
@@ -484,7 +513,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     proxy_tag,
                     proxy_secret,
                     config.general.middle_proxy_nat_ip,
-                    config.general.middle_proxy_nat_probe,
+                    me_nat_probe,
                     None,
                     config.network.stun_servers.clone(),
                     config.general.stun_nat_probe_concurrency,
@@ -495,6 +524,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     cfg_v6.map.clone(),
                     cfg_v4.default_dc.or(cfg_v6.default_dc),
                     decision.clone(),
+                    Some(upstream_manager.clone()),
                     rng.clone(),
                     stats.clone(),
                     config.general.me_keepalive_enabled,
@@ -516,6 +546,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     config.general.me_hardswap_warmup_delay_max_ms,
                     config.general.me_hardswap_warmup_extra_passes,
                     config.general.me_hardswap_warmup_pass_backoff_base_ms,
+                    config.general.me_socks_kdf_policy,
+                    config.general.me_route_backpressure_base_timeout_ms,
+                    config.general.me_route_backpressure_high_timeout_ms,
+                    config.general.me_route_backpressure_high_watermark_pct,
                 );
 
                 let pool_size = config.general.middle_proxy_pool_size.max(1);
@@ -602,7 +636,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         } else {
             info!("  No ME connectivity");
         }
-        info!("  via direct");
+        let me_route = format_me_route(
+            &config.upstreams,
+            &me_results,
+            prefer_ipv6,
+            v4_ok,
+            v6_ok,
+        )
+        .await;
+        info!("  via {}", me_route);
         info!("============================================================");
 
         use std::collections::BTreeMap;
@@ -762,6 +804,27 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         detected_ip_v4,
         detected_ip_v6,
     );
+
+    let stats_policy = stats.clone();
+    let mut config_rx_policy = config_rx.clone();
+    let me_pool_policy = me_pool.clone();
+    tokio::spawn(async move {
+        loop {
+            if config_rx_policy.changed().await.is_err() {
+                break;
+            }
+            let cfg = config_rx_policy.borrow_and_update().clone();
+            stats_policy.apply_telemetry_policy(TelemetryPolicy::from_config(&cfg.general.telemetry));
+            if let Some(pool) = &me_pool_policy {
+                pool.update_runtime_transport_policy(
+                    cfg.general.me_socks_kdf_policy,
+                    cfg.general.me_route_backpressure_base_timeout_ms,
+                    cfg.general.me_route_backpressure_high_timeout_ms,
+                    cfg.general.me_route_backpressure_high_watermark_pct,
+                );
+            }
+        }
+    });
 
     let beobachten_writer = beobachten.clone();
     let config_rx_beobachten = config_rx.clone();
@@ -1037,9 +1100,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let stats = stats.clone();
         let beobachten = beobachten.clone();
         let config_rx_metrics = config_rx.clone();
+        let ip_tracker_metrics = ip_tracker.clone();
         let whitelist = config.server.metrics_whitelist.clone();
         tokio::spawn(async move {
-            metrics::serve(port, stats, beobachten, config_rx_metrics, whitelist).await;
+            metrics::serve(
+                port,
+                stats,
+                beobachten,
+                ip_tracker_metrics,
+                config_rx_metrics,
+                whitelist,
+            )
+            .await;
         });
     }
 

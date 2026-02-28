@@ -68,7 +68,7 @@ pub async fn run_probe(
     probe.ipv4_is_bogon = probe.detected_ipv4.map(is_bogon_v4).unwrap_or(false);
     probe.ipv6_is_bogon = probe.detected_ipv6.map(is_bogon_v6).unwrap_or(false);
 
-    let stun_res = if nat_probe {
+    let stun_res = if nat_probe && config.stun_use {
         let servers = collect_stun_servers(config);
         if servers.is_empty() {
             warn!("STUN probe is enabled but network.stun_servers is empty");
@@ -80,6 +80,9 @@ pub async fn run_probe(
             )
             .await
         }
+    } else if nat_probe {
+        info!("STUN probe is disabled by network.stun_use=false");
+        DualStunResult::default()
     } else {
         DualStunResult::default()
     };

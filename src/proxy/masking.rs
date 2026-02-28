@@ -10,6 +10,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 use tracing::debug;
 use crate::config::ProxyConfig;
+use crate::network::dns_overrides::resolve_socket_addr;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 
@@ -115,8 +116,10 @@ where
         "Forwarding bad client to mask host"
     );
 
-    // Connect to mask host
-    let mask_addr = format!("{}:{}", mask_host, mask_port);
+    // Apply runtime DNS override for mask target when configured.
+    let mask_addr = resolve_socket_addr(mask_host, mask_port)
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|| format!("{}:{}", mask_host, mask_port));
     let connect_result = timeout(MASK_TIMEOUT, TcpStream::connect(&mask_addr)).await;
     match connect_result {
         Ok(Ok(stream)) => {

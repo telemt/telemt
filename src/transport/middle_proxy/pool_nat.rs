@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{ProxyError, Result};
 use crate::network::probe::is_bogon;
-use crate::network::stun::{stun_probe_dual, IpFamily, StunProbeResult};
+use crate::network::stun::{stun_probe_dual, stun_probe_family_with_bind, IpFamily};
 
 use super::MePool;
 use std::time::Instant;
@@ -52,6 +52,7 @@ impl MePool {
         servers: &[String],
         family: IpFamily,
         attempt: u8,
+        bind_ip: Option<IpAddr>,
     ) -> (Vec<String>, Option<std::net::SocketAddr>) {
         let mut join_set = JoinSet::new();
         let mut next_idx = 0usize;
@@ -64,7 +65,11 @@ impl MePool {
                 let stun_addr = servers[next_idx].clone();
                 next_idx += 1;
                 join_set.spawn(async move {
-                    let res = timeout(STUN_BATCH_TIMEOUT, stun_probe_dual(&stun_addr)).await;
+                    let res = timeout(
+                        STUN_BATCH_TIMEOUT,
+                        stun_probe_family_with_bind(&stun_addr, family, bind_ip),
+                    )
+                    .await;
                     (stun_addr, res)
                 });
             }
@@ -74,12 +79,7 @@ impl MePool {
             };
 
             match task {
-                Ok((stun_addr, Ok(Ok(res)))) => {
-                    let picked: Option<StunProbeResult> = match family {
-                        IpFamily::V4 => res.v4,
-                        IpFamily::V6 => res.v6,
-                    };
-
+                Ok((stun_addr, Ok(Ok(picked)))) => {
                     if let Some(result) = picked {
                         live_servers.push(stun_addr.clone());
                         let entry = best_by_ip
@@ -207,10 +207,21 @@ impl MePool {
     pub(super) async fn maybe_reflect_public_addr(
         &self,
         family: IpFamily,
+        bind_ip: Option<IpAddr>,
     ) -> Option<std::net::SocketAddr> {
         const STUN_CACHE_TTL: Duration = Duration::from_secs(600);
+        let use_shared_cache = bind_ip.is_none();
+        if !use_shared_cache {
+            match (family, bind_ip) {
+                (IpFamily::V4, Some(IpAddr::V4(_)))
+                | (IpFamily::V6, Some(IpAddr::V6(_)))
+                | (_, None) => {}
+                _ => return None,
+            }
+        }
         // Backoff window
-        if let Some(until) = *self.stun_backoff_until.read().await
+        if use_shared_cache
+            && let Some(until) = *self.stun_backoff_until.read().await
             && Instant::now() < until
         {
             if let Ok(cache) = self.nat_reflection_cache.try_lock() {
@@ -223,7 +234,9 @@ impl MePool {
             return None;
         }
 
-        if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
+        if use_shared_cache
+            && let Ok(mut cache) = self.nat_reflection_cache.try_lock()
+        {
             let slot = match family {
                 IpFamily::V4 => &mut cache.v4,
                 IpFamily::V6 => &mut cache.v6,
@@ -235,7 +248,11 @@ impl MePool {
             }
         }
 
-        let attempt = self.nat_probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let attempt = if use_shared_cache {
+            self.nat_probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        } else {
+            0
+        };
         let configured_servers = self.configured_stun_servers();
         let live_snapshot = self.nat_stun_live_servers.read().await.clone();
         let primary_servers = if live_snapshot.is_empty() {
@@ -245,12 +262,12 @@ impl MePool {
         };
 
         let (mut live_servers, mut selected_reflected) = self
-            .probe_stun_batch_for_family(&primary_servers, family, attempt)
+            .probe_stun_batch_for_family(&primary_servers, family, attempt, bind_ip)
             .await;
 
         if selected_reflected.is_none() && !configured_servers.is_empty() && primary_servers != configured_servers {
             let (rediscovered_live, rediscovered_reflected) = self
-                .probe_stun_batch_for_family(&configured_servers, family, attempt)
+                .probe_stun_batch_for_family(&configured_servers, family, attempt, bind_ip)
                 .await;
             live_servers = rediscovered_live;
             selected_reflected = rediscovered_reflected;
@@ -264,14 +281,18 @@ impl MePool {
         }
 
         if let Some(reflected_addr) = selected_reflected {
-            self.nat_probe_attempts.store(0, std::sync::atomic::Ordering::Relaxed);
+            if use_shared_cache {
+                self.nat_probe_attempts.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
             info!(
                 family = ?family,
                 live_servers = live_server_count,
                 "STUN-Quorum reached, IP: {}",
                 reflected_addr.ip()
             );
-            if let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
+            if use_shared_cache
+                && let Ok(mut cache) = self.nat_reflection_cache.try_lock()
+            {
                 let slot = match family {
                     IpFamily::V4 => &mut cache.v4,
                     IpFamily::V6 => &mut cache.v6,
@@ -281,8 +302,10 @@ impl MePool {
             return Some(reflected_addr);
         }
 
-        let backoff = Duration::from_secs(60 * 2u64.pow((attempt as u32).min(6)));
-        *self.stun_backoff_until.write().await = Some(Instant::now() + backoff);
+        if use_shared_cache {
+            let backoff = Duration::from_secs(60 * 2u64.pow((attempt as u32).min(6)));
+            *self.stun_backoff_until.write().await = Some(Instant::now() + backoff);
+        }
         None
     }
 }

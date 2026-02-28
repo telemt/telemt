@@ -47,8 +47,8 @@ impl MePool {
             return Err(ProxyError::Proxy("proxy-secret too short for ME auth".into()));
         }
 
-        let (stream, _connect_ms) = self.connect_tcp(addr).await?;
-        let hs = self.handshake_only(stream, addr, rng).await?;
+        let (stream, _connect_ms, upstream_egress) = self.connect_tcp(addr).await?;
+        let hs = self.handshake_only(stream, addr, upstream_egress, rng).await?;
 
         let writer_id = self.next_writer_id.fetch_add(1, Ordering::Relaxed);
         let generation = self.current_generation();
