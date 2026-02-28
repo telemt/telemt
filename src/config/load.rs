@@ -311,6 +311,26 @@ impl ProxyConfig {
             ));
         }
 
+        if config.general.me_route_backpressure_base_timeout_ms == 0 {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_base_timeout_ms must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_route_backpressure_high_timeout_ms
+            < config.general.me_route_backpressure_base_timeout_ms
+        {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_high_timeout_ms must be >= general.me_route_backpressure_base_timeout_ms".to_string(),
+            ));
+        }
+
+        if !(1..=100).contains(&config.general.me_route_backpressure_high_watermark_pct) {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_high_watermark_pct must be within [1, 100]".to_string(),
+            ));
+        }
+
         if config.general.effective_me_pool_force_close_secs() > 0
             && config.general.effective_me_pool_force_close_secs()
                 < config.general.me_pool_drain_ttl_secs

@@ -7,6 +7,7 @@ use tokio::net::UdpSocket;
 use crate::config::{UpstreamConfig, UpstreamType};
 use crate::crypto::SecureRandom;
 use crate::error::ProxyError;
+use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind};
 
 use super::MePool;
 
@@ -20,6 +21,7 @@ pub enum MePingFamily {
 pub struct MePingSample {
     pub dc: i32,
     pub addr: SocketAddr,
+    pub route: Option<String>,
     pub connect_ms: Option<f64>,
     pub handshake_ms: Option<f64>,
     pub error: Option<String>,
@@ -82,6 +84,34 @@ fn pick_target_for_family(reports: &[MePingReport], family: MePingFamily) -> Opt
             .find(|s| s.error.is_none() && s.handshake_ms.is_some())
             .map(|s| s.addr)
     })
+}
+
+fn route_from_egress(egress: Option<UpstreamEgressInfo>) -> Option<String> {
+    let info = egress?;
+    match info.route_kind {
+        UpstreamRouteKind::Direct => {
+            let src_ip = info
+                .direct_bind_ip
+                .or_else(|| info.local_addr.map(|addr| addr.ip()));
+            let ip = src_ip?;
+            let mut parts = Vec::new();
+            if let Some(dev) = detect_interface_for_ip(ip) {
+                parts.push(format!("dev={dev}"));
+            }
+            parts.push(format!("src={ip}"));
+            Some(format!("direct {}", parts.join(" ")))
+        }
+        UpstreamRouteKind::Socks4 => Some(
+            info.socks_bound_addr
+                .map(|addr| format!("socks4 bnd={addr}"))
+                .unwrap_or_else(|| "socks4".to_string()),
+        ),
+        UpstreamRouteKind::Socks5 => Some(
+            info.socks_bound_addr
+                .map(|addr| format!("socks5 bnd={addr}"))
+                .unwrap_or_else(|| "socks5".to_string()),
+        ),
+    }
 }
 
 #[cfg(unix)]
@@ -160,6 +190,15 @@ pub async fn format_me_route(
     v4_ok: bool,
     v6_ok: bool,
 ) -> String {
+    if let Some(route) = reports
+        .iter()
+        .flat_map(|report| report.samples.iter())
+        .find(|sample| sample.error.is_none() && sample.handshake_ms.is_some())
+        .and_then(|sample| sample.route.clone())
+    {
+        return route;
+    }
+
     let enabled_upstreams: Vec<_> = upstreams.iter().filter(|u| u.enabled).collect();
     if enabled_upstreams.is_empty() {
         return detect_direct_route_details(reports, prefer_ipv6, v4_ok, v6_ok)
@@ -222,6 +261,7 @@ mod tests {
         let s = sample(MePingSample {
             dc: 4,
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8888),
+            route: Some("direct src=1.2.3.4".to_string()),
             connect_ms: Some(12.3),
             handshake_ms: Some(34.7),
             error: None,
@@ -238,6 +278,7 @@ mod tests {
         let s = sample(MePingSample {
             dc: -5,
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)), 80),
+            route: Some("socks5".to_string()),
             connect_ms: Some(10.0),
             handshake_ms: None,
             error: Some("handshake timeout".to_string()),
@@ -278,10 +319,12 @@ pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingRe
             let mut connect_ms = None;
             let mut handshake_ms = None;
             let mut error = None;
+            let mut route = None;
 
             match pool.connect_tcp(addr).await {
                 Ok((stream, conn_rtt, upstream_egress)) => {
                     connect_ms = Some(conn_rtt);
+                    route = route_from_egress(upstream_egress);
                     match pool.handshake_only(stream, addr, upstream_egress, rng).await {
                         Ok(hs) => {
                             handshake_ms = Some(hs.handshake_ms);
@@ -302,6 +345,7 @@ pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingRe
             samples.push(MePingSample {
                 dc,
                 addr,
+                route,
                 connect_ms,
                 handshake_ms,
                 error,

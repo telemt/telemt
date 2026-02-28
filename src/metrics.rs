@@ -118,120 +118,394 @@ fn render_beobachten(beobachten: &BeobachtenStore, config: &ProxyConfig) -> Stri
 async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIpTracker) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(4096);
+    let telemetry = stats.telemetry_policy();
+    let core_enabled = telemetry.core_enabled;
+    let user_enabled = telemetry.user_enabled;
+    let me_allows_normal = telemetry.me_level.allows_normal();
+    let me_allows_debug = telemetry.me_level.allows_debug();
 
     let _ = writeln!(out, "# HELP telemt_uptime_seconds Proxy uptime");
     let _ = writeln!(out, "# TYPE telemt_uptime_seconds gauge");
     let _ = writeln!(out, "telemt_uptime_seconds {:.1}", stats.uptime_secs());
 
+    let _ = writeln!(out, "# HELP telemt_telemetry_core_enabled Runtime core telemetry switch");
+    let _ = writeln!(out, "# TYPE telemt_telemetry_core_enabled gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_core_enabled {}",
+        if core_enabled { 1 } else { 0 }
+    );
+
+    let _ = writeln!(out, "# HELP telemt_telemetry_user_enabled Runtime per-user telemetry switch");
+    let _ = writeln!(out, "# TYPE telemt_telemetry_user_enabled gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_enabled {}",
+        if user_enabled { 1 } else { 0 }
+    );
+
+    let _ = writeln!(out, "# HELP telemt_telemetry_me_level Runtime ME telemetry level flag");
+    let _ = writeln!(out, "# TYPE telemt_telemetry_me_level gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_me_level{{level=\"silent\"}} {}",
+        if matches!(telemetry.me_level, crate::config::MeTelemetryLevel::Silent) {
+            1
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_me_level{{level=\"normal\"}} {}",
+        if matches!(telemetry.me_level, crate::config::MeTelemetryLevel::Normal) {
+            1
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_me_level{{level=\"debug\"}} {}",
+        if matches!(telemetry.me_level, crate::config::MeTelemetryLevel::Debug) {
+            1
+        } else {
+            0
+        }
+    );
+
     let _ = writeln!(out, "# HELP telemt_connections_total Total accepted connections");
     let _ = writeln!(out, "# TYPE telemt_connections_total counter");
-    let _ = writeln!(out, "telemt_connections_total {}", stats.get_connects_all());
+    let _ = writeln!(
+        out,
+        "telemt_connections_total {}",
+        if core_enabled { stats.get_connects_all() } else { 0 }
+    );
 
     let _ = writeln!(out, "# HELP telemt_connections_bad_total Bad/rejected connections");
     let _ = writeln!(out, "# TYPE telemt_connections_bad_total counter");
-    let _ = writeln!(out, "telemt_connections_bad_total {}", stats.get_connects_bad());
+    let _ = writeln!(
+        out,
+        "telemt_connections_bad_total {}",
+        if core_enabled { stats.get_connects_bad() } else { 0 }
+    );
 
     let _ = writeln!(out, "# HELP telemt_handshake_timeouts_total Handshake timeouts");
     let _ = writeln!(out, "# TYPE telemt_handshake_timeouts_total counter");
-    let _ = writeln!(out, "telemt_handshake_timeouts_total {}", stats.get_handshake_timeouts());
+    let _ = writeln!(
+        out,
+        "telemt_handshake_timeouts_total {}",
+        if core_enabled {
+            stats.get_handshake_timeouts()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_keepalive_sent_total ME keepalive frames sent");
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_sent_total counter");
-    let _ = writeln!(out, "telemt_me_keepalive_sent_total {}", stats.get_me_keepalive_sent());
+    let _ = writeln!(
+        out,
+        "telemt_me_keepalive_sent_total {}",
+        if me_allows_debug {
+            stats.get_me_keepalive_sent()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_keepalive_failed_total ME keepalive send failures");
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_failed_total counter");
-    let _ = writeln!(out, "telemt_me_keepalive_failed_total {}", stats.get_me_keepalive_failed());
+    let _ = writeln!(
+        out,
+        "telemt_me_keepalive_failed_total {}",
+        if me_allows_normal {
+            stats.get_me_keepalive_failed()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_keepalive_pong_total ME keepalive pong replies");
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_pong_total counter");
-    let _ = writeln!(out, "telemt_me_keepalive_pong_total {}", stats.get_me_keepalive_pong());
+    let _ = writeln!(
+        out,
+        "telemt_me_keepalive_pong_total {}",
+        if me_allows_debug {
+            stats.get_me_keepalive_pong()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_keepalive_timeout_total ME keepalive ping timeouts");
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_timeout_total counter");
-    let _ = writeln!(out, "telemt_me_keepalive_timeout_total {}", stats.get_me_keepalive_timeout());
+    let _ = writeln!(
+        out,
+        "telemt_me_keepalive_timeout_total {}",
+        if me_allows_normal {
+            stats.get_me_keepalive_timeout()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_reconnect_attempts_total ME reconnect attempts");
     let _ = writeln!(out, "# TYPE telemt_me_reconnect_attempts_total counter");
-    let _ = writeln!(out, "telemt_me_reconnect_attempts_total {}", stats.get_me_reconnect_attempts());
+    let _ = writeln!(
+        out,
+        "telemt_me_reconnect_attempts_total {}",
+        if me_allows_normal {
+            stats.get_me_reconnect_attempts()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_reconnect_success_total ME reconnect successes");
     let _ = writeln!(out, "# TYPE telemt_me_reconnect_success_total counter");
-    let _ = writeln!(out, "telemt_me_reconnect_success_total {}", stats.get_me_reconnect_success());
+    let _ = writeln!(
+        out,
+        "telemt_me_reconnect_success_total {}",
+        if me_allows_normal {
+            stats.get_me_reconnect_success()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_crc_mismatch_total ME CRC mismatches");
     let _ = writeln!(out, "# TYPE telemt_me_crc_mismatch_total counter");
-    let _ = writeln!(out, "telemt_me_crc_mismatch_total {}", stats.get_me_crc_mismatch());
+    let _ = writeln!(
+        out,
+        "telemt_me_crc_mismatch_total {}",
+        if me_allows_normal {
+            stats.get_me_crc_mismatch()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_seq_mismatch_total ME sequence mismatches");
     let _ = writeln!(out, "# TYPE telemt_me_seq_mismatch_total counter");
-    let _ = writeln!(out, "telemt_me_seq_mismatch_total {}", stats.get_me_seq_mismatch());
+    let _ = writeln!(
+        out,
+        "telemt_me_seq_mismatch_total {}",
+        if me_allows_normal {
+            stats.get_me_seq_mismatch()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_route_drop_no_conn_total ME route drops: no conn");
     let _ = writeln!(out, "# TYPE telemt_me_route_drop_no_conn_total counter");
-    let _ = writeln!(out, "telemt_me_route_drop_no_conn_total {}", stats.get_me_route_drop_no_conn());
+    let _ = writeln!(
+        out,
+        "telemt_me_route_drop_no_conn_total {}",
+        if me_allows_normal {
+            stats.get_me_route_drop_no_conn()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_route_drop_channel_closed_total ME route drops: channel closed");
     let _ = writeln!(out, "# TYPE telemt_me_route_drop_channel_closed_total counter");
-    let _ = writeln!(out, "telemt_me_route_drop_channel_closed_total {}", stats.get_me_route_drop_channel_closed());
+    let _ = writeln!(
+        out,
+        "telemt_me_route_drop_channel_closed_total {}",
+        if me_allows_normal {
+            stats.get_me_route_drop_channel_closed()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_me_route_drop_queue_full_total ME route drops: queue full");
     let _ = writeln!(out, "# TYPE telemt_me_route_drop_queue_full_total counter");
-    let _ = writeln!(out, "telemt_me_route_drop_queue_full_total {}", stats.get_me_route_drop_queue_full());
+    let _ = writeln!(
+        out,
+        "telemt_me_route_drop_queue_full_total {}",
+        if me_allows_normal {
+            stats.get_me_route_drop_queue_full()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_route_drop_queue_full_profile_total ME route drops: queue full by adaptive profile"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_route_drop_queue_full_profile_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_route_drop_queue_full_profile_total{{profile=\"base\"}} {}",
+        if me_allows_normal {
+            stats.get_me_route_drop_queue_full_base()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_route_drop_queue_full_profile_total{{profile=\"high\"}} {}",
+        if me_allows_normal {
+            stats.get_me_route_drop_queue_full_high()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_socks_kdf_policy_total SOCKS KDF policy outcomes"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_socks_kdf_policy_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_socks_kdf_policy_total{{policy=\"strict\",outcome=\"reject\"}} {}",
+        if me_allows_normal {
+            stats.get_me_socks_kdf_strict_reject()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_socks_kdf_policy_total{{policy=\"compat\",outcome=\"fallback\"}} {}",
+        if me_allows_debug {
+            stats.get_me_socks_kdf_compat_fallback()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_secure_padding_invalid_total Invalid secure frame lengths");
     let _ = writeln!(out, "# TYPE telemt_secure_padding_invalid_total counter");
-    let _ = writeln!(out, "telemt_secure_padding_invalid_total {}", stats.get_secure_padding_invalid());
+    let _ = writeln!(
+        out,
+        "telemt_secure_padding_invalid_total {}",
+        if me_allows_normal {
+            stats.get_secure_padding_invalid()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_desync_total Total crypto-desync detections");
     let _ = writeln!(out, "# TYPE telemt_desync_total counter");
-    let _ = writeln!(out, "telemt_desync_total {}", stats.get_desync_total());
+    let _ = writeln!(
+        out,
+        "telemt_desync_total {}",
+        if me_allows_normal {
+            stats.get_desync_total()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_desync_full_logged_total Full forensic desync logs emitted");
     let _ = writeln!(out, "# TYPE telemt_desync_full_logged_total counter");
-    let _ = writeln!(out, "telemt_desync_full_logged_total {}", stats.get_desync_full_logged());
+    let _ = writeln!(
+        out,
+        "telemt_desync_full_logged_total {}",
+        if me_allows_normal {
+            stats.get_desync_full_logged()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_desync_suppressed_total Suppressed desync forensic events");
     let _ = writeln!(out, "# TYPE telemt_desync_suppressed_total counter");
-    let _ = writeln!(out, "telemt_desync_suppressed_total {}", stats.get_desync_suppressed());
+    let _ = writeln!(
+        out,
+        "telemt_desync_suppressed_total {}",
+        if me_allows_normal {
+            stats.get_desync_suppressed()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_desync_frames_bucket_total Desync count by frames_ok bucket");
     let _ = writeln!(out, "# TYPE telemt_desync_frames_bucket_total counter");
     let _ = writeln!(
         out,
         "telemt_desync_frames_bucket_total{{bucket=\"0\"}} {}",
-        stats.get_desync_frames_bucket_0()
+        if me_allows_normal {
+            stats.get_desync_frames_bucket_0()
+        } else {
+            0
+        }
     );
     let _ = writeln!(
         out,
         "telemt_desync_frames_bucket_total{{bucket=\"1_2\"}} {}",
-        stats.get_desync_frames_bucket_1_2()
+        if me_allows_normal {
+            stats.get_desync_frames_bucket_1_2()
+        } else {
+            0
+        }
     );
     let _ = writeln!(
         out,
         "telemt_desync_frames_bucket_total{{bucket=\"3_10\"}} {}",
-        stats.get_desync_frames_bucket_3_10()
+        if me_allows_normal {
+            stats.get_desync_frames_bucket_3_10()
+        } else {
+            0
+        }
     );
     let _ = writeln!(
         out,
         "telemt_desync_frames_bucket_total{{bucket=\"gt_10\"}} {}",
-        stats.get_desync_frames_bucket_gt_10()
+        if me_allows_normal {
+            stats.get_desync_frames_bucket_gt_10()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(out, "# HELP telemt_pool_swap_total Successful ME pool swaps");
     let _ = writeln!(out, "# TYPE telemt_pool_swap_total counter");
-    let _ = writeln!(out, "telemt_pool_swap_total {}", stats.get_pool_swap_total());
+    let _ = writeln!(
+        out,
+        "telemt_pool_swap_total {}",
+        if me_allows_debug {
+            stats.get_pool_swap_total()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_pool_drain_active Active draining ME writers");
     let _ = writeln!(out, "# TYPE telemt_pool_drain_active gauge");
-    let _ = writeln!(out, "telemt_pool_drain_active {}", stats.get_pool_drain_active());
+    let _ = writeln!(
+        out,
+        "telemt_pool_drain_active {}",
+        if me_allows_debug {
+            stats.get_pool_drain_active()
+        } else {
+            0
+        }
+    );
 
     let _ = writeln!(out, "# HELP telemt_pool_force_close_total Forced close events for draining writers");
     let _ = writeln!(out, "# TYPE telemt_pool_force_close_total counter");
     let _ = writeln!(
         out,
         "telemt_pool_force_close_total {}",
-        stats.get_pool_force_close_total()
+        if me_allows_normal {
+            stats.get_pool_force_close_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(out, "# HELP telemt_pool_stale_pick_total Stale writer fallback picks for new binds");
@@ -239,7 +513,11 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_pool_stale_pick_total {}",
-        stats.get_pool_stale_pick_total()
+        if me_allows_normal {
+            stats.get_pool_stale_pick_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(out, "# HELP telemt_me_writer_removed_total Total ME writer removals");
@@ -247,7 +525,11 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_me_writer_removed_total {}",
-        stats.get_me_writer_removed_total()
+        if me_allows_debug {
+            stats.get_me_writer_removed_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(
@@ -258,7 +540,11 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_me_writer_removed_unexpected_total {}",
-        stats.get_me_writer_removed_unexpected_total()
+        if me_allows_normal {
+            stats.get_me_writer_removed_unexpected_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(out, "# HELP telemt_me_refill_triggered_total Immediate ME refill runs started");
@@ -266,7 +552,11 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_me_refill_triggered_total {}",
-        stats.get_me_refill_triggered_total()
+        if me_allows_debug {
+            stats.get_me_refill_triggered_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(
@@ -277,7 +567,11 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_me_refill_skipped_inflight_total {}",
-        stats.get_me_refill_skipped_inflight_total()
+        if me_allows_debug {
+            stats.get_me_refill_skipped_inflight_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(out, "# HELP telemt_me_refill_failed_total Immediate ME refill failures");
@@ -285,7 +579,11 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_me_refill_failed_total {}",
-        stats.get_me_refill_failed_total()
+        if me_allows_normal {
+            stats.get_me_refill_failed_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(
@@ -296,7 +594,11 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_me_writer_restored_same_endpoint_total {}",
-        stats.get_me_writer_restored_same_endpoint_total()
+        if me_allows_normal {
+            stats.get_me_writer_restored_same_endpoint_total()
+        } else {
+            0
+        }
     );
 
     let _ = writeln!(
@@ -307,16 +609,24 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(
         out,
         "telemt_me_writer_restored_fallback_total {}",
-        stats.get_me_writer_restored_fallback_total()
+        if me_allows_normal {
+            stats.get_me_writer_restored_fallback_total()
+        } else {
+            0
+        }
     );
 
-    let unresolved_writer_losses = stats
-        .get_me_writer_removed_unexpected_total()
-        .saturating_sub(
-            stats
-                .get_me_writer_restored_same_endpoint_total()
-                .saturating_add(stats.get_me_writer_restored_fallback_total()),
-        );
+    let unresolved_writer_losses = if me_allows_normal {
+        stats
+            .get_me_writer_removed_unexpected_total()
+            .saturating_sub(
+                stats
+                    .get_me_writer_restored_same_endpoint_total()
+                    .saturating_add(stats.get_me_writer_restored_fallback_total()),
+            )
+    } else {
+        0
+    };
     let _ = writeln!(
         out,
         "# HELP telemt_me_writer_removed_unexpected_minus_restored_total Unexpected writer removals not yet compensated by restore"
@@ -343,51 +653,63 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(out, "# TYPE telemt_user_msgs_from_client counter");
     let _ = writeln!(out, "# HELP telemt_user_msgs_to_client Per-user messages sent");
     let _ = writeln!(out, "# TYPE telemt_user_msgs_to_client counter");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_user_series_suppressed User-labeled metric series suppression flag"
+    );
+    let _ = writeln!(out, "# TYPE telemt_telemetry_user_series_suppressed gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_suppressed {}",
+        if user_enabled { 0 } else { 1 }
+    );
 
-    for entry in stats.iter_user_stats() {
-        let user = entry.key();
-        let s = entry.value();
-        let _ = writeln!(out, "telemt_user_connections_total{{user=\"{}\"}} {}", user, s.connects.load(std::sync::atomic::Ordering::Relaxed));
-        let _ = writeln!(out, "telemt_user_connections_current{{user=\"{}\"}} {}", user, s.curr_connects.load(std::sync::atomic::Ordering::Relaxed));
-        let _ = writeln!(out, "telemt_user_octets_from_client{{user=\"{}\"}} {}", user, s.octets_from_client.load(std::sync::atomic::Ordering::Relaxed));
-        let _ = writeln!(out, "telemt_user_octets_to_client{{user=\"{}\"}} {}", user, s.octets_to_client.load(std::sync::atomic::Ordering::Relaxed));
-        let _ = writeln!(out, "telemt_user_msgs_from_client{{user=\"{}\"}} {}", user, s.msgs_from_client.load(std::sync::atomic::Ordering::Relaxed));
-        let _ = writeln!(out, "telemt_user_msgs_to_client{{user=\"{}\"}} {}", user, s.msgs_to_client.load(std::sync::atomic::Ordering::Relaxed));
-    }
+    if user_enabled {
+        for entry in stats.iter_user_stats() {
+            let user = entry.key();
+            let s = entry.value();
+            let _ = writeln!(out, "telemt_user_connections_total{{user=\"{}\"}} {}", user, s.connects.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = writeln!(out, "telemt_user_connections_current{{user=\"{}\"}} {}", user, s.curr_connects.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = writeln!(out, "telemt_user_octets_from_client{{user=\"{}\"}} {}", user, s.octets_from_client.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = writeln!(out, "telemt_user_octets_to_client{{user=\"{}\"}} {}", user, s.octets_to_client.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = writeln!(out, "telemt_user_msgs_from_client{{user=\"{}\"}} {}", user, s.msgs_from_client.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = writeln!(out, "telemt_user_msgs_to_client{{user=\"{}\"}} {}", user, s.msgs_to_client.load(std::sync::atomic::Ordering::Relaxed));
+        }
 
-    let ip_stats = ip_tracker.get_stats().await;
-    let ip_counts: HashMap<String, usize> = ip_stats
-        .into_iter()
-        .map(|(user, count, _)| (user, count))
-        .collect();
+        let ip_stats = ip_tracker.get_stats().await;
+        let ip_counts: HashMap<String, usize> = ip_stats
+            .into_iter()
+            .map(|(user, count, _)| (user, count))
+            .collect();
 
-    let mut unique_users = BTreeSet::new();
-    unique_users.extend(config.access.user_max_unique_ips.keys().cloned());
-    unique_users.extend(ip_counts.keys().cloned());
+        let mut unique_users = BTreeSet::new();
+        unique_users.extend(config.access.user_max_unique_ips.keys().cloned());
+        unique_users.extend(ip_counts.keys().cloned());
 
-    let _ = writeln!(out, "# HELP telemt_user_unique_ips_current Per-user current number of unique active IPs");
-    let _ = writeln!(out, "# TYPE telemt_user_unique_ips_current gauge");
-    let _ = writeln!(out, "# HELP telemt_user_unique_ips_limit Per-user configured unique IP limit (0 means unlimited)");
-    let _ = writeln!(out, "# TYPE telemt_user_unique_ips_limit gauge");
-    let _ = writeln!(out, "# HELP telemt_user_unique_ips_utilization Per-user unique IP usage ratio (0 for unlimited)");
-    let _ = writeln!(out, "# TYPE telemt_user_unique_ips_utilization gauge");
+        let _ = writeln!(out, "# HELP telemt_user_unique_ips_current Per-user current number of unique active IPs");
+        let _ = writeln!(out, "# TYPE telemt_user_unique_ips_current gauge");
+        let _ = writeln!(out, "# HELP telemt_user_unique_ips_limit Per-user configured unique IP limit (0 means unlimited)");
+        let _ = writeln!(out, "# TYPE telemt_user_unique_ips_limit gauge");
+        let _ = writeln!(out, "# HELP telemt_user_unique_ips_utilization Per-user unique IP usage ratio (0 for unlimited)");
+        let _ = writeln!(out, "# TYPE telemt_user_unique_ips_utilization gauge");
 
-    for user in unique_users {
-        let current = ip_counts.get(&user).copied().unwrap_or(0);
-        let limit = config.access.user_max_unique_ips.get(&user).copied().unwrap_or(0);
-        let utilization = if limit > 0 {
-            current as f64 / limit as f64
-        } else {
-            0.0
-        };
-        let _ = writeln!(out, "telemt_user_unique_ips_current{{user=\"{}\"}} {}", user, current);
-        let _ = writeln!(out, "telemt_user_unique_ips_limit{{user=\"{}\"}} {}", user, limit);
-        let _ = writeln!(
-            out,
-            "telemt_user_unique_ips_utilization{{user=\"{}\"}} {:.6}",
-            user,
-            utilization
-        );
+        for user in unique_users {
+            let current = ip_counts.get(&user).copied().unwrap_or(0);
+            let limit = config.access.user_max_unique_ips.get(&user).copied().unwrap_or(0);
+            let utilization = if limit > 0 {
+                current as f64 / limit as f64
+            } else {
+                0.0
+            };
+            let _ = writeln!(out, "telemt_user_unique_ips_current{{user=\"{}\"}} {}", user, current);
+            let _ = writeln!(out, "telemt_user_unique_ips_limit{{user=\"{}\"}} {}", user, limit);
+            let _ = writeln!(
+                out,
+                "telemt_user_unique_ips_utilization{{user=\"{}\"}} {:.6}",
+                user,
+                utilization
+            );
+        }
     }
 
     out

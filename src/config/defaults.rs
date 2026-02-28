@@ -170,6 +170,18 @@ pub(crate) fn default_desync_all_full() -> bool {
     false
 }
 
+pub(crate) fn default_me_route_backpressure_base_timeout_ms() -> u64 {
+    25
+}
+
+pub(crate) fn default_me_route_backpressure_high_timeout_ms() -> u64 {
+    120
+}
+
+pub(crate) fn default_me_route_backpressure_high_watermark_pct() -> u8 {
+    80
+}
+
 pub(crate) fn default_beobachten_minutes() -> u64 {
     10
 }

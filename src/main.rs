@@ -36,6 +36,7 @@ use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
 use crate::proxy::ClientHandler;
 use crate::stats::beobachten::BeobachtenStore;
+use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::transport::middle_proxy::{
@@ -406,6 +407,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let prefer_ipv6 = decision.prefer_ipv6();
     let mut use_middle_proxy = config.general.use_middle_proxy && (decision.ipv4_me || decision.ipv6_me);
     let stats = Arc::new(Stats::new());
+    stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
     let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
 
@@ -539,6 +541,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     config.general.me_hardswap_warmup_delay_max_ms,
                     config.general.me_hardswap_warmup_extra_passes,
                     config.general.me_hardswap_warmup_pass_backoff_base_ms,
+                    config.general.me_socks_kdf_policy,
+                    config.general.me_route_backpressure_base_timeout_ms,
+                    config.general.me_route_backpressure_high_timeout_ms,
+                    config.general.me_route_backpressure_high_watermark_pct,
                 );
 
                 let pool_size = config.general.middle_proxy_pool_size.max(1);
@@ -793,6 +799,27 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         detected_ip_v4,
         detected_ip_v6,
     );
+
+    let stats_policy = stats.clone();
+    let mut config_rx_policy = config_rx.clone();
+    let me_pool_policy = me_pool.clone();
+    tokio::spawn(async move {
+        loop {
+            if config_rx_policy.changed().await.is_err() {
+                break;
+            }
+            let cfg = config_rx_policy.borrow_and_update().clone();
+            stats_policy.apply_telemetry_policy(TelemetryPolicy::from_config(&cfg.general.telemetry));
+            if let Some(pool) = &me_pool_policy {
+                pool.update_runtime_transport_policy(
+                    cfg.general.me_socks_kdf_policy,
+                    cfg.general.me_route_backpressure_base_timeout_ms,
+                    cfg.general.me_route_backpressure_high_timeout_ms,
+                    cfg.general.me_route_backpressure_high_watermark_pct,
+                );
+            }
+        }
+    });
 
     let beobachten_writer = beobachten.clone();
     let config_rx_beobachten = config_rx.clone();

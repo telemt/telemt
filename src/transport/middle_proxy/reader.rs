@@ -124,7 +124,14 @@ pub(crate) async fn reader_loop(
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
                         RouteResult::ChannelClosed => stats.increment_me_route_drop_channel_closed(),
-                        RouteResult::QueueFull => stats.increment_me_route_drop_queue_full(),
+                        RouteResult::QueueFullBase => {
+                            stats.increment_me_route_drop_queue_full();
+                            stats.increment_me_route_drop_queue_full_base();
+                        }
+                        RouteResult::QueueFullHigh => {
+                            stats.increment_me_route_drop_queue_full();
+                            stats.increment_me_route_drop_queue_full_high();
+                        }
                         RouteResult::Routed => {}
                     }
                     reg.unregister(cid).await;
@@ -140,7 +147,14 @@ pub(crate) async fn reader_loop(
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
                         RouteResult::ChannelClosed => stats.increment_me_route_drop_channel_closed(),
-                        RouteResult::QueueFull => stats.increment_me_route_drop_queue_full(),
+                        RouteResult::QueueFullBase => {
+                            stats.increment_me_route_drop_queue_full();
+                            stats.increment_me_route_drop_queue_full_base();
+                        }
+                        RouteResult::QueueFullHigh => {
+                            stats.increment_me_route_drop_queue_full();
+                            stats.increment_me_route_drop_queue_full_high();
+                        }
                         RouteResult::Routed => {}
                     }
                     reg.unregister(cid).await;

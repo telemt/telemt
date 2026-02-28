@@ -14,6 +14,7 @@ use tokio::net::{TcpStream, TcpSocket};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
+use crate::config::MeSocksKdfPolicy;
 use crate::crypto::{SecureRandom, build_middleproxy_prekey, derive_middleproxy_keys, sha256};
 use crate::error::{ProxyError, Result};
 use crate::network::IpFamily;
@@ -117,6 +118,13 @@ impl MePool {
         Some(bound)
     }
 
+    fn is_socks_route(upstream_egress: Option<UpstreamEgressInfo>) -> bool {
+        matches!(
+            upstream_egress.map(|info| info.route_kind),
+            Some(UpstreamRouteKind::Socks4 | UpstreamRouteKind::Socks5)
+        )
+    }
+
     /// TCP connect with timeout + return RTT in milliseconds.
     pub(crate) async fn connect_tcp(
         &self,
@@ -125,14 +133,7 @@ impl MePool {
         let start = Instant::now();
         let (stream, upstream_egress) = if let Some(upstream) = &self.upstream {
             let dc_idx = self.resolve_dc_idx_for_endpoint(addr).await;
-            let (stream, egress) = timeout(
-                Duration::from_secs(ME_CONNECT_TIMEOUT_SECS),
-                upstream.connect_with_details(addr, dc_idx, None),
-            )
-            .await
-            .map_err(|_| ProxyError::ConnectionTimeout {
-                addr: addr.to_string(),
-            })??;
+            let (stream, egress) = upstream.connect_with_details(addr, dc_idx, None).await?;
             (stream, Some(egress))
         } else {
             let connect_fut = async {
@@ -226,9 +227,29 @@ impl MePool {
         } else {
             IpFamily::V6
         };
+        let is_socks_route = Self::is_socks_route(upstream_egress);
         let socks_bound_addr = Self::select_socks_bound_addr(family, upstream_egress);
         let reflected = if let Some(bound) = socks_bound_addr {
             Some(bound)
+        } else if is_socks_route {
+            match self.socks_kdf_policy() {
+                MeSocksKdfPolicy::Strict => {
+                    self.stats.increment_me_socks_kdf_strict_reject();
+                    return Err(ProxyError::InvalidHandshake(
+                        "SOCKS route returned no valid BND.ADDR for ME KDF (strict policy)"
+                            .to_string(),
+                    ));
+                }
+                MeSocksKdfPolicy::Compat => {
+                    self.stats.increment_me_socks_kdf_compat_fallback();
+                    if self.nat_probe {
+                        let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
+                        self.maybe_reflect_public_addr(family, bind_ip).await
+                    } else {
+                        None
+                    }
+                }
+            }
         } else if self.nat_probe {
             let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
             self.maybe_reflect_public_addr(family, bind_ip).await

@@ -16,6 +16,7 @@
 //! | `general` | `me_pool_drain_ttl_secs`      | Applied on next ME map update     |
 //! | `general` | `me_pool_min_fresh_ratio`     | Applied on next ME map update     |
 //! | `general` | `me_reinit_drain_timeout_secs`| Applied on next ME map update     |
+//! | `general` | `telemetry` / `me_*_policy`   | Applied immediately               |
 //! | `network` | `dns_overrides`               | Applied immediately               |
 //! | `access`  | All user/quota fields         | Effective immediately             |
 //!
@@ -30,7 +31,7 @@ use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use crate::config::LogLevel;
+use crate::config::{LogLevel, MeSocksKdfPolicy, MeTelemetryLevel};
 use super::load::ProxyConfig;
 
 // ── Hot fields ────────────────────────────────────────────────────────────────
@@ -52,6 +53,13 @@ pub struct HotFields {
     pub me_keepalive_interval_secs: u64,
     pub me_keepalive_jitter_secs:   u64,
     pub me_keepalive_payload_random: bool,
+    pub telemetry_core_enabled: bool,
+    pub telemetry_user_enabled: bool,
+    pub telemetry_me_level: MeTelemetryLevel,
+    pub me_socks_kdf_policy: MeSocksKdfPolicy,
+    pub me_route_backpressure_base_timeout_ms: u64,
+    pub me_route_backpressure_high_timeout_ms: u64,
+    pub me_route_backpressure_high_watermark_pct: u8,
     pub access:                  crate::config::AccessConfig,
 }
 
@@ -72,6 +80,13 @@ impl HotFields {
             me_keepalive_interval_secs: cfg.general.me_keepalive_interval_secs,
             me_keepalive_jitter_secs:   cfg.general.me_keepalive_jitter_secs,
             me_keepalive_payload_random: cfg.general.me_keepalive_payload_random,
+            telemetry_core_enabled: cfg.general.telemetry.core_enabled,
+            telemetry_user_enabled: cfg.general.telemetry.user_enabled,
+            telemetry_me_level: cfg.general.telemetry.me_level,
+            me_socks_kdf_policy: cfg.general.me_socks_kdf_policy,
+            me_route_backpressure_base_timeout_ms: cfg.general.me_route_backpressure_base_timeout_ms,
+            me_route_backpressure_high_timeout_ms: cfg.general.me_route_backpressure_high_timeout_ms,
+            me_route_backpressure_high_watermark_pct: cfg.general.me_route_backpressure_high_watermark_pct,
             access:                  cfg.access.clone(),
         }
     }
@@ -259,6 +274,41 @@ fn log_changes(
             new_hot.me_keepalive_interval_secs,
             new_hot.me_keepalive_jitter_secs,
             new_hot.me_keepalive_payload_random,
+        );
+    }
+
+    if old_hot.telemetry_core_enabled != new_hot.telemetry_core_enabled
+        || old_hot.telemetry_user_enabled != new_hot.telemetry_user_enabled
+        || old_hot.telemetry_me_level != new_hot.telemetry_me_level
+    {
+        info!(
+            "config reload: telemetry: core_enabled={} user_enabled={} me_level={}",
+            new_hot.telemetry_core_enabled,
+            new_hot.telemetry_user_enabled,
+            new_hot.telemetry_me_level,
+        );
+    }
+
+    if old_hot.me_socks_kdf_policy != new_hot.me_socks_kdf_policy {
+        info!(
+            "config reload: me_socks_kdf_policy: {:?} → {:?}",
+            old_hot.me_socks_kdf_policy,
+            new_hot.me_socks_kdf_policy,
+        );
+    }
+
+    if old_hot.me_route_backpressure_base_timeout_ms
+        != new_hot.me_route_backpressure_base_timeout_ms
+        || old_hot.me_route_backpressure_high_timeout_ms
+            != new_hot.me_route_backpressure_high_timeout_ms
+        || old_hot.me_route_backpressure_high_watermark_pct
+            != new_hot.me_route_backpressure_high_watermark_pct
+    {
+        info!(
+            "config reload: me_route_backpressure: base={}ms high={}ms watermark={}%",
+            new_hot.me_route_backpressure_base_timeout_ms,
+            new_hot.me_route_backpressure_high_timeout_ms,
+            new_hot.me_route_backpressure_high_watermark_pct,
         );
     }
 
