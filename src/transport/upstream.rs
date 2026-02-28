@@ -707,8 +707,22 @@ impl UpstreamManager {
 
         for (upstream_idx, upstream_config, bind_rr) in &upstreams {
             let upstream_name = match &upstream_config.upstream_type {
-                UpstreamType::Direct { interface, .. } => {
-                    format!("direct{}", interface.as_ref().map(|i| format!(" ({})", i)).unwrap_or_default())
+                UpstreamType::Direct {
+                    interface,
+                    bind_addresses,
+                } => {
+                    let mut direct_parts = Vec::new();
+                    if let Some(dev) = interface.as_deref().filter(|v| !v.is_empty()) {
+                        direct_parts.push(format!("dev={dev}"));
+                    }
+                    if let Some(src) = bind_addresses.as_ref().filter(|v| !v.is_empty()) {
+                        direct_parts.push(format!("src={}", src.join(",")));
+                    }
+                    if direct_parts.is_empty() {
+                        "direct".to_string()
+                    } else {
+                        format!("direct {}", direct_parts.join(" "))
+                    }
                 }
                 UpstreamType::Socks4 { address, .. } => format!("socks4://{}", address),
                 UpstreamType::Socks5 { address, .. } => format!("socks5://{}", address),

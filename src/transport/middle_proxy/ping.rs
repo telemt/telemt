@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use tokio::net::UdpSocket;
+
+use crate::config::{UpstreamConfig, UpstreamType};
 use crate::crypto::SecureRandom;
 use crate::error::ProxyError;
 
@@ -48,6 +51,161 @@ pub fn format_sample_line(sample: &MePingSample) -> String {
         (Some(conn), None, None) => format!("     {sign} {addr}\tPing: {:.0} ms / RPC: FAIL", conn),
         _ => format!("     {sign} {addr}\tPing: FAIL"),
     }
+}
+
+fn format_direct_with_config(
+    interface: &Option<String>,
+    bind_addresses: &Option<Vec<String>>,
+) -> Option<String> {
+    let mut direct_parts: Vec<String> = Vec::new();
+    if let Some(dev) = interface.as_deref().filter(|v| !v.is_empty()) {
+        direct_parts.push(format!("dev={dev}"));
+    }
+    if let Some(src) = bind_addresses.as_ref().filter(|v| !v.is_empty()) {
+        direct_parts.push(format!("src={}", src.join(",")));
+    }
+    if direct_parts.is_empty() {
+        None
+    } else {
+        Some(format!("direct {}", direct_parts.join(" ")))
+    }
+}
+
+fn pick_target_for_family(reports: &[MePingReport], family: MePingFamily) -> Option<SocketAddr> {
+    reports.iter().find_map(|report| {
+        if report.family != family {
+            return None;
+        }
+        report
+            .samples
+            .iter()
+            .find(|s| s.error.is_none() && s.handshake_ms.is_some())
+            .map(|s| s.addr)
+    })
+}
+
+#[cfg(unix)]
+fn detect_interface_for_ip(ip: IpAddr) -> Option<String> {
+    use nix::ifaddrs::getifaddrs;
+
+    if let Ok(addrs) = getifaddrs() {
+        for iface in addrs {
+            if let Some(address) = iface.address {
+                if let Some(v4) = address.as_sockaddr_in() {
+                    if IpAddr::V4(v4.ip()) == ip {
+                        return Some(iface.interface_name);
+                    }
+                } else if let Some(v6) = address.as_sockaddr_in6() {
+                    if IpAddr::V6(v6.ip()) == ip {
+                        return Some(iface.interface_name);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn detect_interface_for_ip(_ip: IpAddr) -> Option<String> {
+    None
+}
+
+async fn detect_direct_route_details(
+    reports: &[MePingReport],
+    prefer_ipv6: bool,
+    v4_ok: bool,
+    v6_ok: bool,
+) -> Option<String> {
+    let target_addr = if prefer_ipv6 && v6_ok {
+        pick_target_for_family(reports, MePingFamily::V6)
+            .or_else(|| pick_target_for_family(reports, MePingFamily::V4))
+    } else if v4_ok {
+        pick_target_for_family(reports, MePingFamily::V4)
+            .or_else(|| pick_target_for_family(reports, MePingFamily::V6))
+    } else {
+        pick_target_for_family(reports, MePingFamily::V6)
+            .or_else(|| pick_target_for_family(reports, MePingFamily::V4))
+    }?;
+
+    let local_ip = if target_addr.is_ipv4() {
+        let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+        sock.connect(target_addr).await.ok()?;
+        sock.local_addr().ok().map(|a| a.ip())
+    } else {
+        let sock = UdpSocket::bind("[::]:0").await.ok()?;
+        sock.connect(target_addr).await.ok()?;
+        sock.local_addr().ok().map(|a| a.ip())
+    };
+
+    let mut parts = Vec::new();
+    if let Some(ip) = local_ip {
+        if let Some(dev) = detect_interface_for_ip(ip) {
+            parts.push(format!("dev={dev}"));
+        }
+        parts.push(format!("src={ip}"));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("direct {}", parts.join(" ")))
+    }
+}
+
+pub async fn format_me_route(
+    upstreams: &[UpstreamConfig],
+    reports: &[MePingReport],
+    prefer_ipv6: bool,
+    v4_ok: bool,
+    v6_ok: bool,
+) -> String {
+    let enabled_upstreams: Vec<_> = upstreams.iter().filter(|u| u.enabled).collect();
+    if enabled_upstreams.is_empty() {
+        return detect_direct_route_details(reports, prefer_ipv6, v4_ok, v6_ok)
+            .await
+            .unwrap_or_else(|| "direct".to_string());
+    }
+
+    if enabled_upstreams.len() == 1 {
+        return match &enabled_upstreams[0].upstream_type {
+            UpstreamType::Direct {
+                interface,
+                bind_addresses,
+            } => {
+                if let Some(route) = format_direct_with_config(interface, bind_addresses) {
+                    route
+                } else {
+                    detect_direct_route_details(reports, prefer_ipv6, v4_ok, v6_ok)
+                        .await
+                        .unwrap_or_else(|| "direct".to_string())
+                }
+            }
+            UpstreamType::Socks4 { address, .. } => format!("socks4://{address}"),
+            UpstreamType::Socks5 { address, .. } => format!("socks5://{address}"),
+        };
+    }
+
+    let has_direct = enabled_upstreams
+        .iter()
+        .any(|u| matches!(u.upstream_type, UpstreamType::Direct { .. }));
+    let has_socks4 = enabled_upstreams
+        .iter()
+        .any(|u| matches!(u.upstream_type, UpstreamType::Socks4 { .. }));
+    let has_socks5 = enabled_upstreams
+        .iter()
+        .any(|u| matches!(u.upstream_type, UpstreamType::Socks5 { .. }));
+    let mut kinds = Vec::new();
+    if has_direct {
+        kinds.push("direct");
+    }
+    if has_socks4 {
+        kinds.push("socks4");
+    }
+    if has_socks5 {
+        kinds.push("socks5");
+    }
+    format!("mixed upstreams ({})", kinds.join(", "))
 }
 
 #[cfg(test)]

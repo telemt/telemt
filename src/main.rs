@@ -40,6 +40,7 @@ use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::transport::middle_proxy::{
     MePool, fetch_proxy_config, run_me_ping, MePingFamily, MePingSample, format_sample_line,
+    format_me_route,
 };
 use crate::transport::{ListenOptions, UpstreamManager, create_listener, find_listener_processes};
 use crate::tls_front::TlsFrontCache;
@@ -624,7 +625,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         } else {
             info!("  No ME connectivity");
         }
-        info!("  via direct");
+        let me_route = format_me_route(
+            &config.upstreams,
+            &me_results,
+            prefer_ipv6,
+            v4_ok,
+            v6_ok,
+        )
+        .await;
+        info!("  via {}", me_route);
         info!("============================================================");
 
         use std::collections::BTreeMap;
