@@ -1,176 +1,669 @@
-# Telemt full config with default values.
-# Examples are kept in comments after '#'.
+# ==============================================================================
+#
+#   TELEMT — Advanced Rust-based Telegram MTProto Proxy
+#   Full Configuration Reference
+#
+#   This file is both a working config and a complete documentation.
+#   Every parameter is explained. Read it top to bottom before deploying.
+#
+#   Quick Start:
+#     1. Set [server].port to your desired port (443 recommended)
+#     2. Generate a secret: openssl rand -hex 16
+#     3. Put it in [access.users] under a name you choose
+#     4. Set [censorship].tls_domain to a popular unblocked HTTPS site
+#     5. Set your public IP in [general].middle_proxy_nat_ip
+#        and [general.links].public_host
+#     6. Set announce IP in [[server.listeners]]
+#     7. Run Telemt. It prints a tg:// link. Send it to your users.
+#
+#   Modes of Operation:
+#     Direct Mode  (use_middle_proxy = false)
+#       Connects straight to Telegram DCs via TCP. Simple, fast, low overhead.
+#       No ad_tag support. No CDN DC support (203, etc).
+#
+#     Middle-Proxy Mode  (use_middle_proxy = true)
+#       Connects to Telegram Middle-End servers via RPC protocol.
+#       Required for ad_tag monetization and CDN support.
+#       Requires proxy_secret_path and a valid public IP.
+#
+# ==============================================================================
 
-# Top-level legacy field.
-show_link = [] # example: "*" or ["alice", "bob"]
-# default_dc = 2 # example: default DC for unmapped non-standard DCs
+
+# ==============================================================================
+# LEGACY TOP-LEVEL FIELDS
+# ==============================================================================
+
+# Deprecated. Use [general.links].show instead.
+# Accepts "*" for all users, or an array like ["alice", "bob"].
+show_link = []
+
+# Fallback Datacenter index (1-5) when a client requests an unknown DC ID.
+# DC 2 is Amsterdam (Europe), closest for most CIS users.
+default_dc = 2
+
+
+# ==============================================================================
+# GENERAL SETTINGS
+# ==============================================================================
 
 [general]
+
+# ------------------------------------------------------------------------------
+# Core Protocol
+# ------------------------------------------------------------------------------
+
+# Coalesce the MTProto handshake and first data payload into a single TCP packet.
+# Significantly reduces connection latency. No reason to disable.
 fast_mode = true
-use_middle_proxy = false
-# ad_tag = "00000000000000000000000000000000" # example
-# proxy_secret_path = "proxy-secret" # example custom path
-# middle_proxy_nat_ip = "203.0.113.10" # example public NAT IP override
+
+# How the proxy connects to Telegram servers.
+# false = Direct TCP to Telegram DCs (simple, low overhead)
+# true  = Middle-End RPC protocol (required for ad_tag and CDN DCs)
+use_middle_proxy = true
+
+# 32-char hex Ad-Tag from @MTProxybot for sponsored channel injection.
+# Only works when use_middle_proxy = true.
+# Obtain yours: message @MTProxybot on Telegram, register your proxy.
+# ad_tag = "00000000000000000000000000000000"
+
+# ------------------------------------------------------------------------------
+# Middle-End Authentication
+# ------------------------------------------------------------------------------
+
+# Path to the Telegram infrastructure AES key file.
+# Auto-downloaded from https://core.telegram.org/getProxySecret on first run.
+# This key authenticates your proxy with Middle-End servers.
+proxy_secret_path = "proxy-secret"
+
+# ------------------------------------------------------------------------------
+# Public IP Configuration (Critical for Middle-Proxy Mode)
+# ------------------------------------------------------------------------------
+
+# Your server's PUBLIC IPv4 address.
+# Middle-End servers need this for the cryptographic Key Derivation Function.
+# If your server has a direct public IP, set it here.
+# If behind NAT (AWS, Docker, etc.), this MUST be your external IP.
+# If omitted, Telemt uses STUN to auto-detect (see middle_proxy_nat_probe).
+# middle_proxy_nat_ip = "203.0.113.10"
+
+# Auto-detect public IP via STUN servers defined in [network].
+# Set to false if you hardcoded middle_proxy_nat_ip above.
+# Set to true if you want automatic detection.
 middle_proxy_nat_probe = true
-# middle_proxy_nat_stun = "stun.l.google.com:19302" # example
-# middle_proxy_nat_stun_servers = [] # example: ["stun1.l.google.com:19302", "stun2.l.google.com:19302"]
+
+# ------------------------------------------------------------------------------
+# Middle-End Connection Pool
+# ------------------------------------------------------------------------------
+
+# Number of persistent multiplexed RPC connections to ME servers.
+# All client traffic is routed through these "fat pipes".
+# 8 handles thousands of concurrent users comfortably.
 middle_proxy_pool_size = 8
+
+# Legacy field. Connections kept initialized but idle as warm standby.
 middle_proxy_warm_standby = 16
+
+# ------------------------------------------------------------------------------
+# Middle-End Keepalive
+# Telegram ME servers aggressively kill idle TCP connections.
+# These settings send periodic RPC_PING frames to keep pipes alive.
+# ------------------------------------------------------------------------------
+
 me_keepalive_enabled = true
+
+# Base interval between pings in seconds.
 me_keepalive_interval_secs = 25
+
+# Random jitter added to interval to prevent all connections pinging simultaneously.
 me_keepalive_jitter_secs = 5
+
+# Randomize ping payload bytes to prevent DPI from fingerprinting ping patterns.
 me_keepalive_payload_random = true
+
+# ------------------------------------------------------------------------------
+# Client-Side Limits
+# ------------------------------------------------------------------------------
+
+# Max buffered ciphertext per client (bytes) when upstream is slow.
+# Acts as backpressure to prevent memory exhaustion. 256KB is safe.
 crypto_pending_buffer = 262144
+
+# Maximum single MTProto frame size from client. 16MB is protocol standard.
 max_client_frame = 16777216
-desync_all_full = false
+
+# ------------------------------------------------------------------------------
+# Crypto Desynchronization Logging
+# Desync errors usually mean DPI/GFW is tampering with connections.
+# ------------------------------------------------------------------------------
+
+# true  = full forensics (trace ID, IP hash, hex dumps) for EVERY desync event
+# false = deduplicated logging, one entry per time window (prevents log spam)
+# Set true if you are actively debugging DPI interference.
+desync_all_full = true
+
+# ------------------------------------------------------------------------------
+# Beobachten — Built-in Honeypot / Active Probe Tracker
+# Tracks IPs that fail handshakes or behave like TLS scanners.
+# Output file can be fed into fail2ban or iptables for auto-blocking.
+# ------------------------------------------------------------------------------
+
 beobachten = true
-beobachten_minutes = 10
+
+# How long (minutes) to remember a suspicious IP before expiring it.
+beobachten_minutes = 30
+
+# How often (seconds) to flush tracker state to disk.
 beobachten_flush_secs = 15
+
+# File path for the tracker output.
 beobachten_file = "cache/beobachten.txt"
+
+# ------------------------------------------------------------------------------
+# Hardswap — Zero-Downtime ME Pool Rotation
+# When Telegram updates ME server IPs, Hardswap creates a completely new pool,
+# waits until it is fully ready, migrates traffic, then kills the old pool.
+# Users experience zero interruption.
+# ------------------------------------------------------------------------------
+
 hardswap = true
+
+# ------------------------------------------------------------------------------
+# ME Pool Warmup Staggering
+# When creating a new pool, connections are opened one by one with delays
+# to avoid a burst of SYN packets that could trigger ISP flood protection.
+# ------------------------------------------------------------------------------
+
 me_warmup_stagger_enabled = true
+
+# Delay between each connection creation (milliseconds).
 me_warmup_step_delay_ms = 500
+
+# Random jitter added to the delay (milliseconds).
 me_warmup_step_jitter_ms = 300
+
+# ------------------------------------------------------------------------------
+# ME Reconnect Backoff
+# If an ME server drops the connection, Telemt retries with this strategy.
+# ------------------------------------------------------------------------------
+
+# Max simultaneous reconnect attempts per DC.
 me_reconnect_max_concurrent_per_dc = 8
+
+# Exponential backoff base (milliseconds).
 me_reconnect_backoff_base_ms = 500
+
+# Backoff ceiling (milliseconds). Will never wait longer than this.
 me_reconnect_backoff_cap_ms = 30000
+
+# Number of instant retries before switching to exponential backoff.
 me_reconnect_fast_retry_count = 12
+
+# ------------------------------------------------------------------------------
+# NAT Mismatch Behavior
+# If STUN-detected IP differs from local interface IP (you are behind NAT).
+# false = abort ME mode (safe default)
+# true  = force ME mode anyway (use if you know your NAT setup is correct)
+# ------------------------------------------------------------------------------
+
 stun_iface_mismatch_ignore = false
-unknown_dc_log_path = "unknown-dc.txt" # to disable: set to null
-log_level = "normal" # debug | verbose | normal | silent
+
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
+
+# File to log unknown DC requests (DC IDs outside standard 1-5).
+unknown_dc_log_path = "unknown-dc.txt"
+
+# Verbosity: "debug" | "verbose" | "normal" | "silent"
+log_level = "normal"
+
+# Disable ANSI color codes in log output (useful for file logging).
 disable_colors = false
-fast_mode_min_tls_record = 0
+
+# ------------------------------------------------------------------------------
+# FakeTLS Record Sizing
+# Buffer small MTProto packets into larger TLS records to mimic real HTTPS.
+# Real HTTPS servers send records close to MTU size (~1400 bytes).
+# A stream of tiny TLS records is a strong DPI signal.
+# Set to 0 to disable. Set to 1400 for realistic HTTPS emulation.
+# ------------------------------------------------------------------------------
+
+fast_mode_min_tls_record = 1400
+
+# ------------------------------------------------------------------------------
+# Periodic Updates
+# ------------------------------------------------------------------------------
+
+# How often (seconds) to re-fetch ME server lists and proxy secrets
+# from core.telegram.org. Keeps your proxy in sync with Telegram infrastructure.
 update_every = 300
-me_reinit_every_secs = 900
+
+# How often (seconds) to force a Hardswap even if the ME map is unchanged.
+# Shorter intervals mean shorter-lived TCP flows, harder for DPI to profile.
+me_reinit_every_secs = 600
+
+# ------------------------------------------------------------------------------
+# Hardswap Warmup Tuning
+# Fine-grained control over how the new pool is warmed up before traffic switch.
+# ------------------------------------------------------------------------------
+
 me_hardswap_warmup_delay_min_ms = 1000
 me_hardswap_warmup_delay_max_ms = 2000
 me_hardswap_warmup_extra_passes = 3
 me_hardswap_warmup_pass_backoff_base_ms = 500
+
+# ------------------------------------------------------------------------------
+# Config Update Debouncing
+# Telegram sometimes pushes transient/broken configs. Debouncing requires
+# N consecutive identical fetches before applying a change.
+# ------------------------------------------------------------------------------
+
+# ME server list must be identical for this many fetches before applying.
 me_config_stable_snapshots = 2
+
+# Minimum seconds between config applications.
 me_config_apply_cooldown_secs = 300
+
+# Proxy secret must be identical for this many fetches before applying.
 proxy_secret_stable_snapshots = 2
+
+# ------------------------------------------------------------------------------
+# Proxy Secret Rotation
+# ------------------------------------------------------------------------------
+
+# Apply newly downloaded secrets at runtime without restart.
 proxy_secret_rotate_runtime = true
+
+# Maximum acceptable secret length (bytes). Rejects abnormally large secrets.
 proxy_secret_len_max = 256
+
+# ------------------------------------------------------------------------------
+# Hardswap Drain Settings
+# Controls graceful shutdown of old ME connections during pool rotation.
+# ------------------------------------------------------------------------------
+
+# Seconds to keep old connections alive for in-flight data before force-closing.
 me_pool_drain_ttl_secs = 90
+
+# Minimum ratio of healthy connections in new pool before draining old pool.
+# 0.8 = at least 80% of new pool must be ready.
 me_pool_min_fresh_ratio = 0.8
+
+# Maximum seconds to wait for drain to complete before force-killing.
 me_reinit_drain_timeout_secs = 120
-# Legacy compatibility fields used when update_every is omitted.
-proxy_secret_auto_reload_secs = 3600
-proxy_config_auto_reload_secs = 3600
+
+# ------------------------------------------------------------------------------
+# NTP Clock Check
+# MTProto uses timestamps. Clock drift > 30 seconds breaks handshakes.
+# Telemt checks on startup and warns if out of sync.
+# ------------------------------------------------------------------------------
+
 ntp_check = true
-ntp_servers = ["pool.ntp.org"] # example: ["pool.ntp.org", "time.cloudflare.com"]
+ntp_servers = ["pool.ntp.org"]
+
+# ------------------------------------------------------------------------------
+# Auto-Degradation
+# If ME servers become completely unreachable (ISP blocking),
+# automatically fall back to Direct Mode so users stay connected.
+# ------------------------------------------------------------------------------
+
 auto_degradation_enabled = true
+
+# Number of DC groups that must be unreachable before triggering fallback.
 degradation_min_unavailable_dc_groups = 2
 
+
+# ==============================================================================
+# ALLOWED CLIENT PROTOCOLS
+# Only enable what you need. In censored regions, TLS-only is safest.
+# ==============================================================================
+
 [general.modes]
+
+# Classic MTProto. Unobfuscated length prefixes. Trivially detected by DPI.
+# No reason to enable unless you have ancient clients.
 classic = false
+
+# Obfuscated MTProto with randomized padding. Better than classic, but
+# still detectable by statistical analysis of packet sizes.
 secure = false
+
+# FakeTLS (ee-secrets). Wraps MTProto in TLS 1.3 framing.
+# To DPI, it looks like a normal HTTPS connection.
+# This should be the ONLY enabled mode in censored environments.
 tls = true
 
+
+# ==============================================================================
+# STARTUP LINK GENERATION
+# Controls what tg:// invite links are printed to console on startup.
+# ==============================================================================
+
 [general.links]
-show ="*" # example: "*" or ["alice", "bob"]
-# public_host = "proxy.example.com" # example explicit host/IP for tg:// links
-# public_port = 443 # example explicit port for tg:// links
+
+# Which users to generate links for.
+# "*" = all users, or an array like ["alice", "bob"].
+show = "*"
+
+# IP or domain to embed in the tg:// link.
+# If omitted, Telemt uses STUN to auto-detect.
+# Set this to your server's public IP or domain for reliable links.
+# public_host = "proxy.example.com"
+
+# Port to embed in the tg:// link.
+# If omitted, uses [server].port.
+# public_port = 443
+
+
+# ==============================================================================
+# NETWORK & IP RESOLUTION
+# ==============================================================================
 
 [network]
+
+# Enable IPv4 for outbound connections to Telegram.
 ipv4 = true
-ipv6 = false # set true to enable IPv6
-prefer = 4 # 4 or 6
+
+# Enable IPv6 for outbound connections to Telegram.
+ipv6 = false
+
+# Prefer IPv4 (4) or IPv6 (6) when both are available.
+prefer = 4
+
+# Experimental: use both IPv4 and IPv6 ME servers simultaneously.
+# May improve reliability but doubles connection count.
 multipath = false
+
+# STUN servers for external IP discovery.
+# Used for Middle-Proxy KDF (if nat_probe=true) and link generation.
 stun_servers = [
-  "stun.l.google.com:5349",
-  "stun1.l.google.com:3478",
-  "stun.gmx.net:3478",
-  "stun.l.google.com:19302",
-  "stun.1und1.de:3478",
-  "stun1.l.google.com:19302",
-  "stun2.l.google.com:19302",
-  "stun3.l.google.com:19302",
-  "stun4.l.google.com:19302",
-  "stun.services.mozilla.com:3478",
-  "stun.stunprotocol.org:3478",
-  "stun.nextcloud.com:3478",
-  "stun.voip.eutelia.it:3478",
+    "stun.l.google.com:5349",
+    "stun1.l.google.com:3478",
+    "stun.gmx.net:3478",
+    "stun.l.google.com:19302"
 ]
+
+# If UDP STUN is blocked, attempt TCP-based STUN as fallback.
 stun_tcp_fallback = true
-http_ip_detect_urls = ["https://ifconfig.me/ip", "https://api.ipify.org"]
+
+# If all STUN fails, use HTTP APIs to discover public IP.
+http_ip_detect_urls = [
+    "https://ifconfig.me/ip",
+    "https://api.ipify.org"
+]
+
+# Cache discovered public IP to this file to survive restarts.
 cache_public_ip_path = "cache/public_ip.txt"
 
+
+# ==============================================================================
+# SERVER BINDING & METRICS
+# ==============================================================================
+
 [server]
+
+# TCP port to listen on.
+# 443 is recommended (looks like normal HTTPS traffic).
 port = 443
+
+# IPv4 bind address. "0.0.0.0" = all interfaces.
 listen_addr_ipv4 = "0.0.0.0"
+
+# IPv6 bind address. "::" = all interfaces.
 listen_addr_ipv6 = "::"
-# listen_unix_sock = "/var/run/telemt.sock" # example
-# listen_unix_sock_perm = "0660" # example unix socket mode
-# listen_tcp = true # example explicit override (auto-detected when omitted)
+
+# Unix socket listener (for reverse proxy setups with Nginx/HAProxy).
+# listen_unix_sock = "/var/run/telemt.sock"
+# listen_unix_sock_perm = "0660"
+
+# Enable PROXY protocol header parsing.
+# Set true ONLY if Telemt is behind HAProxy/Nginx that injects PROXY headers.
+# If enabled without a proxy in front, clients will fail to connect.
 proxy_protocol = false
-# metrics_port = 9090 # example
-metrics_whitelist = ["127.0.0.1/32", "::1/128"]
-# Example explicit listeners (default: omitted, auto-generated from listen_addr_*):
+
+# Prometheus metrics HTTP endpoint port.
+# Uncomment to enable. Access at http://your-server:9090/metrics
+# metrics_port = 9090
+
+# IP ranges allowed to access the metrics endpoint.
+metrics_whitelist = [
+    "127.0.0.1/32",
+    "::1/128"
+]
+
+# ------------------------------------------------------------------------------
+# Listener Overrides
+# Define explicit listeners with specific bind IPs and announce IPs.
+# The announce IP is what gets embedded in tg:// links and sent to ME servers.
+# You MUST set announce to your server's public IP for ME mode to work.
+# ------------------------------------------------------------------------------
+
 # [[server.listeners]]
 # ip = "0.0.0.0"
-# announce = "proxy-v4.example.com"
-# # announce_ip = "203.0.113.10" # deprecated alias
-# proxy_protocol = false
+# announce = "203.0.113.10"
 # reuse_allow = false
-#
-# [[server.listeners]]
-# ip = "::"
-# announce = "proxy-v6.example.com"
-# proxy_protocol = false
-# reuse_allow = false
+
+
+# ==============================================================================
+# TIMEOUTS (seconds unless noted)
+# ==============================================================================
 
 [timeouts]
+
+# Maximum time for client to complete FakeTLS + MTProto handshake.
 client_handshake = 15
+
+# Maximum time to establish TCP connection to upstream Telegram DC.
 tg_connect = 10
+
+# TCP keepalive interval for client connections.
 client_keepalive = 60
+
+# Maximum client inactivity before dropping the connection.
 client_ack = 300
+
+# Instant retry count for a single ME endpoint before giving up on it.
 me_one_retry = 3
+
+# Timeout (milliseconds) for a single ME endpoint connection attempt.
 me_one_timeout_ms = 1500
 
+
+# ==============================================================================
+# ANTI-CENSORSHIP / FAKETLS / MASKING
+# This is where Telemt becomes invisible to Deep Packet Inspection.
+# ==============================================================================
+
 [censorship]
-tls_domain = "petrovich.ru"
-# tls_domains = ["example.com", "cdn.example.net"] # Additional domains for EE links
+
+# ------------------------------------------------------------------------------
+# TLS Domain Fronting
+# The SNI (Server Name Indication) your proxy presents to connecting clients.
+# Must be a popular, unblocked HTTPS website in your target country.
+# DPI sees traffic to this domain. Choose carefully.
+# Good choices: major CDNs, banks, government sites, search engines.
+# Bad choices: obscure sites, already-blocked domains.
+# ------------------------------------------------------------------------------
+
+tls_domain = "www.google.com"
+
+# ------------------------------------------------------------------------------
+# Active Probe Masking
+# When someone connects but fails the MTProto handshake (wrong secret),
+# they might be an ISP active prober testing if this is a proxy.
+#
+# mask = false: drop the connection (prober knows something is here)
+# mask = true:  transparently proxy them to mask_host (prober sees a real website)
+#
+# With mask enabled, your server is indistinguishable from a real web server
+# to anyone who doesn't have the correct secret.
+# ------------------------------------------------------------------------------
+
 mask = true
-# mask_host = "www.google.com" # example, defaults to tls_domain when both mask_host/mask_unix_sock are unset
-# mask_unix_sock = "/var/run/nginx.sock" # example, mutually exclusive with mask_host
+
+# The real web server to forward failed handshakes to.
+# If omitted, defaults to tls_domain.
+# mask_host = "www.google.com"
+
+# Port on the mask host to connect to.
 mask_port = 443
-# mask_proxy_protocol = 0 # Send PROXY protocol header to mask_host: 0 = off, 1 = v1 (text), 2 = v2 (binary)
-fake_cert_len = 2048 # if tls_emulation=false and default value is used, loader may randomize this value at runtime
+
+# Inject PROXY protocol header when forwarding to mask host.
+# 0 = disabled, 1 = v1, 2 = v2. Leave disabled unless mask_host expects it.
+# mask_proxy_protocol = 0
+
+# ------------------------------------------------------------------------------
+# TLS Certificate Emulation
+# ------------------------------------------------------------------------------
+
+# Size (bytes) of the locally generated fake TLS certificate.
+# Only used when tls_emulation is disabled.
+fake_cert_len = 2048
+
+# KILLER FEATURE: Real-Time TLS Emulation.
+# Telemt connects to tls_domain, fetches its actual TLS 1.3 certificate chain,
+# and exactly replicates the byte sizes of ServerHello and Certificate records.
+# Defeats DPI that uses TLS record length heuristics to detect proxies.
+# Strongly recommended in censored environments.
 tls_emulation = true
+
+# Directory to cache fetched TLS certificates.
 tls_front_dir = "tlsfront"
-server_hello_delay_min_ms = 0
-server_hello_delay_max_ms = 0
-tls_new_session_tickets = 0
-tls_full_cert_ttl_secs = 90
+
+# ------------------------------------------------------------------------------
+# ServerHello Timing
+# Real web servers take 30-150ms to respond to ClientHello due to network
+# latency and crypto processing. A proxy responding in <1ms is suspicious.
+# These settings add realistic delay to mimic genuine server behavior.
+# ------------------------------------------------------------------------------
+
+# Minimum delay before sending ServerHello (milliseconds).
+server_hello_delay_min_ms = 50
+
+# Maximum delay before sending ServerHello (milliseconds).
+server_hello_delay_max_ms = 150
+
+# ------------------------------------------------------------------------------
+# TLS Session Tickets
+# Real TLS 1.3 servers send 1-2 NewSessionTicket messages after handshake.
+# A server that sends zero tickets is anomalous and may trigger DPI flags.
+# Set this to match your tls_domain's behavior (usually 2).
+# ------------------------------------------------------------------------------
+
+tls_new_session_tickets = 2
+
+# ------------------------------------------------------------------------------
+# Full Certificate Frequency
+# When tls_emulation is enabled, this controls how often (per client IP)
+# to send the complete emulated certificate chain.
+#
+# > 0: Subsequent connections within TTL seconds get a smaller cached version.
+#       Saves bandwidth but creates a detectable size difference between
+#       first and repeat connections.
+#
+# = 0: Every connection gets the full certificate. More bandwidth but
+#       perfectly consistent behavior, no anomalies for DPI to detect.
+# ------------------------------------------------------------------------------
+
+tls_full_cert_ttl_secs = 0
+
+# ------------------------------------------------------------------------------
+# ALPN Enforcement
+# Ensure ServerHello responds with the exact ALPN protocol the client requested.
+# Mismatched ALPN (e.g., client asks h2, server says http/1.1) is a DPI red flag.
+# ------------------------------------------------------------------------------
+
 alpn_enforce = true
 
+
+# ==============================================================================
+# ACCESS CONTROL & USERS
+# ==============================================================================
+
 [access]
+
+# ------------------------------------------------------------------------------
+# Replay Attack Protection
+# DPI can record a legitimate user's handshake and replay it later to probe
+# whether the server is a proxy. Telemt remembers recent handshake nonces
+# and rejects duplicates.
+# ------------------------------------------------------------------------------
+
+# Number of nonce slots in the replay detection buffer.
 replay_check_len = 65536
+
+# How long (seconds) to remember nonces before expiring them.
 replay_window_secs = 1800
+
+# Allow clients with incorrect system clocks to connect.
+# false = reject clients with significant time skew (more secure)
+# true  = accept anyone regardless of clock (more permissive)
 ignore_time_skew = false
 
+# ------------------------------------------------------------------------------
+# User Secrets
+# Each user needs a unique 32-character hex string as their secret.
+# Generate with: openssl rand -hex 16
+#
+# This secret is embedded in the tg:// link. Anyone with it can connect.
+# Format: username = "hex_secret"
+# ------------------------------------------------------------------------------
+
 [access.users]
-# format: "username" = "32_hex_chars_secret"
-hello = "00000000000000000000000000000000"
-# alice = "11111111111111111111111111111111" # example
+# alice = "0123456789abcdef0123456789abcdef"
+# bob = "fedcba9876543210fedcba9876543210"
+
+# ------------------------------------------------------------------------------
+# Per-User Connection Limits
+# Limits concurrent TCP connections per user to prevent secret sharing.
+# Uncomment and set for each user as needed.
+# ------------------------------------------------------------------------------
 
 [access.user_max_tcp_conns]
-# alice = 100 # example
+# alice = 100
+# bob = 50
+
+# ------------------------------------------------------------------------------
+# Per-User Expiration Dates
+# Automatically revoke access after the specified date (ISO 8601 format).
+# ------------------------------------------------------------------------------
 
 [access.user_expirations]
-# alice = "2078-01-01T00:00:00Z" # example
+# alice = "2025-12-31T23:59:59Z"
+# bob = "2026-06-15T00:00:00Z"
+
+# ------------------------------------------------------------------------------
+# Per-User Data Quotas
+# Maximum total bytes transferred per user. Connection refused after limit.
+# ------------------------------------------------------------------------------
 
 [access.user_data_quota]
-# hello = 10737418240 # example bytes
-# alice = 10737418240 # example bytes
+# alice = 107374182400
+# bob = 53687091200
+
+# ------------------------------------------------------------------------------
+# Per-User Unique IP Limits
+# Maximum number of different IP addresses that can use this secret
+# at the same time. Highly effective against secret leaking/sharing.
+# Set to 1 for single-device, 2-3 for phone+desktop, etc.
+# ------------------------------------------------------------------------------
 
 [access.user_max_unique_ips]
-# hello = 10 # example
-# alice = 100 # example
+# alice = 3
+# bob = 2
 
-# Default behavior if [[upstreams]] is omitted: loader injects one direct upstream.
-# Example explicit upstreams:
+
+# ==============================================================================
+# UPSTREAM ROUTING
+# Controls how Telemt connects to Telegram servers (or ME servers).
+# If omitted entirely, uses the OS default route.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Direct upstream: use the server's own network interface.
+# You can optionally bind to a specific interface or local IP.
+# ------------------------------------------------------------------------------
+
 # [[upstreams]]
 # type = "direct"
 # interface = "eth0"
@@ -178,28 +671,27 @@ hello = "00000000000000000000000000000000"
 # weight = 1
 # enabled = true
 # scopes = "*"
-#
-# [[upstreams]]
-# type = "socks4"
-# address = "198.51.100.20:1080"
-# interface = "eth0"
-# user_id = "telemt"
-# weight = 1
-# enabled = true
-# scopes = "*"
-#
+
+# ------------------------------------------------------------------------------
+# SOCKS5 upstream: route Telegram traffic through a SOCKS5 proxy.
+# Useful if your server's IP is blocked from reaching Telegram DCs.
+# ------------------------------------------------------------------------------
+
 # [[upstreams]]
 # type = "socks5"
 # address = "198.51.100.30:1080"
-# interface = "eth0"
 # username = "proxy-user"
 # password = "proxy-pass"
 # weight = 1
 # enabled = true
-# scopes = "*"
 
-# === DC Address Overrides ===
+
+# ==============================================================================
+# DATACENTER OVERRIDES
+# Force specific DC IDs to route to specific IP:Port combinations.
+# DC 203 (CDN) is auto-injected by Telemt if not specified here.
+# ==============================================================================
+
 # [dc_overrides]
-# "201" = "149.154.175.50:443" # example
-# "202" = ["149.154.167.51:443", "149.154.175.100:443"] # example
-# "203" = "91.105.192.100:443" # loader auto-adds this one when omitted
+# "201" = "149.154.175.50:443"
+# "202" = ["149.154.167.51:443", "149.154.175.100:443"]
