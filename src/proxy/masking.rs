@@ -55,6 +55,7 @@ pub async fn handle_bad_client<R, W>(
     writer: W,
     initial_data: &[u8],
     peer: SocketAddr,
+    local_addr: SocketAddr,
     config: &ProxyConfig,
     beobachten: &BeobachtenStore,
 )
@@ -126,23 +127,16 @@ where
             let proxy_header: Option<Vec<u8>> = match config.censorship.mask_proxy_protocol {
                 0 => None,
                 version => {
-                    let header = if let Ok(local_addr) = stream.local_addr() {
-                        match version {
-                            2 => ProxyProtocolV2Builder::new().with_addrs(peer, local_addr).build(),
-                            _ => match (peer, local_addr) {
-                                (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
-                                    ProxyProtocolV1Builder::new().tcp4(src.into(), dst.into()).build(),
-                                (SocketAddr::V6(src), SocketAddr::V6(dst)) =>
-                                    ProxyProtocolV1Builder::new().tcp6(src.into(), dst.into()).build(),
-                                _ =>
-                                    ProxyProtocolV1Builder::new().build(),
-                            },
-                        }
-                    } else {
-                        match version {
-                            2 => ProxyProtocolV2Builder::new().build(),
-                            _ => ProxyProtocolV1Builder::new().build(),
-                        }
+                    let header = match version {
+                        2 => ProxyProtocolV2Builder::new().with_addrs(peer, local_addr).build(),
+                        _ => match (peer, local_addr) {
+                            (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
+                                ProxyProtocolV1Builder::new().tcp4(src.into(), dst.into()).build(),
+                            (SocketAddr::V6(src), SocketAddr::V6(dst)) =>
+                                ProxyProtocolV1Builder::new().tcp6(src.into(), dst.into()).build(),
+                            _ =>
+                                ProxyProtocolV1Builder::new().build(),
+                        },
                     };
                     Some(header)
                 }

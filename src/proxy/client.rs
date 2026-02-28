@@ -91,6 +91,11 @@ where
     stats.increment_connects_all();
     let mut real_peer = normalize_ip(peer);
 
+    // For non-TCP streams, use a synthetic local address; may be overridden by PROXY protocol dst
+    let mut local_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port)
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
+
     if proxy_protocol_enabled {
         match parse_proxy_protocol(&mut stream, peer).await {
             Ok(info) => {
@@ -101,6 +106,9 @@ where
                     "PROXY protocol header parsed"
                 );
                 real_peer = normalize_ip(info.src_addr);
+                if let Some(dst) = info.dst_addr {
+                    local_addr = dst;
+                }
             }
             Err(e) => {
                 stats.increment_connects_bad();
@@ -118,11 +126,6 @@ where
     let config_for_timeout = config.clone();
     let beobachten_for_timeout = beobachten.clone();
     let peer_for_timeout = real_peer.ip();
-
-    // For non-TCP streams, use a synthetic local address
-    let local_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port)
-        .parse()
-        .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
 
     // Phase 1: handshake (with timeout)
     let outcome = match timeout(handshake_timeout, async {
@@ -144,6 +147,7 @@ where
                     writer,
                     &first_bytes,
                     real_peer,
+                    local_addr,
                     &config,
                     &beobachten,
                 )
@@ -169,6 +173,7 @@ where
                         writer,
                         &handshake,
                         real_peer,
+                        local_addr,
                         &config,
                         &beobachten,
                     )
@@ -213,6 +218,7 @@ where
                     writer,
                     &first_bytes,
                     real_peer,
+                    local_addr,
                     &config,
                     &beobachten,
                 )
@@ -238,6 +244,7 @@ where
                         writer,
                         &handshake,
                         real_peer,
+                        local_addr,
                         &config,
                         &beobachten,
                     )
@@ -405,6 +412,8 @@ impl RunningClientHandler {
     }
 
     async fn do_handshake(mut self) -> Result<HandshakeOutcome> {
+        let mut local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
+
         if self.proxy_protocol_enabled {
             match parse_proxy_protocol(&mut self.stream, self.peer).await {
                 Ok(info) => {
@@ -415,6 +424,9 @@ impl RunningClientHandler {
                         "PROXY protocol header parsed"
                     );
                     self.peer = normalize_ip(info.src_addr);
+                    if let Some(dst) = info.dst_addr {
+                        local_addr = dst;
+                    }
                 }
                 Err(e) => {
                     self.stats.increment_connects_bad();
@@ -440,13 +452,13 @@ impl RunningClientHandler {
         debug!(peer = %peer, is_tls = is_tls, "Handshake type detected");
 
         if is_tls {
-            self.handle_tls_client(first_bytes).await
+            self.handle_tls_client(first_bytes, local_addr).await
         } else {
-            self.handle_direct_client(first_bytes).await
+            self.handle_direct_client(first_bytes, local_addr).await
         }
     }
 
-    async fn handle_tls_client(mut self, first_bytes: [u8; 5]) -> Result<HandshakeOutcome> {
+    async fn handle_tls_client(mut self, first_bytes: [u8; 5], local_addr: SocketAddr) -> Result<HandshakeOutcome> {
         let peer = self.peer;
         let _ip_tracker = self.ip_tracker.clone();
 
@@ -463,6 +475,7 @@ impl RunningClientHandler {
                 writer,
                 &first_bytes,
                 peer,
+                local_addr,
                 &self.config,
                 &self.beobachten,
             )
@@ -479,7 +492,6 @@ impl RunningClientHandler {
         let stats = self.stats.clone();
         let buffer_pool = self.buffer_pool.clone();
 
-        let local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
         let (read_half, write_half) = self.stream.into_split();
 
         let (mut tls_reader, tls_writer, _tls_user) = match handle_tls_handshake(
@@ -502,6 +514,7 @@ impl RunningClientHandler {
                     writer,
                     &handshake,
                     peer,
+                    local_addr,
                     &config,
                     &self.beobachten,
                 )
@@ -558,7 +571,7 @@ impl RunningClientHandler {
         )))
     }
 
-    async fn handle_direct_client(mut self, first_bytes: [u8; 5]) -> Result<HandshakeOutcome> {
+    async fn handle_direct_client(mut self, first_bytes: [u8; 5], local_addr: SocketAddr) -> Result<HandshakeOutcome> {
         let peer = self.peer;
         let _ip_tracker = self.ip_tracker.clone();
 
@@ -571,6 +584,7 @@ impl RunningClientHandler {
                 writer,
                 &first_bytes,
                 peer,
+                local_addr,
                 &self.config,
                 &self.beobachten,
             )
@@ -587,7 +601,6 @@ impl RunningClientHandler {
         let stats = self.stats.clone();
         let buffer_pool = self.buffer_pool.clone();
 
-        let local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
         let (read_half, write_half) = self.stream.into_split();
 
         let (crypto_reader, crypto_writer, success) = match handle_mtproto_handshake(
@@ -609,6 +622,7 @@ impl RunningClientHandler {
                     writer,
                     &handshake,
                     peer,
+                    local_addr,
                     &config,
                     &self.beobachten,
                 )
