@@ -191,6 +191,8 @@ then Ctrl+X -> Y -> Enter to save
 
 **5.** In Shell type `systemctl enable telemt` - then telemt will start with system startup, after the network is up
 
+**6.** In Shell type `journalctl -u telemt -n -g "links" --no-pager -o cat | tac` - get the connection links
+
 ## Configuration
 ### Minimal Configuration for First Start
 ```toml

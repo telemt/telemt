@@ -254,10 +254,137 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         warn!("Using default tls_domain. Consider setting a custom domain.");
     }
 
+    let upstream_manager = Arc::new(UpstreamManager::new(config.upstreams.clone()));
+
+    let mut tls_domains = Vec::with_capacity(1 + config.censorship.tls_domains.len());
+    tls_domains.push(config.censorship.tls_domain.clone());
+    for d in &config.censorship.tls_domains {
+        if !tls_domains.contains(d) {
+            tls_domains.push(d.clone());
+        }
+    }
+
+    // Start TLS front fetching in background immediately, in parallel with STUN probing.
+    let tls_cache: Option<Arc<TlsFrontCache>> = if config.censorship.tls_emulation {
+        let cache = Arc::new(TlsFrontCache::new(
+            &tls_domains,
+            config.censorship.fake_cert_len,
+            &config.censorship.tls_front_dir,
+        ));
+        cache.load_from_disk().await;
+
+        let port = config.censorship.mask_port;
+        let proxy_protocol = config.censorship.mask_proxy_protocol;
+        let mask_host = config
+            .censorship
+            .mask_host
+            .clone()
+            .unwrap_or_else(|| config.censorship.tls_domain.clone());
+        let fetch_timeout = Duration::from_secs(5);
+
+        let cache_initial = cache.clone();
+        let domains_initial = tls_domains.clone();
+        let host_initial = mask_host.clone();
+        let upstream_initial = upstream_manager.clone();
+        tokio::spawn(async move {
+            let mut join = tokio::task::JoinSet::new();
+            for domain in domains_initial {
+                let cache_domain = cache_initial.clone();
+                let host_domain = host_initial.clone();
+                let upstream_domain = upstream_initial.clone();
+                join.spawn(async move {
+                    match crate::tls_front::fetcher::fetch_real_tls(
+                        &host_domain,
+                        port,
+                        &domain,
+                        fetch_timeout,
+                        Some(upstream_domain),
+                        proxy_protocol,
+                    )
+                    .await
+                    {
+                        Ok(res) => cache_domain.update_from_fetch(&domain, res).await,
+                        Err(e) => {
+                            warn!(domain = %domain, error = %e, "TLS emulation initial fetch failed")
+                        }
+                    }
+                });
+            }
+            while let Some(res) = join.join_next().await {
+                if let Err(e) = res {
+                    warn!(error = %e, "TLS emulation initial fetch task join failed");
+                }
+            }
+        });
+
+        let cache_timeout = cache.clone();
+        let domains_timeout = tls_domains.clone();
+        let fake_cert_len = config.censorship.fake_cert_len;
+        tokio::spawn(async move {
+            tokio::time::sleep(fetch_timeout).await;
+            for domain in domains_timeout {
+                let cached = cache_timeout.get(&domain).await;
+                if cached.domain == "default" {
+                    warn!(
+                        domain = %domain,
+                        timeout_secs = fetch_timeout.as_secs(),
+                        fake_cert_len,
+                        "TLS-front fetch not ready within timeout; using cache/default fake cert fallback"
+                    );
+                }
+            }
+        });
+
+        // Periodic refresh with jitter.
+        let cache_refresh = cache.clone();
+        let domains_refresh = tls_domains.clone();
+        let host_refresh = mask_host.clone();
+        let upstream_refresh = upstream_manager.clone();
+        tokio::spawn(async move {
+            loop {
+                let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
+                let jitter_secs = rand::rng().random_range(0..=7200);
+                tokio::time::sleep(Duration::from_secs(base_secs + jitter_secs)).await;
+
+                let mut join = tokio::task::JoinSet::new();
+                for domain in domains_refresh.clone() {
+                    let cache_domain = cache_refresh.clone();
+                    let host_domain = host_refresh.clone();
+                    let upstream_domain = upstream_refresh.clone();
+                    join.spawn(async move {
+                        match crate::tls_front::fetcher::fetch_real_tls(
+                            &host_domain,
+                            port,
+                            &domain,
+                            fetch_timeout,
+                            Some(upstream_domain),
+                            proxy_protocol,
+                        )
+                        .await
+                        {
+                            Ok(res) => cache_domain.update_from_fetch(&domain, res).await,
+                            Err(e) => warn!(domain = %domain, error = %e, "TLS emulation refresh failed"),
+                        }
+                    });
+                }
+
+                while let Some(res) = join.join_next().await {
+                    if let Err(e) = res {
+                        warn!(error = %e, "TLS emulation refresh task join failed");
+                    }
+                }
+            }
+        });
+
+        Some(cache)
+    } else {
+        None
+    };
+
     let probe = run_probe(
         &config.network,
-        config.general.middle_proxy_nat_stun.clone(),
         config.general.middle_proxy_nat_probe,
+        config.general.stun_nat_probe_concurrency,
     )
     .await?;
     let decision = decide_network_capabilities(&config.network, &probe);
@@ -358,8 +485,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     proxy_secret,
                     config.general.middle_proxy_nat_ip,
                     config.general.middle_proxy_nat_probe,
-                    config.general.middle_proxy_nat_stun.clone(),
-                    config.general.middle_proxy_nat_stun_servers.clone(),
+                    None,
+                    config.network.stun_servers.clone(),
+                    config.general.stun_nat_probe_concurrency,
                     probe.detected_ipv6,
                     config.timeouts.me_one_retry,
                     config.timeouts.me_one_timeout_ms,
@@ -391,26 +519,33 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 );
 
                 let pool_size = config.general.middle_proxy_pool_size.max(1);
-                match pool.init(pool_size, &rng).await {
-                    Ok(()) => {
-                        info!("Middle-End pool initialized successfully");
+                loop {
+                    match pool.init(pool_size, &rng).await {
+                        Ok(()) => {
+                            info!("Middle-End pool initialized successfully");
 
-                        // Phase 4: Start health monitor
-                        let pool_clone = pool.clone();
-                        let rng_clone = rng.clone();
-                        let min_conns = pool_size;
-                        tokio::spawn(async move {
-                            crate::transport::middle_proxy::me_health_monitor(
-                                pool_clone, rng_clone, min_conns,
-                            )
-                            .await;
-                        });
+                            // Phase 4: Start health monitor
+                            let pool_clone = pool.clone();
+                            let rng_clone = rng.clone();
+                            let min_conns = pool_size;
+                            tokio::spawn(async move {
+                                crate::transport::middle_proxy::me_health_monitor(
+                                    pool_clone, rng_clone, min_conns,
+                                )
+                                .await;
+                            });
 
-                        Some(pool)
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to initialize ME pool. Falling back to direct mode.");
-                        None
+                            break Some(pool);
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                retry_in_secs = 2,
+                                "ME pool is not ready yet; retrying startup initialization"
+                            );
+                            pool.reset_stun_state();
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
                     }
                 }
             }
@@ -442,79 +577,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(config.access.replay_window_secs),
     ));
 
-    let upstream_manager = Arc::new(UpstreamManager::new(config.upstreams.clone()));
     let buffer_pool = Arc::new(BufferPool::with_config(16 * 1024, 4096));
-
-    // TLS front cache (optional emulation)
-    let mut tls_domains = Vec::with_capacity(1 + config.censorship.tls_domains.len());
-    tls_domains.push(config.censorship.tls_domain.clone());
-    for d in &config.censorship.tls_domains {
-        if !tls_domains.contains(d) {
-            tls_domains.push(d.clone());
-        }
-    }
-
-    let tls_cache: Option<Arc<TlsFrontCache>> = if config.censorship.tls_emulation {
-        let cache = Arc::new(TlsFrontCache::new(
-            &tls_domains,
-            config.censorship.fake_cert_len,
-            &config.censorship.tls_front_dir,
-        ));
-
-        cache.load_from_disk().await;
-
-        let port = config.censorship.mask_port;
-        let mask_host = config.censorship.mask_host.clone()
-            .unwrap_or_else(|| config.censorship.tls_domain.clone());
-        // Initial synchronous fetch to warm cache before serving clients.
-        for domain in tls_domains.clone() {
-            match crate::tls_front::fetcher::fetch_real_tls(
-                &mask_host,
-                port,
-                &domain,
-                Duration::from_secs(5),
-                Some(upstream_manager.clone()),
-                config.censorship.mask_proxy_protocol,
-            )
-            .await
-            {
-                Ok(res) => cache.update_from_fetch(&domain, res).await,
-                Err(e) => warn!(domain = %domain, error = %e, "TLS emulation fetch failed"),
-            }
-        }
-
-        // Periodic refresh with jitter.
-        let cache_clone = cache.clone();
-        let domains = tls_domains.clone();
-        let upstream_for_task = upstream_manager.clone();
-        let proxy_protocol = config.censorship.mask_proxy_protocol;
-        tokio::spawn(async move {
-            loop {
-                let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
-                let jitter_secs = rand::rng().random_range(0..=7200);
-                tokio::time::sleep(Duration::from_secs(base_secs + jitter_secs)).await;
-                for domain in &domains {
-                    match crate::tls_front::fetcher::fetch_real_tls(
-                        &mask_host,
-                        port,
-                        domain,
-                        Duration::from_secs(5),
-                        Some(upstream_for_task.clone()),
-                        proxy_protocol,
-                    )
-                    .await
-                    {
-                        Ok(res) => cache_clone.update_from_fetch(domain, res).await,
-                        Err(e) => warn!(domain = %domain, error = %e, "TLS emulation refresh failed"),
-                    }
-                }
-            }
-        });
-
-        Some(cache)
-    } else {
-        None
-    };
 
     // Middle-End ping before DC connectivity
     if let Some(ref pool) = me_pool {

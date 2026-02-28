@@ -160,13 +160,19 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub middle_proxy_nat_probe: bool,
 
-    /// Optional STUN server address (host:port) for NAT probing.
+    /// Deprecated legacy single STUN server for NAT probing.
+    /// Use `network.stun_servers` instead.
     #[serde(default = "default_middle_proxy_nat_stun")]
     pub middle_proxy_nat_stun: Option<String>,
 
-    /// Optional list of STUN servers for NAT probing fallback.
+    /// Deprecated legacy STUN list for NAT probing fallback.
+    /// Use `network.stun_servers` instead.
     #[serde(default = "default_middle_proxy_nat_stun_servers")]
     pub middle_proxy_nat_stun_servers: Vec<String>,
+
+    /// Maximum number of concurrent STUN probes during NAT detection.
+    #[serde(default = "default_stun_nat_probe_concurrency")]
+    pub stun_nat_probe_concurrency: usize,
 
     /// Desired size of active Middle-Proxy writer pool.
     #[serde(default = "default_pool_size")]
@@ -378,6 +384,7 @@ impl Default for GeneralConfig {
             middle_proxy_nat_probe: default_true(),
             middle_proxy_nat_stun: default_middle_proxy_nat_stun(),
             middle_proxy_nat_stun_servers: default_middle_proxy_nat_stun_servers(),
+            stun_nat_probe_concurrency: default_stun_nat_probe_concurrency(),
             middle_proxy_pool_size: default_pool_size(),
             middle_proxy_warm_standby: default_middle_proxy_warm_standby(),
             me_keepalive_enabled: default_true(),

@@ -1,17 +1,22 @@
 //! Middle Proxy RPC transport.
 
 mod codec;
+mod config_updater;
 mod handshake;
 mod health;
 mod pool;
+mod pool_config;
+mod pool_init;
 mod pool_nat;
+mod pool_refill;
+mod pool_reinit;
+mod pool_writer;
 mod ping;
 mod reader;
 mod registry;
+mod rotation;
 mod send;
 mod secret;
-mod rotation;
-mod config_updater;
 mod wire;
 
 use bytes::Bytes;

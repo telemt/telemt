@@ -1,5 +1,6 @@
 services:
   telemt:
+    image: ghcr.io/telemt/telemt:latest
     build: .
     container_name: telemt
     restart: unless-stopped

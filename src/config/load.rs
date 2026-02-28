@@ -65,6 +65,16 @@ fn validate_network_cfg(net: &mut NetworkConfig) -> Result<()> {
     Ok(())
 }
 
+fn push_unique_nonempty(target: &mut Vec<String>, value: String) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !target.iter().any(|existing| existing == trimmed) {
+        target.push(trimmed.to_string());
+    }
+}
+
 // ============= Main Config =============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -121,6 +131,9 @@ impl ProxyConfig {
         let general_table = parsed_toml
             .get("general")
             .and_then(|value| value.as_table());
+        let network_table = parsed_toml
+            .get("network")
+            .and_then(|value| value.as_table());
         let update_every_is_explicit = general_table
             .map(|table| table.contains_key("update_every"))
             .unwrap_or(false);
@@ -130,12 +143,45 @@ impl ProxyConfig {
         let legacy_config_is_explicit = general_table
             .map(|table| table.contains_key("proxy_config_auto_reload_secs"))
             .unwrap_or(false);
+        let stun_servers_is_explicit = network_table
+            .map(|table| table.contains_key("stun_servers"))
+            .unwrap_or(false);
 
         let mut config: ProxyConfig =
             parsed_toml.try_into().map_err(|e| ProxyError::Config(e.to_string()))?;
 
         if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
             config.general.update_every = None;
+        }
+
+        let legacy_nat_stun = config.general.middle_proxy_nat_stun.take();
+        let legacy_nat_stun_servers = std::mem::take(&mut config.general.middle_proxy_nat_stun_servers);
+        let legacy_nat_stun_used = legacy_nat_stun.is_some() || !legacy_nat_stun_servers.is_empty();
+        if stun_servers_is_explicit {
+            let mut explicit_stun_servers = Vec::new();
+            for stun in std::mem::take(&mut config.network.stun_servers) {
+                push_unique_nonempty(&mut explicit_stun_servers, stun);
+            }
+            config.network.stun_servers = explicit_stun_servers;
+
+            if legacy_nat_stun_used {
+                warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are ignored because network.stun_servers is explicitly set");
+            }
+        } else {
+            // Keep the default STUN pool unless network.stun_servers is explicitly overridden.
+            let mut unified_stun_servers = default_stun_servers();
+            if let Some(stun) = legacy_nat_stun {
+                push_unique_nonempty(&mut unified_stun_servers, stun);
+            }
+            for stun in legacy_nat_stun_servers {
+                push_unique_nonempty(&mut unified_stun_servers, stun);
+            }
+
+            config.network.stun_servers = unified_stun_servers;
+
+            if legacy_nat_stun_used {
+                warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are deprecated; use network.stun_servers");
+            }
         }
 
         if let Some(update_every) = config.general.update_every {
@@ -164,6 +210,12 @@ impl ProxyConfig {
                     "proxy_*_auto_reload_secs are deprecated; set general.update_every"
                 );
             }
+        }
+
+        if config.general.stun_nat_probe_concurrency == 0 {
+            return Err(ProxyError::Config(
+                "general.stun_nat_probe_concurrency must be > 0".to_string(),
+            ));
         }
 
         if config.general.me_reinit_every_secs == 0 {
@@ -604,6 +656,26 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
         assert!(err.contains("general.update_every must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stun_nat_probe_concurrency_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            stun_nat_probe_concurrency = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_stun_nat_probe_concurrency_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.stun_nat_probe_concurrency must be > 0"));
         let _ = std::fs::remove_file(path);
     }
 

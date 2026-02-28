@@ -1,12 +1,16 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::time::Duration;
 
-use tracing::{info, warn};
+use tokio::task::JoinSet;
+use tokio::time::timeout;
+use tracing::{debug, info, warn};
 
 use crate::config::NetworkConfig;
 use crate::error::Result;
-use crate::network::stun::{stun_probe_dual, DualStunResult, IpFamily};
+use crate::network::stun::{stun_probe_dual, DualStunResult, IpFamily, StunProbeResult};
 
 #[derive(Debug, Clone, Default)]
 pub struct NetworkProbe {
@@ -49,7 +53,13 @@ impl NetworkDecision {
     }
 }
 
-pub async fn run_probe(config: &NetworkConfig, stun_addr: Option<String>, nat_probe: bool) -> Result<NetworkProbe> {
+const STUN_BATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub async fn run_probe(
+    config: &NetworkConfig,
+    nat_probe: bool,
+    stun_nat_probe_concurrency: usize,
+) -> Result<NetworkProbe> {
     let mut probe = NetworkProbe::default();
 
     probe.detected_ipv4 = detect_local_ip_v4();
@@ -58,20 +68,34 @@ pub async fn run_probe(config: &NetworkConfig, stun_addr: Option<String>, nat_pr
     probe.ipv4_is_bogon = probe.detected_ipv4.map(is_bogon_v4).unwrap_or(false);
     probe.ipv6_is_bogon = probe.detected_ipv6.map(is_bogon_v6).unwrap_or(false);
 
-    let stun_server = stun_addr.unwrap_or_else(|| "stun.l.google.com:19302".to_string());
     let stun_res = if nat_probe {
-        match stun_probe_dual(&stun_server).await {
-            Ok(res) => res,
-            Err(e) => {
-                warn!(error = %e, "STUN probe failed, continuing without reflection");
-                DualStunResult::default()
-            }
+        let servers = collect_stun_servers(config);
+        if servers.is_empty() {
+            warn!("STUN probe is enabled but network.stun_servers is empty");
+            DualStunResult::default()
+        } else {
+            probe_stun_servers_parallel(
+                &servers,
+                stun_nat_probe_concurrency.max(1),
+            )
+            .await
         }
     } else {
         DualStunResult::default()
     };
     probe.reflected_ipv4 = stun_res.v4.map(|r| r.reflected_addr);
     probe.reflected_ipv6 = stun_res.v6.map(|r| r.reflected_addr);
+
+    // If STUN is blocked but IPv4 is private, try HTTP public-IP fallback.
+    if nat_probe
+        && probe.reflected_ipv4.is_none()
+        && probe.detected_ipv4.map(is_bogon_v4).unwrap_or(false)
+    {
+        if let Some(public_ip) = detect_public_ipv4_http(&config.http_ip_detect_urls).await {
+            probe.reflected_ipv4 = Some(SocketAddr::new(IpAddr::V4(public_ip), 0));
+            info!(public_ip = %public_ip, "STUN unavailable, using HTTP public IPv4 fallback");
+        }
+    }
 
     probe.ipv4_nat_detected = match (probe.detected_ipv4, probe.reflected_ipv4) {
         (Some(det), Some(reflected)) => det != reflected.ip(),
@@ -92,6 +116,111 @@ pub async fn run_probe(config: &NetworkConfig, stun_addr: Option<String>, nat_pr
         && (!probe.ipv6_is_bogon || probe.reflected_ipv6.map(|r| !is_bogon(r.ip())).unwrap_or(false));
 
     Ok(probe)
+}
+
+async fn detect_public_ipv4_http(urls: &[String]) -> Option<Ipv4Addr> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    for url in urls {
+        let response = match client.get(url).send().await {
+            Ok(response) => response,
+            Err(_) => continue,
+        };
+
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(_) => continue,
+        };
+
+        let Ok(ip) = body.trim().parse::<Ipv4Addr>() else {
+            continue;
+        };
+        if !is_bogon_v4(ip) {
+            return Some(ip);
+        }
+    }
+
+    None
+}
+
+fn collect_stun_servers(config: &NetworkConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in &config.stun_servers {
+        if !s.is_empty() && !out.contains(s) {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
+async fn probe_stun_servers_parallel(
+    servers: &[String],
+    concurrency: usize,
+) -> DualStunResult {
+    let mut join_set = JoinSet::new();
+    let mut next_idx = 0usize;
+    let mut best_v4_by_ip: HashMap<IpAddr, (usize, StunProbeResult)> = HashMap::new();
+    let mut best_v6_by_ip: HashMap<IpAddr, (usize, StunProbeResult)> = HashMap::new();
+
+    while next_idx < servers.len() || !join_set.is_empty() {
+        while next_idx < servers.len() && join_set.len() < concurrency {
+            let stun_addr = servers[next_idx].clone();
+            next_idx += 1;
+            join_set.spawn(async move {
+                let res = timeout(STUN_BATCH_TIMEOUT, stun_probe_dual(&stun_addr)).await;
+                (stun_addr, res)
+            });
+        }
+
+        let Some(task) = join_set.join_next().await else {
+            break;
+        };
+
+        match task {
+            Ok((stun_addr, Ok(Ok(result)))) => {
+                if let Some(v4) = result.v4 {
+                    let entry = best_v4_by_ip.entry(v4.reflected_addr.ip()).or_insert((0, v4));
+                    entry.0 += 1;
+                }
+                if let Some(v6) = result.v6 {
+                    let entry = best_v6_by_ip.entry(v6.reflected_addr.ip()).or_insert((0, v6));
+                    entry.0 += 1;
+                }
+                if result.v4.is_some() || result.v6.is_some() {
+                    debug!(stun = %stun_addr, "STUN server responded within probe timeout");
+                }
+            }
+            Ok((stun_addr, Ok(Err(e)))) => {
+                debug!(error = %e, stun = %stun_addr, "STUN probe failed");
+            }
+            Ok((stun_addr, Err(_))) => {
+                debug!(stun = %stun_addr, "STUN probe timeout");
+            }
+            Err(e) => {
+                debug!(error = %e, "STUN probe task join failed");
+            }
+        }
+    }
+
+    let mut out = DualStunResult::default();
+    if let Some((_, best)) = best_v4_by_ip
+        .into_values()
+        .max_by_key(|(count, _)| *count)
+    {
+        info!("STUN-Quorum reached, IP: {}", best.reflected_addr.ip());
+        out.v4 = Some(best);
+    }
+    if let Some((_, best)) = best_v6_by_ip
+        .into_values()
+        .max_by_key(|(count, _)| *count)
+    {
+        info!("STUN-Quorum reached, IP: {}", best.reflected_addr.ip());
+        out.v6 = Some(best);
+    }
+    out
 }
 
 pub fn decide_network_capabilities(config: &NetworkConfig, probe: &NetworkProbe) -> NetworkDecision {

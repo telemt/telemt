@@ -22,6 +22,7 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
     let mut inflight: HashMap<(i32, IpFamily), usize> = HashMap::new();
     loop {
         tokio::time::sleep(Duration::from_secs(HEALTH_INTERVAL_SECS)).await;
+        pool.prune_closed_writers().await;
         check_family(
             IpFamily::V4,
             &pool,

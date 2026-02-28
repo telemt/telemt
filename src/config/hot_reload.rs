@@ -96,6 +96,9 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig) {
     if old.general.use_middle_proxy != new.general.use_middle_proxy {
         warn!("config reload: use_middle_proxy changed; restart required");
     }
+    if old.general.stun_nat_probe_concurrency != new.general.stun_nat_probe_concurrency {
+        warn!("config reload: general.stun_nat_probe_concurrency changed; restart required");
+    }
 }
 
 /// Resolve the public host for link generation — mirrors the logic in main.rs.

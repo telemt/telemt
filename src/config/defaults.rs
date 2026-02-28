@@ -111,25 +111,15 @@ pub(crate) fn default_proxy_secret_path() -> Option<String> {
 }
 
 pub(crate) fn default_middle_proxy_nat_stun() -> Option<String> {
-    Some("stun.l.google.com:19302".to_string())
+    None
 }
 
 pub(crate) fn default_middle_proxy_nat_stun_servers() -> Vec<String> {
-    vec![
-        "stun.l.google.com:5349".to_string(),
-        "stun1.l.google.com:3478".to_string(),
-        "stun.gmx.net:3478".to_string(),
-        "stun.l.google.com:19302".to_string(),
-        "stun.1und1.de:3478".to_string(),
-        "stun1.l.google.com:19302".to_string(),
-        "stun2.l.google.com:19302".to_string(),
-        "stun3.l.google.com:19302".to_string(),
-        "stun4.l.google.com:19302".to_string(),
-        "stun.services.mozilla.com:3478".to_string(),
-        "stun.stunprotocol.org:3478".to_string(),
-        "stun.nextcloud.com:3478".to_string(),
-        "stun.voip.eutelia.it:3478".to_string(),
-    ]
+    Vec::new()
+}
+
+pub(crate) fn default_stun_nat_probe_concurrency() -> usize {
+    8
 }
 
 pub(crate) fn default_middle_proxy_warm_standby() -> usize {
