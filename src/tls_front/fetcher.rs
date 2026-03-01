@@ -499,7 +499,7 @@ async fn fetch_via_raw_tls(
                     sock = %sock_path,
                     "Raw TLS fetch using mask unix socket"
                 );
-                return fetch_via_raw_tls_stream(stream, sni, connect_timeout, 0).await;
+                return fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol).await;
             }
             Ok(Err(e)) => {
                 warn!(
@@ -631,7 +631,7 @@ async fn fetch_via_rustls(
                     sock = %sock_path,
                     "Rustls fetch using mask unix socket"
                 );
-                return fetch_via_rustls_stream(stream, host, sni, 0).await;
+                return fetch_via_rustls_stream(stream, host, sni, proxy_protocol).await;
             }
             Ok(Err(e)) => {
                 warn!(
