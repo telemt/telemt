@@ -35,11 +35,11 @@
 
 # Deprecated. Use [general.links].show instead.
 # Accepts "*" for all users, or an array like ["alice", "bob"].
-show_link = []
+show_link = ["0"]
 
 # Fallback Datacenter index (1-5) when a client requests an unknown DC ID.
 # DC 2 is Amsterdam (Europe), closest for most CIS users.
-default_dc = 2
+# default_dc = 2
 
 
 # ==============================================================================
@@ -550,7 +550,7 @@ server_hello_delay_max_ms = 150
 # Set this to match your tls_domain's behavior (usually 2).
 # ------------------------------------------------------------------------------
 
-tls_new_session_tickets = 2
+# tls_new_session_tickets = 0
 
 # ------------------------------------------------------------------------------
 # Full Certificate Frequency

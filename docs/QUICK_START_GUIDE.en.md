@@ -74,7 +74,7 @@ tls_domain = "petrovich.ru"
 # format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
 ```
-then Ctrl+X -> Y -> Enter to save
+then Ctrl+S -> Ctrl+X to save
 
 > [!WARNING]
 > Replace the value of the hello parameter with the value you obtained in step 0. 
@@ -105,7 +105,7 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 ```
-then Ctrl+X -> Y -> Enter to save
+then Ctrl+S -> Ctrl+X to save
 
 
 **3.** To start it, enter the command `systemctl start telemt`
