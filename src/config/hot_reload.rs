@@ -7,7 +7,8 @@
 //! | Section   | Field                         | Effect                            |
 //! |-----------|-------------------------------|-----------------------------------|
 //! | `general` | `log_level`                   | Filter updated via `log_level_tx` |
-//! | `general` | `ad_tag`                      | Passed on next connection         |
+//! | `access`  | `user_ad_tags`                 | Passed on next connection         |
+//! | `general` | `ad_tag`                       | Passed on next connection (fallback when no per-user tag) |
 //! | `general` | `middle_proxy_pool_size`      | Passed on next connection         |
 //! | `general` | `me_keepalive_*`              | Passed on next connection         |
 //! | `general` | `desync_all_full`             | Applied immediately               |
@@ -207,12 +208,15 @@ fn log_changes(
         log_tx.send(new_hot.log_level.clone()).ok();
     }
 
-    if old_hot.ad_tag != new_hot.ad_tag {
+    if old_hot.access.user_ad_tags != new_hot.access.user_ad_tags {
         info!(
-            "config reload: ad_tag: {} → {}",
-            old_hot.ad_tag.as_deref().unwrap_or("none"),
-            new_hot.ad_tag.as_deref().unwrap_or("none"),
+            "config reload: user_ad_tags updated ({} entries)",
+            new_hot.access.user_ad_tags.len(),
         );
+    }
+
+    if old_hot.ad_tag != new_hot.ad_tag {
+        info!("config reload: general.ad_tag updated (applied on next connection)");
     }
 
     if old_hot.dns_overrides != new_hot.dns_overrides {

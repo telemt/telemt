@@ -238,7 +238,22 @@ where
     stats.increment_user_connects(&user);
     stats.increment_user_curr_connects(&user);
 
-    let proto_flags = proto_flags_for_tag(proto_tag, me_pool.has_proxy_tag());
+    // Per-user ad_tag from access.user_ad_tags; fallback to general.ad_tag (hot-reloadable)
+    let user_tag: Option<Vec<u8>> = config
+        .access
+        .user_ad_tags
+        .get(&user)
+        .and_then(|s| hex::decode(s).ok())
+        .filter(|v| v.len() == 16);
+    let global_tag: Option<Vec<u8>> = config
+        .general
+        .ad_tag
+        .as_ref()
+        .and_then(|s| hex::decode(s).ok())
+        .filter(|v| v.len() == 16);
+    let effective_tag = user_tag.or(global_tag);
+
+    let proto_flags = proto_flags_for_tag(proto_tag, effective_tag.is_some());
     debug!(
         trace_id = format_args!("0x{:016x}", trace_id),
         user = %user,
@@ -256,6 +271,7 @@ where
 
     let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(C2ME_CHANNEL_CAPACITY);
     let me_pool_c2me = me_pool.clone();
+    let effective_tag = effective_tag;
     let c2me_sender = tokio::spawn(async move {
         let mut sent_since_yield = 0usize;
         while let Some(cmd) = c2me_rx.recv().await {
@@ -268,6 +284,7 @@ where
                         translated_local_addr,
                         &payload,
                         flags,
+                        effective_tag.as_deref(),
                     ).await?;
                     sent_since_yield = sent_since_yield.saturating_add(1);
                     if should_yield_c2me_sender(sent_since_yield, !c2me_rx.is_empty()) {

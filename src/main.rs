@@ -448,7 +448,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             info!("Middle-proxy STUN probing disabled by network.stun_use=false");
         }
 
-        // ad_tag (proxy_tag) for advertising
+        // Global ad_tag (pool default). Used when user has no per-user tag in access.user_ad_tags.
         let proxy_tag = config
             .general
             .ad_tag

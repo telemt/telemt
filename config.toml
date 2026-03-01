@@ -4,8 +4,14 @@
 
 # === General Settings ===
 [general]
-use_middle_proxy = false
+fast_mode = true
+use_middle_proxy = true
+# Global ad_tag fallback when user has no per-user tag in [access.user_ad_tags]
 # ad_tag = "00000000000000000000000000000000"
+# Per-user ad_tag in [access.user_ad_tags] (32 hex from @MTProxybot)
+# Path to proxy-secret binary (auto-downloaded if missing).
+proxy_secret_path = "proxy-secret"
+# disable_colors = false  # Disable colored output in logs (useful for files/systemd)
 
 # === Log Level ===
 # Log level: debug | verbose | normal | silent
