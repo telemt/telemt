@@ -770,12 +770,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Background tasks
     let um_clone = upstream_manager.clone();
     let decision_clone = decision.clone();
+    let dc_overrides_for_health = config.dc_overrides.clone();
     tokio::spawn(async move {
         um_clone
             .run_health_checks(
                 prefer_ipv6,
                 decision_clone.ipv4_dc,
                 decision_clone.ipv6_dc,
+                dc_overrides_for_health,
             )
             .await;
     });
