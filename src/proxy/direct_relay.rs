@@ -118,10 +118,10 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
     // Unknown DC requested by client without override: log and fall back.
     if !config.dc_overrides.contains_key(&dc_key) {
         warn!(dc_idx = dc_idx, "Requested non-standard DC with no override; falling back to default cluster");
-        if let Some(path) = &config.general.unknown_dc_log_path {
-            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                let _ = writeln!(file, "dc_idx={dc_idx}");
-            }
+        if let Some(path) = &config.general.unknown_dc_log_path
+            && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(file, "dc_idx={dc_idx}");
         }
     }
 

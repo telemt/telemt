@@ -1,5 +1,7 @@
 //! Error Types
 
+#![allow(dead_code)]
+
 use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -89,7 +91,7 @@ impl From<StreamError> for std::io::Error {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, err)
             }
             StreamError::Poisoned { .. } => {
-                std::io::Error::new(std::io::ErrorKind::Other, err)
+                std::io::Error::other(err)
             }
             StreamError::BufferOverflow { .. } => {
                 std::io::Error::new(std::io::ErrorKind::OutOfMemory, err)
@@ -98,7 +100,7 @@ impl From<StreamError> for std::io::Error {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, err)
             }
             StreamError::PartialRead { .. } | StreamError::PartialWrite { .. } => {
-                std::io::Error::new(std::io::ErrorKind::Other, err)
+                std::io::Error::other(err)
             }
         }
     }
@@ -133,12 +135,7 @@ impl Recoverable for StreamError {
     }
     
     fn can_continue(&self) -> bool {
-        match self {
-            Self::Poisoned { .. } => false,
-            Self::UnexpectedEof => false,
-            Self::BufferOverflow { .. } => false,
-            _ => true,
-        }
+        !matches!(self, Self::Poisoned { .. } | Self::UnexpectedEof | Self::BufferOverflow { .. })
     }
 }
 

@@ -28,6 +28,7 @@ mod address_family {
 
 /// Information extracted from PROXY protocol header
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ProxyProtocolInfo {
     /// Source (client) address
     pub src_addr: SocketAddr,
@@ -37,6 +38,7 @@ pub struct ProxyProtocolInfo {
     pub version: u8,
 }
 
+#[allow(dead_code)]
 impl ProxyProtocolInfo {
     /// Create info with just source address
     pub fn new(src_addr: SocketAddr) -> Self {
@@ -287,6 +289,12 @@ impl Default for ProxyProtocolV1Builder {
 pub struct ProxyProtocolV2Builder {
     src: Option<SocketAddr>,
     dst: Option<SocketAddr>,
+}
+
+impl Default for ProxyProtocolV2Builder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProxyProtocolV2Builder {

@@ -3,6 +3,8 @@
 //! This module provides core types and traits for implementing
 //! stateful async streams with proper partial read/write handling.
 
+#![allow(dead_code)]
+
 use bytes::{Bytes, BytesMut};
 use std::io;
 

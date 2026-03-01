@@ -2,6 +2,8 @@
 
 **Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements such as connection pooling, replay protection, detailed statistics, masking from "prying" eyes
 
+[**Telemt Chat in Telegram**](https://t.me/telemtrs)
+
 ## NEWS and EMERGENCY
 ### ✈️ Telemt 3 is released!
 <table>
@@ -10,28 +12,18 @@
 
 ### 🇷🇺 RU
 
-#### Драфтинг LTS и текущие улучшения
+#### Релиз 3.0.15 — 25 февраля
 
-С 21 февраля мы начали подготовку LTS-версии.
+25 февраля мы выпустили версию **3.0.15**
 
-Мы внимательно анализируем весь доступный фидбек.  
-Наша цель — сделать LTS-кандидаты максимально стабильными, тщательно отлаженными и готовыми к long-run и highload production-сценариям.
+Мы предполагаем, что она станет завершающей версией поколения 3.0 и уже сейчас мы рассматриваем её как **LTS-кандидата** для версии **3.1.0**!
 
----
+После нескольких дней детального анализа особенностей работы Middle-End мы спроектировали и реализовали продуманный режим **ротации ME Writer**. Данный режим позволяет поддерживать стабильно высокую производительность в long-run сценариях без возникновения ошибок, связанных с некорректной конфигурацией прокси
 
-#### Улучшения от 23 февраля
-
-23 февраля были внесены улучшения производительности в режимах **DC** и **Middle-End (ME)**, с акцентом на обратный канал (путь клиент → DC / ME).
-
-Дополнительно реализован ряд изменений, направленных на повышение устойчивости системы:
-
-- Смягчение сетевой нестабильности  
-- Повышение устойчивости к десинхронизации криптографии  
-- Снижение дрейфа сессий при неблагоприятных условиях  
-- Улучшение обработки ошибок в edge-case транспортных сценариях  
+Будем рады вашему фидбеку и предложениям по улучшению — особенно в части **статистики** и **UX**
 
 Релиз:  
-[3.0.9](https://github.com/telemt/telemt/releases/tag/3.0.9)
+[3.0.15](https://github.com/telemt/telemt/releases/tag/3.0.15)
 
 ---
 
@@ -48,28 +40,18 @@
 
 ### 🇬🇧 EN
 
-#### LTS Drafting and Ongoing Improvements
+#### Release 3.0.15 — February 25
 
-Starting February 21, we began drafting the upcoming LTS version.
+On February 25, we released version **3.0.15**
 
-We are carefully reviewing and analyzing all available feedback.  
-The goal is to ensure that LTS candidates are максимально stable, thoroughly debugged, and ready for long-run and high-load production scenarios.
+We expect this to become the final release of the 3.0 generation and at this point, we already see it as a strong **LTS candidate** for the upcoming **3.1.0** release!
 
----
+After several days of deep analysis of Middle-End behavior, we designed and implemented a well-engineered **ME Writer rotation mode**. This mode enables sustained high throughput in long-run scenarios while preventing proxy misconfiguration errors
 
-#### February 23 Improvements
-
-On February 23, we introduced performance improvements for both **DC** and **Middle-End (ME)** modes, specifically optimizing the reverse channel (client → DC / ME data path).
-
-Additionally, we implemented a set of robustness enhancements designed to:
-
-- Mitigate network-related instability
-- Improve resilience against cryptographic desynchronization
-- Reduce session drift under adverse conditions
-- Improve error handling in edge-case transport scenarios
+We are looking forward to your feedback and improvement proposals — especially regarding **statistics** and **UX**
 
 Release:  
-[3.0.9](https://github.com/telemt/telemt/releases/tag/3.0.9)
+[3.0.15](https://github.com/telemt/telemt/releases/tag/3.0.15)
 
 ---
 
@@ -208,6 +190,8 @@ then Ctrl+X -> Y -> Enter to save
 **4.** In Shell type `systemctl status telemt` - there you can reach info about current MTProxy status
 
 **5.** In Shell type `systemctl enable telemt` - then telemt will start with system startup, after the network is up
+
+**6.** In Shell type `journalctl -u telemt -n -g "links" --no-pager -o cat | tac` - get the connection links
 
 ## Configuration
 ### Minimal Configuration for First Start

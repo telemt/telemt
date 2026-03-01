@@ -165,11 +165,10 @@ fn process_pid16() -> u16 {
 }
 
 fn process_utime() -> u32 {
-    let utime = std::time::SystemTime::now()
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as u32;
-    utime
+        .as_secs() as u32
 }
 
 pub(crate) fn cbc_encrypt_padded(

@@ -1,6 +1,7 @@
 //! Masking - forward unrecognized traffic to mask host
 
 use std::str;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
 #[cfg(unix)]
@@ -9,6 +10,9 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 use tracing::debug;
 use crate::config::ProxyConfig;
+use crate::network::dns_overrides::resolve_socket_addr;
+use crate::stats::beobachten::BeobachtenStore;
+use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 
 const MASK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum duration for the entire masking relay.
@@ -19,12 +23,12 @@ const MASK_BUFFER_SIZE: usize = 8192;
 /// Detect client type based on initial data
 fn detect_client_type(data: &[u8]) -> &'static str {
     // Check for HTTP request
-    if data.len() > 4 {
-        if data.starts_with(b"GET ") || data.starts_with(b"POST") ||
+    if data.len() > 4
+        && (data.starts_with(b"GET ") || data.starts_with(b"POST") ||
            data.starts_with(b"HEAD") || data.starts_with(b"PUT ") ||
-           data.starts_with(b"DELETE") || data.starts_with(b"OPTIONS") {
-            return "HTTP";
-        }
+           data.starts_with(b"DELETE") || data.starts_with(b"OPTIONS"))
+    {
+        return "HTTP";
     }
 
     // Check for TLS ClientHello (0x16 = handshake, 0x03 0x01-0x03 = TLS version)
@@ -50,19 +54,26 @@ pub async fn handle_bad_client<R, W>(
     reader: R,
     writer: W,
     initial_data: &[u8],
+    peer: SocketAddr,
+    local_addr: SocketAddr,
     config: &ProxyConfig,
+    beobachten: &BeobachtenStore,
 )
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let client_type = detect_client_type(initial_data);
+    if config.general.beobachten {
+        let ttl = Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60));
+        beobachten.record(client_type, peer.ip(), ttl);
+    }
+
     if !config.censorship.mask {
         // Masking disabled, just consume data
         consume_client_data(reader).await;
         return;
     }
-
-    let client_type = detect_client_type(initial_data);
 
     // Connect via Unix socket or TCP
     #[cfg(unix)]
@@ -77,7 +88,29 @@ where
         let connect_result = timeout(MASK_TIMEOUT, UnixStream::connect(sock_path)).await;
         match connect_result {
             Ok(Ok(stream)) => {
-                let (mask_read, mask_write) = stream.into_split();
+                let (mask_read, mut mask_write) = stream.into_split();
+                let proxy_header: Option<Vec<u8>> = match config.censorship.mask_proxy_protocol {
+                    0 => None,
+                    version => {
+                        let header = match version {
+                            2 => ProxyProtocolV2Builder::new().with_addrs(peer, local_addr).build(),
+                            _ => match (peer, local_addr) {
+                                (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
+                                    ProxyProtocolV1Builder::new().tcp4(src.into(), dst.into()).build(),
+                                (SocketAddr::V6(src), SocketAddr::V6(dst)) =>
+                                    ProxyProtocolV1Builder::new().tcp6(src.into(), dst.into()).build(),
+                                _ =>
+                                    ProxyProtocolV1Builder::new().build(),
+                            },
+                        };
+                        Some(header)
+                    }
+                };
+                if let Some(header) = proxy_header {
+                    if mask_write.write_all(&header).await.is_err() {
+                        return;
+                    }
+                }
                 if timeout(MASK_RELAY_TIMEOUT, relay_to_mask(reader, writer, mask_read, mask_write, initial_data)).await.is_err() {
                     debug!("Mask relay timed out (unix socket)");
                 }
@@ -106,12 +139,37 @@ where
         "Forwarding bad client to mask host"
     );
 
-    // Connect to mask host
-    let mask_addr = format!("{}:{}", mask_host, mask_port);
+    // Apply runtime DNS override for mask target when configured.
+    let mask_addr = resolve_socket_addr(mask_host, mask_port)
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|| format!("{}:{}", mask_host, mask_port));
     let connect_result = timeout(MASK_TIMEOUT, TcpStream::connect(&mask_addr)).await;
     match connect_result {
         Ok(Ok(stream)) => {
-            let (mask_read, mask_write) = stream.into_split();
+            let proxy_header: Option<Vec<u8>> = match config.censorship.mask_proxy_protocol {
+                0 => None,
+                version => {
+                    let header = match version {
+                        2 => ProxyProtocolV2Builder::new().with_addrs(peer, local_addr).build(),
+                        _ => match (peer, local_addr) {
+                            (SocketAddr::V4(src), SocketAddr::V4(dst)) =>
+                                ProxyProtocolV1Builder::new().tcp4(src.into(), dst.into()).build(),
+                            (SocketAddr::V6(src), SocketAddr::V6(dst)) =>
+                                ProxyProtocolV1Builder::new().tcp6(src.into(), dst.into()).build(),
+                            _ =>
+                                ProxyProtocolV1Builder::new().build(),
+                        },
+                    };
+                    Some(header)
+                }
+            };
+
+            let (mask_read, mut mask_write) = stream.into_split();
+            if let Some(header) = proxy_header {
+                if mask_write.write_all(&header).await.is_err() {
+                    return;
+                }
+            }
             if timeout(MASK_RELAY_TIMEOUT, relay_to_mask(reader, writer, mask_read, mask_write, initial_data)).await.is_err() {
                 debug!("Mask relay timed out");
             }

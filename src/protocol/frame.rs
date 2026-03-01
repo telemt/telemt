@@ -1,5 +1,7 @@
 //! MTProto frame types and metadata
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 /// Extra metadata associated with a frame
@@ -83,7 +85,7 @@ impl FrameMode {
 pub fn validate_message_length(len: usize) -> bool {
     use super::constants::{MIN_MSG_LEN, MAX_MSG_LEN, PADDING_FILLER};
     
-    len >= MIN_MSG_LEN && len <= MAX_MSG_LEN && len % PADDING_FILLER.len() == 0
+    (MIN_MSG_LEN..=MAX_MSG_LEN).contains(&len) && len.is_multiple_of(PADDING_FILLER.len())
 }
 
 #[cfg(test)]

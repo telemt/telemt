@@ -4,11 +4,14 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tracing::{debug, warn, error};
 
+#[allow(dead_code)]
 const TIME_SYNC_URL: &str = "https://core.telegram.org/getProxySecret";
+#[allow(dead_code)]
 const MAX_TIME_SKEW_SECS: i64 = 30;
 
 /// Time sync result
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TimeSyncResult {
     pub server_time: DateTime<Utc>,
     pub local_time: DateTime<Utc>,
@@ -17,6 +20,7 @@ pub struct TimeSyncResult {
 }
 
 /// Check time synchronization with Telegram servers
+#[allow(dead_code)]
 pub async fn check_time_sync() -> Option<TimeSyncResult> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -60,17 +64,18 @@ pub async fn check_time_sync() -> Option<TimeSyncResult> {
 }
 
 /// Background time sync task
+#[allow(dead_code)]
 pub async fn time_sync_task(check_interval: Duration) -> ! {
     loop {
-        if let Some(result) = check_time_sync().await {
-            if result.is_skewed {
-                error!(
-                    "System clock is off by {} seconds. Please sync your clock.",
-                    result.skew_secs
-                );
-            }
+        if let Some(result) = check_time_sync().await
+            && result.is_skewed
+        {
+            error!(
+                "System clock is off by {} seconds. Please sync your clock.",
+                result.skew_secs
+            );
         }
-        
+
         tokio::time::sleep(check_interval).await;
     }
 }

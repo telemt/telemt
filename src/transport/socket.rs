@@ -10,6 +10,7 @@ use socket2::{Socket, TcpKeepalive, Domain, Type, Protocol};
 use tracing::debug;
 
 /// Configure TCP socket with recommended settings for proxy use
+#[allow(dead_code)]
 pub fn configure_tcp_socket(
     stream: &TcpStream,
     keepalive: bool,
@@ -82,6 +83,7 @@ pub fn configure_client_socket(
 }
 
 /// Set socket to send RST on close (for masking)
+#[allow(dead_code)]
 pub fn set_linger_zero(stream: &TcpStream) -> Result<()> {
     let socket = socket2::SockRef::from(stream);
     socket.set_linger(Some(Duration::ZERO))?;
@@ -89,6 +91,7 @@ pub fn set_linger_zero(stream: &TcpStream) -> Result<()> {
 }
 
 /// Create a new TCP socket for outgoing connections
+#[allow(dead_code)]
 pub fn create_outgoing_socket(addr: SocketAddr) -> Result<Socket> {
     create_outgoing_socket_bound(addr, None)
 }
@@ -120,6 +123,7 @@ pub fn create_outgoing_socket_bound(addr: SocketAddr, bind_addr: Option<IpAddr>)
 
 
 /// Get local address of a socket
+#[allow(dead_code)]
 pub fn get_local_addr(stream: &TcpStream) -> Option<SocketAddr> {
     stream.local_addr().ok()
 }
@@ -132,17 +136,17 @@ pub fn resolve_interface_ip(name: &str, want_ipv6: bool) -> Option<IpAddr> {
 
     if let Ok(addrs) = getifaddrs() {
         for iface in addrs {
-            if iface.interface_name == name {
-                if let Some(address) = iface.address {
-                    if let Some(v4) = address.as_sockaddr_in() {
-                        if !want_ipv6 {
-                            return Some(IpAddr::V4(v4.ip()));
-                        }
-                    } else if let Some(v6) = address.as_sockaddr_in6() {
-                        if want_ipv6 {
-                            return Some(IpAddr::V6(v6.ip().clone()));
-                        }
+            if iface.interface_name == name
+                && let Some(address) = iface.address
+            {
+                if let Some(v4) = address.as_sockaddr_in() {
+                    if !want_ipv6 {
+                        return Some(IpAddr::V4(v4.ip()));
                     }
+                } else if let Some(v6) = address.as_sockaddr_in6()
+                    && want_ipv6
+                {
+                    return Some(IpAddr::V6(v6.ip()));
                 }
             }
         }
@@ -157,11 +161,13 @@ pub fn resolve_interface_ip(_name: &str, _want_ipv6: bool) -> Option<IpAddr> {
 }
 
 /// Get peer address of a socket
+#[allow(dead_code)]
 pub fn get_peer_addr(stream: &TcpStream) -> Option<SocketAddr> {
     stream.peer_addr().ok()
 }
 
 /// Check if address is IPv6
+#[allow(dead_code)]
 pub fn is_ipv6(addr: &SocketAddr) -> bool {
     addr.is_ipv6()
 }

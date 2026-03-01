@@ -1,7 +1,7 @@
 //! Client Handler
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +27,7 @@ use crate::error::{HandshakeResult, ProxyError, Result};
 use crate::ip_tracker::UserIpTracker;
 use crate::protocol::constants::*;
 use crate::protocol::tls;
+use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::middle_proxy::MePool;
@@ -38,6 +39,36 @@ use crate::proxy::direct_relay::handle_via_direct;
 use crate::proxy::handshake::{HandshakeSuccess, handle_mtproto_handshake, handle_tls_handshake};
 use crate::proxy::masking::handle_bad_client;
 use crate::proxy::middle_relay::handle_via_middle_proxy;
+
+fn beobachten_ttl(config: &ProxyConfig) -> Duration {
+    Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60))
+}
+
+fn record_beobachten_class(
+    beobachten: &BeobachtenStore,
+    config: &ProxyConfig,
+    peer_ip: IpAddr,
+    class: &str,
+) {
+    if !config.general.beobachten {
+        return;
+    }
+    beobachten.record(class, peer_ip, beobachten_ttl(config));
+}
+
+fn record_handshake_failure_class(
+    beobachten: &BeobachtenStore,
+    config: &ProxyConfig,
+    peer_ip: IpAddr,
+    error: &ProxyError,
+) {
+    let class = if error.to_string().contains("expected 64 bytes, got 0") {
+        "expected_64_got_0"
+    } else {
+        "other"
+    };
+    record_beobachten_class(beobachten, config, peer_ip, class);
+}
 
 pub async fn handle_client_stream<S>(
     mut stream: S,
@@ -51,6 +82,7 @@ pub async fn handle_client_stream<S>(
     me_pool: Option<Arc<MePool>>,
     tls_cache: Option<Arc<TlsFrontCache>>,
     ip_tracker: Arc<UserIpTracker>,
+    beobachten: Arc<BeobachtenStore>,
     proxy_protocol_enabled: bool,
 ) -> Result<()>
 where
@@ -58,6 +90,11 @@ where
 {
     stats.increment_connects_all();
     let mut real_peer = normalize_ip(peer);
+
+    // For non-TCP streams, use a synthetic local address; may be overridden by PROXY protocol dst
+    let mut local_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port)
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
 
     if proxy_protocol_enabled {
         match parse_proxy_protocol(&mut stream, peer).await {
@@ -69,10 +106,14 @@ where
                     "PROXY protocol header parsed"
                 );
                 real_peer = normalize_ip(info.src_addr);
+                if let Some(dst) = info.dst_addr {
+                    local_addr = dst;
+                }
             }
             Err(e) => {
                 stats.increment_connects_bad();
                 warn!(peer = %peer, error = %e, "Invalid PROXY protocol header");
+                record_beobachten_class(&beobachten, &config, peer.ip(), "other");
                 return Err(e);
             }
         }
@@ -82,11 +123,9 @@ where
 
     let handshake_timeout = Duration::from_secs(config.timeouts.client_handshake);
     let stats_for_timeout = stats.clone();
-
-    // For non-TCP streams, use a synthetic local address
-    let local_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port)
-        .parse()
-        .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
+    let config_for_timeout = config.clone();
+    let beobachten_for_timeout = beobachten.clone();
+    let peer_for_timeout = real_peer.ip();
 
     // Phase 1: handshake (with timeout)
     let outcome = match timeout(handshake_timeout, async {
@@ -103,7 +142,16 @@ where
                 debug!(peer = %real_peer, tls_len = tls_len, "TLS handshake too short");
                 stats.increment_connects_bad();
                 let (reader, writer) = tokio::io::split(stream);
-                handle_bad_client(reader, writer, &first_bytes, &config).await;
+                handle_bad_client(
+                    reader,
+                    writer,
+                    &first_bytes,
+                    real_peer,
+                    local_addr,
+                    &config,
+                    &beobachten,
+                )
+                .await;
                 return Ok(HandshakeOutcome::Handled);
             }
 
@@ -120,7 +168,16 @@ where
                 HandshakeResult::Success(result) => result,
                 HandshakeResult::BadClient { reader, writer } => {
                     stats.increment_connects_bad();
-                    handle_bad_client(reader, writer, &handshake, &config).await;
+                    handle_bad_client(
+                        reader,
+                        writer,
+                        &handshake,
+                        real_peer,
+                        local_addr,
+                        &config,
+                        &beobachten,
+                    )
+                    .await;
                     return Ok(HandshakeOutcome::Handled);
                 }
                 HandshakeResult::Error(e) => return Err(e),
@@ -156,7 +213,16 @@ where
                 debug!(peer = %real_peer, "Non-TLS modes disabled");
                 stats.increment_connects_bad();
                 let (reader, writer) = tokio::io::split(stream);
-                handle_bad_client(reader, writer, &first_bytes, &config).await;
+                handle_bad_client(
+                    reader,
+                    writer,
+                    &first_bytes,
+                    real_peer,
+                    local_addr,
+                    &config,
+                    &beobachten,
+                )
+                .await;
                 return Ok(HandshakeOutcome::Handled);
             }
 
@@ -173,7 +239,16 @@ where
                 HandshakeResult::Success(result) => result,
                 HandshakeResult::BadClient { reader, writer } => {
                     stats.increment_connects_bad();
-                    handle_bad_client(reader, writer, &handshake, &config).await;
+                    handle_bad_client(
+                        reader,
+                        writer,
+                        &handshake,
+                        real_peer,
+                        local_addr,
+                        &config,
+                        &beobachten,
+                    )
+                    .await;
                     return Ok(HandshakeOutcome::Handled);
                 }
                 HandshakeResult::Error(e) => return Err(e),
@@ -200,11 +275,23 @@ where
         Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => {
             debug!(peer = %peer, error = %e, "Handshake failed");
+            record_handshake_failure_class(
+                &beobachten_for_timeout,
+                &config_for_timeout,
+                peer_for_timeout,
+                &e,
+            );
             return Err(e);
         }
         Err(_) => {
             stats_for_timeout.increment_handshake_timeouts();
             debug!(peer = %peer, "Handshake timeout");
+            record_beobachten_class(
+                &beobachten_for_timeout,
+                &config_for_timeout,
+                peer_for_timeout,
+                "other",
+            );
             return Err(ProxyError::TgHandshakeTimeout);
         }
     };
@@ -230,6 +317,7 @@ pub struct RunningClientHandler {
     me_pool: Option<Arc<MePool>>,
     tls_cache: Option<Arc<TlsFrontCache>>,
     ip_tracker: Arc<UserIpTracker>,
+    beobachten: Arc<BeobachtenStore>,
     proxy_protocol_enabled: bool,
 }
 
@@ -246,6 +334,7 @@ impl ClientHandler {
         me_pool: Option<Arc<MePool>>,
         tls_cache: Option<Arc<TlsFrontCache>>,
         ip_tracker: Arc<UserIpTracker>,
+        beobachten: Arc<BeobachtenStore>,
         proxy_protocol_enabled: bool,
     ) -> RunningClientHandler {
         RunningClientHandler {
@@ -260,6 +349,7 @@ impl ClientHandler {
             me_pool,
             tls_cache,
             ip_tracker,
+            beobachten,
             proxy_protocol_enabled,
         }
     }
@@ -271,7 +361,7 @@ impl RunningClientHandler {
 
         self.peer = normalize_ip(self.peer);
         let peer = self.peer;
-        let ip_tracker = self.ip_tracker.clone();
+        let _ip_tracker = self.ip_tracker.clone();
         debug!(peer = %peer, "New connection");
 
         if let Err(e) = configure_client_socket(
@@ -284,17 +374,32 @@ impl RunningClientHandler {
 
         let handshake_timeout = Duration::from_secs(self.config.timeouts.client_handshake);
         let stats = self.stats.clone();
+        let config_for_timeout = self.config.clone();
+        let beobachten_for_timeout = self.beobachten.clone();
+        let peer_for_timeout = peer.ip();
 
         // Phase 1: handshake (with timeout)
         let outcome = match timeout(handshake_timeout, self.do_handshake()).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(e)) => {
                 debug!(peer = %peer, error = %e, "Handshake failed");
+                record_handshake_failure_class(
+                    &beobachten_for_timeout,
+                    &config_for_timeout,
+                    peer_for_timeout,
+                    &e,
+                );
                 return Err(e);
             }
             Err(_) => {
                 stats.increment_handshake_timeouts();
                 debug!(peer = %peer, "Handshake timeout");
+                record_beobachten_class(
+                    &beobachten_for_timeout,
+                    &config_for_timeout,
+                    peer_for_timeout,
+                    "other",
+                );
                 return Err(ProxyError::TgHandshakeTimeout);
             }
         };
@@ -307,6 +412,8 @@ impl RunningClientHandler {
     }
 
     async fn do_handshake(mut self) -> Result<HandshakeOutcome> {
+        let mut local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
+
         if self.proxy_protocol_enabled {
             match parse_proxy_protocol(&mut self.stream, self.peer).await {
                 Ok(info) => {
@@ -317,10 +424,19 @@ impl RunningClientHandler {
                         "PROXY protocol header parsed"
                     );
                     self.peer = normalize_ip(info.src_addr);
+                    if let Some(dst) = info.dst_addr {
+                        local_addr = dst;
+                    }
                 }
                 Err(e) => {
                     self.stats.increment_connects_bad();
                     warn!(peer = %self.peer, error = %e, "Invalid PROXY protocol header");
+                    record_beobachten_class(
+                        &self.beobachten,
+                        &self.config,
+                        self.peer.ip(),
+                        "other",
+                    );
                     return Err(e);
                 }
             }
@@ -331,20 +447,20 @@ impl RunningClientHandler {
 
         let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
         let peer = self.peer;
-        let ip_tracker = self.ip_tracker.clone();
+        let _ip_tracker = self.ip_tracker.clone();
 
         debug!(peer = %peer, is_tls = is_tls, "Handshake type detected");
 
         if is_tls {
-            self.handle_tls_client(first_bytes).await
+            self.handle_tls_client(first_bytes, local_addr).await
         } else {
-            self.handle_direct_client(first_bytes).await
+            self.handle_direct_client(first_bytes, local_addr).await
         }
     }
 
-    async fn handle_tls_client(mut self, first_bytes: [u8; 5]) -> Result<HandshakeOutcome> {
+    async fn handle_tls_client(mut self, first_bytes: [u8; 5], local_addr: SocketAddr) -> Result<HandshakeOutcome> {
         let peer = self.peer;
-        let ip_tracker = self.ip_tracker.clone();
+        let _ip_tracker = self.ip_tracker.clone();
 
         let tls_len = u16::from_be_bytes([first_bytes[3], first_bytes[4]]) as usize;
 
@@ -354,7 +470,16 @@ impl RunningClientHandler {
             debug!(peer = %peer, tls_len = tls_len, "TLS handshake too short");
             self.stats.increment_connects_bad();
             let (reader, writer) = self.stream.into_split();
-            handle_bad_client(reader, writer, &first_bytes, &self.config).await;
+            handle_bad_client(
+                reader,
+                writer,
+                &first_bytes,
+                peer,
+                local_addr,
+                &self.config,
+                &self.beobachten,
+            )
+            .await;
             return Ok(HandshakeOutcome::Handled);
         }
 
@@ -367,7 +492,6 @@ impl RunningClientHandler {
         let stats = self.stats.clone();
         let buffer_pool = self.buffer_pool.clone();
 
-        let local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
         let (read_half, write_half) = self.stream.into_split();
 
         let (mut tls_reader, tls_writer, _tls_user) = match handle_tls_handshake(
@@ -385,7 +509,16 @@ impl RunningClientHandler {
             HandshakeResult::Success(result) => result,
             HandshakeResult::BadClient { reader, writer } => {
                 stats.increment_connects_bad();
-                handle_bad_client(reader, writer, &handshake, &config).await;
+                handle_bad_client(
+                    reader,
+                    writer,
+                    &handshake,
+                    peer,
+                    local_addr,
+                    &config,
+                    &self.beobachten,
+                )
+                .await;
                 return Ok(HandshakeOutcome::Handled);
             }
             HandshakeResult::Error(e) => return Err(e),
@@ -438,15 +571,24 @@ impl RunningClientHandler {
         )))
     }
 
-    async fn handle_direct_client(mut self, first_bytes: [u8; 5]) -> Result<HandshakeOutcome> {
+    async fn handle_direct_client(mut self, first_bytes: [u8; 5], local_addr: SocketAddr) -> Result<HandshakeOutcome> {
         let peer = self.peer;
-        let ip_tracker = self.ip_tracker.clone();
+        let _ip_tracker = self.ip_tracker.clone();
 
         if !self.config.general.modes.classic && !self.config.general.modes.secure {
             debug!(peer = %peer, "Non-TLS modes disabled");
             self.stats.increment_connects_bad();
             let (reader, writer) = self.stream.into_split();
-            handle_bad_client(reader, writer, &first_bytes, &self.config).await;
+            handle_bad_client(
+                reader,
+                writer,
+                &first_bytes,
+                peer,
+                local_addr,
+                &self.config,
+                &self.beobachten,
+            )
+            .await;
             return Ok(HandshakeOutcome::Handled);
         }
 
@@ -459,7 +601,6 @@ impl RunningClientHandler {
         let stats = self.stats.clone();
         let buffer_pool = self.buffer_pool.clone();
 
-        let local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
         let (read_half, write_half) = self.stream.into_split();
 
         let (crypto_reader, crypto_writer, success) = match handle_mtproto_handshake(
@@ -476,7 +617,16 @@ impl RunningClientHandler {
             HandshakeResult::Success(result) => result,
             HandshakeResult::BadClient { reader, writer } => {
                 stats.increment_connects_bad();
-                handle_bad_client(reader, writer, &handshake, &config).await;
+                handle_bad_client(
+                    reader,
+                    writer,
+                    &handshake,
+                    peer,
+                    local_addr,
+                    &config,
+                    &self.beobachten,
+                )
+                .await;
                 return Ok(HandshakeOutcome::Handled);
             }
             HandshakeResult::Error(e) => return Err(e),
@@ -594,18 +744,18 @@ impl RunningClientHandler {
         peer_addr: SocketAddr,
         ip_tracker: &UserIpTracker,
     ) -> Result<()> {
-        if let Some(expiration) = config.access.user_expirations.get(user) {
-            if chrono::Utc::now() > *expiration {
-                return Err(ProxyError::UserExpired {
-                    user: user.to_string(),
-                });
-            }
+        if let Some(expiration) = config.access.user_expirations.get(user)
+            && chrono::Utc::now() > *expiration
+        {
+            return Err(ProxyError::UserExpired {
+                user: user.to_string(),
+            });
         }
 
         // IP limit check
         if let Err(reason) = ip_tracker.check_and_add(user, peer_addr.ip()).await {
             warn!(
-                user = %user, 
+                user = %user,
                 ip = %peer_addr.ip(),
                 reason = %reason,
                 "IP limit exceeded"
@@ -615,20 +765,20 @@ impl RunningClientHandler {
             });
         }
 
-        if let Some(limit) = config.access.user_max_tcp_conns.get(user) {
-            if stats.get_user_curr_connects(user) >= *limit as u64 {
-                return Err(ProxyError::ConnectionLimitExceeded {
-                    user: user.to_string(),
-                });
-            }
+        if let Some(limit) = config.access.user_max_tcp_conns.get(user)
+            && stats.get_user_curr_connects(user) >= *limit as u64
+        {
+            return Err(ProxyError::ConnectionLimitExceeded {
+                user: user.to_string(),
+            });
         }
 
-        if let Some(quota) = config.access.user_data_quota.get(user) {
-            if stats.get_user_total_octets(user) >= *quota {
-                return Err(ProxyError::DataQuotaExceeded {
-                    user: user.to_string(),
-                });
-            }
+        if let Some(quota) = config.access.user_data_quota.get(user)
+            && stats.get_user_total_octets(user) >= *quota
+        {
+            return Err(ProxyError::DataQuotaExceeded {
+                user: user.to_string(),
+            });
         }
 
         Ok(())

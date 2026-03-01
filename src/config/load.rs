@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
@@ -63,6 +65,33 @@ fn validate_network_cfg(net: &mut NetworkConfig) -> Result<()> {
     Ok(())
 }
 
+fn push_unique_nonempty(target: &mut Vec<String>, value: String) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !target.iter().any(|existing| existing == trimmed) {
+        target.push(trimmed.to_string());
+    }
+}
+
+fn is_valid_ad_tag(tag: &str) -> bool {
+    tag.len() == 32 && tag.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn sanitize_ad_tag(ad_tag: &mut Option<String>) {
+    let Some(tag) = ad_tag.as_ref() else {
+        return;
+    };
+
+    if !is_valid_ad_tag(tag) {
+        warn!(
+            "Invalid general.ad_tag value, expected exactly 32 hex chars; ad_tag is disabled"
+        );
+        *ad_tag = None;
+    }
+}
+
 // ============= Main Config =============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -114,8 +143,217 @@ impl ProxyConfig {
         let base_dir = path.as_ref().parent().unwrap_or(Path::new("."));
         let processed = preprocess_includes(&content, base_dir, 0)?;
 
-        let mut config: ProxyConfig =
+        let parsed_toml: toml::Value =
             toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
+        let general_table = parsed_toml
+            .get("general")
+            .and_then(|value| value.as_table());
+        let network_table = parsed_toml
+            .get("network")
+            .and_then(|value| value.as_table());
+        let update_every_is_explicit = general_table
+            .map(|table| table.contains_key("update_every"))
+            .unwrap_or(false);
+        let legacy_secret_is_explicit = general_table
+            .map(|table| table.contains_key("proxy_secret_auto_reload_secs"))
+            .unwrap_or(false);
+        let legacy_config_is_explicit = general_table
+            .map(|table| table.contains_key("proxy_config_auto_reload_secs"))
+            .unwrap_or(false);
+        let stun_servers_is_explicit = network_table
+            .map(|table| table.contains_key("stun_servers"))
+            .unwrap_or(false);
+
+        let mut config: ProxyConfig =
+            parsed_toml.try_into().map_err(|e| ProxyError::Config(e.to_string()))?;
+
+        if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
+            config.general.update_every = None;
+        }
+
+        let legacy_nat_stun = config.general.middle_proxy_nat_stun.take();
+        let legacy_nat_stun_servers = std::mem::take(&mut config.general.middle_proxy_nat_stun_servers);
+        let legacy_nat_stun_used = legacy_nat_stun.is_some() || !legacy_nat_stun_servers.is_empty();
+        if stun_servers_is_explicit {
+            let mut explicit_stun_servers = Vec::new();
+            for stun in std::mem::take(&mut config.network.stun_servers) {
+                push_unique_nonempty(&mut explicit_stun_servers, stun);
+            }
+            config.network.stun_servers = explicit_stun_servers;
+
+            if legacy_nat_stun_used {
+                warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are ignored because network.stun_servers is explicitly set");
+            }
+        } else {
+            // Keep the default STUN pool unless network.stun_servers is explicitly overridden.
+            let mut unified_stun_servers = default_stun_servers();
+            if let Some(stun) = legacy_nat_stun {
+                push_unique_nonempty(&mut unified_stun_servers, stun);
+            }
+            for stun in legacy_nat_stun_servers {
+                push_unique_nonempty(&mut unified_stun_servers, stun);
+            }
+
+            config.network.stun_servers = unified_stun_servers;
+
+            if legacy_nat_stun_used {
+                warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are deprecated; use network.stun_servers");
+            }
+        }
+
+        sanitize_ad_tag(&mut config.general.ad_tag);
+
+        if let Some(update_every) = config.general.update_every {
+            if update_every == 0 {
+                return Err(ProxyError::Config(
+                    "general.update_every must be > 0".to_string(),
+                ));
+            }
+        } else {
+            let legacy_secret = config.general.proxy_secret_auto_reload_secs;
+            let legacy_config = config.general.proxy_config_auto_reload_secs;
+            let effective = legacy_secret.min(legacy_config);
+            if effective == 0 {
+                return Err(ProxyError::Config(
+                    "legacy proxy_*_auto_reload_secs values must be > 0 when general.update_every is not set".to_string(),
+                ));
+            }
+
+            if legacy_secret != default_proxy_secret_reload_secs()
+                || legacy_config != default_proxy_config_reload_secs()
+            {
+                warn!(
+                    proxy_secret_auto_reload_secs = legacy_secret,
+                    proxy_config_auto_reload_secs = legacy_config,
+                    effective_update_every_secs = effective,
+                    "proxy_*_auto_reload_secs are deprecated; set general.update_every"
+                );
+            }
+        }
+
+        if config.general.stun_nat_probe_concurrency == 0 {
+            return Err(ProxyError::Config(
+                "general.stun_nat_probe_concurrency must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.upstream_connect_retry_attempts == 0 {
+            return Err(ProxyError::Config(
+                "general.upstream_connect_retry_attempts must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.upstream_unhealthy_fail_threshold == 0 {
+            return Err(ProxyError::Config(
+                "general.upstream_unhealthy_fail_threshold must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_reinit_every_secs == 0 {
+            return Err(ProxyError::Config(
+                "general.me_reinit_every_secs must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.beobachten_minutes == 0 {
+            return Err(ProxyError::Config(
+                "general.beobachten_minutes must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.beobachten_flush_secs == 0 {
+            return Err(ProxyError::Config(
+                "general.beobachten_flush_secs must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.beobachten_file.trim().is_empty() {
+            return Err(ProxyError::Config(
+                "general.beobachten_file cannot be empty".to_string(),
+            ));
+        }
+
+        if config.general.me_hardswap_warmup_delay_max_ms == 0 {
+            return Err(ProxyError::Config(
+                "general.me_hardswap_warmup_delay_max_ms must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_hardswap_warmup_delay_min_ms
+            > config.general.me_hardswap_warmup_delay_max_ms
+        {
+            return Err(ProxyError::Config(
+                "general.me_hardswap_warmup_delay_min_ms must be <= general.me_hardswap_warmup_delay_max_ms".to_string(),
+            ));
+        }
+
+        if config.general.me_hardswap_warmup_extra_passes > 10 {
+            return Err(ProxyError::Config(
+                "general.me_hardswap_warmup_extra_passes must be within [0, 10]".to_string(),
+            ));
+        }
+
+        if config.general.me_hardswap_warmup_pass_backoff_base_ms == 0 {
+            return Err(ProxyError::Config(
+                "general.me_hardswap_warmup_pass_backoff_base_ms must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_config_stable_snapshots == 0 {
+            return Err(ProxyError::Config(
+                "general.me_config_stable_snapshots must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.proxy_secret_stable_snapshots == 0 {
+            return Err(ProxyError::Config(
+                "general.proxy_secret_stable_snapshots must be > 0".to_string(),
+            ));
+        }
+
+        if !(32..=4096).contains(&config.general.proxy_secret_len_max) {
+            return Err(ProxyError::Config(
+                "general.proxy_secret_len_max must be within [32, 4096]".to_string(),
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&config.general.me_pool_min_fresh_ratio) {
+            return Err(ProxyError::Config(
+                "general.me_pool_min_fresh_ratio must be within [0.0, 1.0]".to_string(),
+            ));
+        }
+
+        if config.general.me_route_backpressure_base_timeout_ms == 0 {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_base_timeout_ms must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_route_backpressure_high_timeout_ms
+            < config.general.me_route_backpressure_base_timeout_ms
+        {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_high_timeout_ms must be >= general.me_route_backpressure_base_timeout_ms".to_string(),
+            ));
+        }
+
+        if !(1..=100).contains(&config.general.me_route_backpressure_high_watermark_pct) {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_high_watermark_pct must be within [1, 100]".to_string(),
+            ));
+        }
+
+        if config.general.effective_me_pool_force_close_secs() > 0
+            && config.general.effective_me_pool_force_close_secs()
+                < config.general.me_pool_drain_ttl_secs
+        {
+            warn!(
+                me_pool_drain_ttl_secs = config.general.me_pool_drain_ttl_secs,
+                me_reinit_drain_timeout_secs = config.general.effective_me_pool_force_close_secs(),
+                "force-close timeout is lower than drain TTL; bumping force-close timeout to TTL"
+            );
+            config.general.me_reinit_drain_timeout_secs = config.general.me_pool_drain_ttl_secs;
+        }
 
         // Validate secrets.
         for (user, secret) in &config.access.users {
@@ -193,6 +431,7 @@ impl ProxyConfig {
         }
 
         validate_network_cfg(&mut config.network)?;
+        crate::network::dns_overrides::validate_entries(&config.network.dns_overrides)?;
 
         if config.general.use_middle_proxy && config.network.ipv6 == Some(true) {
             warn!("IPv6 with Middle Proxy is experimental and may cause KDF address mismatch; consider disabling IPv6 or ME");
@@ -230,23 +469,25 @@ impl ProxyConfig {
                     reuse_allow: false,
                 });
             }
-            if let Some(ipv6_str) = &config.server.listen_addr_ipv6 {
-                if let Ok(ipv6) = ipv6_str.parse::<IpAddr>() {
-                    config.server.listeners.push(ListenerConfig {
-                        ip: ipv6,
-                        announce: None,
-                        announce_ip: None,
-                        proxy_protocol: None,
-                        reuse_allow: false,
-                    });
-                }
+            if let Some(ipv6_str) = &config.server.listen_addr_ipv6
+                && let Ok(ipv6) = ipv6_str.parse::<IpAddr>()
+            {
+                config.server.listeners.push(ListenerConfig {
+                    ip: ipv6,
+                    announce: None,
+                    announce_ip: None,
+                    proxy_protocol: None,
+                    reuse_allow: false,
+                });
             }
         }
 
         // Migration: announce_ip → announce for each listener.
         for listener in &mut config.server.listeners {
-            if listener.announce.is_none() && listener.announce_ip.is_some() {
-                listener.announce = Some(listener.announce_ip.unwrap().to_string());
+            if listener.announce.is_none()
+                && let Some(ip) = listener.announce_ip.take()
+            {
+                listener.announce = Some(ip.to_string());
             }
         }
 
@@ -293,13 +534,17 @@ impl ProxyConfig {
 
         if let Some(tag) = &self.general.ad_tag {
             let zeros = "00000000000000000000000000000000";
+            if !is_valid_ad_tag(tag) {
+                return Err(ProxyError::Config(
+                    "general.ad_tag must be exactly 32 hex characters".to_string(),
+                ));
+            }
             if tag == zeros {
                 warn!("ad_tag is all zeros; register a valid proxy tag via @MTProxybot to enable sponsored channel");
             }
-            if tag.len() != 32 || tag.chars().any(|c| !c.is_ascii_hexdigit()) {
-                warn!("ad_tag is not a 32-char hex string; ensure you use value issued by @MTProxybot");
-            }
         }
+
+        crate::network::dns_overrides::validate_entries(&self.network.dns_overrides)?;
 
         Ok(())
     }
@@ -308,6 +553,90 @@ impl ProxyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serde_defaults_remain_unchanged_for_present_sections() {
+        let toml = r#"
+            [network]
+            [general]
+            [server]
+            [access]
+        "#;
+        let cfg: ProxyConfig = toml::from_str(toml).unwrap();
+
+        assert_eq!(cfg.network.ipv6, default_network_ipv6());
+        assert_eq!(cfg.network.stun_use, default_true());
+        assert_eq!(cfg.network.stun_tcp_fallback, default_stun_tcp_fallback());
+        assert_eq!(
+            cfg.general.middle_proxy_warm_standby,
+            default_middle_proxy_warm_standby()
+        );
+        assert_eq!(
+            cfg.general.me_reconnect_max_concurrent_per_dc,
+            default_me_reconnect_max_concurrent_per_dc()
+        );
+        assert_eq!(
+            cfg.general.me_reconnect_fast_retry_count,
+            default_me_reconnect_fast_retry_count()
+        );
+        assert_eq!(
+            cfg.general.upstream_connect_retry_attempts,
+            default_upstream_connect_retry_attempts()
+        );
+        assert_eq!(
+            cfg.general.upstream_connect_retry_backoff_ms,
+            default_upstream_connect_retry_backoff_ms()
+        );
+        assert_eq!(
+            cfg.general.upstream_unhealthy_fail_threshold,
+            default_upstream_unhealthy_fail_threshold()
+        );
+        assert_eq!(cfg.general.update_every, default_update_every());
+        assert_eq!(cfg.server.listen_addr_ipv4, default_listen_addr_ipv4());
+        assert_eq!(cfg.server.listen_addr_ipv6, default_listen_addr_ipv6_opt());
+        assert_eq!(cfg.access.users, default_access_users());
+    }
+
+    #[test]
+    fn impl_defaults_are_sourced_from_default_helpers() {
+        let network = NetworkConfig::default();
+        assert_eq!(network.ipv6, default_network_ipv6());
+        assert_eq!(network.stun_use, default_true());
+        assert_eq!(network.stun_tcp_fallback, default_stun_tcp_fallback());
+
+        let general = GeneralConfig::default();
+        assert_eq!(
+            general.middle_proxy_warm_standby,
+            default_middle_proxy_warm_standby()
+        );
+        assert_eq!(
+            general.me_reconnect_max_concurrent_per_dc,
+            default_me_reconnect_max_concurrent_per_dc()
+        );
+        assert_eq!(
+            general.me_reconnect_fast_retry_count,
+            default_me_reconnect_fast_retry_count()
+        );
+        assert_eq!(
+            general.upstream_connect_retry_attempts,
+            default_upstream_connect_retry_attempts()
+        );
+        assert_eq!(
+            general.upstream_connect_retry_backoff_ms,
+            default_upstream_connect_retry_backoff_ms()
+        );
+        assert_eq!(
+            general.upstream_unhealthy_fail_threshold,
+            default_upstream_unhealthy_fail_threshold()
+        );
+        assert_eq!(general.update_every, default_update_every());
+
+        let server = ServerConfig::default();
+        assert_eq!(server.listen_addr_ipv6, Some(default_listen_addr_ipv6()));
+
+        let access = AccessConfig::default();
+        assert_eq!(access.users, default_access_users());
+    }
 
     #[test]
     fn dc_overrides_allow_string_and_array() {
@@ -345,6 +674,469 @@ mod tests {
             .get("203")
             .map(|v| v.contains(&"91.105.192.100:443".to_string()))
             .unwrap_or(false));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_every_overrides_legacy_fields() {
+        let toml = r#"
+            [general]
+            update_every = 123
+            proxy_secret_auto_reload_secs = 700
+            proxy_config_auto_reload_secs = 800
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_update_every_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.effective_update_every_secs(), 123);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_every_fallback_to_legacy_min() {
+        let toml = r#"
+            [general]
+            proxy_secret_auto_reload_secs = 600
+            proxy_config_auto_reload_secs = 120
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_update_every_legacy_min_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.update_every, None);
+        assert_eq!(cfg.general.effective_update_every_secs(), 120);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_every_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            update_every = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_update_every_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.update_every must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stun_nat_probe_concurrency_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            stun_nat_probe_concurrency = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_stun_nat_probe_concurrency_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.stun_nat_probe_concurrency must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_reinit_every_default_is_set() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_reinit_every_default_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(
+            cfg.general.me_reinit_every_secs,
+            default_me_reinit_every_secs()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_reinit_every_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_reinit_every_secs = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_reinit_every_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_reinit_every_secs must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn upstream_connect_retry_attempts_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            upstream_connect_retry_attempts = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_upstream_connect_retry_attempts_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.upstream_connect_retry_attempts must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn upstream_unhealthy_fail_threshold_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            upstream_unhealthy_fail_threshold = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_upstream_unhealthy_fail_threshold_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.upstream_unhealthy_fail_threshold must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_hardswap_warmup_defaults_are_set() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_hardswap_warmup_defaults_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(
+            cfg.general.me_hardswap_warmup_delay_min_ms,
+            default_me_hardswap_warmup_delay_min_ms()
+        );
+        assert_eq!(
+            cfg.general.me_hardswap_warmup_delay_max_ms,
+            default_me_hardswap_warmup_delay_max_ms()
+        );
+        assert_eq!(
+            cfg.general.me_hardswap_warmup_extra_passes,
+            default_me_hardswap_warmup_extra_passes()
+        );
+        assert_eq!(
+            cfg.general.me_hardswap_warmup_pass_backoff_base_ms,
+            default_me_hardswap_warmup_pass_backoff_base_ms()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_hardswap_warmup_delay_range_is_validated() {
+        let toml = r#"
+            [general]
+            me_hardswap_warmup_delay_min_ms = 2001
+            me_hardswap_warmup_delay_max_ms = 2000
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_hardswap_warmup_delay_range_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains(
+            "general.me_hardswap_warmup_delay_min_ms must be <= general.me_hardswap_warmup_delay_max_ms"
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_hardswap_warmup_delay_max_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_hardswap_warmup_delay_max_ms = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_hardswap_warmup_delay_max_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_hardswap_warmup_delay_max_ms must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_hardswap_warmup_extra_passes_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            me_hardswap_warmup_extra_passes = 11
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_hardswap_warmup_extra_passes_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_hardswap_warmup_extra_passes must be within [0, 10]"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_hardswap_warmup_pass_backoff_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_hardswap_warmup_pass_backoff_base_ms = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_hardswap_warmup_backoff_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_hardswap_warmup_pass_backoff_base_ms must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_config_stable_snapshots_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_config_stable_snapshots = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_config_stable_snapshots_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_config_stable_snapshots must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn proxy_secret_stable_snapshots_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            proxy_secret_stable_snapshots = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_proxy_secret_stable_snapshots_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.proxy_secret_stable_snapshots must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn proxy_secret_len_max_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            proxy_secret_len_max = 16
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_proxy_secret_len_max_out_of_range_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.proxy_secret_len_max must be within [32, 4096]"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_pool_min_fresh_ratio_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            me_pool_min_fresh_ratio = 1.5
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_pool_min_ratio_invalid_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_pool_min_fresh_ratio must be within [0.0, 1.0]"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn force_close_bumped_when_below_drain_ttl() {
+        let toml = r#"
+            [general]
+            me_pool_drain_ttl_secs = 90
+            me_reinit_drain_timeout_secs = 30
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_force_close_bump_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.me_reinit_drain_timeout_secs, 90);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_ad_tag_is_disabled_during_load() {
+        let toml = r#"
+            [general]
+            ad_tag = "not_hex"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_invalid_ad_tag_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert!(cfg.general.ad_tag.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn valid_ad_tag_is_preserved_during_load() {
+        let toml = r#"
+            [general]
+            ad_tag = "00112233445566778899aabbccddeeff"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_valid_ad_tag_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(
+            cfg.general.ad_tag.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_dns_override_is_rejected() {
+        let toml = r#"
+            [network]
+            dns_overrides = ["example.com:443:2001:db8::10"]
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_invalid_dns_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("must be bracketed"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn valid_dns_override_is_accepted() {
+        let toml = r#"
+            [network]
+            dns_overrides = ["example.com:443:127.0.0.1", "example.net:443:[2001:db8::10]"]
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_valid_dns_override_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.network.dns_overrides.len(), 2);
         let _ = std::fs::remove_file(path);
     }
 }

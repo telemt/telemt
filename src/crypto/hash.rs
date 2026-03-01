@@ -64,6 +64,7 @@ pub fn crc32c(data: &[u8]) -> u32 {
 ///
 /// Returned buffer layout (IPv4):
 /// nonce_srv | nonce_clt | clt_ts | srv_ip | clt_port | purpose | clt_ip | srv_port | secret | nonce_srv | [clt_v6 | srv_v6] | nonce_clt
+#[allow(clippy::too_many_arguments)]
 pub fn build_middleproxy_prekey(
     nonce_srv: &[u8; 16],
     nonce_clt: &[u8; 16],
@@ -108,6 +109,7 @@ pub fn build_middleproxy_prekey(
 /// Uses MD5 + SHA-1 as mandated by the Telegram Middle Proxy protocol.
 /// These algorithms are NOT replaceable here — changing them would break
 /// interoperability with Telegram's middle proxy infrastructure.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_middleproxy_keys(
     nonce_srv: &[u8; 16],
     nonce_clt: &[u8; 16],

@@ -1,24 +1,31 @@
 //! Middle Proxy RPC transport.
 
 mod codec;
+mod config_updater;
 mod handshake;
 mod health;
 mod pool;
+mod pool_config;
+mod pool_init;
 mod pool_nat;
+mod pool_refill;
+mod pool_reinit;
+mod pool_writer;
 mod ping;
 mod reader;
 mod registry;
+mod rotation;
 mod send;
 mod secret;
-mod rotation;
-mod config_updater;
 mod wire;
 
 use bytes::Bytes;
 
 pub use health::me_health_monitor;
-pub use ping::{run_me_ping, format_sample_line, MePingReport, MePingSample, MePingFamily};
+#[allow(unused_imports)]
+pub use ping::{run_me_ping, format_sample_line, format_me_route, MePingReport, MePingSample, MePingFamily};
 pub use pool::MePool;
+#[allow(unused_imports)]
 pub use pool_nat::{stun_probe, detect_public_ip};
 pub use registry::ConnRegistry;
 pub use secret::fetch_proxy_secret;

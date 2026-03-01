@@ -1,5 +1,7 @@
 // src/ip_tracker.rs
-// Модуль для отслеживания и ограничения уникальных IP-адресов пользователей
+// IP address tracking and limiting for users
+
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
