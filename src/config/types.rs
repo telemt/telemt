@@ -247,13 +247,14 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub use_middle_proxy: bool,
 
-    #[serde(default)]
-    pub ad_tag: Option<String>,
-
     /// Path to proxy-secret binary file (auto-downloaded if absent).
     /// Infrastructure secret from https://core.telegram.org/getProxySecret.
     #[serde(default = "default_proxy_secret_path")]
     pub proxy_secret_path: Option<String>,
+
+    /// Global ad_tag (32 hex chars from @MTProxybot). Fallback when user has no per-user tag in access.user_ad_tags.
+    #[serde(default)]
+    pub ad_tag: Option<String>,
 
     /// Public IP override for middle-proxy NAT environments.
     /// When set, this IP is used in ME key derivation and RPC_PROXY_REQ "our_addr".
@@ -807,6 +808,10 @@ pub struct AccessConfig {
     #[serde(default = "default_access_users")]
     pub users: HashMap<String, String>,
 
+    /// Per-user ad_tag (32 hex chars from @MTProxybot).
+    #[serde(default)]
+    pub user_ad_tags: HashMap<String, String>,
+
     #[serde(default)]
     pub user_max_tcp_conns: HashMap<String, usize>,
 
@@ -833,6 +838,7 @@ impl Default for AccessConfig {
     fn default() -> Self {
         Self {
             users: default_access_users(),
+            user_ad_tags: HashMap::new(),
             user_max_tcp_conns: HashMap::new(),
             user_expirations: HashMap::new(),
             user_data_quota: HashMap::new(),
