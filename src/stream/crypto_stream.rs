@@ -336,22 +336,35 @@ impl PendingCiphertext {
     }
 
     fn remaining_capacity(&self) -> usize {
-        self.max_len.saturating_sub(self.buf.len())
+        self.max_len.saturating_sub(self.pending_len())
+    }
+
+    fn compact_consumed_prefix(&mut self) {
+        if self.pos == 0 {
+            return;
+        }
+
+        if self.pos >= self.buf.len() {
+            self.buf.clear();
+            self.pos = 0;
+            return;
+        }
+
+        let _ = self.buf.split_to(self.pos);
+        self.pos = 0;
     }
 
     fn advance(&mut self, n: usize) {
         self.pos = (self.pos + n).min(self.buf.len());
 
         if self.pos == self.buf.len() {
-            self.buf.clear();
-            self.pos = 0;
+            self.compact_consumed_prefix();
             return;
         }
 
         // Compact when a large prefix was consumed.
         if self.pos >= 16 * 1024 {
-            let _ = self.buf.split_to(self.pos);
-            self.pos = 0;
+            self.compact_consumed_prefix();
         }
     }
 
@@ -377,6 +390,11 @@ impl PendingCiphertext {
                 ErrorKind::WouldBlock,
                 "pending ciphertext buffer is full",
             ));
+        }
+
+        // Reclaim consumed prefix when physical storage is the only limiter.
+        if self.pos > 0 && self.buf.len() + plaintext.len() > self.max_len {
+            self.compact_consumed_prefix();
         }
 
         let start = self.buf.len();
@@ -775,5 +793,72 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PassthroughStream<S> {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctr() -> AesCtr {
+        AesCtr::new(&[0x11; 32], 0x0102_0304_0506_0708_1112_1314_1516_1718)
+    }
+
+    #[test]
+    fn pending_capacity_reclaims_after_partial_advance_without_compaction_threshold() {
+        let mut pending = PendingCiphertext::new(1024);
+        let mut ctr = test_ctr();
+        let payload = vec![0x41; 900];
+        pending.push_encrypted(&mut ctr, &payload).unwrap();
+
+        // Keep position below compaction threshold to validate logical-capacity accounting.
+        pending.advance(800);
+        assert_eq!(pending.pending_len(), 100);
+        assert_eq!(pending.remaining_capacity(), 924);
+    }
+
+    #[test]
+    fn push_encrypted_respects_pending_limit() {
+        let mut pending = PendingCiphertext::new(64);
+        let mut ctr = test_ctr();
+
+        pending.push_encrypted(&mut ctr, &[0x10; 64]).unwrap();
+        let err = pending.push_encrypted(&mut ctr, &[0x20]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn push_encrypted_compacts_prefix_when_physical_buffer_would_overflow() {
+        let mut pending = PendingCiphertext::new(64);
+        let mut ctr = test_ctr();
+
+        pending.push_encrypted(&mut ctr, &[0x22; 60]).unwrap();
+        pending.advance(30);
+        pending.push_encrypted(&mut ctr, &[0x33; 30]).unwrap();
+
+        assert_eq!(pending.pending_len(), 60);
+        assert!(pending.buf.len() <= 64);
+    }
+
+    #[test]
+    fn pending_ciphertext_preserves_stream_order_across_drain_and_append() {
+        let mut pending = PendingCiphertext::new(128);
+        let mut ctr = test_ctr();
+
+        let first = vec![0xA1; 80];
+        let second = vec![0xB2; 40];
+
+        pending.push_encrypted(&mut ctr, &first).unwrap();
+        pending.advance(50);
+        pending.push_encrypted(&mut ctr, &second).unwrap();
+
+        let mut baseline_ctr = test_ctr();
+        let mut baseline_plain = Vec::with_capacity(first.len() + second.len());
+        baseline_plain.extend_from_slice(&first);
+        baseline_plain.extend_from_slice(&second);
+        baseline_ctr.apply(&mut baseline_plain);
+
+        let expected = &baseline_plain[50..];
+        assert_eq!(pending.pending_slice(), expected);
     }
 }

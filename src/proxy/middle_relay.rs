@@ -26,6 +26,9 @@ enum C2MeCommand {
 
 const DESYNC_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const DESYNC_ERROR_CLASS: &str = "frame_too_large_crypto_desync";
+const C2ME_CHANNEL_CAPACITY: usize = 1024;
+const C2ME_SOFT_PRESSURE_MIN_FREE_SLOTS: usize = 64;
+const C2ME_SENDER_FAIRNESS_BUDGET: usize = 32;
 static DESYNC_DEDUP: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
 
 struct RelayForensicsState {
@@ -166,6 +169,27 @@ fn report_desync_frame_too_large(
     ))
 }
 
+fn should_yield_c2me_sender(sent_since_yield: usize, has_backlog: bool) -> bool {
+    has_backlog && sent_since_yield >= C2ME_SENDER_FAIRNESS_BUDGET
+}
+
+async fn enqueue_c2me_command(
+    tx: &mpsc::Sender<C2MeCommand>,
+    cmd: C2MeCommand,
+) -> std::result::Result<(), mpsc::error::SendError<C2MeCommand>> {
+    match tx.try_send(cmd) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Closed(cmd)) => Err(mpsc::error::SendError(cmd)),
+        Err(mpsc::error::TrySendError::Full(cmd)) => {
+            // Cooperative yield reduces burst catch-up when the per-conn queue is near saturation.
+            if tx.capacity() <= C2ME_SOFT_PRESSURE_MIN_FREE_SLOTS {
+                tokio::task::yield_now().await;
+            }
+            tx.send(cmd).await
+        }
+    }
+}
+
 pub(crate) async fn handle_via_middle_proxy<R, W>(
     mut crypto_reader: CryptoReader<R>,
     crypto_writer: CryptoWriter<W>,
@@ -230,9 +254,10 @@ where
 
     let frame_limit = config.general.max_client_frame;
 
-    let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(1024);
+    let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(C2ME_CHANNEL_CAPACITY);
     let me_pool_c2me = me_pool.clone();
     let c2me_sender = tokio::spawn(async move {
+        let mut sent_since_yield = 0usize;
         while let Some(cmd) = c2me_rx.recv().await {
             match cmd {
                 C2MeCommand::Data { payload, flags } => {
@@ -244,6 +269,11 @@ where
                         &payload,
                         flags,
                     ).await?;
+                    sent_since_yield = sent_since_yield.saturating_add(1);
+                    if should_yield_c2me_sender(sent_since_yield, !c2me_rx.is_empty()) {
+                        sent_since_yield = 0;
+                        tokio::task::yield_now().await;
+                    }
                 }
                 C2MeCommand::Close => {
                     let _ = me_pool_c2me.send_close(conn_id).await;
@@ -360,8 +390,7 @@ where
                     flags |= RPC_FLAG_NOT_ENCRYPTED;
                 }
                 // Keep client read loop lightweight: route heavy ME send path via a dedicated task.
-                if c2me_tx
-                    .send(C2MeCommand::Data { payload, flags })
+                if enqueue_c2me_command(&c2me_tx, C2MeCommand::Data { payload, flags })
                     .await
                     .is_err()
                 {
@@ -372,7 +401,7 @@ where
             Ok(None) => {
                 debug!(conn_id, "Client EOF");
                 client_closed = true;
-                let _ = c2me_tx.send(C2MeCommand::Close).await;
+                let _ = enqueue_c2me_command(&c2me_tx, C2MeCommand::Close).await;
                 break;
             }
             Err(e) => {
@@ -646,4 +675,85 @@ where
         .map_err(ProxyError::Io)?;
     // ACK should remain low-latency.
     client_writer.flush().await.map_err(ProxyError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration as TokioDuration, timeout};
+
+    #[test]
+    fn should_yield_sender_only_on_budget_with_backlog() {
+        assert!(!should_yield_c2me_sender(0, true));
+        assert!(!should_yield_c2me_sender(C2ME_SENDER_FAIRNESS_BUDGET - 1, true));
+        assert!(!should_yield_c2me_sender(C2ME_SENDER_FAIRNESS_BUDGET, false));
+        assert!(should_yield_c2me_sender(C2ME_SENDER_FAIRNESS_BUDGET, true));
+    }
+
+    #[tokio::test]
+    async fn enqueue_c2me_command_uses_try_send_fast_path() {
+        let (tx, mut rx) = mpsc::channel::<C2MeCommand>(2);
+        enqueue_c2me_command(
+            &tx,
+            C2MeCommand::Data {
+                payload: vec![1, 2, 3],
+                flags: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let recv = timeout(TokioDuration::from_millis(50), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match recv {
+            C2MeCommand::Data { payload, flags } => {
+                assert_eq!(payload, vec![1, 2, 3]);
+                assert_eq!(flags, 0);
+            }
+            C2MeCommand::Close => panic!("unexpected close command"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_c2me_command_falls_back_to_send_when_queue_is_full() {
+        let (tx, mut rx) = mpsc::channel::<C2MeCommand>(1);
+        tx.send(C2MeCommand::Data {
+            payload: vec![9],
+            flags: 9,
+        })
+        .await
+        .unwrap();
+
+        let tx2 = tx.clone();
+        let producer = tokio::spawn(async move {
+            enqueue_c2me_command(
+                &tx2,
+                C2MeCommand::Data {
+                    payload: vec![7, 7],
+                    flags: 7,
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let _ = timeout(TokioDuration::from_millis(100), rx.recv())
+            .await
+            .unwrap();
+        producer.await.unwrap();
+
+        let recv = timeout(TokioDuration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match recv {
+            C2MeCommand::Data { payload, flags } => {
+                assert_eq!(payload, vec![7, 7]);
+                assert_eq!(flags, 7);
+            }
+            C2MeCommand::Close => panic!("unexpected close command"),
+        }
+    }
 }
