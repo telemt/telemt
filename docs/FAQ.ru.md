@@ -37,7 +37,7 @@ hello = 1
 ## Как сделать несколько разных ссылок
 
 1. Сгенерируйте нужное число секретов `openssl rand -hex 16`
-2. Открыть конфиг `nano /etc/telemt.toml`.
+2. Открыть конфиг `nano /etc/telemt.toml`
 3. Добавить новых пользователей.
 ```toml
 [access.users]
@@ -47,3 +47,19 @@ user3 = "00000000000000000000000000000003"
 ```
 4. Сохранить конфиг. Ctrl+X -> Y -> Enter. Перезапускать telemt не нужно.
 5. Получить ссылки через `journalctl -u telemt -n -g "links" --no-pager -o cat | tac`
+
+## Как посмотреть метрики
+
+1. Открыть конфиг `nano /etc/telemt.toml`
+2. Добавить следующие параметры
+```toml
+[server]
+metrics_port = 9090
+metrics_whitelist = ["127.0.0.1/32", "::1/128", "0.0.0.0/0"]
+```
+3. Добавьте свой IP в metrics_whitelist
+4. Сохранить конфиг. Ctrl+X -> Y -> Enter.
+5. Метрики доступны по адресу SERVER_IP:9090/metrics. 
+> [!WARNING]
+> "0.0.0.0/0" в metrics_whitelist открывает доступ с любого IP. Замените на свой ip. Например "1.2.3.4"
+
