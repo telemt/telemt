@@ -5,7 +5,9 @@
 # === General Settings ===
 [general]
 use_middle_proxy = false
+# Global ad_tag fallback when user has no per-user tag in [access.user_ad_tags]
 # ad_tag = "00000000000000000000000000000000"
+# Per-user ad_tag in [access.user_ad_tags] (32 hex from @MTProxybot)
 
 # === Log Level ===
 # Log level: debug | verbose | normal | silent

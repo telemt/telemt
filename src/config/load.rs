@@ -532,7 +532,7 @@ impl ProxyConfig {
             )));
         }
 
-        if let Some(tag) = &self.general.ad_tag {
+        for (user, tag) in &self.access.user_ad_tags {
             let zeros = "00000000000000000000000000000000";
             if !is_valid_ad_tag(tag) {
                 return Err(ProxyError::Config(
@@ -540,7 +540,7 @@ impl ProxyConfig {
                 ));
             }
             if tag == zeros {
-                warn!("ad_tag is all zeros; register a valid proxy tag via @MTProxybot to enable sponsored channel");
+                warn!(user = %user, "user ad_tag is all zeros; register a valid proxy tag via @MTProxybot to enable sponsored channel");
             }
         }
 

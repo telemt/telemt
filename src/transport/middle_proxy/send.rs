@@ -18,6 +18,7 @@ use rand::seq::SliceRandom;
 use super::registry::ConnMeta;
 
 impl MePool {
+    /// Send RPC_PROXY_REQ. `tag_override`: per-user ad_tag (from access.user_ad_tags); if None, uses pool default.
     pub async fn send_proxy_req(
         self: &Arc<Self>,
         conn_id: u64,
@@ -26,13 +27,15 @@ impl MePool {
         our_addr: SocketAddr,
         data: &[u8],
         proto_flags: u32,
+        tag_override: Option<&[u8]>,
     ) -> Result<()> {
+        let tag = tag_override.or(self.proxy_tag.as_deref());
         let payload = build_proxy_req_payload(
             conn_id,
             client_addr,
             our_addr,
             data,
-            self.proxy_tag.as_deref(),
+            tag,
             proto_flags,
         );
         let meta = ConnMeta {

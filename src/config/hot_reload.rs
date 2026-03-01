@@ -4,21 +4,22 @@
 //!
 //! # What can be reloaded without restart
 //!
-//! | Section   | Field                         | Effect                            |
-//! |-----------|-------------------------------|-----------------------------------|
-//! | `general` | `log_level`                   | Filter updated via `log_level_tx` |
-//! | `general` | `ad_tag`                      | Passed on next connection         |
-//! | `general` | `middle_proxy_pool_size`      | Passed on next connection         |
-//! | `general` | `me_keepalive_*`              | Passed on next connection         |
-//! | `general` | `desync_all_full`             | Applied immediately               |
-//! | `general` | `update_every`                | Applied to ME updater immediately |
-//! | `general` | `hardswap`                    | Applied on next ME map update     |
-//! | `general` | `me_pool_drain_ttl_secs`      | Applied on next ME map update     |
-//! | `general` | `me_pool_min_fresh_ratio`     | Applied on next ME map update     |
-//! | `general` | `me_reinit_drain_timeout_secs`| Applied on next ME map update     |
-//! | `general` | `telemetry` / `me_*_policy`   | Applied immediately               |
-//! | `network` | `dns_overrides`               | Applied immediately               |
-//! | `access`  | All user/quota fields         | Effective immediately             |
+//! | Section   | Field                          | Effect                                         |
+//! |-----------|--------------------------------|------------------------------------------------|
+//! | `general` | `log_level`                    | Filter updated via `log_level_tx`              |
+//! | `access`  | `user_ad_tags`                 | Passed on next connection                      |
+//! | `general` | `ad_tag`                       | Passed on next connection (fallback per-user)  |
+//! | `general` | `middle_proxy_pool_size`       | Passed on next connection                      |
+//! | `general` | `me_keepalive_*`               | Passed on next connection                      |
+//! | `general` | `desync_all_full`              | Applied immediately                            |
+//! | `general` | `update_every`                 | Applied to ME updater immediately              |
+//! | `general` | `hardswap`                     | Applied on next ME map update                  |
+//! | `general` | `me_pool_drain_ttl_secs`       | Applied on next ME map update                  |
+//! | `general` | `me_pool_min_fresh_ratio`      | Applied on next ME map update                  |
+//! | `general` | `me_reinit_drain_timeout_secs` | Applied on next ME map update                  |
+//! | `general` | `telemetry` / `me_*_policy`    | Applied immediately                            |
+//! | `network` | `dns_overrides`                | Applied immediately                            |
+//! | `access`  | All user/quota fields          | Effective immediately                          |
 //!
 //! Fields that require re-binding sockets (`server.port`, `censorship.*`,
 //! `network.*`, `use_middle_proxy`) are **not** applied; a warning is emitted.
@@ -207,12 +208,15 @@ fn log_changes(
         log_tx.send(new_hot.log_level.clone()).ok();
     }
 
-    if old_hot.ad_tag != new_hot.ad_tag {
+    if old_hot.access.user_ad_tags != new_hot.access.user_ad_tags {
         info!(
-            "config reload: ad_tag: {} → {}",
-            old_hot.ad_tag.as_deref().unwrap_or("none"),
-            new_hot.ad_tag.as_deref().unwrap_or("none"),
+            "config reload: user_ad_tags updated ({} entries)",
+            new_hot.access.user_ad_tags.len(),
         );
+    }
+
+    if old_hot.ad_tag != new_hot.ad_tag {
+        info!("config reload: general.ad_tag updated (applied on next connection)");
     }
 
     if old_hot.dns_overrides != new_hot.dns_overrides {

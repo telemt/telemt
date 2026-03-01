@@ -215,10 +215,12 @@ hello = "00000000000000000000000000000000"
 
 ```
 ### Advanced
-#### Adtag
-To use channel advertising and usage statistics from Telegram, get Adtag from [@mtproxybot](https://t.me/mtproxybot), add this parameter to section `[General]`
+#### Adtag (per-user)
+To use channel advertising and usage statistics from Telegram, get an Adtag from [@mtproxybot](https://t.me/mtproxybot). Set it per user in `[access.user_ad_tags]` (32 hex chars):
 ```toml
-ad_tag = "00000000000000000000000000000000" # Replace zeros to your adtag from @mtproxybot
+[access.user_ad_tags]
+username1 = "11111111111111111111111111111111"  # Replace with your tag from @mtproxybot
+username2 = "22222222222222222222222222222222"
 ```
 #### Listening and Announce IPs
 To specify listening address and/or address in links, add to section `[[server.listeners]]` of config.toml:
