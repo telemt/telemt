@@ -967,6 +967,50 @@ mod tests {
     }
 
     #[test]
+    fn me_adaptive_floor_min_writers_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            me_adaptive_floor_min_writers_single_endpoint = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_adaptive_floor_min_writers_out_of_range_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "general.me_adaptive_floor_min_writers_single_endpoint must be within [1, 32]"
+            )
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_floor_mode_adaptive_is_parsed() {
+        let toml = r#"
+            [general]
+            me_floor_mode = "adaptive"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_floor_mode_adaptive_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.me_floor_mode, MeFloorMode::Adaptive);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn upstream_connect_retry_attempts_zero_is_rejected() {
         let toml = r#"
             [general]
