@@ -15,6 +15,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 use tokio::net::UnixListener;
 
 mod cli;
+mod api;
 mod config;
 mod crypto;
 mod error;
@@ -1150,6 +1151,36 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             )
             .await;
         });
+    }
+
+    if config.server.api.enabled {
+        let listen = match config.server.api.listen.parse::<SocketAddr>() {
+            Ok(listen) => listen,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    listen = %config.server.api.listen,
+                    "Invalid server.api.listen; API is disabled"
+                );
+                SocketAddr::from(([127, 0, 0, 1], 0))
+            }
+        };
+        if listen.port() != 0 {
+            let stats = stats.clone();
+            let ip_tracker_api = ip_tracker.clone();
+            let config_rx_api = config_rx.clone();
+            let config_path_api = std::path::PathBuf::from(&config_path);
+            tokio::spawn(async move {
+                api::serve(
+                    listen,
+                    stats,
+                    ip_tracker_api,
+                    config_rx_api,
+                    config_path_api,
+                )
+                .await;
+            });
+        }
     }
 
     for (listener, listener_proxy_protocol) in listeners {
