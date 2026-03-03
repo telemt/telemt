@@ -395,6 +395,19 @@ async fn maybe_rotate_single_endpoint_shadow(
     }
 
     let endpoint = endpoints[0];
+    if pool.is_endpoint_quarantined(endpoint).await {
+        pool.stats
+            .increment_me_single_endpoint_shadow_rotate_skipped_quarantine_total();
+        shadow_rotate_deadline.insert(key, now + Duration::from_secs(SHADOW_ROTATE_RETRY_SECS));
+        debug!(
+            dc = %dc,
+            ?family,
+            %endpoint,
+            "Single-endpoint shadow rotation skipped: endpoint is quarantined"
+        );
+        return;
+    }
+
     let Some(writer_ids) = live_writer_ids_by_addr.get(&endpoint) else {
         shadow_rotate_deadline.insert(key, now + Duration::from_secs(SHADOW_ROTATE_RETRY_SECS));
         return;

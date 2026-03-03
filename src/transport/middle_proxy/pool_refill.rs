@@ -37,7 +37,7 @@ impl MePool {
         );
     }
 
-    async fn is_endpoint_quarantined(&self, addr: SocketAddr) -> bool {
+    pub(super) async fn is_endpoint_quarantined(&self, addr: SocketAddr) -> bool {
         let mut guard = self.endpoint_quarantine.lock().await;
         let now = Instant::now();
         guard.retain(|_, expiry| *expiry > now);
