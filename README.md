@@ -19,18 +19,18 @@
 
 ### 🇷🇺 RU
 
-#### Релиз 3.0.15 — 25 февраля
+#### Релиз 3.3.3 LTS - 6 марта
 
-25 февраля мы выпустили версию **3.0.15**
+6 марта мы выпустили Telemt **3.3.3**
 
-Мы предполагаем, что она станет завершающей версией поколения 3.0 и уже сейчас мы рассматриваем её как **LTS-кандидата** для версии **3.1.0**!
+Это первая версия telemt работающая в комплексных условиях и при этом предоставляющая API
 
-После нескольких дней детального анализа особенностей работы Middle-End мы спроектировали и реализовали продуманный режим **ротации ME Writer**. Данный режим позволяет поддерживать стабильно высокую производительность в long-run сценариях без возникновения ошибок, связанных с некорректной конфигурацией прокси
+В ней используется новый алгоритм - ME NoWait, который вместе с Adaptive Floor и моделью усовершенствованного доступа к KDF Fingerprint на RwLock позволяет достигать максимальную производительность, даже в условиях lossy-сети
 
 Будем рады вашему фидбеку и предложениям по улучшению — особенно в части **статистики** и **UX**
 
 Релиз:  
-[3.0.15](https://github.com/telemt/telemt/releases/tag/3.0.15)
+[3.3.3](https://github.com/telemt/telemt/releases/tag/3.3.3)
 
 ---
 
@@ -47,18 +47,18 @@
 
 ### 🇬🇧 EN
 
-#### Release 3.0.15 — February 25
+#### Release 3.3.3 LTS - March 6
 
-On February 25, we released version **3.0.15**
+On March 6, we released Telemt **3.3.3**
 
-We expect this to become the final release of the 3.0 generation and at this point, we already see it as a strong **LTS candidate** for the upcoming **3.1.0** release!
+This is the first telemt's version designed to operate reliably in complex network conditions while also providing a runtime API!
 
-After several days of deep analysis of Middle-End behavior, we designed and implemented a well-engineered **ME Writer rotation mode**. This mode enables sustained high throughput in long-run scenarios while preventing proxy misconfiguration errors
+The release introduces a new algorithm — ME NoWait, which combined with Adaptive Floor and an improved KDF Fingerprint access model based on RwLock, it enables the system to achieve maximum performance even in lossy network environments
 
 We are looking forward to your feedback and improvement proposals — especially regarding **statistics** and **UX**
 
 Release:  
-[3.0.15](https://github.com/telemt/telemt/releases/tag/3.0.15)
+[3.3.3](https://github.com/telemt/telemt/releases/tag/3.3.3)
 
 ---
 
@@ -79,7 +79,7 @@ We welcome ideas, architectural feedback, and pull requests.
 
 ⚓ Our implementation of **TLS-fronting** is one of the most deeply debugged, focused, advanced and *almost* **"behaviorally consistent to real"**:  we are confident we have it right - [see evidence on our validation and traces](#recognizability-for-dpi-and-crawler)
 
-⚓ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared to other implementations of connecting to the Middle-End Proxy: non dramatically, but usual
+⚓ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared to other implementations of connecting to he Middle-End Proxy: non dramatically, but usual
 
 # GOTO
 - [Features](#features)
