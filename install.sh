@@ -1,73 +1,94 @@
-sudo bash -c '
-set -e
+#!/bin/sh
+set -eu
 
-# --- Проверка на существующую установку ---
-if systemctl list-unit-files | grep -q telemt.service; then
-    # --- РЕЖИМ ОБНОВЛЕНИЯ ---
-    echo "--- Обнаружена существующая установка Telemt. Запускаю обновление... ---"
+REPO="${REPO:-telemt/telemt}"
+BIN_NAME="${BIN_NAME:-telemt}"
+VERSION="${1:-${VERSION:-latest}}"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
-    echo "[*] Остановка службы telemt..."
-    systemctl stop telemt || true # Игнорируем ошибку, если служба уже остановлена
+say() {
+    printf '%s\n' "$*"
+}
 
-    echo "[1/2] Скачивание последней версии Telemt..."
-    wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
+die() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
 
-    echo "[1/2] Замена исполняемого файла в /usr/local/bin..."
-    mv telemt /usr/local/bin/telemt
-    chmod +x /usr/local/bin/telemt
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
 
-    echo "[2/2] Запуск службы..."
-    systemctl start telemt
+detect_arch() {
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64) printf 'x86_64\n' ;;
+        aarch64|arm64) printf 'aarch64\n' ;;
+        *) die "unsupported architecture: $arch" ;;
+    esac
+}
 
-    echo "--- Обновление Telemt успешно завершено! ---"
-    echo
-    echo "Для проверки статуса службы выполните:"
-    echo "   systemctl status telemt"
+detect_libc() {
+    if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -iq musl; then
+        printf 'musl\n'
+    else
+        printf 'gnu\n'
+    fi
+}
 
-else
-    # --- РЕЖИМ НОВОЙ УСТАНОВКИ ---
-    echo "--- Начало автоматической установки Telemt ---"
+fetch_to_stdout() {
+    url="$1"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- "$url"
+    else
+        die "neither curl nor wget is installed"
+    fi
+}
 
-    # Шаг 1: Скачивание и установка бинарного файла
-    echo "[1/5] Скачивание последней версии Telemt..."
-    wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
+install_binary() {
+    src="$1"
+    dst="$2"
 
-    echo "[1/5] Перемещение исполняемого файла в /usr/local/bin и установка прав..."
-    mv telemt /usr/local/bin/telemt
-    chmod +x /usr/local/bin/telemt
+    if [ -w "$INSTALL_DIR" ] || { [ ! -e "$INSTALL_DIR" ] && [ -w "$(dirname "$INSTALL_DIR")" ]; }; then
+        mkdir -p "$INSTALL_DIR"
+        install -m 0755 "$src" "$dst"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo mkdir -p "$INSTALL_DIR"
+        sudo install -m 0755 "$src" "$dst"
+    else
+        die "cannot write to $INSTALL_DIR and sudo is not available"
+    fi
+}
 
-    # Шаг 2: Генерация секрета
-    echo "[2/5] Генерация секретного ключа..."
-    SECRET=$(openssl rand -hex 16)
+need_cmd uname
+need_cmd tar
+need_cmd mktemp
+need_cmd grep
+need_cmd install
 
-    # Шаг 3: Создание файла конфигурации
-    echo "[3/5] Создание файла конфигурации /etc/telemt.toml..."
-    printf "# === General Settings ===\n[general]\n[general.modes]\nclassic = false\nsecure = false\ntls = true\n\n# === Anti-Censorship & Masking ===\n[censorship]\n# !!! ВАЖНО: Замените на ваш домен или домен, который вы хотите использовать для маскировки !!!\ntls_domain = \"petrovich.ru\"\n\n[access.users]\nhello = \"%s\"\n" "$SECRET" > /etc/telemt.toml
+ARCH="$(detect_arch)"
+LIBC="$(detect_libc)"
 
-    # Шаг 4: Создание службы Systemd
-    echo "[4/5] Создание службы systemd..."
-    printf "[Unit]\nDescription=Telemt Proxy\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/usr/local/bin/telemt /etc/telemt.toml\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65536\n\n[Install]\nWantedBy=multi-user.target\n" > /etc/systemd/system/telemt.service
+case "$VERSION" in
+    latest)
+        URL="https://github.com/$REPO/releases/latest/download/${BIN_NAME}-${ARCH}-linux-${LIBC}.tar.gz"
+        ;;
+    *)
+        URL="https://github.com/$REPO/releases/download/${VERSION}/${BIN_NAME}-${ARCH}-linux-${LIBC}.tar.gz"
+        ;;
+esac
 
-    # Шаг 5: Запуск службы
-    echo "[5/5] Перезагрузка systemd, запуск и включение службы telemt..."
-    systemctl daemon-reload
-    systemctl start telemt
-    systemctl enable telemt
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT INT TERM
 
-    echo "--- Установка и запуск Telemt успешно завершены! ---"
-    echo
-    echo "ВАЖНАЯ ИНФОРМАЦИЯ:"
-    echo "==================="
-    echo "1. Вам НЕОБХОДИМО отредактировать файл /etc/telemt.toml и заменить '\''petrovich.ru'\'' на другой домен"
-    echo "   с помощью команды:"
-    echo "   nano /etc/telemt.toml"
-    echo "   После редактирования файла перезапустите службу командой:"
-    echo "   sudo systemctl restart telemt"
-    echo
-    echo "2. Для проверки статуса службы выполните команду:"
-    echo "   systemctl status telemt"
-    echo
-    echo "3. Для получения ссылок на подключение выполните команду:"
-    echo "   journalctl -u telemt -n -g '\''links'\'' --no-pager -o cat | tac"
-fi
-'
+say "Installing $BIN_NAME ($VERSION) for $ARCH-linux-$LIBC..."
+fetch_to_stdout "$URL" | tar -xzf - -C "$TMPDIR"
+
+[ -f "$TMPDIR/$BIN_NAME" ] || die "archive did not contain $BIN_NAME"
+
+install_binary "$TMPDIR/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+
+say "Installed: $INSTALL_DIR/$BIN_NAME"
+"$INSTALL_DIR/$BIN_NAME" --version 2>/dev/null || true
