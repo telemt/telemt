@@ -50,6 +50,11 @@ python3 -c 'import os; print(os.urandom(16).hex())'
 
 **1. Поместите свою конфигурацию в файл /etc/telemt.toml**
 
+Создаём директорию для конфига:
+```bash
+mkdir /etc/telemt
+```
+
 Открываем nano
 ```bash
 nano /etc/telemt.toml
@@ -90,7 +95,14 @@ hello = "00000000000000000000000000000000"
 
 ---
 
-**2. Создайте службу в /etc/systemd/system/telemt.service**
+**2. Создайте пользователя для telemt**
+
+```bash
+useradd -d /opt/telemt -m -r -U telemt
+chown -R telemt:telemt /etc/telemt
+```
+
+**3. Создайте службу в /etc/systemd/system/telemt.service**
 
 Открываем nano
 ```bash
@@ -101,28 +113,38 @@ nano /etc/systemd/system/telemt.service
 ```bash
 [Unit]
 Description=Telemt
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/bin
-ExecStart=/bin/telemt /etc/telemt.toml
+User=telemt
+Group=telemt
+WorkingDirectory=/opt/telemt
+ExecStart=/bin/telemt /etc/telemt/telemt.toml
 Restart=on-failure
 LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 ```
 Затем нажмите Ctrl+S -> Ctrl+X, чтобы сохранить
 
+перезагрузите конфигурацию systemd
+```bash
+systemctl daemon-reload
+```
 
-**3.** Для запуска введите команду `systemctl start telemt`
+**4.** Для запуска введите команду `systemctl start telemt`
 
-**4.** Для получения информации о статусе введите `systemctl status telemt`
+**5.** Для получения информации о статусе введите `systemctl status telemt`
 
-**5.** Для автоматического запуска при запуске системы в введите `systemctl enable telemt`
+**6.** Для автоматического запуска при запуске системы в введите `systemctl enable telemt`
 
-**6.** Для получения ссылки/ссылок введите 
+**7.** Для получения ссылки/ссылок введите 
 ```bash
 curl -s http://127.0.0.1:9091/v1/users | jq
 ```
