@@ -48,7 +48,7 @@ python3 -c 'import os; print(os.urandom(16).hex())'
 
 ---
 
-**1. Поместите свою конфигурацию в файл /etc/telemt.toml**
+**1. Поместите свою конфигурацию в файл /etc/telemt/telemt.toml**
 
 Создаём директорию для конфига:
 ```bash
@@ -57,7 +57,7 @@ mkdir /etc/telemt
 
 Открываем nano
 ```bash
-nano /etc/telemt.toml
+nano /etc/telemt/telemt.toml
 ```
 Вставьте свою конфигурацию
 
