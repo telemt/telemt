@@ -67,7 +67,7 @@ pub(super) struct RuntimeEdgeConnectionsSummaryData {
 }
 
 #[derive(Clone)]
-pub struct EdgeConnectionsCacheEntry {
+pub(crate) struct EdgeConnectionsCacheEntry {
     pub(super) expires_at: Instant,
     pub(super) payload: RuntimeEdgeConnectionsSummaryPayload,
     pub(super) generated_at_epoch_secs: u64,

@@ -147,7 +147,11 @@ impl MePool {
             if spawned == 0 {
                 break;
             }
-            while join.join_next().await.is_some() {}
+            while let Some(result) = join.join_next().await {
+                if let Err(err) = result {
+                    warn!(error = ?err, "reconnect task failed (panic or cancellation)");
+                }
+            }
         }
     }
 }
@@ -199,6 +203,25 @@ mod tests {
         assert!(
             MAX_CONCURRENT_RECONNECTS <= 256,
             "concurrency bound ({MAX_CONCURRENT_RECONNECTS}) risks thundering-herd on upstream"
+        );
+    }
+
+    // Regression: a panicking reconnect task must produce a catchable JoinError rather
+    // than being silently swallowed.  If the while loop ever reverts to `.is_some()`
+    // the error is dropped; this test ensures the error EXISTS and can be observed.
+    #[tokio::test]
+    async fn panicking_reconnect_task_produces_join_error() {
+        let mut join: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        join.spawn(async { panic!("simulated reconnect task panic") });
+        let mut error_count = 0usize;
+        while let Some(result) = join.join_next().await {
+            if result.is_err() {
+                error_count += 1;
+            }
+        }
+        assert_eq!(
+            error_count, 1,
+            "exactly one JoinError must be emitted by the panicking task"
         );
     }
 
