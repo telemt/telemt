@@ -27,7 +27,7 @@ struct ApiEventsInner {
 }
 
 /// Bounded ring-buffer for control-plane API/runtime events.
-pub struct ApiEventStore {
+pub(crate) struct ApiEventStore {
     inner: Mutex<ApiEventsInner>,
 }
 

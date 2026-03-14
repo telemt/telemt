@@ -1,0 +1,70 @@
+# .cargo/config.toml
+[build]
+rustflags = [
+    # 1. ABSOLUTE NON-NEGOTIABLES (Forbid)
+    # NOTE: temporarily relax some strict lints to reduce noise while triaging legacy code.
+    "-D", "clippy::unwrap_used",
+    "-D", "clippy::expect_used",
+    "-D", "clippy::panic",
+    "-D", "clippy::todo",
+    "-D", "clippy::unimplemented",
+    "-F", "clippy::undocumented_unsafe_blocks",
+
+    # 2. BASE STRICTNESS & CORE CORRECTNESS (Deny)
+    "-D", "clippy::correctness",
+    # Note: temporarily allow some noisy lints (e.g. redundant closure, too_many_arguments,
+    #       documentation backticks, missing const fn) while we triage existing code.
+    "-A", "clippy::use-self",
+    "-A", "clippy::redundant-closure",
+    "-A", "clippy::too-many-arguments",
+    "-A", "clippy::doc-markdown",
+    "-A", "clippy::missing-const-for-fn",
+    "-A", "clippy::unnecessary_operation",
+    "-A", "clippy::redundant-pub-crate",
+    "-A", "clippy::derive-partial-eq-without-eq",
+    "-D", "clippy::option_if_let_else",
+    "-D", "clippy::or_fun_call",
+    "-D", "clippy::branches_sharing_code",
+    "-A", "clippy::type_complexity",
+    "-A", "clippy::new_ret_no_self",
+    "-D", "clippy::single_option_map",
+    "-D", "clippy::useless_let_if_seq",
+    "-D", "clippy::redundant_locals",
+    "-D", "clippy::cloned_ref_to_slice_refs",
+    #"-D", "clippy::all",
+    #"-D", "clippy::pedantic",
+    #"-D", "clippy::cargo",
+    "-D", "unsafe_code",
+
+    # 3. CONCURRENCY, ASYNC, & MEMORY STRICTNESS (Deny)
+    "-D", "clippy::await_holding_lock",
+    "-D", "clippy::await_holding_refcell_ref",
+    "-D", "clippy::debug_assert_with_mut_call",
+    "-D", "clippy::macro_use_imports",
+    "-D", "clippy::cast_ptr_alignment",
+    "-D", "clippy::cast_lossless",
+    "-A", "clippy::cast_possible_truncation",
+    "-A", "clippy::cast_possible_wrap",
+    "-D", "clippy::ptr_as_ptr",
+    "-A", "clippy::significant_drop_tightening",
+    "-A", "clippy::significant_drop_in_scrutinee",
+
+    # 4. CRYPTOGRAPHIC, MATH & COMPLEXITY STRICTNESS (Deny)
+    "-D", "clippy::large_stack_arrays",
+    "-A", "clippy::float_cmp",
+    "-D", "clippy::same_functions_in_if_condition",
+    #"-D", "clippy::cognitive_complexity",
+
+    # 5. NATIVE COMPILER STRICTNESS (Deny)
+    #"-D", "missing_docs",
+    #"-D", "missing_debug_implementations",
+    "-D", "trivial_casts",
+    "-D", "trivial_numeric_casts",
+    "-D", "unused_extern_crates",
+    "-D", "unused_import_braces",
+    #"-D", "unused_qualifications",
+    "-D", "rust_2018_idioms",
+
+    # 6. EXPERIMENTAL (Warn)
+    "-A", "clippy::nursery"
+]

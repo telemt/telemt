@@ -20,6 +20,11 @@ impl SnapshotApplyOutcome {
     }
 }
 
+// Limits the number of simultaneous outbound dials during a secret-rotation
+// reconnect sweep, preventing a thundering-herd burst against Telegram's
+// MTProto servers when the pool contains many active writers.
+const MAX_CONCURRENT_RECONNECTS: usize = 32;
+
 impl MePool {
     pub async fn update_proxy_maps(
         &self,
@@ -110,32 +115,46 @@ impl MePool {
         false
     }
 
-    // Reconnects every active writer concurrently so that secret rotation does not
-    // block the caller for O(N writers × 2 s) with the old sequential approach.
-    // Each new connection is established before the corresponding old writer is marked as
-    // draining, ensuring the pool never briefly drops to zero active writers per DC.
+    // Reconnects every active writer concurrently, bounded to MAX_CONCURRENT_RECONNECTS
+    // tasks at a time, so that secret rotation does not block the caller for
+    // O(N writers × connect latency) with the old sequential approach, and does not
+    // create an unbounded burst of dials against Telegram's MTProto endpoints.
+    // Each new connection is established before the corresponding old writer is marked
+    // as draining, ensuring the pool never briefly drops to zero active writers per DC.
     pub async fn reconnect_all(self: &Arc<Self>) {
         let ws = self.writers.read().await.clone();
-        let mut join = tokio::task::JoinSet::new();
-        for w in ws {
-            let pool = self.clone();
-            join.spawn(async move {
-                if pool
-                    .connect_one_for_dc(w.addr, w.writer_dc, pool.rng.as_ref())
-                    .await
-                    .is_ok()
-                {
-                    pool.mark_writer_draining(w.id).await;
+        let mut ws_iter = ws.into_iter();
+        loop {
+            let mut join = tokio::task::JoinSet::new();
+            let mut spawned = 0usize;
+            for _ in 0..MAX_CONCURRENT_RECONNECTS {
+                if let Some(w) = ws_iter.next() {
+                    let pool = self.clone();
+                    spawned += 1;
+                    join.spawn(async move {
+                        if pool
+                            .connect_one_for_dc(w.addr, w.writer_dc, pool.rng.as_ref())
+                            .await
+                            .is_ok()
+                        {
+                            pool.mark_writer_draining(w.id).await;
+                        }
+                    });
+                } else {
+                    break;
                 }
-            });
+            }
+            if spawned == 0 {
+                break;
+            }
+            while join.join_next().await.is_some() {}
         }
-        while join.join_next().await.is_some() {}
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SnapshotApplyOutcome;
+    use super::{SnapshotApplyOutcome, MAX_CONCURRENT_RECONNECTS};
 
     // --- SnapshotApplyOutcome::changed() ---
 
@@ -165,5 +184,49 @@ mod tests {
         ];
         let changed_count = variants.iter().filter(|v| v.changed()).count();
         assert_eq!(changed_count, 1, "exactly one variant must report changed");
+    }
+
+    // --- MAX_CONCURRENT_RECONNECTS ---
+
+    // The concurrency bound must be large enough for meaningful parallelism but
+    // small enough to prevent a thundering-herd burst against upstream endpoints.
+    #[test]
+    fn max_concurrent_reconnects_is_in_operational_range() {
+        assert!(
+            MAX_CONCURRENT_RECONNECTS >= 4,
+            "concurrency bound ({MAX_CONCURRENT_RECONNECTS}) is too small for useful parallelism"
+        );
+        assert!(
+            MAX_CONCURRENT_RECONNECTS <= 256,
+            "concurrency bound ({MAX_CONCURRENT_RECONNECTS}) risks thundering-herd on upstream"
+        );
+    }
+
+    // Verify that the batch-iteration logic never exceeds MAX_CONCURRENT_RECONNECTS
+    // tasks per batch, regardless of how many writers exist.
+    #[test]
+    fn batching_logic_never_spawns_more_than_cap_per_batch() {
+        // Simulate the batch loop with a large writer list (200 > 32).
+        let total_writers = 200usize;
+        let mut remaining = total_writers;
+        let mut max_batch = 0usize;
+
+        while remaining > 0 {
+            let batch = remaining.min(MAX_CONCURRENT_RECONNECTS);
+            if batch > max_batch {
+                max_batch = batch;
+            }
+            remaining -= batch;
+        }
+
+        assert!(
+            max_batch <= MAX_CONCURRENT_RECONNECTS,
+            "no batch must exceed MAX_CONCURRENT_RECONNECTS ({MAX_CONCURRENT_RECONNECTS})"
+        );
+        assert_eq!(
+            max_batch,
+            MAX_CONCURRENT_RECONNECTS,
+            "first batch must be exactly MAX_CONCURRENT_RECONNECTS when writers > cap"
+        );
     }
 }

@@ -99,6 +99,12 @@ impl BufferPool {
     
     /// Return a buffer to the pool
     fn return_buffer(&self, mut buffer: BytesMut) {
+        // Zero the initialized region before clearing to prevent the next caller
+        // from observing prior connection data through the backing allocation.
+        // This satisfies OWASP ASVS L2 V8.3.6 (clear sensitive data from memory).
+        // The write is not optimized away because the allocation remains live
+        // (it is about to be pushed into the pool queue).
+        buffer.as_mut().fill(0u8);
         buffer.clear();
 
         // Accept buffers within [buffer_size, buffer_size * MAX_POOL_BUFFER_OVERSIZE_MULT].
@@ -638,24 +644,71 @@ mod tests {
         assert_eq!(stats.hits, 50);
     }
 
-    // ── Security invariant: sensitive data must not leak between pool users ───
-
-    // A buffer containing "sensitive" bytes must be zeroed before being handed
-    // to the next caller. An attacker who can trigger repeated pool cycles against
-    // a shared buffer slot must not be able to read prior connection data.
+    // Security invariant: sensitive data must not leak between pool users.
+    // A buffer containing sensitive bytes has its initialized region overwritten
+    // with zeros in return_buffer() before the length is reset to 0.  The next
+    // caller therefore receives a buffer whose backing bytes are provably zero,
+    // not merely logically invisible through the safe Rust API.
     #[test]
     fn pooled_buffer_sensitive_data_is_cleared_before_reuse() {
         let pool = Arc::new(BufferPool::with_config(64, 2));
         {
             let mut buf = pool.get();
             buf.extend_from_slice(b"credentials:password123");
-            // Drop returns the buffer to the pool after clearing.
+            // Drop triggers return_buffer: fill(0u8) then clear().
         }
         {
             let buf = pool.get();
             // Buffer must be empty — no leftover bytes from the previous user.
             assert!(buf.is_empty(), "pool must clear buffer before handing it to the next caller");
             assert_eq!(buf.len(), 0);
+        }
+    }
+
+    // Verify that return_buffer() actually zeros the backing bytes, not merely
+    // resets the length.  We use unsafe to read the first N bytes of the backing
+    // allocation after the buffer has been returned and re-issued with len=0.
+    //
+    // SAFETY reasoning: BytesMut maintains a NonNull<u8> backing allocation for
+    // the full capacity.  When len=0 and capacity>0, the deref'd slice as_ptr()
+    // returns the start of that allocation (not a dangling pointer), because
+    // BytesMut is constructed from an Arc-managed heap block.  Reading exactly
+    // `prior_len` bytes (which return_buffer zeroed via fill(0u8)) is valid
+    // because the allocation covers at least `capacity >= buffer_size` bytes.
+    #[allow(unsafe_code)]
+    #[test]
+    fn return_to_pool_zeros_backing_bytes_not_just_length() {
+        let buf_size = 16usize;
+        let payload: &[u8] = b"secret_payload!!"; // exactly 16 bytes = buf_size
+        assert_eq!(payload.len(), buf_size, "pre-condition: payload fills buffer");
+
+        let pool = Arc::new(BufferPool::with_config(buf_size, 1));
+
+        {
+            let mut buf = pool.get();
+            buf.extend_from_slice(payload);
+            assert_eq!(buf.len(), buf_size);
+        } // drop → return_buffer → fill(0u8) → clear()
+
+        {
+            let buf = pool.get();
+            assert_eq!(buf.len(), 0, "re-issued buffer must have len=0");
+            assert!(
+                buf.capacity() >= buf_size,
+                "re-issued buffer must have at least the original capacity"
+            );
+
+            // Read the first `payload.len()` bytes of the backing allocation
+            // to confirm return_buffer wrote zeros, not just reset the length.
+            let backing_zeroed = unsafe {
+                std::slice::from_raw_parts(buf.as_ptr(), payload.len())
+                    .iter()
+                    .all(|&b| b == 0)
+            };
+            assert!(
+                backing_zeroed,
+                "return_buffer must zero backing bytes (fill(0u8)), not merely reset len"
+            );
         }
     }
 

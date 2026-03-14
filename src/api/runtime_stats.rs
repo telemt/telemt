@@ -18,7 +18,7 @@ const FEATURE_DISABLED_REASON: &str = "feature_disabled";
 const SOURCE_UNAVAILABLE_REASON: &str = "source_unavailable";
 
 #[derive(Clone)]
-pub struct MinimalCacheEntry {
+pub(crate) struct MinimalCacheEntry {
     pub(super) expires_at: Instant,
     pub(super) payload: MinimalAllPayload,
     pub(super) generated_at_epoch_secs: u64,
