@@ -79,13 +79,19 @@ impl ServerCertVerifier for NoVerify {
 fn build_client_config() -> Arc<ClientConfig> {
     let root = rustls::RootCertStore::empty();
 
-    let provider = rustls::crypto::ring::default_provider();
-    let builder = ClientConfig::builder_with_provider(Arc::new(provider));
+    // Keep the provider in an Arc so it can be reused in the fallback branch
+    // without switching to a different (default) crypto backend.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = ClientConfig::builder_with_provider(provider.clone());
     let builder = match builder.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12]) {
         Ok(builder) => builder,
         Err(error) => {
-            warn!(%error, "Failed to set explicit TLS versions, using rustls defaults");
-            ClientConfig::builder()
+            warn!(%error, "Failed to set explicit TLS versions, falling back to rustls default versions with the same provider");
+            // Use the same ring provider rather than the global default, so the
+            // crypto backend does not silently change on this error path.
+            ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("ring provider must support at least one protocol version")
         }
     };
 

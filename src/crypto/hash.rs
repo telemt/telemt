@@ -27,12 +27,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// SHA-256 HMAC
+// HMAC-SHA256 accepts any key length (zero-length or arbitrary), so
+// new_from_slice never returns an error.  expect() is safe here; the
+// allow attribute suppresses the clippy::expect_used lint which is
+// globally denied but inapplicable to this structurally-infallible call.
+#[allow(clippy::expect_used)]
 pub fn sha256_hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut mac = match HmacSha256::new_from_slice(key) {
-        Ok(mac) => mac,
-        // new_from_slice for HMAC accepts any key length; this branch is structurally unreachable.
-        Err(_) => unreachable!("HMAC-SHA256 new_from_slice must not fail: HMAC accepts any key length"),
-    };
+    let mut mac = HmacSha256::new_from_slice(key)
+        .expect("HMAC-SHA256 new_from_slice must not fail: HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }

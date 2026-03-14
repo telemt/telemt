@@ -124,19 +124,23 @@ pub const MAX_NONCE_ATTEMPTS: usize = 64;
 
 /// Generate a valid random nonce for Telegram handshake.
 ///
-/// Panics if `random_bytes` returns `MAX_NONCE_ATTEMPTS` consecutive invalid nonces,
-/// which is a statistical impossibility with a correctly-seeded CSPRNG.
+/// Panics if `random_bytes` returns `MAX_NONCE_ATTEMPTS` consecutive invalid nonces.
+/// This is a statistical impossibility with a correctly-seeded CSPRNG; reaching
+/// this branch means the RNG source is broken or adversarially controlled.
+// clippy::panic is globally denied, but this explicit panic on RNG failure is
+// intentional and correct: continuing with a broken RNG would be far more dangerous.
+#[allow(clippy::panic)]
 pub fn generate_nonce<R: FnMut(usize) -> Vec<u8>>(mut random_bytes: R) -> [u8; HANDSHAKE_LEN] {
     for _ in 0..MAX_NONCE_ATTEMPTS {
         let nonce_vec = random_bytes(HANDSHAKE_LEN);
         let mut nonce = [0u8; HANDSHAKE_LEN];
         nonce.copy_from_slice(&nonce_vec);
-        
+
         if is_valid_nonce(&nonce) {
             return nonce;
         }
     }
-    unreachable!("CSPRNG produced {MAX_NONCE_ATTEMPTS} consecutive invalid nonces — RNG is broken")
+    panic!("CSPRNG produced {MAX_NONCE_ATTEMPTS} consecutive invalid nonces; RNG is broken")
 }
 
 /// Check if nonce is valid (not matching reserved patterns)
@@ -385,4 +389,21 @@ mod tests {
     // Enforced at compile time: if Clone is ever derived or manually implemented for
     // ObfuscationParams, this assertion will fail to compile.
     static_assertions::assert_not_impl_any!(ObfuscationParams: Clone);
+
+    // A broken or adversarially-controlled RNG that returns MAX_NONCE_ATTEMPTS
+    // consecutive invalid nonces must trigger a panic rather than looping forever
+    // or silently returning garbage.  Once this panic is observable in production
+    // logs it is an unambiguous signal that the RNG source is compromised.
+    #[test]
+    #[should_panic(expected = "CSPRNG produced")]
+    fn generate_nonce_panics_when_rng_always_returns_invalid_nonces() {
+        generate_nonce(|n| {
+            let mut buf = vec![0u8; n];
+            // Force first-byte reservation on every single attempt, making all
+            // MAX_NONCE_ATTEMPTS nonces invalid and triggering the panic path.
+            buf[0] = RESERVED_NONCE_FIRST_BYTES[0];
+            buf[4..8].copy_from_slice(&[1, 2, 3, 4]);
+            buf
+        });
+    }
 }

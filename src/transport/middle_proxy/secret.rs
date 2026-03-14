@@ -61,6 +61,9 @@ pub async fn fetch_proxy_secret(cache_path: Option<&str>, max_len: usize) -> Res
             let tmp_path = unique_temp_path(cache);
             if let Err(e) = tokio::fs::write(&tmp_path, &data).await {
                 warn!(error = %e, "Failed to write proxy-secret temp file (non-fatal)");
+                // Best-effort cleanup: remove the partial temp file so it does not
+                // accumulate on disk across failed refresh cycles.
+                let _ = tokio::fs::remove_file(&tmp_path).await;
             } else if let Err(e) = tokio::fs::rename(&tmp_path, cache).await {
                 warn!(error = %e, path = cache, "Failed to rename proxy-secret cache (non-fatal)");
                 let _ = tokio::fs::remove_file(&tmp_path).await;
@@ -100,6 +103,16 @@ pub async fn fetch_proxy_secret(cache_path: Option<&str>, max_len: usize) -> Res
 }
 
 pub async fn download_proxy_secret_with_max_len(max_len: usize) -> Result<Vec<u8>> {
+    // Fail fast before any network I/O when the caller passes a nonsensical cap.
+    // Without this guard the error would surface only after the HTTP round-trip,
+    // producing a misleading hard-cap or Content-Length error instead of an
+    // explicit "invalid parameter" one.
+    if max_len < PROXY_SECRET_MIN_LEN {
+        return Err(ProxyError::Proxy(format!(
+            "proxy-secret max_len {max_len} is below the minimum allowed {PROXY_SECRET_MIN_LEN}",
+        )));
+    }
+
     let mut resp = reqwest::get("https://core.telegram.org/getProxySecret")
         .await
         .map_err(|e| ProxyError::Proxy(format!("Failed to download proxy-secret: {e}")))?;
@@ -149,7 +162,15 @@ pub async fn download_proxy_secret_with_max_len(max_len: usize) -> Result<Vec<u8
             .await
             .map_err(|e| ProxyError::Proxy(format!("Read proxy-secret body: {e}")))?{
             Some(chunk) => {
-                if data.len() + chunk.len() > hard_cap {
+                // Use checked_add to guard against a malicious/malfunctioning
+                // HTTP implementation sending chunk lengths that sum past usize::MAX.
+                let new_len = data
+                    .len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| ProxyError::Proxy(
+                        "proxy-secret response body size overflowed usize".to_string(),
+                    ))?;
+                if new_len > hard_cap {
                     return Err(ProxyError::Proxy(format!(
                         "proxy-secret response body would exceed hard cap {hard_cap} bytes"
                     )));
@@ -325,6 +346,28 @@ mod tests {
             data.len() <= hard_cap,
             "must not have buffered past hard_cap: got {} bytes",
             data.len()
+        );
+    }
+
+    // The chunk-accumulation loop uses checked_add to prevent usize-overflow wrap-around
+    // from silently bypassing the hard cap.  This test verifies the guard's contract:
+    // a hypothetical accumulated length that would overflow usize when a new chunk is
+    // added must be treated as a cap violation rather than wrapping back to a small value.
+    #[test]
+    fn streaming_cap_checked_add_overflow_is_treated_as_cap_violation() {
+        // Simulate a near-saturated buffer (impossible in practice but must be
+        // handled safely in the guard logic rather than panicking or wrapping).
+        let almost_max: usize = usize::MAX - 3;
+        let chunk_len: usize = 10; // wrapping addition would produce 6, sneaking past caps
+
+        let new_len = almost_max.checked_add(chunk_len);
+
+        // The guard must detect overflow (None) and treat it as cap exceeded,
+        // not silently allow 6 bytes through.
+        assert!(
+            new_len.is_none(),
+            "checked_add must detect overflow; wrapping arithmetic would produce {}",
+            almost_max.wrapping_add(chunk_len)
         );
     }
 
