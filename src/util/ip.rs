@@ -1,6 +1,6 @@
 //! IP Addr Detect
 
-use std::net::{IpAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -15,7 +15,7 @@ pub struct IpInfo {
 #[allow(dead_code)]
 impl IpInfo {
     /// Check if any IP is detected
-    pub fn has_any(&self) -> bool {
+    pub const fn has_any(&self) -> bool {
         self.ipv4.is_some() || self.ipv6.is_some()
     }
 
@@ -32,16 +32,16 @@ impl IpInfo {
 /// URLs for IP detection
 #[allow(dead_code)]
 const IPV4_URLS: &[&str] = &[
-    "http://v4.ident.me/",
-    "http://ipv4.icanhazip.com/",
-    "http://api.ipify.org/",
+    "https://v4.ident.me/",
+    "https://ipv4.icanhazip.com/",
+    "https://api.ipify.org/",
 ];
 
 #[allow(dead_code)]
 const IPV6_URLS: &[&str] = &[
-    "http://v6.ident.me/",
-    "http://ipv6.icanhazip.com/",
-    "http://api6.ipify.org/",
+    "https://v6.ident.me/",
+    "https://ipv6.icanhazip.com/",
+    "https://api6.ipify.org/",
 ];
 
 /// Detect local IP address by connecting to a public DNS
@@ -129,13 +129,30 @@ pub async fn detect_ip() -> IpInfo {
 }
 
 #[allow(dead_code)]
-fn is_private_ip(ip: IpAddr) -> bool {
+const fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
             ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local()
         }
         IpAddr::V6(ipv6) => {
-            ipv6.is_loopback() || (ipv6.segments()[0] & 0xfe00) == 0xfc00 // Unique Local
+            let segs = ipv6.segments();
+            let seg0 = segs[0];
+            // IPv4-mapped addresses (::ffff:x.x.x.x, i.e. ::ffff:0:0/96) must be
+            // classified using the embedded IPv4 rules.  Without this check,
+            // ::ffff:192.168.1.1 is treated as a public IPv6 address, causing the
+            // proxy to publish a private RFC-1918 address in its external-IP link.
+            let is_v4_mapped = segs[0] == 0 && segs[1] == 0 && segs[2] == 0
+                && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff;
+            if is_v4_mapped {
+                let v4 = Ipv4Addr::new(
+                    (segs[6] >> 8) as u8, segs[6] as u8,
+                    (segs[7] >> 8) as u8, segs[7] as u8,
+                );
+                return v4.is_private() || v4.is_loopback() || v4.is_link_local();
+            }
+            ipv6.is_loopback()
+                || (seg0 & 0xfe00) == 0xfc00 // Unique Local (fc00::/7)
+                || (seg0 & 0xffc0) == 0xfe80 // Link-Local (fe80::/10)
         }
     }
 }
@@ -183,5 +200,116 @@ mod tests {
         };
         assert_eq!(info.preferred(false), Some("1.2.3.4".parse().unwrap()));
         assert_eq!(info.preferred(true), Some("::1".parse().unwrap()));
+    }
+
+    // ===== T-4: is_private_ip IPv6 link-local regression tests =====
+
+    #[test]
+    fn test_is_private_ip_ipv6_link_local_detected() {
+        // fe80::/10 covers fe80:: through febf::.
+        assert!(is_private_ip("fe80::1".parse().unwrap()), "fe80::1 is link-local");
+        assert!(is_private_ip("fe80::".parse().unwrap()), "fe80:: is link-local");
+        assert!(
+            is_private_ip("fe80::ffff:ffff:ffff:ffff".parse().unwrap()),
+            "fe80::ffff:... is link-local"
+        );
+        assert!(
+            is_private_ip("febf::ffff".parse().unwrap()),
+            "febf::ffff is the last address in fe80::/10"
+        );
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv6_just_outside_link_local_range_is_public() {
+        // fe7f:: is one step below fe80::/10 — not link-local and not ULA.
+        assert!(
+            !is_private_ip("fe7f::1".parse().unwrap()),
+            "fe7f::1 is below fe80::/10 and must not be private"
+        );
+        // fec0:: is one step above febf:: — outside fe80::/10 and outside fc00::/7.
+        assert!(
+            !is_private_ip("fec0::1".parse().unwrap()),
+            "fec0::1 is above fe80::/10 and not ULA — must not be private"
+        );
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv6_ula_still_detected() {
+        assert!(is_private_ip("fc00::1".parse().unwrap()), "fc00::/7 is ULA");
+        assert!(is_private_ip("fd00::1".parse().unwrap()), "fd00:: is ULA");
+        assert!(is_private_ip("fdff::1".parse().unwrap()), "fdff:: is ULA");
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv6_loopback_still_detected() {
+        assert!(is_private_ip("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv6_global_unicast_is_public() {
+        assert!(!is_private_ip("2001:4860:4860::8888".parse().unwrap()));
+        assert!(!is_private_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_link_local_mask_boundary_exhaustive() {
+        // Verify the exact boundary of fe80::/10.
+        // The mask 0xffc0 applied to the first segment must equal 0xfe80.
+        let cases: &[(&str, bool)] = &[
+            ("fe80::1", true),
+            ("fe81::1", true),
+            ("fea0::1", true),
+            ("febf::1", true),  // last /10 prefix
+            ("fec0::1", false), // first address outside /10
+            ("fe7f::1", false), // just below the range
+            ("ff00::1", false), // multicast
+        ];
+        for &(addr_str, expected) in cases {
+            let ip: IpAddr = addr_str.parse().expect(addr_str);
+            assert_eq!(
+                is_private_ip(ip),
+                expected,
+                "{addr_str}: expected is_private={expected}"
+            );
+        }
+    }
+
+    // ===== T-5: IPv4-mapped IPv6 address classification =====
+
+    #[test]
+    fn test_is_private_ip_ipv4_mapped_private_rfc1918_is_private() {
+        // ::ffff:192.168.x.x, ::ffff:10.x.x.x, ::ffff:172.16-31.x.x — RFC 1918
+        assert!(is_private_ip("::ffff:192.168.1.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:172.31.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv4_mapped_loopback_is_private() {
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv4_mapped_link_local_is_private() {
+        // 169.254.0.0/16 is IPv4 link-local
+        assert!(is_private_ip("::ffff:169.254.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:169.254.255.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv4_mapped_public_is_not_private() {
+        assert!(!is_private_ip("::ffff:8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip("::ffff:1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip("::ffff:203.0.113.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_ip_ipv4_compatible_not_treated_as_mapped() {
+        // ::192.168.1.1 is IPv4-compatible (deprecated, segs[5]=0, not 0xffff).
+        // It does NOT match the ::ffff:0:0/96 mapped range and falls through to
+        // pure-IPv6 rules, which classify it as public (not ULA, not link-local).
+        assert!(!is_private_ip("::192.168.1.1".parse::<IpAddr>().unwrap()));
     }
 }

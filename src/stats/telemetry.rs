@@ -19,7 +19,7 @@ impl Default for TelemetryPolicy {
 }
 
 impl TelemetryPolicy {
-    pub fn from_config(cfg: &TelemetryConfig) -> Self {
+    pub const fn from_config(cfg: &TelemetryConfig) -> Self {
         Self {
             core_enabled: cfg.core_enabled,
             user_enabled: cfg.user_enabled,

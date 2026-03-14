@@ -11,7 +11,7 @@ pub(crate) enum BndAddrStatus {
 }
 
 impl BndAddrStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
             Self::Bogon => "bogon",
@@ -28,7 +28,7 @@ pub(crate) enum BndPortStatus {
 }
 
 impl BndPortStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
             Self::Zero => "zero",
@@ -233,15 +233,14 @@ pub(crate) fn timeskew_snapshot() -> MeTimeskewSnapshot {
     }
 
     let (last_skew_secs, last_source, last_seen_age_secs) =
-        if let Some(last) = guard.timeskew_samples.back() {
-            (
+        guard.timeskew_samples.back().map_or(
+            (None, None, None),
+            |last| (
                 Some(last.skew_secs),
                 Some(last.source),
                 Some(now_epoch_secs.saturating_sub(last.ts_epoch_secs)),
-            )
-        } else {
-            (None, None, None)
-        };
+            ),
+        );
 
     MeTimeskewSnapshot {
         max_skew_secs_15m,

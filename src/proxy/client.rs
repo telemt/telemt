@@ -41,7 +41,7 @@ use crate::proxy::masking::handle_bad_client;
 use crate::proxy::middle_relay::handle_via_middle_proxy;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 
-fn beobachten_ttl(config: &ProxyConfig) -> Duration {
+const fn beobachten_ttl(config: &ProxyConfig) -> Duration {
     Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60))
 }
 
@@ -63,10 +63,24 @@ fn record_handshake_failure_class(
     peer_ip: IpAddr,
     error: &ProxyError,
 ) {
-    let class = if error.to_string().contains("expected 64 bytes, got 0") {
-        "expected_64_got_0"
-    } else {
-        "other"
+    // Classify connection-closed-before-handshake probes separately so the
+    // beobachten store can distinguish port scanners (send SYN, read banner,
+    // drop) from other failures. Matching on error variants is robust against
+    // changes to error message formatting.
+    let class = match error {
+        ProxyError::Stream(crate::error::StreamError::UnexpectedEof) => "expected_64_got_0",
+        ProxyError::Stream(crate::error::StreamError::PartialRead { got: 0, .. }) => {
+            "expected_64_got_0"
+        }
+        ProxyError::Io(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            "expected_64_got_0"
+        }
+        _ => "other",
     };
     record_beobachten_class(beobachten, config, peer_ip, class);
 }
@@ -96,7 +110,7 @@ where
     // For non-TCP streams, use a synthetic local address; may be overridden by PROXY protocol dst
     let mut local_addr: SocketAddr = format!("0.0.0.0:{}", config.server.port)
         .parse()
-        .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
+        .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 443)));
 
     if proxy_protocol_enabled {
         let proxy_header_timeout = Duration::from_millis(
@@ -338,7 +352,7 @@ pub struct RunningClientHandler {
 }
 
 impl ClientHandler {
-    pub fn new(
+    pub const fn new(
         stream: TcpStream,
         peer: SocketAddr,
         config: Arc<ProxyConfig>,
@@ -847,5 +861,261 @@ impl RunningClientHandler {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::StreamError;
+    use std::net::{IpAddr, Ipv4Addr};
+    use crate::stats::beobachten::BeobachtenStore;
+
+    fn make_beobachten() -> Arc<BeobachtenStore> {
+        Arc::new(BeobachtenStore::default())
+    }
+
+    fn make_config_beobachten_on() -> Arc<ProxyConfig> {
+        // Default ProxyConfig: beobachten=true, beobachten_minutes=10
+        Arc::new(ProxyConfig::default())
+    }
+
+    fn make_config_beobachten_off() -> Arc<ProxyConfig> {
+        let mut cfg = ProxyConfig::default();
+        cfg.general.beobachten = false;
+        Arc::new(cfg)
+    }
+
+    fn peer_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))
+    }
+
+    /// Verify that the given class name appears in the beobachten snapshot.
+    ///
+    /// `snapshot_text` format: `[class_name]\n<ip>-<count>\n...`
+    fn snapshot_contains_class(store: &BeobachtenStore, class: &str) -> bool {
+        // Use a large TTL so entries are never expired during the test.
+        let text = store.snapshot_text(Duration::from_secs(3600));
+        let header = format!("[{class}]");
+        text.contains(&header)
+    }
+
+    // ── record_handshake_failure_class ───────────────────────────────────────
+
+    #[test]
+    fn unexpected_eof_io_error_classified_as_port_scanner_class() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(
+            snapshot_contains_class(&b, "expected_64_got_0"),
+            "UnexpectedEof should be classified as 'expected_64_got_0'"
+        );
+        assert!(
+            !snapshot_contains_class(&b, "other"),
+            "should not also appear under 'other'"
+        );
+    }
+
+    #[test]
+    fn connection_reset_io_error_classified_as_port_scanner_class() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "expected_64_got_0"));
+    }
+
+    #[test]
+    fn stream_unexpected_eof_classified_as_port_scanner_class() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::Stream(StreamError::UnexpectedEof);
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "expected_64_got_0"));
+    }
+
+    #[test]
+    fn partial_read_got_zero_classified_as_port_scanner_class() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::Stream(StreamError::PartialRead { expected: 64, got: 0 });
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "expected_64_got_0"));
+    }
+
+    #[test]
+    fn partial_read_got_nonzero_classified_as_other() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        // got > 0: partial data received, not a clean close
+        let err = ProxyError::Stream(StreamError::PartialRead { expected: 64, got: 32 });
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(
+            snapshot_contains_class(&b, "other"),
+            "PartialRead with got=32 should be 'other'"
+        );
+        assert!(
+            !snapshot_contains_class(&b, "expected_64_got_0"),
+            "should not be classified as 'expected_64_got_0'"
+        );
+    }
+
+    #[test]
+    fn proxy_error_string_classified_as_other() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::Proxy("upstream refused connection".into());
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "other"));
+    }
+
+    #[test]
+    fn handshake_timeout_classified_as_other() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::TgHandshakeTimeout;
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "other"));
+    }
+
+    #[test]
+    fn beobachten_disabled_records_nothing() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_off();
+        let err = ProxyError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        // When beobachten is disabled, the store must remain empty.
+        let snap = b.snapshot_text(Duration::from_secs(3600));
+        assert_eq!(snap, "empty\n", "beobachten disabled: store must be empty");
+    }
+
+    #[test]
+    fn error_message_format_change_does_not_affect_classification() {
+        // Regression: old code used `.to_string().contains("expected 64 bytes, got 0")`
+        // which silently breaks if the error format changes. This tests the new
+        // variant-matching path is independent of formatting.
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+
+        // ProxyError::Io wrapping an UnexpectedEof — the Display format of
+        // io::Error can change between Rust versions. Classification must not
+        // depend on the human-readable string.
+        let raw_io = std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "some version-specific message that could change",
+        );
+        let err = ProxyError::Io(raw_io);
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(
+            snapshot_contains_class(&b, "expected_64_got_0"),
+            "Classification must be based on error kind, not message text"
+        );
+    }
+
+    // ── Boundary: got == 0 vs got == 1 ──────────────────────────────────────
+    // A censor that sends exactly 1 byte before closing (slow-probe) is
+    // classified as "other" — only a clean 0-byte close gets "expected_64_got_0".
+
+    #[test]
+    fn partial_read_got_one_is_other() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::Stream(StreamError::PartialRead { expected: 64, got: 1 });
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "other"));
+        assert!(!snapshot_contains_class(&b, "expected_64_got_0"));
+    }
+
+    #[test]
+    fn partial_read_expected_5_got_zero_is_expected_64_got_0() {
+        // The class name is historical; it fires for ANY got==0 partial read,
+        // not only 64-byte ones.  The `..` wildcard in the match arm guarantees this.
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::Stream(StreamError::PartialRead { expected: 5, got: 0 });
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "expected_64_got_0"));
+    }
+
+    #[test]
+    fn invalid_handshake_error_classified_as_other() {
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let err = ProxyError::InvalidHandshake("garbled bytes from censor".into());
+        record_handshake_failure_class(&b, &cfg, peer_ip(), &err);
+
+        assert!(snapshot_contains_class(&b, "other"));
+        assert!(!snapshot_contains_class(&b, "expected_64_got_0"));
+    }
+
+    #[test]
+    fn two_different_ips_accumulate_under_same_class() {
+        // If two censors from distinct IPs both do a clean-close probe, both
+        // must appear under "expected_64_got_0" without stomping each other.
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        let err = ProxyError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        record_handshake_failure_class(&b, &cfg, ip_a, &err);
+        record_handshake_failure_class(&b, &cfg, ip_b, &err);
+
+        let text = b.snapshot_text(Duration::from_secs(3600));
+        assert!(text.contains("[expected_64_got_0]"));
+        // Both IPs must appear under the same section.
+        assert!(text.contains("10.0.0.1") || text.contains("::ffff:10.0.0.1"), "ip_a missing");
+        assert!(text.contains("10.0.0.2") || text.contains("::ffff:10.0.0.2"), "ip_b missing");
+    }
+
+    #[test]
+    fn two_different_ips_with_different_classes_do_not_bleed() {
+        // IP A → expected_64_got_0, IP B → other.  They must end up in separate
+        // beobachten sections and must NOT appear under each other's section.
+        let b = make_beobachten();
+        let cfg = make_config_beobachten_on();
+        let ip_a = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2));
+
+        let err_eof = ProxyError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        let err_other = ProxyError::TgHandshakeTimeout;
+
+        record_handshake_failure_class(&b, &cfg, ip_a, &err_eof);
+        record_handshake_failure_class(&b, &cfg, ip_b, &err_other);
+
+        let text = b.snapshot_text(Duration::from_secs(3600));
+
+        // Find positions of each section header.
+        let pos_eof = text.find("[expected_64_got_0]").expect("[expected_64_got_0] section missing");
+        let pos_other = text.find("[other]").expect("[other] section missing");
+
+        // ip_a must appear AFTER pos_eof and BEFORE pos_other (or after, depending on order)
+        // — the key invariant is that each IP appears exactly once.
+        let ip_a_pos = text.find("192.168.1.1").or_else(|| text.find("::ffff:192.168.1.1")).expect("ip_a not found in snapshot");
+        let ip_b_pos = text.find("192.168.1.2").or_else(|| text.find("::ffff:192.168.1.2")).expect("ip_b not found in snapshot");
+
+        // ip_a should be in the expected_64_got_0 section (between pos_eof and the next section)
+        assert!(
+            ip_a_pos > pos_eof && (ip_a_pos < pos_other || pos_other < pos_eof),
+            "ip_a not in expected_64_got_0 section"
+        );
+        // ip_b should be in the other section
+        assert!(
+            ip_b_pos > pos_other || pos_other > pos_eof,
+            "ip_b not in other section"
+        );
     }
 }

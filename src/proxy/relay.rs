@@ -18,22 +18,22 @@
 //! Uses `tokio::io::copy_bidirectional` which polls both directions concurrently
 //! in a single task via non-blocking `poll_read` / `poll_write` calls:
 //!
-//! Old (select! + write_all — BLOCKING):
+//! Old (select! + `write_all` — BLOCKING):
 //!
 //!   loop {
 //!       select! {
 //!           biased;
-//!           data = client.read()  => { server.write_all(data).await; }  ← BLOCKS here
-//!           data = server.read()  => { client.write_all(data).await; }  ← can't run
+//!           data = `client.read()`  => { `server.write_all(data).await`; }  ← BLOCKS here
+//!           data = `server.read()`  => { `client.write_all(data).await`; }  ← can't run
 //!       }
 //!   }
 //!
-//! New (copy_bidirectional — CONCURRENT):
+//! New (`copy_bidirectional` — CONCURRENT):
 //!
 //!   poll(cx) {
 //!       // Both directions polled in the same poll cycle
-//!       C→S: poll_read(client) → poll_write(server)   // non-blocking
-//!       S→C: poll_read(server) → poll_write(client)   // non-blocking
+//!       C→S: `poll_read(client)` → `poll_write(server)`   // non-blocking
+//!       S→C: `poll_read(server)` → `poll_write(client)`   // non-blocking
 //!       // If one writer is Pending, the other direction still progresses
 //!   }
 //!
@@ -41,8 +41,8 @@
 //! - No head-of-line blocking: slow client download doesn't block uploads
 //! - No biased starvation: fair polling of both directions
 //! - Proper flush: `copy_bidirectional` calls `poll_flush` when reader stalls,
-//!   so CryptoWriter's pending ciphertext is always drained (fixes "stuck at 95%")
-//! - No deadlock risk: old write_all could deadlock when both TCP buffers filled;
+//!   so `CryptoWriter`'s pending ciphertext is always drained (fixes "stuck at 95%")
+//! - No deadlock risk: old `write_all` could deadlock when both TCP buffers filled;
 //!   poll-based approach lets TCP flow control work correctly
 //!
 //! Stats tracking:
@@ -99,7 +99,7 @@ struct CombinedStream<R, W> {
 }
 
 impl<R, W> CombinedStream<R, W> {
-    fn new(reader: R, writer: W) -> Self {
+    const fn new(reader: R, writer: W) -> Self {
         Self { reader, writer }
     }
 }
@@ -138,7 +138,7 @@ impl<R: Unpin, W: AsyncWrite + Unpin> AsyncWrite for CombinedStream<R, W> {
 
 // ============= SharedCounters =============
 
-/// Atomic counters shared between the relay (via StatsIo) and the watchdog task.
+/// Atomic counters shared between the relay (via `StatsIo`) and the watchdog task.
 ///
 /// Using `Relaxed` ordering is sufficient because:
 /// - Counters are monotonically increasing (no ABA problem)
@@ -149,16 +149,16 @@ struct SharedCounters {
     c2s_bytes: AtomicU64,
     /// Bytes written to client (S→C direction)
     s2c_bytes: AtomicU64,
-    /// Number of poll_read completions (≈ C→S chunks)
+/// Number of `poll_read` completions (≈ C→S chunks)
     c2s_ops: AtomicU64,
-    /// Number of poll_write completions (≈ S→C chunks)
+/// Number of `poll_write` completions (≈ S→C chunks)
     s2c_ops: AtomicU64,
     /// Milliseconds since relay epoch of last I/O activity
     last_activity_ms: AtomicU64,
 }
 
 impl SharedCounters {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             c2s_bytes: AtomicU64::new(0),
             s2c_bytes: AtomicU64::new(0),

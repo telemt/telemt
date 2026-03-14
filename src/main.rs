@@ -1,4 +1,15 @@
-//! telemt — Telegram MTProto Proxy
+//! telemt — Telegram `MTProto` Proxy
+
+#![cfg_attr(
+    test,
+    allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
 
 mod api;
 mod cli;
@@ -18,7 +29,9 @@ mod tls_front;
 mod transport;
 mod util;
 
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    maestro::run().await
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(maestro::run())
 }

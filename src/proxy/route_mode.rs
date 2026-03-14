@@ -14,18 +14,18 @@ pub(crate) enum RelayRouteMode {
 }
 
 impl RelayRouteMode {
-    pub(crate) fn as_u8(self) -> u8 {
+    pub(crate) const fn as_u8(self) -> u8 {
         self as u8
     }
 
-    pub(crate) fn from_u8(value: u8) -> Self {
+    pub(crate) const fn from_u8(value: u8) -> Self {
         match value {
             1 => Self::Middle,
             _ => Self::Direct,
         }
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
             Self::Middle => "middle",
@@ -108,7 +108,7 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn is_session_affected_by_cutover(
+pub(crate) const fn is_session_affected_by_cutover(
     current: RouteCutoverState,
     _session_mode: RelayRouteMode,
     session_generation: u64,
@@ -128,7 +128,7 @@ pub(crate) fn affected_cutover_state(
     None
 }
 
-pub(crate) fn cutover_stagger_delay(session_id: u64, generation: u64) -> Duration {
+pub(crate) const fn cutover_stagger_delay(session_id: u64, generation: u64) -> Duration {
     let mut value = session_id
         ^ generation.rotate_left(17)
         ^ 0x9e37_79b9_7f4a_7c15;
@@ -139,4 +139,89 @@ pub(crate) fn cutover_stagger_delay(session_id: u64, generation: u64) -> Duratio
     value ^= value >> 31;
     let ms = 1000 + (value % 1000);
     Duration::from_millis(ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_is_affected_only_by_newer_generation() {
+        let current = RouteCutoverState {
+            mode: RelayRouteMode::Middle,
+            generation: 7,
+        };
+
+        assert!(is_session_affected_by_cutover(current, RelayRouteMode::Direct, 6));
+        assert!(!is_session_affected_by_cutover(current, RelayRouteMode::Direct, 7));
+        assert!(!is_session_affected_by_cutover(current, RelayRouteMode::Direct, 8));
+    }
+
+    #[test]
+    fn affected_cutover_state_returns_none_when_session_generation_matches() {
+        let (tx, rx) = watch::channel(RouteCutoverState {
+            mode: RelayRouteMode::Direct,
+            generation: 4,
+        });
+        // Keep sender alive for the duration of the test.
+        let _keep_sender = tx;
+
+        let affected = affected_cutover_state(&rx, RelayRouteMode::Direct, 4);
+        assert!(affected.is_none());
+    }
+
+    #[test]
+    fn affected_cutover_state_returns_state_when_generation_advances() {
+        let (tx, rx) = watch::channel(RouteCutoverState {
+            mode: RelayRouteMode::Direct,
+            generation: 1,
+        });
+        tx.send_replace(RouteCutoverState {
+            mode: RelayRouteMode::Middle,
+            generation: 2,
+        });
+
+        let affected = affected_cutover_state(&rx, RelayRouteMode::Direct, 1);
+        assert_eq!(
+            affected,
+            Some(RouteCutoverState {
+                mode: RelayRouteMode::Middle,
+                generation: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn stagger_delay_is_deterministic_and_bounded() {
+        let session_id = 0x1234_5678_9abc_def0;
+        let generation = 42;
+
+        let delay_a = cutover_stagger_delay(session_id, generation);
+        let delay_b = cutover_stagger_delay(session_id, generation);
+        assert_eq!(delay_a, delay_b);
+
+        let ms = delay_a.as_millis() as u64;
+        assert!((1000..2000).contains(&ms));
+    }
+
+    #[test]
+    fn set_mode_advances_generation_only_on_change() {
+        let controller = RouteRuntimeController::new(RelayRouteMode::Direct);
+
+        assert!(controller.set_mode(RelayRouteMode::Direct).is_none());
+        assert_eq!(controller.snapshot().generation, 0);
+
+        let changed = controller.set_mode(RelayRouteMode::Middle);
+        assert_eq!(
+            changed,
+            Some(RouteCutoverState {
+                mode: RelayRouteMode::Middle,
+                generation: 1,
+            })
+        );
+        assert_eq!(controller.snapshot().generation, 1);
+
+        assert!(controller.set_mode(RelayRouteMode::Middle).is_none());
+        assert_eq!(controller.snapshot().generation, 1);
+    }
 }

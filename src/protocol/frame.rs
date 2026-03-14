@@ -1,4 +1,4 @@
-//! MTProto frame types and metadata
+//! `MTProto` frame types and metadata
 
 #![allow(dead_code)]
 
@@ -31,7 +31,7 @@ impl FrameExtra {
         }
     }
     
-    /// Create with simple_ack flag set
+/// Create with `simple_ack` flag set
     pub fn with_simple_ack() -> Self {
         Self {
             simple_ack: true,
@@ -40,7 +40,7 @@ impl FrameExtra {
     }
     
     /// Check if any flags are set
-    pub fn has_flags(&self) -> bool {
+    pub const fn has_flags(&self) -> bool {
         self.quickack || self.simple_ack || self.skip_send
     }
 }
@@ -65,23 +65,23 @@ pub enum FrameMode {
     Intermediate,
     /// Secure Intermediate - 4 byte length with padding
     SecureIntermediate,
-    /// Full MTProto - with seq_no and CRC32
+/// Full `MTProto` - with `seq_no` and CRC32
     Full,
 }
 
 impl FrameMode {
     /// Get maximum overhead for this frame mode
-    pub fn max_overhead(&self) -> usize {
+    pub const fn max_overhead(&self) -> usize {
         match self {
-            FrameMode::Abridged => 4,
-            FrameMode::Intermediate => 4,
-            FrameMode::SecureIntermediate => 4 + 3, // length + padding
-            FrameMode::Full => 12 + 16, // header + max CBC padding
+            Self::Abridged => 4,
+            Self::Intermediate => 4,
+            Self::SecureIntermediate => 4 + 3, // length + padding
+            Self::Full => 12 + 16, // header + max CBC padding
         }
     }
 }
 
-/// Validate message length for MTProto
+/// Validate message length for `MTProto`
 pub fn validate_message_length(len: usize) -> bool {
     use super::constants::{MIN_MSG_LEN, MAX_MSG_LEN, PADDING_FILLER};
     
@@ -91,7 +91,7 @@ pub fn validate_message_length(len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_frame_extra_default() {
         let extra = FrameExtra::default();
@@ -100,23 +100,64 @@ mod tests {
         assert!(!extra.skip_send);
         assert!(!extra.has_flags());
     }
-    
+
     #[test]
     fn test_frame_extra_flags() {
         let extra = FrameExtra::with_quickack();
         assert!(extra.quickack);
         assert!(extra.has_flags());
-        
+
         let extra = FrameExtra::with_simple_ack();
         assert!(extra.simple_ack);
         assert!(extra.has_flags());
     }
-    
+
     #[test]
     fn test_validate_message_length() {
         assert!(validate_message_length(12)); // MIN_MSG_LEN
         assert!(validate_message_length(16));
         assert!(!validate_message_length(8)); // Too small
         assert!(!validate_message_length(13)); // Not aligned to 4
+    }
+
+    // 16 MB is the maximum valid length (1 << 24 = 16_777_216 = multiple of 4).
+    #[test]
+    fn test_validate_message_length_max_boundary_valid() {
+        assert!(validate_message_length(1 << 24));
+    }
+
+    // One alignment unit past the max must be rejected.
+    #[test]
+    fn test_validate_message_length_max_plus_four_invalid() {
+        assert!(!validate_message_length((1 << 24) + 4));
+    }
+
+    // Zero is below MIN_MSG_LEN and must be rejected.
+    #[test]
+    fn test_validate_message_length_zero_invalid() {
+        assert!(!validate_message_length(0));
+    }
+
+    // usize::MAX must not overflow any internal arithmetic.
+    #[test]
+    fn test_validate_message_length_usize_max_invalid() {
+        assert!(!validate_message_length(usize::MAX));
+    }
+
+    // Every misalignment within the minimum block must be rejected.
+    #[test]
+    fn test_validate_message_length_all_misalignments_at_min() {
+        use super::super::constants::MIN_MSG_LEN;
+        assert!(validate_message_length(MIN_MSG_LEN)); // base case: aligned
+        assert!(!validate_message_length(MIN_MSG_LEN + 1));
+        assert!(!validate_message_length(MIN_MSG_LEN + 2));
+        assert!(!validate_message_length(MIN_MSG_LEN + 3));
+    }
+
+    // Just below maximum must still be valid if aligned.
+    #[test]
+    fn test_validate_message_length_below_max_aligned_valid() {
+        let just_below = (1usize << 24) - 4;
+        assert!(validate_message_length(just_below));
     }
 }

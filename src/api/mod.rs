@@ -225,7 +225,7 @@ async fn handle(
             .headers()
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .map(|v| v == api_cfg.auth_header)
+            .map(|v| constant_time_eq(v.as_bytes(), api_cfg.auth_header.as_bytes()))
             .unwrap_or(false);
         if !auth_ok {
             return Ok(error_response(
@@ -399,10 +399,64 @@ async fn handle(
                 Ok(success_response(StatusCode::CREATED, data, revision))
             }
             _ => {
-                if let Some(user) = path.strip_prefix("/v1/users/")
-                    && !user.is_empty()
-                    && !user.contains('/')
+                if let Some(user_path) = path.strip_prefix("/v1/users/")
+                    && !user_path.is_empty()
                 {
+                    // Two-segment action route: POST /v1/users/{username}/rotate-secret.
+                    // Must be resolved before the single-segment guard below because the
+                    // path segment contains a '/' that would otherwise be rejected.
+                    if method == Method::POST
+                        && let Some(base_user) = user_path.strip_suffix("/rotate-secret")
+                        && !base_user.is_empty()
+                        && !base_user.contains('/')
+                    {
+                        if api_cfg.read_only {
+                            return Ok(error_response(
+                                request_id,
+                                ApiFailure::new(
+                                    StatusCode::FORBIDDEN,
+                                    "read_only",
+                                    "API runs in read-only mode",
+                                ),
+                            ));
+                        }
+                        let expected_revision = parse_if_match(req.headers());
+                        let body =
+                            read_optional_json::<RotateSecretRequest>(req.into_body(), body_limit)
+                                .await?;
+                        let result = rotate_secret(
+                            base_user,
+                            body.unwrap_or_default(),
+                            expected_revision,
+                            &shared,
+                        )
+                        .await;
+                        let (data, revision) = match result {
+                            Ok(ok) => ok,
+                            Err(error) => {
+                                shared.runtime_events.record(
+                                    "api.user.rotate_secret.failed",
+                                    format!("username={} code={}", base_user, error.code),
+                                );
+                                return Err(error);
+                            }
+                        };
+                        shared.runtime_events.record(
+                            "api.user.rotate_secret.ok",
+                            format!("username={}", base_user),
+                        );
+                        return Ok(success_response(StatusCode::OK, data, revision));
+                    }
+
+                    // Single-segment routes: /v1/users/{username}
+                    if user_path.contains('/') {
+                        return Ok(error_response(
+                            request_id,
+                            ApiFailure::new(StatusCode::NOT_FOUND, "not_found", "Route not found"),
+                        ));
+                    }
+                    let user = user_path;
+
                     if method == Method::GET {
                         let revision = current_revision(&shared.config_path).await?;
                         let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
@@ -481,48 +535,6 @@ async fn handle(
                         );
                         return Ok(success_response(StatusCode::OK, deleted_user, revision));
                     }
-                    if method == Method::POST
-                        && let Some(base_user) = user.strip_suffix("/rotate-secret")
-                        && !base_user.is_empty()
-                        && !base_user.contains('/')
-                    {
-                        if api_cfg.read_only {
-                            return Ok(error_response(
-                                request_id,
-                                ApiFailure::new(
-                                    StatusCode::FORBIDDEN,
-                                    "read_only",
-                                    "API runs in read-only mode",
-                                ),
-                            ));
-                        }
-                        let expected_revision = parse_if_match(req.headers());
-                        let body =
-                            read_optional_json::<RotateSecretRequest>(req.into_body(), body_limit)
-                                .await?;
-                        let result = rotate_secret(
-                            base_user,
-                            body.unwrap_or_default(),
-                            expected_revision,
-                            &shared,
-                        )
-                        .await;
-                        let (data, revision) = match result {
-                            Ok(ok) => ok,
-                            Err(error) => {
-                                shared.runtime_events.record(
-                                    "api.user.rotate_secret.failed",
-                                    format!("username={} code={}", base_user, error.code),
-                                );
-                                return Err(error);
-                            }
-                        };
-                        shared.runtime_events.record(
-                            "api.user.rotate_secret.ok",
-                            format!("username={}", base_user),
-                        );
-                        return Ok(success_response(StatusCode::OK, data, revision));
-                    }
                     if method == Method::POST {
                         return Ok(error_response(
                             request_id,
@@ -550,5 +562,310 @@ async fn handle(
     match result {
         Ok(resp) => Ok(resp),
         Err(error) => Ok(error_response(request_id, error)),
+    }
+}
+
+// XOR-fold constant-time comparison. Running time depends only on the length of the
+// expected token (b), not on min(a.len(), b.len()), to prevent a timing oracle where
+// an attacker reduces the iteration count by sending a shorter candidate
+// (OWASP ASVS V6.6.1). Bitwise `&` on bool is eager — it never short-circuits —
+// so both the length check and the byte fold always execute.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..b.len() {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b[i];
+        diff |= x ^ y;
+    }
+    (a.len() == b.len()) & (diff == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_identical_slices_returns_true() {
+        assert!(constant_time_eq(b"token-abc", b"token-abc"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_slices_same_length_returns_false() {
+        assert!(!constant_time_eq(b"token-abc", b"token-xyz"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths_returns_false() {
+        assert!(!constant_time_eq(b"short", b"longer-value"));
+        assert!(!constant_time_eq(b"longer-value", b"short"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty_slices_returns_true() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_one_empty_returns_false() {
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(!constant_time_eq(b"x", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_single_byte_difference_returns_false() {
+        assert!(!constant_time_eq(b"aaaaaaaaaa", b"aaaaaaaaab"));
+    }
+
+    // Verifies that the implementation does not take an early exit when lengths
+    // differ, which would expose a timing oracle revealing the expected token
+    // length (OWASP ASVS V6.6.1). The byte fold must execute over the
+    // overlapping prefix even when lengths are unequal.
+    #[test]
+    fn constant_time_eq_matching_prefix_with_length_mismatch_returns_false() {
+        // b is a strict prefix of a: all overlapping bytes are identical.
+        assert!(!constant_time_eq(b"abcdef", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abcdef"));
+        // Single extra byte appended.
+        assert!(!constant_time_eq(b"token", b"tokenX"));
+        assert!(!constant_time_eq(b"tokenX", b"token"));
+        // All-same bytes, different lengths.
+        assert!(!constant_time_eq(b"aaaa", b"aaa"));
+        assert!(!constant_time_eq(b"aaa", b"aaaa"));
+    }
+
+    // Regression test: this documents the routing bug where the outer
+    // !user.contains('/') guard blocked the rotate-secret route entirely.
+    // The fixed routing resolves the two-segment action route BEFORE applying
+    // the single-segment guard.
+    #[test]
+    fn rotate_secret_path_is_reachable_with_fixed_routing_logic() {
+        let path = "/v1/users/alice/rotate-secret";
+        let user_path = path.strip_prefix("/v1/users/").unwrap();
+
+        // Old (buggy) guard — would have rejected this path before rotate-secret
+        // could be matched because the path segment contains '/'.
+        let old_guard_passed = !user_path.is_empty() && !user_path.contains('/');
+        assert!(
+            !old_guard_passed,
+            "old guard must have been blocking the rotate-secret route"
+        );
+
+        // Fixed routing: try the two-segment action prefix FIRST.
+        let base_user = user_path
+            .strip_suffix("/rotate-secret")
+            .filter(|u| !u.is_empty() && !u.contains('/'));
+        assert_eq!(
+            base_user,
+            Some("alice"),
+            "fixed routing must extract the base username correctly"
+        );
+    }
+
+    #[test]
+    fn single_segment_user_path_routes_correctly_after_fix() {
+        let path = "/v1/users/alice";
+        let user_path = path.strip_prefix("/v1/users/").unwrap();
+
+        // rotate-secret check must not match
+        let is_rotate = user_path
+            .strip_suffix("/rotate-secret")
+            .map(|u| !u.is_empty() && !u.contains('/'))
+            .unwrap_or(false);
+        assert!(!is_rotate);
+
+        // Single-segment guard must pass
+        assert!(!user_path.contains('/'));
+        assert_eq!(user_path, "alice");
+    }
+
+    #[test]
+    fn deep_path_segment_is_rejected_by_both_guards() {
+        let path = "/v1/users/alice/settings/extra";
+        let user_path = path.strip_prefix("/v1/users/").unwrap();
+
+        // Not a rotate-secret path
+        let is_rotate = user_path
+            .strip_suffix("/rotate-secret")
+            .map(|u| !u.is_empty() && !u.contains('/'))
+            .unwrap_or(false);
+        assert!(!is_rotate);
+
+        // Not a single-segment path
+        assert!(user_path.contains('/'));
+    }
+
+    #[test]
+    fn empty_user_segment_is_rejected() {
+        let path = "/v1/users/";
+        let user_path = path.strip_prefix("/v1/users/").unwrap();
+        assert!(user_path.is_empty());
+    }
+
+    // ── constant_time_eq adversarial edge cases ───────────────────────────────
+
+    // All-zero bytes: both slices equal, accumulator stays 0 throughout.
+    #[test]
+    fn constant_time_eq_all_zero_bytes_returns_true() {
+        assert!(constant_time_eq(&[0u8; 32], &[0u8; 32]));
+    }
+
+    // All-0xFF bytes: both slices equal, accumulator stays 0 (XOR of equal
+    // 0xFF bytes is 0x00).
+    #[test]
+    fn constant_time_eq_all_max_bytes_returns_true() {
+        assert!(constant_time_eq(&[0xffu8; 32], &[0xffu8; 32]));
+    }
+
+    // Mismatch only at the first byte: the fold must detect it regardless of
+    // position; no early-exit optimisation must suppress it.
+    #[test]
+    fn constant_time_eq_mismatch_at_first_byte_only() {
+        let a = [0u8; 16];
+        let mut b = [0u8; 16];
+        b[0] = 1;
+        assert!(!constant_time_eq(&a, &b));
+    }
+
+    // Mismatch only at the last byte: the fold must not stop before reaching it.
+    #[test]
+    fn constant_time_eq_mismatch_at_last_byte_only() {
+        let a = [0u8; 16];
+        let mut b = [0u8; 16];
+        b[15] = 1;
+        assert!(!constant_time_eq(&a, &b));
+    }
+
+    // Length mismatch with identical prefix and all-same bytes: the length
+    // check must still fire even when the byte fold accumulator would be 0.
+    #[test]
+    fn constant_time_eq_equal_prefix_but_length_mismatch_returns_false() {
+        assert!(!constant_time_eq(&[0xaau8; 8], &[0xaau8; 9]));
+        assert!(!constant_time_eq(&[0xaau8; 9], &[0xaau8; 8]));
+    }
+
+    // Typical authentication-token format: raw header value used in practice.
+    #[test]
+    fn constant_time_eq_bearer_token_format_match_and_mismatch() {
+        let token: &[u8] = b"Bearer super-secret-token-xyz-123";
+        assert!(constant_time_eq(token, token));
+        let mut different = token.to_vec();
+        different[7] = b'X';
+        assert!(!constant_time_eq(token, &different));
+    }
+
+    // Large slices (256 bytes): ensures no panic and correct result across
+    // sizes that trigger SIMD/vectorised paths in release builds.
+    #[test]
+    fn constant_time_eq_256_byte_slices_match_and_mismatch() {
+        let a = vec![0xddu8; 256];
+        let b = vec![0xddu8; 256];
+        assert!(constant_time_eq(&a, &b));
+        let mut c = b.clone();
+        c[255] = 0xde;
+        assert!(!constant_time_eq(&a, &c));
+        c[0] = 0xde;
+        assert!(!constant_time_eq(&a, &c));
+    }
+
+    // ── Timing-oracle adversarial tests (length-iteration invariant) ──────────
+
+    // An active censor/attacker who knows the token format may send truncated
+    // inputs to narrow down the token length via a timing side-channel.
+    // After the fix, `constant_time_eq` always iterates over `b.len()` (the
+    // expected token length), so submission of every strict prefix of the
+    // expected token must be rejected while iteration count stays constant.
+    #[test]
+    fn constant_time_eq_every_prefix_of_expected_token_is_rejected() {
+        let expected = b"Bearer super-secret-api-token-abc123xyz";
+        for prefix_len in 0..expected.len() {
+            let attacker_input = &expected[..prefix_len];
+            assert!(
+                !constant_time_eq(attacker_input, expected),
+                "prefix of length {prefix_len} must not authenticate against full token"
+            );
+        }
+    }
+
+    // Reversed: input longer than expected token — the extra bytes must cause
+    // rejection even when the first b.len() bytes are correct.
+    #[test]
+    fn constant_time_eq_input_with_correct_prefix_plus_extra_bytes_is_rejected() {
+        let expected = b"secret-token";
+        for extra in 1usize..=32 {
+            let mut longer = expected.to_vec();
+            // Extend with zeros — the XOR of matching first bytes is 0, so only
+            // the length check prevents a false positive.
+            longer.extend(std::iter::repeat(0u8).take(extra));
+            assert!(
+                !constant_time_eq(&longer, expected),
+                "input extended by {extra} zero bytes must not authenticate"
+            );
+            // Extend with matching-value bytes — ensures the byte_fold stays at 0
+            // for the expected-length portion; only length differs.
+            let mut same_byte_extension = expected.to_vec();
+            same_byte_extension.extend(std::iter::repeat(expected[0]).take(extra));
+            assert!(
+                !constant_time_eq(&same_byte_extension, expected),
+                "input extended by {extra} repeated bytes must not authenticate"
+            );
+        }
+    }
+
+    // Null-byte injection: ensure the function does not mis-parse embedded
+    // NUL characters as C-string terminators and accept a shorter match.
+    #[test]
+    fn constant_time_eq_null_byte_injection_is_rejected() {
+        // Token containing a null byte — must only match itself exactly.
+        let expected: &[u8] = b"token\x00suffix";
+        assert!(constant_time_eq(expected, expected));
+        assert!(!constant_time_eq(b"token", expected));
+        assert!(!constant_time_eq(b"token\x00", expected));
+        assert!(!constant_time_eq(b"token\x00suffi", expected));
+
+        // Null-prefixed input of the same length must not match a non-null token.
+        let real_token: &[u8] = b"real-secret-value";
+        let mut null_injected = vec![0u8; real_token.len()];
+        null_injected[0] = real_token[0];
+        assert!(!constant_time_eq(&null_injected, real_token));
+    }
+
+    // High-byte (0xFF) values throughout: XOR of 0xFF ^ 0xFF = 0, so equal
+    // high-byte slices must match, and any single-byte difference must not.
+    #[test]
+    fn constant_time_eq_high_byte_edge_cases() {
+        let token = vec![0xffu8; 20];
+        assert!(constant_time_eq(&token, &token));
+        let mut tampered = token.clone();
+        tampered[10] = 0xfe;
+        assert!(!constant_time_eq(&tampered, &token));
+        // Shorter all-ff slice must not match.
+        assert!(!constant_time_eq(&token[..19], &token));
+    }
+
+    // Accumulator-saturation attack: if all bytes of `a` have been XOR-folded to
+    // 0xFF (i.e. acc is saturated), but the remaining bytes of `b` are 0x00, the
+    // fold of 0x00 into 0xFF must keep acc ≠ 0 (since 0xFF | 0 = 0xFF).
+    // This guards against a misimplemented fold that resets acc on certain values.
+    #[test]
+    fn constant_time_eq_accumulator_never_resets_to_zero_after_mismatch() {
+        // a[0] = 0xAA, b[0] = 0x55 → XOR = 0xFF.
+        // Subsequent bytes all match (XOR = 0x00). Accumulator must remain 0xFF.
+        let mut a = vec![0x55u8; 16];
+        let mut b = vec![0x55u8; 16];
+        a[0] = 0xAA; // deliberate mismatch at position 0
+        assert!(!constant_time_eq(&a, &b));
+        // Verify with mismatch only at last position to test late detection.
+        a[0] = b[0];
+        a[15] = 0xAA;
+        b[15] = 0x55;
+        assert!(!constant_time_eq(&a, &b));
+    }
+
+    // Zero-length expected token: only the empty input must match.
+    #[test]
+    fn constant_time_eq_zero_length_expected_only_matches_empty_input() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"\x00", b""));
+        assert!(!constant_time_eq(b"x", b""));
     }
 }

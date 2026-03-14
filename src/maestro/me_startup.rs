@@ -15,7 +15,7 @@ use crate::stats::Stats;
 use crate::transport::middle_proxy::MePool;
 use crate::transport::UpstreamManager;
 
-use super::helpers::load_startup_proxy_config_snapshot;
+use super::helpers::{load_startup_proxy_config_snapshot, retry_backoff_ms};
 
 pub(crate) async fn initialize_me_pool(
     use_middle_proxy: bool,
@@ -41,13 +41,19 @@ pub(crate) async fn initialize_me_pool(
     let me2dc_fallback = config.general.me2dc_fallback;
     let me_init_retry_attempts = config.general.me_init_retry_attempts;
     let me_init_warn_after_attempts: u32 = 3;
+    let backoff_base_ms = config.general.me_init_retry_backoff_base_ms;
+    let backoff_cap_ms = config.general.me_init_retry_backoff_cap_ms;
 
     // Global ad_tag (pool default). Used when user has no per-user tag in access.user_ad_tags.
-    let proxy_tag = config
-        .general
-        .ad_tag
-        .as_ref()
-        .map(|tag| hex::decode(tag).expect("general.ad_tag must be validated before startup"));
+    let proxy_tag = match parse_global_proxy_tag(config) {
+        Ok(proxy_tag) => proxy_tag,
+        Err(err) => {
+            let detail = format!("general.ad_tag is invalid: {err}");
+            startup_tracker.set_me_last_error(Some(detail.clone())).await;
+            error!(error = %err, "{detail}; refusing ME startup");
+            return None;
+        }
+    };
 
     // =============================================================
     // CRITICAL: Download Telegram proxy-secret (NOT user secret!)
@@ -60,7 +66,9 @@ pub(crate) async fn initialize_me_pool(
     // =============================================================
     let proxy_secret_path = config.general.proxy_secret_path.as_deref();
     let pool_size = config.general.middle_proxy_pool_size.max(1);
+    let mut secret_fetch_attempt: u32 = 0;
     let proxy_secret = loop {
+        secret_fetch_attempt = secret_fetch_attempt.saturating_add(1);
         match crate::transport::middle_proxy::fetch_proxy_secret(
             proxy_secret_path,
             config.general.proxy_secret_len_max,
@@ -78,12 +86,14 @@ pub(crate) async fn initialize_me_pool(
                     break None;
                 }
 
+                let delay_ms = retry_backoff_ms(secret_fetch_attempt, backoff_base_ms, backoff_cap_ms);
                 warn!(
                     error = %e,
-                    retry_in_secs = 2,
+                    attempt = secret_fetch_attempt,
+                    retry_in_ms = delay_ms,
                     "ME startup failed: proxy-secret is unavailable and no saved secret found; retrying because me2dc_fallback=false"
                 );
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
         }
     };
@@ -127,6 +137,8 @@ pub(crate) async fn initialize_me_pool(
                 config.general.proxy_config_v4_cache_path.as_deref(),
                 me2dc_fallback,
                 "getProxyConfig",
+                backoff_base_ms,
+                backoff_cap_ms,
             )
             .await;
             if cfg_v4.is_some() {
@@ -158,6 +170,8 @@ pub(crate) async fn initialize_me_pool(
                 config.general.proxy_config_v6_cache_path.as_deref(),
                 me2dc_fallback,
                 "getProxyConfigV6",
+                backoff_base_ms,
+                backoff_cap_ms,
             )
             .await;
             if cfg_v6.is_some() {
@@ -290,6 +304,8 @@ pub(crate) async fn initialize_me_pool(
                     } else {
                         me_init_retry_attempts.to_string()
                     };
+                    let backoff_base_ms_bg = backoff_base_ms;
+                    let backoff_cap_ms_bg = backoff_cap_ms;
                     std::thread::spawn(move || {
                         let runtime = match tokio::runtime::Builder::new_current_thread()
                             .enable_all()
@@ -338,12 +354,13 @@ pub(crate) async fn initialize_me_pool(
                                     }
                                     Err(e) => {
                                         startup_tracker_bg.set_me_last_error(Some(e.to_string())).await;
+                                        let delay_ms = retry_backoff_ms(init_attempt, backoff_base_ms_bg, backoff_cap_ms_bg);
                                         if init_attempt >= me_init_warn_after_attempts {
                                             warn!(
                                                 error = %e,
                                                 attempt = init_attempt,
                                                 retry_limit = %retry_limit,
-                                                retry_in_secs = 2,
+                                                retry_in_ms = delay_ms,
                                                 "ME pool is not ready yet; retrying background initialization"
                                             );
                                         } else {
@@ -351,12 +368,12 @@ pub(crate) async fn initialize_me_pool(
                                                 error = %e,
                                                 attempt = init_attempt,
                                                 retry_limit = %retry_limit,
-                                                retry_in_secs = 2,
+                                                retry_in_ms = delay_ms,
                                                 "ME pool startup warmup: retrying background initialization"
                                             );
                                         }
                                         pool_bg.reset_stun_state();
-                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                                     }
                                 }
                             }
@@ -431,13 +448,14 @@ pub(crate) async fn initialize_me_pool(
                                 } else {
                                     me_init_retry_attempts.to_string()
                                 };
+                                let delay_ms = retry_backoff_ms(init_attempt, backoff_base_ms, backoff_cap_ms);
                                 if init_attempt >= me_init_warn_after_attempts {
                                     warn!(
                                         error = %e,
                                         attempt = init_attempt,
                                         retry_limit = retry_limit,
                                         me2dc_fallback = me2dc_fallback,
-                                        retry_in_secs = 2,
+                                        retry_in_ms = delay_ms,
                                         "ME pool is not ready yet; retrying startup initialization"
                                     );
                                 } else {
@@ -446,12 +464,12 @@ pub(crate) async fn initialize_me_pool(
                                         attempt = init_attempt,
                                         retry_limit = retry_limit,
                                         me2dc_fallback = me2dc_fallback,
-                                        retry_in_secs = 2,
+                                        retry_in_ms = delay_ms,
                                         "ME pool startup warmup: retrying initialization"
                                     );
                                 }
                                 pool.reset_stun_state();
-                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                             }
                         }
                     }
@@ -511,5 +529,49 @@ pub(crate) async fn initialize_me_pool(
                 .await;
             None
         }
+    }
+}
+
+fn parse_global_proxy_tag(config: &ProxyConfig) -> std::result::Result<Option<Vec<u8>>, hex::FromHexError> {
+    config
+        .general
+        .ad_tag
+        .as_deref()
+        .map(hex::decode)
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_global_proxy_tag;
+    use crate::config::ProxyConfig;
+
+    #[test]
+    fn parse_global_proxy_tag_absent_returns_none() {
+        let cfg = ProxyConfig::default();
+        let parsed = parse_global_proxy_tag(&cfg);
+        assert!(parsed.is_ok());
+        assert!(parsed.ok().flatten().is_none());
+    }
+
+    #[test]
+    fn parse_global_proxy_tag_valid_hex_returns_bytes() {
+        let mut cfg = ProxyConfig::default();
+        cfg.general.ad_tag = Some("00112233445566778899aabbccddeeff".to_string());
+
+        let parsed = parse_global_proxy_tag(&cfg);
+        assert!(parsed.is_ok());
+        let bytes = parsed.ok().flatten();
+        assert!(bytes.is_some());
+        assert_eq!(bytes.unwrap_or_default().len(), 16);
+    }
+
+    #[test]
+    fn parse_global_proxy_tag_invalid_hex_returns_error() {
+        let mut cfg = ProxyConfig::default();
+        cfg.general.ad_tag = Some("zz".to_string());
+
+        let parsed = parse_global_proxy_tag(&cfg);
+        assert!(parsed.is_err());
     }
 }

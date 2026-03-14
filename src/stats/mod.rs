@@ -11,13 +11,17 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
+use std::hash::BuildHasher;
+use std::collections::hash_map::RandomState;
 use std::collections::VecDeque;
 use tracing::debug;
 
 use crate::config::{MeTelemetryLevel, MeWriterPickMode};
 use self::telemetry::TelemetryPolicy;
+
+// Maximum number of distinct MTProto error codes tracked per Stats instance.
+// Bounds memory against adversarial middle-proxy endpoints returning synthetic codes.
+const ME_HANDSHAKE_ERROR_CODE_MAP_CAP: usize = 256;
 
 // ============= Stats =============
 
@@ -455,6 +459,16 @@ impl Stats {
     }
     pub fn increment_me_handshake_error_code(&self, code: i32) {
         if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        // Fast path: code already tracked — no capacity check needed.
+        if let Some(entry) = self.me_handshake_error_codes.get(&code) {
+            entry.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // Bound new distinct codes to prevent unbounded map growth under adversarial
+        // middle-proxy endpoints that return unique synthetic error codes per connection.
+        if self.me_handshake_error_codes.len() >= ME_HANDSHAKE_ERROR_CODE_MAP_CAP {
             return;
         }
         let entry = self
@@ -1433,6 +1447,11 @@ pub struct ReplayChecker {
     shards: Vec<Mutex<ReplayShard>>,
     shard_mask: usize,
     window: Duration,
+    // Per-instance randomly seeded hasher to prevent targeted shard-flooding attacks.
+    // DefaultHasher::new() uses SipHasher13(0,0) — a fixed seed — allowing an adversary
+    // who knows the shard count to craft tokens that all collide to one shard, fill its
+    // LruCache, and evict in-window entries, defeating replay protection.
+    hash_builder: RandomState,
     checks: AtomicU64,
     hits: AtomicU64,
     additions: AtomicU64,
@@ -1459,7 +1478,7 @@ impl ReplayShard {
         }
     }
     
-    fn next_seq(&mut self) -> u64 {
+    const fn next_seq(&mut self) -> u64 {
         self.seq_counter += 1;
         self.seq_counter
     }
@@ -1468,13 +1487,23 @@ impl ReplayShard {
         if window.is_zero() {
             return;
         }
-        let cutoff = now.checked_sub(window).unwrap_or(now);
+        // If checked_sub overflows the system has been running for less than `window`
+        // and no entry can have expired yet. unwrap_or(now) would set cutoff=now and
+        // evict every entry nanoseconds after insertion, defeating replay protection
+        // entirely on fresh deployments (e.g., VMs booted within the past 30 minutes
+        // with the default 1800-second window).
+        let cutoff = match now.checked_sub(window) {
+            Some(c) => c,
+            None => return,
+        };
         
         while let Some((ts, _, _)) = self.queue.front() {
             if *ts >= cutoff {
                 break;
             }
-            let (_, key, queue_seq) = self.queue.pop_front().unwrap();
+            let Some((_, key, queue_seq)) = self.queue.pop_front() else {
+                break;
+            };
             
             // Use key.as_ref() to get &[u8] — avoids Borrow<Q> ambiguity
             // between Borrow<[u8]> and Borrow<Box<[u8]>>
@@ -1511,7 +1540,7 @@ impl ReplayChecker {
     pub fn new(total_capacity: usize, window: Duration) -> Self {
         let num_shards = 64;
         let shard_capacity = (total_capacity / num_shards).max(1);
-        let cap = NonZeroUsize::new(shard_capacity).unwrap();
+        let cap = NonZeroUsize::new(shard_capacity).unwrap_or(NonZeroUsize::MIN);
 
         let mut shards = Vec::with_capacity(num_shards);
         for _ in 0..num_shards {
@@ -1522,6 +1551,7 @@ impl ReplayChecker {
             shards,
             shard_mask: num_shards - 1,
             window,
+            hash_builder: RandomState::new(),
             checks: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             additions: AtomicU64::new(0),
@@ -1530,9 +1560,7 @@ impl ReplayChecker {
     }
 
     fn get_shard_idx(&self, key: &[u8]) -> usize {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) & self.shard_mask
+        (self.hash_builder.hash_one(key) as usize) & self.shard_mask
     }
 
     fn check_and_add_internal(&self, data: &[u8]) -> bool {
@@ -1565,7 +1593,9 @@ impl ReplayChecker {
         self.check_and_add_internal(data)
     }
 
-    // Compatibility helpers (non-atomic split operations) — prefer check_and_add_*.
+    // Legacy shims: check_* performs atomic check-AND-add, not check-only.
+    // Callers MUST NOT follow a check_* with the matching add_*: that double-inserts the key.
+    // Use check_and_add_* directly for all production code paths.
     pub fn check_handshake(&self, data: &[u8]) -> bool { self.check_and_add_handshake(data) }
     pub fn add_handshake(&self, data: &[u8]) { self.add_only(data) }
     pub fn check_tls_digest(&self, data: &[u8]) -> bool { self.check_and_add_tls_digest(data) }
@@ -1743,5 +1773,194 @@ mod tests {
             assert!(checker.check_handshake(&i.to_le_bytes()));
         }
         assert_eq!(checker.stats().total_entries, 500);
+    }
+
+    #[test]
+    fn replay_checker_entries_not_prematurely_evicted_when_window_exceeds_system_uptime() {
+        // Duration::MAX (≈584 years) guarantees checked_sub returns None on any real
+        // system. The buggy unwrap_or(now) set cutoff=now, evicting every entry one
+        // nanosecond after insertion and silently disabling replay protection on systems
+        // that have been running for less than the configured window (default: 30 min).
+        let checker = ReplayChecker::new(1000, Duration::MAX);
+        assert!(
+            !checker.check_and_add_handshake(b"probe"),
+            "first call must return false (not a replay)",
+        );
+        assert!(
+            checker.check_and_add_handshake(b"probe"),
+            "immediate duplicate must be detected; the unwrap_or(now) cleanup() bug \
+             would evict the entry and return false here",
+        );
+    }
+
+    #[test]
+    fn replay_checker_large_window_independent_keys_all_detected_as_replays() {
+        // Verify that with a very large window, multiple distinct keys are all
+        // retained and detected correctly as replays.
+        let checker = ReplayChecker::new(1000, Duration::MAX);
+        let keys: &[&[u8]] = &[b"alpha", b"beta", b"gamma", b"delta"];
+        for key in keys {
+            assert!(!checker.check_and_add_handshake(key), "first call must be new");
+        }
+        for key in keys {
+            assert!(checker.check_and_add_handshake(key), "second call must be replay");
+        }
+    }
+
+    #[test]
+    fn replay_checker_zero_window_skips_cleanup_entries_still_detected() {
+        // Zero window disables cleanup entirely; entries must persist until LRU eviction.
+        let checker = ReplayChecker::new(100, Duration::ZERO);
+        assert!(!checker.check_and_add_handshake(b"z"));
+        assert!(checker.check_and_add_handshake(b"z"), "zero-window: duplicate must be detected");
+    }
+
+    #[test]
+    fn replay_checker_capacity_1_accepts_new_and_detects_replay_within_window() {
+        let checker = ReplayChecker::new(1, Duration::from_secs(3600));
+        assert!(!checker.check_and_add_handshake(b"x"));
+        assert!(checker.check_and_add_handshake(b"x"));
+    }
+
+    #[test]
+    fn test_handshake_error_code_cap_prevents_unbounded_map_growth() {
+        let stats = Stats::new();
+        // Insert cap + 50 unique codes; map must not grow significantly past cap.
+        for code in 0..(ME_HANDSHAKE_ERROR_CODE_MAP_CAP as i32 + 50) {
+            stats.increment_me_handshake_error_code(code);
+        }
+        // Single-threaded: no concurrent race window, so the map must be exactly at cap.
+        // The +8 buffer was masking potential deterministic off-by-one bugs in the cap logic.
+        assert_eq!(
+            stats.me_handshake_error_codes.len(),
+            ME_HANDSHAKE_ERROR_CODE_MAP_CAP,
+            "single-threaded cap test: map must be exactly at cap",
+        );
+    }
+
+    #[test]
+    fn test_handshake_error_code_existing_codes_still_increment_after_cap_reached() {
+        let stats = Stats::new();
+        stats.increment_me_handshake_error_code(1001);
+        stats.increment_me_handshake_error_code(1002);
+        // Fill the map to the cap with other codes.
+        for code in 0..(ME_HANDSHAKE_ERROR_CODE_MAP_CAP as i32) {
+            stats.increment_me_handshake_error_code(code);
+        }
+        let before = stats.me_handshake_error_codes.get(&1001).unwrap().load(Ordering::Relaxed);
+        stats.increment_me_handshake_error_code(1001);
+        let after = stats.me_handshake_error_codes.get(&1001).unwrap().load(Ordering::Relaxed);
+        assert_eq!(after, before + 1, "existing error code must be incrementable even after cap");
+    }
+
+    #[test]
+    fn test_handshake_error_code_negative_codes_tracked_until_cap() {
+        let stats = Stats::new();
+        // Negative codes (valid i32) must be tracked up to cap, then stopped exactly.
+        for code in -(ME_HANDSHAKE_ERROR_CODE_MAP_CAP as i32)..0 {
+            stats.increment_me_handshake_error_code(code);
+        }
+        assert_eq!(
+            stats.me_handshake_error_codes.len(),
+            ME_HANDSHAKE_ERROR_CODE_MAP_CAP,
+            "negative error codes: map must be exactly at cap in single-threaded test",
+        );
+    }
+
+    #[test]
+    fn test_handshake_error_code_telemetry_silent_skips_all_tracking() {
+        let stats = Stats::new();
+        stats.apply_telemetry_policy(TelemetryPolicy {
+            core_enabled: true,
+            user_enabled: true,
+            me_level: MeTelemetryLevel::Silent,
+        });
+        stats.increment_me_handshake_error_code(-404);
+        stats.increment_me_handshake_error_code(500);
+        assert!(
+            stats.me_handshake_error_codes.is_empty(),
+            "silent telemetry must not track any error codes",
+        );
+    }
+
+    // ---- N-3: randomized-shard ReplayChecker tests ----
+
+    #[test]
+    fn replay_checker_random_seed_correctness_identical_to_fixed_seed() {
+        // After switching to RandomState, functional correctness must be unchanged.
+        // Replay detection is based on key identity, not hash value, so any seed works.
+        let checker = ReplayChecker::new(10_000, Duration::from_secs(60));
+        let keys: &[&[u8]] = &[
+            b"", b"a", b"aa", b"\x00", b"\xff", b"\x00\x01\x02\x03",
+        ];
+        for key in keys {
+            assert!(!checker.check_and_add_handshake(key), "new key must not be replay");
+        }
+        for key in keys {
+            assert!(checker.check_and_add_handshake(key), "second call must be replay");
+        }
+    }
+
+    #[test]
+    fn replay_checker_two_independent_instances_are_independent() {
+        // Two ReplayChecker instances MUST NOT share state. A key added to one must not
+        // appear as a replay in the other. (Also verifies the RandomState is per-instance.)
+        let c1 = ReplayChecker::new(1000, Duration::from_secs(60));
+        let c2 = ReplayChecker::new(1000, Duration::from_secs(60));
+
+        assert!(!c1.check_and_add_handshake(b"shared-key"));
+        // c2 has never seen this key: must not be a replay.
+        assert!(
+            !c2.check_and_add_handshake(b"shared-key"),
+            "key added to c1 must not be visible in c2",
+        );
+    }
+
+    #[test]
+    fn replay_checker_with_randomized_seed_caps_do_not_block_all_shards() {
+        // With a fixed seed, an adversary can craft inputs that all land on one shard,
+        // exhausting its LRU. With RandomState, the distribution changes per instance.
+        // This test verifies that a fresh instance still correctly detects ALL added
+        // keys as replays, even when total_capacity > entries_added (so LRU does not
+        // evict) and the shard distribution is randomized.
+        let checker = ReplayChecker::new(10_000, Duration::from_secs(3600));
+        for i in 0..1000u32 {
+            checker.add_only(&i.to_le_bytes());
+        }
+        for i in 0..1000u32 {
+            assert!(
+                checker.check_and_add_handshake(&i.to_le_bytes()),
+                "key {i} not detected as replay after adding — possible shard distribution failure",
+            );
+        }
+    }
+
+    #[test]
+    fn replay_checker_shard_lru_eviction_does_not_cause_false_positives() {
+        // When LRU evicts an entry, a re-probe must return false (not a false replay).
+        // Capacity 1 per shard (64 shards total = 64 entries) forces frequent LRU eviction.
+        // With RandomState each run uses a different distribution; correctness must hold.
+        let checker = ReplayChecker::new(64, Duration::from_secs(3600));
+        // Phase 1: add 64 distinct keys.
+        for i in 0u32..64 {
+            checker.add_only(&i.to_le_bytes());
+        }
+        // Phase 2: add 64 MORE distinct keys. Many earlier keys are now LRU-evicted.
+        for i in 64u32..128 {
+            checker.add_only(&i.to_le_bytes());
+        }
+        // Phase 3: the newly added keys must still be detected as replays.
+        let mut replay_hits = 0u32;
+        for i in 64u32..128 {
+            if checker.check_and_add_handshake(&i.to_le_bytes()) {
+                replay_hits += 1;
+            }
+        }
+        // Not all 64 may survive (LRU competes across shards), but a significant
+        // fraction must — confirms replay detection still works under eviction pressure.
+        assert!(
+            replay_hits > 0,
+            "at least some recently-added keys must survive LRU and be detected as replays",
+        );
     }
 }

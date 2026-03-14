@@ -14,6 +14,16 @@ use crate::error::{ProxyError, Result};
 use super::defaults::*;
 use super::types::*;
 
+// Reject absolute paths and any path component that traverses upward.
+// This prevents config include directives from escaping the config directory.
+fn is_safe_include_path(path_str: &str) -> bool {
+    let p = std::path::Path::new(path_str);
+    if p.is_absolute() {
+        return false;
+    }
+    !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedConfig {
     pub(crate) config: ProxyConfig,
@@ -55,6 +65,12 @@ fn preprocess_includes(
             let rest = rest.trim();
             if let Some(rest) = rest.strip_prefix('=') {
                 let path_str = rest.trim().trim_matches('"');
+                if !is_safe_include_path(path_str) {
+                    return Err(ProxyError::Config(format!(
+                        "Include path '{}' is disallowed: only relative paths without '..' are permitted",
+                        path_str
+                    )));
+                }
                 let resolved = base_dir.join(path_str);
                 source_files.insert(normalize_config_path(&resolved));
                 let included = std::fs::read_to_string(&resolved)
@@ -161,7 +177,7 @@ pub struct ProxyConfig {
     /// Keys are DC indices as strings, values are one or more "ip:port" addresses.
     /// Matches the C implementation's `proxy_for <dc_id> <ip>:<port>` config directive.
     /// Example in config.toml:
-    ///   [dc_overrides]
+///   [`dc_overrides`]
     ///   "203" = ["149.154.175.100:443", "91.105.192.100:443"]
     #[serde(default, deserialize_with = "deserialize_dc_overrides")]
     pub dc_overrides: HashMap<String, Vec<String>>,
@@ -207,7 +223,7 @@ impl ProxyConfig {
             .map(|table| table.contains_key("stun_servers"))
             .unwrap_or(false);
 
-        let mut config: ProxyConfig =
+        let mut config: Self =
             parsed_toml.try_into().map_err(|e| ProxyError::Config(e.to_string()))?;
 
         if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
@@ -299,6 +315,24 @@ impl ProxyConfig {
         if config.general.me_init_retry_attempts > 1_000_000 {
             return Err(ProxyError::Config(
                 "general.me_init_retry_attempts must be within [0, 1000000]".to_string(),
+            ));
+        }
+
+        if config.general.me_init_retry_backoff_base_ms == 0 {
+            return Err(ProxyError::Config(
+                "general.me_init_retry_backoff_base_ms must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_init_retry_backoff_cap_ms < config.general.me_init_retry_backoff_base_ms {
+            return Err(ProxyError::Config(
+                "general.me_init_retry_backoff_cap_ms must be >= me_init_retry_backoff_base_ms".to_string(),
+            ));
+        }
+
+        if config.server.max_connections == 0 {
+            return Err(ProxyError::Config(
+                "server.max_connections must be > 0".to_string(),
             ));
         }
 
@@ -865,6 +899,14 @@ impl ProxyConfig {
             }
         }
 
+        for (user, secret) in &self.access.users {
+            if secret == "00000000000000000000000000000000" {
+                warn!(
+                    "User '{}' has the default all-zero secret; replace before use in production",
+                    user
+                );
+            }
+        }
         crate::network::dns_overrides::validate_entries(&self.network.dns_overrides)?;
 
         Ok(())
@@ -883,7 +925,9 @@ mod tests {
             [server]
             [access]
         "#;
-        let cfg: ProxyConfig = toml::from_str(toml).unwrap();
+        let cfg_result: std::result::Result<ProxyConfig, _> = toml::from_str(toml);
+        assert!(cfg_result.is_ok(), "Failed to deserialize test config");
+        let cfg = if let Ok(cfg) = cfg_result { cfg } else { return };
 
         assert_eq!(cfg.network.ipv6, default_network_ipv6());
         assert_eq!(cfg.network.stun_use, default_true());
@@ -1041,6 +1085,14 @@ mod tests {
             general.me_init_retry_attempts,
             default_me_init_retry_attempts()
         );
+        assert_eq!(
+            general.me_init_retry_backoff_base_ms,
+            default_me_init_retry_backoff_base_ms()
+        );
+        assert_eq!(
+            general.me_init_retry_backoff_cap_ms,
+            default_me_init_retry_backoff_cap_ms()
+        );
         assert_eq!(general.me2dc_fallback, default_me2dc_fallback());
         assert_eq!(
             general.proxy_config_v4_cache_path,
@@ -1107,6 +1159,7 @@ mod tests {
         assert_eq!(general.update_every, default_update_every());
 
         let server = ServerConfig::default();
+        assert_eq!(server.max_connections, default_max_connections());
         assert_eq!(server.listen_addr_ipv6, Some(default_listen_addr_ipv6()));
         assert_eq!(server.api.listen, default_api_listen());
         assert_eq!(server.api.whitelist, default_api_whitelist());
@@ -2056,5 +2109,371 @@ mod tests {
         let cfg = ProxyConfig::load(&path).unwrap();
         assert_eq!(cfg.network.dns_overrides.len(), 2);
         let _ = std::fs::remove_file(path);
+    }
+
+    // ============= Security / Adversarial Tests =============
+
+    #[test]
+    fn is_safe_include_path_blocks_parent_dir_traversal() {
+        assert!(!is_safe_include_path("../etc/passwd"));
+        assert!(!is_safe_include_path("../../etc/passwd"));
+        assert!(!is_safe_include_path("subdir/../../../etc/shadow"));
+        assert!(!is_safe_include_path(".."));
+    }
+
+    #[test]
+    fn is_safe_include_path_blocks_absolute_paths() {
+        assert!(!is_safe_include_path("/etc/passwd"));
+        assert!(!is_safe_include_path("/root/.ssh/id_rsa"));
+    }
+
+    #[test]
+    fn is_safe_include_path_allows_relative_safe_paths() {
+        assert!(is_safe_include_path("config.toml"));
+        assert!(is_safe_include_path("subdir/extra.toml"));
+        assert!(is_safe_include_path("a/b/c/config.toml"));
+    }
+
+    #[test]
+    fn preprocess_includes_rejects_traversal_path() {
+        let dir = std::env::temp_dir();
+        let main_path = dir.join("telemt_traversal_test_main.toml");
+        std::fs::write(&main_path, "include = \"../../etc/passwd\"\n").unwrap();
+        let result = ProxyConfig::load(&main_path);
+        let _ = std::fs::remove_file(&main_path);
+        assert!(result.is_err(), "Path traversal include must be rejected");
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("disallowed") || err_str.contains("Include"),
+            "Error must describe include restriction, got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn preprocess_includes_rejects_absolute_path() {
+        let dir = std::env::temp_dir();
+        let main_path = dir.join("telemt_absolute_include_test.toml");
+        std::fs::write(&main_path, "include = \"/etc/hostname\"\n").unwrap();
+        let result = ProxyConfig::load(&main_path);
+        let _ = std::fs::remove_file(&main_path);
+        assert!(result.is_err(), "Absolute include path must be rejected");
+    }
+
+    #[test]
+    fn preprocess_includes_depth_limit_enforced() {
+        let dir = std::env::temp_dir();
+        // 12-file chain: depth limit is 10, so this must fail.
+        let files: Vec<_> = (0..12)
+            .map(|i| dir.join(format!("telemt_depth_test_{i}.toml")))
+            .collect();
+        for i in 0..11 {
+            let next = files[i + 1].file_name().unwrap().to_string_lossy().into_owned();
+            std::fs::write(&files[i], format!("include = \"{next}\"\n")).unwrap();
+        }
+        std::fs::write(&files[11], "[general]\n").unwrap();
+        let result = ProxyConfig::load(&files[0]);
+        for f in &files {
+            let _ = std::fs::remove_file(f);
+        }
+        assert!(result.is_err(), "Include depth > 10 must be rejected");
+    }
+
+    #[test]
+    fn validate_warns_for_default_zero_secret_but_does_not_fail() {
+        // The default AccessConfig ships with the all-zero secret.
+        // validate() must warn but not reject, so deployments using a known
+        // test value are not silently broken without an explicit hardening step.
+        let cfg = ProxyConfig::default();
+        assert!(
+            cfg.validate().is_ok(),
+            "validate() must not fail for the default all-zero secret (warn only)"
+        );
+    }
+
+    #[test]
+    fn load_rejects_non_hex_secret() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_nonhex_secret_test.toml");
+        let toml = "[censorship]\ntls_domain = \"example.com\"\n[access.users]\nuser = \"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\"\n";
+        std::fs::write(&path, toml).unwrap();
+        let result = ProxyConfig::load(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "Non-hex secret must be rejected");
+    }
+
+    #[test]
+    fn load_rejects_31_char_secret() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_short31_secret_test.toml");
+        let toml = "[censorship]\ntls_domain = \"example.com\"\n[access.users]\nuser = \"0000000000000000000000000000000\"\n";
+        std::fs::write(&path, toml).unwrap();
+        let result = ProxyConfig::load(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "31-char secret must be rejected");
+    }
+
+    #[test]
+    fn load_rejects_33_char_secret() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_long33_secret_test.toml");
+        let toml = "[censorship]\ntls_domain = \"example.com\"\n[access.users]\nuser = \"000000000000000000000000000000000\"\n";
+        std::fs::write(&path, toml).unwrap();
+        let result = ProxyConfig::load(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "33-char secret must be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_tls_domain_with_spaces() {
+        let mut cfg = ProxyConfig::default();
+        cfg.access.users.clear();
+        cfg.access.users.insert("u".into(), "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4".into());
+        cfg.censorship.tls_domain = "bad domain".into();
+        assert!(cfg.validate().is_err(), "tls_domain with spaces must fail validate()");
+    }
+
+    #[test]
+    fn validate_rejects_tls_domain_with_slash() {
+        let mut cfg = ProxyConfig::default();
+        cfg.access.users.clear();
+        cfg.access.users.insert("u".into(), "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4".into());
+        cfg.censorship.tls_domain = "bad/domain".into();
+        assert!(cfg.validate().is_err(), "tls_domain with '/' must fail validate()");
+    }
+
+    #[test]
+    fn include_path_absolute_is_rejected() {
+        // Absolute include paths break the containment guarantee — must always be rejected.
+        assert!(!is_safe_include_path("/etc/passwd"));
+        assert!(!is_safe_include_path("/absolute/path/to/file.toml"));
+        assert!(!is_safe_include_path("//double-slash"));
+    }
+
+    #[test]
+    fn include_path_parent_dir_traversal_is_rejected() {
+        // Any path containing `..` as a component allows escape from the config directory.
+        assert!(!is_safe_include_path("../sibling.toml"));
+        assert!(!is_safe_include_path("../../escape.toml"));
+        assert!(!is_safe_include_path("subdir/../../etc/passwd"));
+        assert!(!is_safe_include_path("./sub/../../../escape"));
+    }
+
+    #[test]
+    fn include_path_safe_relative_paths_are_accepted() {
+        assert!(is_safe_include_path("extra.toml"));
+        assert!(is_safe_include_path("subdir/nested.toml"));
+        assert!(is_safe_include_path("a/b/c/deep.toml"));
+    }
+
+    #[test]
+    fn include_depth_limit_blocks_excessive_nesting() {
+        // Build a chain of 12 temp files (depth 0 → 11), triggering the depth > 10 guard.
+        // file_0 includes file_1, file_1 includes file_2, ..., file_10 includes file_11.
+        // The call with file_11 at depth=11 must return an error.
+        let dir = std::env::temp_dir();
+        let prefix = "telemt_include_depth_test_";
+
+        for i in (0usize..=11).rev() {
+            let content = if i == 11 {
+                "[general]\n".to_string()
+            } else {
+                format!("include = \"{prefix}{}.toml\"\n", i + 1)
+            };
+            let path = dir.join(format!("{prefix}{i}.toml"));
+            std::fs::write(&path, content).unwrap();
+        }
+
+        let root = dir.join(format!("{prefix}0.toml"));
+        let root_content = std::fs::read_to_string(&root).unwrap();
+        let mut sf = BTreeSet::new();
+        let result = preprocess_includes(&root_content, &dir, 0, &mut sf);
+
+        for i in 0usize..=11 {
+            let _ = std::fs::remove_file(dir.join(format!("{prefix}{i}.toml")));
+        }
+
+        assert!(result.is_err(), "Include chain deeper than 10 levels must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("depth") || msg.contains("10"),
+            "Error must mention depth limit, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn include_depth_10_is_accepted_depth_11_is_rejected() {
+        // Exactly 10 levels of nesting must succeed; 11 must fail.
+        // Chain: root (depth 0) → file_1 → ... → file_10 (terminal, 10 includes deep).
+        let dir = std::env::temp_dir();
+        let prefix = "telemt_depth10_test_";
+
+        for i in (0usize..=10).rev() {
+            let content = if i == 10 {
+                "[general]\n".to_string()
+            } else {
+                format!("include = \"{prefix}{}.toml\"\n", i + 1)
+            };
+            let path = dir.join(format!("{prefix}{i}.toml"));
+            std::fs::write(&path, content).unwrap();
+        }
+
+        let root = dir.join(format!("{prefix}0.toml"));
+        let root_content = std::fs::read_to_string(&root).unwrap();
+        let mut sf = BTreeSet::new();
+        let result = preprocess_includes(&root_content, &dir, 0, &mut sf);
+
+        for i in 0usize..=10 {
+            let _ = std::fs::remove_file(dir.join(format!("{prefix}{i}.toml")));
+        }
+
+        assert!(result.is_ok(), "Exactly 10 levels of nesting must be accepted, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn load_rejects_secret_with_uppercase_mixed_but_valid_hex() {
+        // Mixed-case hex is valid for user secrets (is_ascii_hexdigit accepts A-F).
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_mixedcase_secret_test.toml");
+        let toml = "[censorship]\ntls_domain = \"example.com\"\n[access.users]\nuser = \"AABBCCDDEEFF00112233445566778899\"\n";
+        std::fs::write(&path, toml).unwrap();
+        let result = ProxyConfig::load(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok(), "Valid 32-char mixed-case hex secret must be accepted");
+    }
+
+    #[test]
+    fn load_rejects_secret_with_special_characters() {
+        // Shell-injection or SQL-style characters in user secrets must be caught by hex validation.
+        let dir = std::env::temp_dir();
+        let cases = [
+            ("semicolon", "0000000000000000000000000000000;"),
+            ("quote",     "0000000000000000000000000000000'"),
+            ("slash",     "0000000000000000000000000000000/"),
+            ("null",      "00000000000000000000000000000000\x00"),
+        ];
+        for (name, secret) in cases {
+            let path = dir.join(format!("telemt_special_secret_{name}_test.toml"));
+            let toml = format!(
+                "[censorship]\ntls_domain = \"example.com\"\n[access.users]\nuser = \"{secret}\"\n"
+            );
+            std::fs::write(&path, &toml).unwrap();
+            let result = ProxyConfig::load(&path);
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                result.is_err(),
+                "Secret with special char '{name}' must be rejected, but was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn max_connections_zero_is_rejected() {
+        let toml = r#"
+            [server]
+            max_connections = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_max_connections_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("server.max_connections must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn max_connections_nonzero_is_accepted() {
+        let toml = r#"
+            [server]
+            max_connections = 1
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_max_connections_one_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.server.max_connections, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_init_retry_backoff_base_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_init_retry_backoff_base_ms = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_backoff_base_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_init_retry_backoff_base_ms must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_init_retry_backoff_cap_less_than_base_is_rejected() {
+        let toml = r#"
+            [general]
+            me_init_retry_backoff_base_ms = 5000
+            me_init_retry_backoff_cap_ms = 3000
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_backoff_cap_lt_base_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_init_retry_backoff_cap_ms must be >= me_init_retry_backoff_base_ms"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_init_retry_backoff_cap_equal_to_base_is_accepted() {
+        // cap == base is valid: every retry waits exactly base milliseconds.
+        let toml = r#"
+            [general]
+            me_init_retry_backoff_base_ms = 3000
+            me_init_retry_backoff_cap_ms = 3000
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_backoff_cap_eq_base_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.me_init_retry_backoff_base_ms, 3000);
+        assert_eq!(cfg.general.me_init_retry_backoff_cap_ms, 3000);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_init_retry_backoff_defaults_are_valid() {
+        let default_cfg = GeneralConfig::default();
+        assert!(default_cfg.me_init_retry_backoff_base_ms > 0);
+        assert!(default_cfg.me_init_retry_backoff_cap_ms >= default_cfg.me_init_retry_backoff_base_ms);
     }
 }

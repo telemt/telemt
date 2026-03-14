@@ -282,7 +282,7 @@ pub(super) fn build_security_posture_data(cfg: &ProxyConfig) -> SecurityPostureD
     }
 }
 
-fn user_max_unique_ips_mode_label(mode: UserMaxUniqueIpsMode) -> &'static str {
+const fn user_max_unique_ips_mode_label(mode: UserMaxUniqueIpsMode) -> &'static str {
     match mode {
         UserMaxUniqueIpsMode::ActiveWindow => "active_window",
         UserMaxUniqueIpsMode::TimeWindow => "time_window",
@@ -290,14 +290,14 @@ fn user_max_unique_ips_mode_label(mode: UserMaxUniqueIpsMode) -> &'static str {
     }
 }
 
-fn me_floor_mode_label(mode: MeFloorMode) -> &'static str {
+const fn me_floor_mode_label(mode: MeFloorMode) -> &'static str {
     match mode {
         MeFloorMode::Static => "static",
         MeFloorMode::Adaptive => "adaptive",
     }
 }
 
-fn me_writer_pick_mode_label(mode: MeWriterPickMode) -> &'static str {
+const fn me_writer_pick_mode_label(mode: MeWriterPickMode) -> &'static str {
     match mode {
         MeWriterPickMode::SortedRr => "sorted_rr",
         MeWriterPickMode::P2c => "p2c",

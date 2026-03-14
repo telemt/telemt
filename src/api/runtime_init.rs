@@ -175,7 +175,7 @@ async fn current_me_pool_stage_progress(shared: &ApiShared) -> Option<f64> {
 
     let dc_coverage = ratio_01(covered_dc_groups, configured_dc_groups);
     let writer_coverage = ratio_01(status.alive_writers, status.required_writers);
-    Some((0.7 * dc_coverage + 0.3 * writer_coverage).clamp(0.0, 1.0))
+    Some(0.7f64.mul_add(dc_coverage, 0.3 * writer_coverage).clamp(0.0, 1.0))
 }
 
 fn ratio_01(part: usize, total: usize) -> f64 {

@@ -128,10 +128,8 @@ impl MePool {
                     continue;
                 }
                 if !matches!(
-                    super::pool::WriterContour::from_u8(
-                        writer.contour.load(Ordering::Relaxed),
-                    ),
-                    super::pool::WriterContour::Active
+                    WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)),
+                    WriterContour::Active
                 ) {
                     continue;
                 }

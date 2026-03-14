@@ -41,29 +41,29 @@ pub enum Transition<S, O> {
 
 impl<S, O> Transition<S, O> {
     /// Check if transition produces output
-    pub fn has_output(&self) -> bool {
-        matches!(self, Transition::Complete(_) | Transition::Yield(_, _))
+    pub const fn has_output(&self) -> bool {
+        matches!(self, Self::Complete(_) | Self::Yield(_, _))
     }
     
     /// Map the output value
     pub fn map_output<U, F: FnOnce(O) -> U>(self, f: F) -> Transition<S, U> {
         match self {
-            Transition::Same => Transition::Same,
-            Transition::Next(s) => Transition::Next(s),
-            Transition::Complete(o) => Transition::Complete(f(o)),
-            Transition::Yield(o, s) => Transition::Yield(f(o), s),
-            Transition::Error(e) => Transition::Error(e),
+            Self::Same => Transition::Same,
+            Self::Next(s) => Transition::Next(s),
+            Self::Complete(o) => Transition::Complete(f(o)),
+            Self::Yield(o, s) => Transition::Yield(f(o), s),
+            Self::Error(e) => Transition::Error(e),
         }
     }
     
     /// Map the state value
     pub fn map_state<T, F: FnOnce(S) -> T>(self, f: F) -> Transition<T, O> {
         match self {
-            Transition::Same => Transition::Same,
-            Transition::Next(s) => Transition::Next(f(s)),
-            Transition::Complete(o) => Transition::Complete(o),
-            Transition::Yield(o, s) => Transition::Yield(o, f(s)),
-            Transition::Error(e) => Transition::Error(e),
+            Self::Same => Transition::Same,
+            Self::Next(s) => Transition::Next(f(s)),
+            Self::Complete(o) => Transition::Complete(o),
+            Self::Yield(o, s) => Transition::Yield(o, f(s)),
+            Self::Error(e) => Transition::Error(e),
         }
     }
 }
@@ -87,19 +87,19 @@ pub enum PollResult<T> {
 
 impl<T> PollResult<T> {
     /// Check if result is ready
-    pub fn is_ready(&self) -> bool {
-        matches!(self, PollResult::Ready(_))
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
     }
     
     /// Check if result indicates EOF
-    pub fn is_eof(&self) -> bool {
-        matches!(self, PollResult::Eof)
+    pub const fn is_eof(&self) -> bool {
+        matches!(self, Self::Eof)
     }
     
     /// Convert to Option, discarding non-ready states
     pub fn ok(self) -> Option<T> {
         match self {
-            PollResult::Ready(t) => Some(t),
+            Self::Ready(t) => Some(t),
             _ => None,
         }
     }
@@ -107,11 +107,11 @@ impl<T> PollResult<T> {
     /// Map the value
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> PollResult<U> {
         match self {
-            PollResult::Ready(t) => PollResult::Ready(f(t)),
-            PollResult::Pending => PollResult::Pending,
-            PollResult::NeedInput(n) => PollResult::NeedInput(n),
-            PollResult::Eof => PollResult::Eof,
-            PollResult::Error(e) => PollResult::Error(e),
+            Self::Ready(t) => PollResult::Ready(f(t)),
+            Self::Pending => PollResult::Pending,
+            Self::NeedInput(n) => PollResult::NeedInput(n),
+            Self::Eof => PollResult::Eof,
+            Self::Error(e) => PollResult::Error(e),
         }
     }
 }
@@ -119,10 +119,10 @@ impl<T> PollResult<T> {
 impl<T> From<io::Result<T>> for PollResult<T> {
     fn from(result: io::Result<T>) -> Self {
         match result {
-            Ok(t) => PollResult::Ready(t),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => PollResult::Pending,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => PollResult::Eof,
-            Err(e) => PollResult::Error(e),
+            Ok(t) => Self::Ready(t),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Self::Pending,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Self::Eof,
+            Err(e) => Self::Error(e),
         }
     }
 }
@@ -214,8 +214,8 @@ impl ReadBuffer {
         &self.buffer
     }
     
-    /// Get mutable access to underlying BytesMut
-    pub fn as_bytes_mut(&mut self) -> &mut BytesMut {
+    /// Get mutable access to underlying `BytesMut`
+    pub const fn as_bytes_mut(&mut self) -> &mut BytesMut {
         &mut self.buffer
     }
     
@@ -226,7 +226,7 @@ impl ReadBuffer {
     }
     
     /// Set new target
-    pub fn set_target(&mut self, target: usize) {
+    pub const fn set_target(&mut self, target: usize) {
         self.target = Some(target);
     }
 }
@@ -299,8 +299,8 @@ impl WriteBuffer {
     
     /// Advance position by n bytes (after successful write)
     pub fn advance(&mut self, n: usize) {
-        self.position += n;
-        
+        self.position = self.position.saturating_add(n).min(self.buffer.len());
+
         // If all data written, reset buffer
         if self.position >= self.buffer.len() {
             self.buffer.clear();
@@ -334,7 +334,7 @@ pub struct HeaderBuffer<const N: usize> {
 
 impl<const N: usize> HeaderBuffer<N> {
     /// Create new empty header buffer
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             data: [0u8; N],
             filled: 0,
@@ -352,12 +352,12 @@ impl<const N: usize> HeaderBuffer<N> {
     }
     
     /// Check if completely filled
-    pub fn is_complete(&self) -> bool {
+    pub const fn is_complete(&self) -> bool {
         self.filled >= N
     }
     
     /// Get remaining bytes needed
-    pub fn remaining(&self) -> usize {
+    pub const fn remaining(&self) -> usize {
         N - self.filled
     }
     
@@ -373,7 +373,7 @@ impl<const N: usize> HeaderBuffer<N> {
     }
     
     /// Take the buffer, resetting state
-    pub fn take(&mut self) -> [u8; N] {
+    pub const fn take(&mut self) -> [u8; N] {
         let data = self.data;
         self.data = [0u8; N];
         self.filled = 0;
@@ -381,7 +381,7 @@ impl<const N: usize> HeaderBuffer<N> {
     }
     
     /// Reset to empty state
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.filled = 0;
     }
 }
@@ -403,17 +403,17 @@ pub struct YieldBuffer {
 
 impl YieldBuffer {
     /// Create new yield buffer
-    pub fn new(data: Bytes) -> Self {
+    pub const fn new(data: Bytes) -> Self {
         Self { data, position: 0 }
     }
     
     /// Check if all data has been yielded
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.position >= self.data.len()
     }
     
     /// Get remaining bytes
-    pub fn remaining(&self) -> usize {
+    pub const fn remaining(&self) -> usize {
         self.data.len() - self.position
     }
     
@@ -508,6 +508,37 @@ mod tests {
         assert_eq!(buf.len(), 2);
         assert_eq!(buf.pending(), b"lo");
     }
+
+    #[test]
+    fn write_buffer_advance_beyond_length_does_not_panic() {
+        // Advancing past the buffer end must not panic or leave position > buffer.len().
+        let mut buf = WriteBuffer::with_max_size(100);
+        buf.extend(&[1, 2, 3, 4]).unwrap();
+        buf.advance(1000); // far beyond 4-byte content
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+        // Buffer should be usable again after the overshoot.
+        buf.extend(&[9]).unwrap();
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[test]
+    fn write_buffer_advance_exact_length_resets_cleanly() {
+        let mut buf = WriteBuffer::with_max_size(64);
+        buf.extend(&[0xAA; 16]).unwrap();
+        buf.advance(16);
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn write_buffer_advance_saturating_on_usize_near_max() {
+        // position.saturating_add(very_large_n) must clamp to buffer.len() without overflow.
+        let mut buf = WriteBuffer::with_max_size(64);
+        buf.extend(&[0xBB; 8]).unwrap();
+        buf.advance(usize::MAX);
+        assert!(buf.is_empty());
+    }
     
     #[test]
     fn test_write_buffer_overflow() {
@@ -569,5 +600,67 @@ mod tests {
         let r: PollResult<i32> = PollResult::Eof;
         assert!(r.is_eof());
         assert_eq!(r.ok(), None);
+    }
+
+    // WriteBuffer::advance(0) must be a no-op: position unchanged, buffer not reset.
+    // A zero-advance could otherwise prematurely reset the buffer and corrupt data
+    // that has not yet been written to the upstream.
+    #[test]
+    fn write_buffer_advance_zero_is_noop() {
+        let mut buf = WriteBuffer::with_max_size(64);
+        buf.extend(&[0xAA; 8]).unwrap();
+        buf.advance(0);
+        assert_eq!(buf.len(), 8, "advance(0) must not consume any bytes");
+        assert_eq!(buf.pending(), &[0xAA; 8]);
+    }
+
+    // WriteBuffer::extend after a partial advance must account for remaining
+    // capacity correctly: remaining_capacity() = max_size - buffer.len(), not
+    // max_size - position.  A bug here could allow overflow of the internal
+    // BytesMut or reject valid writes that should fit.
+    #[test]
+    fn write_buffer_extend_after_partial_drain_uses_correct_remaining_capacity() {
+        let mut buf = WriteBuffer::with_max_size(16);
+        buf.extend(&[0x11; 12]).unwrap();
+        buf.advance(8); // 8 bytes consumed, 4 still pending
+        // remaining_capacity = 16 - 12 (buffer.len) = 4, NOT 16 - 4 (position)
+        assert_eq!(buf.remaining_capacity(), 4);
+        // Exactly 4 bytes should fit
+        assert!(buf.extend(&[0x22; 4]).is_ok());
+        // 5 bytes must overflow
+        let mut buf2 = WriteBuffer::with_max_size(16);
+        buf2.extend(&[0x33; 12]).unwrap();
+        buf2.advance(8);
+        assert!(buf2.extend(&[0x44; 5]).is_err(), "5 bytes must exceed remaining capacity of 4");
+    }
+
+    // ReadBuffer::take_exact with n > len must return None without modifying the buffer.
+    #[test]
+    fn read_buffer_take_exact_larger_than_available_returns_none() {
+        let mut buf = ReadBuffer::new();
+        buf.extend(b"AB");
+        assert!(buf.take_exact(10).is_none(), "must return None when n > buffer len");
+        assert_eq!(buf.len(), 2, "buffer must be unchanged after failed take_exact");
+    }
+
+    // HeaderBuffer::advance must clamp at N, never overflow the array.
+    // An unclamped advance would advance `filled` past N, causing as_array()
+    // to assert-panic on subsequent calls.
+    #[test]
+    fn header_buffer_advance_clamps_at_capacity() {
+        let mut buf = HeaderBuffer::<4>::new();
+        buf.advance(100); // far beyond N=4
+        assert!(buf.is_complete(), "after overflow advance, buffer must be complete");
+        assert_eq!(buf.remaining(), 0);
+    }
+
+    // YieldBuffer::copy_to with a zero-length destination must return 0 without
+    // advancing position.
+    #[test]
+    fn yield_buffer_copy_to_empty_dst_is_noop() {
+        let mut buf = YieldBuffer::new(bytes::Bytes::from_static(b"hello"));
+        let copied = buf.copy_to(&mut []);
+        assert_eq!(copied, 0);
+        assert_eq!(buf.remaining(), 5, "position must not advance for empty dst");
     }
 }

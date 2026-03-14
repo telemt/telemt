@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -69,7 +70,9 @@ pub(crate) async fn reader_loop(
         }
 
         while dec.len() >= 12 {
-            let fl = u32::from_le_bytes(dec[0..4].try_into().unwrap()) as usize;
+            let mut fl_bytes = [0u8; 4];
+            fl_bytes.copy_from_slice(&dec[0..4]);
+            let fl = u32::from_le_bytes(fl_bytes) as usize;
             if fl == 4 {
                 let _ = dec.split_to(4);
                 continue;
@@ -85,20 +88,22 @@ pub(crate) async fn reader_loop(
 
             let frame = dec.split_to(fl).freeze();
             let pe = fl - 4;
-            let ec = u32::from_le_bytes(frame[pe..pe + 4].try_into().unwrap());
+            let mut ec_bytes = [0u8; 4];
+            ec_bytes.copy_from_slice(&frame[pe..pe + 4]);
+            let ec = u32::from_le_bytes(ec_bytes);
             let actual_crc = rpc_crc(crc_mode, &frame[..pe]);
             if actual_crc != ec {
                 stats.increment_me_crc_mismatch();
                 warn!(
                     frame_len = fl,
-                    expected_crc = format_args!("0x{ec:08x}"),
-                    actual_crc = format_args!("0x{actual_crc:08x}"),
                     "CRC mismatch — CBC crypto desync, aborting ME connection"
                 );
                 return Err(ProxyError::Proxy("CRC mismatch (crypto desync)".into()));
             }
 
-            let seq_no = i32::from_le_bytes(frame[4..8].try_into().unwrap());
+            let mut seq_bytes = [0u8; 4];
+            seq_bytes.copy_from_slice(&frame[4..8]);
+            let seq_no = i32::from_le_bytes(seq_bytes);
             if seq_no != expected_seq {
                 stats.increment_me_seq_mismatch();
                 warn!(seq_no, expected = expected_seq, "ME RPC seq mismatch");
@@ -114,12 +119,18 @@ pub(crate) async fn reader_loop(
                 continue;
             }
 
-            let pt = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+            let mut pt_bytes = [0u8; 4];
+            pt_bytes.copy_from_slice(&payload[0..4]);
+            let pt = u32::from_le_bytes(pt_bytes);
             let body = payload.slice(4..);
 
             if pt == RPC_PROXY_ANS_U32 && body.len() >= 12 {
-                let flags = u32::from_le_bytes(body[0..4].try_into().unwrap());
-                let cid = u64::from_le_bytes(body[4..12].try_into().unwrap());
+                let mut flags_bytes = [0u8; 4];
+                flags_bytes.copy_from_slice(&body[0..4]);
+                let flags = u32::from_le_bytes(flags_bytes);
+                let mut cid_bytes = [0u8; 8];
+                cid_bytes.copy_from_slice(&body[4..12]);
+                let cid = u64::from_le_bytes(cid_bytes);
                 let data = body.slice(12..);
                 trace!(cid, flags, len = data.len(), "RPC_PROXY_ANS");
 
@@ -148,8 +159,12 @@ pub(crate) async fn reader_loop(
                     send_close_conn(&tx, cid).await;
                 }
             } else if pt == RPC_SIMPLE_ACK_U32 && body.len() >= 12 {
-                let cid = u64::from_le_bytes(body[0..8].try_into().unwrap());
-                let cfm = u32::from_le_bytes(body[8..12].try_into().unwrap());
+                let mut cid_bytes = [0u8; 8];
+                cid_bytes.copy_from_slice(&body[0..8]);
+                let cid = u64::from_le_bytes(cid_bytes);
+                let mut cfm_bytes = [0u8; 4];
+                cfm_bytes.copy_from_slice(&body[8..12]);
+                let cfm = u32::from_le_bytes(cfm_bytes);
                 trace!(cid, cfm, "RPC_SIMPLE_ACK");
 
                 let routed = reg.route_nowait(cid, MeResponse::Ack(cfm)).await;
@@ -171,17 +186,23 @@ pub(crate) async fn reader_loop(
                     send_close_conn(&tx, cid).await;
                 }
             } else if pt == RPC_CLOSE_EXT_U32 && body.len() >= 8 {
-                let cid = u64::from_le_bytes(body[0..8].try_into().unwrap());
+                let mut cid_bytes = [0u8; 8];
+                cid_bytes.copy_from_slice(&body[0..8]);
+                let cid = u64::from_le_bytes(cid_bytes);
                 debug!(cid, "RPC_CLOSE_EXT from ME");
                 reg.route(cid, MeResponse::Close).await;
                 reg.unregister(cid).await;
             } else if pt == RPC_CLOSE_CONN_U32 && body.len() >= 8 {
-                let cid = u64::from_le_bytes(body[0..8].try_into().unwrap());
+                let mut cid_bytes = [0u8; 8];
+                cid_bytes.copy_from_slice(&body[0..8]);
+                let cid = u64::from_le_bytes(cid_bytes);
                 debug!(cid, "RPC_CLOSE_CONN from ME");
                 reg.route(cid, MeResponse::Close).await;
                 reg.unregister(cid).await;
             } else if pt == RPC_PING_U32 && body.len() >= 8 {
-                let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
+                let mut ping_id_bytes = [0u8; 8];
+                ping_id_bytes.copy_from_slice(&body[0..8]);
+                let ping_id = i64::from_le_bytes(ping_id_bytes);
                 trace!(ping_id, "RPC_PING -> RPC_PONG");
                 let mut pong = Vec::with_capacity(12);
                 pong.extend_from_slice(&RPC_PONG_U32.to_le_bytes());
@@ -195,7 +216,9 @@ pub(crate) async fn reader_loop(
                     break;
                 }
             } else if pt == RPC_PONG_U32 && body.len() >= 8 {
-                let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
+                let mut ping_id_bytes = [0u8; 8];
+                ping_id_bytes.copy_from_slice(&body[0..8]);
+                let ping_id = i64::from_le_bytes(ping_id_bytes);
                 stats.increment_me_keepalive_pong();
                 if let Some((sent, wid)) = {
                     let mut guard = ping_tracker.lock().await;
@@ -204,17 +227,17 @@ pub(crate) async fn reader_loop(
                     let rtt = sent.elapsed().as_secs_f64() * 1000.0;
                     let mut stats = rtt_stats.lock().await;
                     let entry = stats.entry(wid).or_insert((rtt, rtt));
-                    entry.1 = entry.1 * 0.8 + rtt * 0.2;
+                    entry.1 = entry.1.mul_add(0.8, rtt * 0.2);
                     if rtt < entry.0 {
                         entry.0 = rtt;
                     } else {
                         // allow slow baseline drift upward to avoid stale minimum
-                        entry.0 = entry.0 * 0.99 + rtt * 0.01;
+                        entry.0 = entry.0.mul_add(0.99, rtt * 0.01);
                     }
                     let degraded_now = entry.1 > entry.0 * 2.0;
                     degraded.store(degraded_now, Ordering::Relaxed);
                     writer_rtt_ema_ms_x10
-                        .store((entry.1 * 10.0).clamp(0.0, u32::MAX as f64) as u32, Ordering::Relaxed);
+                        .store((entry.1 * 10.0).clamp(0.0, f64::from(u32::MAX)) as u32, Ordering::Relaxed);
                     trace!(writer_id = wid, rtt_ms = rtt, ema_ms = entry.1, base_ms = entry.0, degraded = degraded_now, "ME RTT sample");
                 }
             } else {

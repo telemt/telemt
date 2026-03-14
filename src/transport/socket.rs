@@ -4,6 +4,8 @@
 use std::collections::HashSet;
 #[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::fd::RawFd;
 use std::io::Result;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
@@ -78,20 +80,38 @@ pub fn configure_client_socket(
         let timeout_ms = i32::try_from(timeout_ms_u64)
             .map_err(|_| Error::new(ErrorKind::InvalidInput, "ack_timeout_secs exceeds TCP_USER_TIMEOUT range"))?;
 
-        let rc = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_USER_TIMEOUT,
-                &timeout_ms as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            return Err(Error::last_os_error());
-        }
+        set_tcp_user_timeout_linux(fd, timeout_ms)?;
     }
     
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn set_tcp_user_timeout_linux(fd: RawFd, timeout_ms: libc::c_int) -> Result<()> {
+    use std::io::Error;
+    use std::mem::size_of_val;
+
+    let optlen = size_of_val(&timeout_ms) as libc::socklen_t;
+    let optval = std::ptr::from_ref(&timeout_ms).cast::<libc::c_void>();
+
+    // SAFETY:
+    // - `fd` is expected to be a valid TCP socket descriptor supplied by the caller.
+    // - `optval` points to `timeout_ms`, which lives for the duration of the call.
+    // - `optlen` matches the exact size of `timeout_ms` (`c_int`) expected by the kernel.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_USER_TIMEOUT,
+            optval,
+            optlen,
+        )
+    };
+    if rc != 0 {
+        return Err(Error::last_os_error());
+    }
+
     Ok(())
 }
 
@@ -181,16 +201,16 @@ pub fn get_peer_addr(stream: &TcpStream) -> Option<SocketAddr> {
 
 /// Check if address is IPv6
 #[allow(dead_code)]
-pub fn is_ipv6(addr: &SocketAddr) -> bool {
+pub const fn is_ipv6(addr: &SocketAddr) -> bool {
     addr.is_ipv6()
 }
 
 /// Parse IPv4-mapped IPv6 address to IPv4
-pub fn normalize_ip(addr: SocketAddr) -> SocketAddr {
+pub const fn normalize_ip(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V6(v6) => {
             if let Some(v4) = v6.ip().to_ipv4_mapped() {
-                SocketAddr::new(std::net::IpAddr::V4(v4), v6.port())
+                SocketAddr::new(IpAddr::V4(v4), v6.port())
             } else {
                 addr
             }
@@ -202,9 +222,9 @@ pub fn normalize_ip(addr: SocketAddr) -> SocketAddr {
 /// Socket options for server listening
 #[derive(Debug, Clone)]
 pub struct ListenOptions {
-    /// Enable SO_REUSEADDR
+/// Enable `SO_REUSEADDR`
     pub reuse_addr: bool,
-    /// Enable SO_REUSEPORT (Linux/BSD)
+/// Enable `SO_REUSEPORT` (Linux/BSD)
     pub reuse_port: bool,
     /// Backlog size
     pub backlog: u32,
@@ -385,7 +405,11 @@ fn listening_inodes_for_port(addr: SocketAddr) -> HashSet<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::fs::File;
     use std::io::ErrorKind;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     
@@ -542,6 +566,124 @@ mod tests {
         let too_large_secs = (i32::MAX as u64 / 1000) + 1;
         let err = match configure_client_socket(&stream, 30, too_large_secs) {
             Ok(()) => panic!("expected overflow validation error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_set_tcp_user_timeout_linux_invalid_fd_rejected() {
+        let err = match set_tcp_user_timeout_linux(-1, 30_000) {
+            Ok(()) => panic!("expected EBADF for invalid file descriptor"),
+            Err(e) => e,
+        };
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_set_tcp_user_timeout_linux_valid_fd() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("bind failed: {e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(e) => panic!("local_addr failed: {e}"),
+        };
+
+        let stream = match TcpStream::connect(addr).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("connect failed: {e}"),
+        };
+
+        match set_tcp_user_timeout_linux(stream.as_raw_fd(), 30_000) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("set_tcp_user_timeout_linux failed: {error}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_set_tcp_user_timeout_linux_rejects_non_socket_fd() {
+        let file = match File::open("/dev/null") {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        let result = set_tcp_user_timeout_linux(file.as_raw_fd(), 30_000);
+        let err = match result {
+            Ok(()) => panic!("expected non-socket FD rejection"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(
+                err.raw_os_error(),
+                Some(libc::ENOTSOCK) | Some(libc::ENOPROTOOPT) | Some(libc::EINVAL)
+            ),
+            "unexpected errno for non-socket FD: {:?}",
+            err.raw_os_error()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_set_tcp_user_timeout_linux_rejects_negative_timeout() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("bind failed: {e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(e) => panic!("local_addr failed: {e}"),
+        };
+
+        let stream = match TcpStream::connect(addr).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("connect failed: {e}"),
+        };
+
+        let result = set_tcp_user_timeout_linux(stream.as_raw_fd(), -1);
+        let err = match result {
+            Ok(()) => panic!("expected negative timeout rejection"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(err.raw_os_error(), Some(libc::EINVAL)),
+            "unexpected errno for negative timeout: {:?}",
+            err.raw_os_error()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_configure_client_socket_rejects_u64_max_ack_timeout() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("bind failed: {e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(e) => panic!("local_addr failed: {e}"),
+        };
+
+        let stream = match TcpStream::connect(addr).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("connect failed: {e}"),
+        };
+
+        let err = match configure_client_socket(&stream, 30, u64::MAX) {
+            Ok(()) => panic!("expected invalid-input overflow rejection"),
             Err(e) => e,
         };
         assert_eq!(err.kind(), ErrorKind::InvalidInput);

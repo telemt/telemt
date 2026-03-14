@@ -91,7 +91,10 @@ fn should_emit_full_desync(key: u64, all_full: bool, now: Instant) -> bool {
     }
 
     let dedup = DESYNC_DEDUP.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = dedup.lock().expect("desync dedup mutex poisoned");
+    let mut guard = match dedup.lock() {
+        Ok(guard) => guard,
+        Err(_) => return true,
+    };
     guard.retain(|_, seen_at| now.duration_since(*seen_at) < DESYNC_DEDUP_WINDOW);
 
     match guard.get_mut(&key) {
@@ -117,7 +120,7 @@ fn report_desync_frame_too_large(
     max_frame: usize,
     len: usize,
     raw_len_bytes: Option<[u8; 4]>,
-    stats: &Stats,
+    metrics: &Stats,
 ) -> ProxyError {
     let len_buf = raw_len_bytes.unwrap_or((len as u32).to_le_bytes());
     let looks_like_tls = raw_len_bytes
@@ -137,10 +140,10 @@ fn report_desync_frame_too_large(
     let duration_ms = state.started_at.elapsed().as_millis() as u64;
     let bytes_me2c = state.bytes_me2c.load(Ordering::Relaxed);
 
-    stats.increment_desync_total();
-    stats.observe_desync_frames_ok(frame_counter);
+    metrics.increment_desync_total();
+    metrics.observe_desync_frames_ok(frame_counter);
     if emit_full {
-        stats.increment_desync_full_logged();
+        metrics.increment_desync_full_logged();
         warn!(
             trace_id = format_args!("0x{:016x}", state.trace_id),
             conn_id = state.conn_id,
@@ -176,7 +179,7 @@ fn report_desync_frame_too_large(
             "Frame too large forensic peer detail"
         );
     } else {
-        stats.increment_desync_suppressed();
+        metrics.increment_desync_suppressed();
         debug!(
             trace_id = format_args!("0x{:016x}", state.trace_id),
             conn_id = state.conn_id,
@@ -201,7 +204,7 @@ fn report_desync_frame_too_large(
     ))
 }
 
-fn should_yield_c2me_sender(sent_since_yield: usize, has_backlog: bool) -> bool {
+const fn should_yield_c2me_sender(sent_since_yield: usize, has_backlog: bool) -> bool {
     has_backlog && sent_since_yield >= C2ME_SENDER_FAIRNESS_BUDGET
 }
 
@@ -332,7 +335,6 @@ where
         .max(C2ME_CHANNEL_CAPACITY_FALLBACK);
     let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(c2me_channel_capacity);
     let me_pool_c2me = me_pool.clone();
-    let effective_tag = effective_tag;
     let c2me_sender = tokio::spawn(async move {
         let mut sent_since_yield = 0usize;
         while let Some(cmd) = c2me_rx.recv().await {
@@ -942,7 +944,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::time::{Duration as TokioDuration, timeout};
+
+    fn next_test_key() -> u64 {
+        static TEST_KEY_COUNTER: AtomicU64 = AtomicU64::new(1);
+        TEST_KEY_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn drop_dedup_key_if_present(key: u64) {
+        if let Some(dedup) = DESYNC_DEDUP.get()
+            && let Ok(mut guard) = dedup.lock() {
+                guard.remove(&key);
+            }
+    }
 
     #[test]
     fn should_yield_sender_only_on_budget_with_backlog() {
@@ -950,6 +965,43 @@ mod tests {
         assert!(!should_yield_c2me_sender(C2ME_SENDER_FAIRNESS_BUDGET - 1, true));
         assert!(!should_yield_c2me_sender(C2ME_SENDER_FAIRNESS_BUDGET, false));
         assert!(should_yield_c2me_sender(C2ME_SENDER_FAIRNESS_BUDGET, true));
+    }
+
+    #[test]
+    fn desync_all_full_bypasses_dedup_and_always_emits_full() {
+        let key = next_test_key();
+        drop_dedup_key_if_present(key);
+
+        let now = Instant::now();
+        assert!(should_emit_full_desync(key, true, now));
+        assert!(should_emit_full_desync(
+            key,
+            true,
+            now + Duration::from_secs(1),
+        ));
+
+        drop_dedup_key_if_present(key);
+    }
+
+    #[test]
+    fn desync_dedup_suppresses_within_window_and_reemits_after_window() {
+        let key = next_test_key();
+        drop_dedup_key_if_present(key);
+
+        let now = Instant::now();
+        assert!(should_emit_full_desync(key, false, now));
+        assert!(!should_emit_full_desync(
+            key,
+            false,
+            now + Duration::from_secs(1),
+        ));
+        assert!(should_emit_full_desync(
+            key,
+            false,
+            now + DESYNC_DEDUP_WINDOW + Duration::from_millis(1),
+        ));
+
+        drop_dedup_key_if_present(key);
     }
 
     #[tokio::test]

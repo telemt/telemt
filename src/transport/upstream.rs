@@ -53,11 +53,11 @@ impl LatencyEma {
     fn update(&mut self, sample_ms: f64) {
         self.value_ms = Some(match self.value_ms {
             None => sample_ms,
-            Some(prev) => prev * (1.0 - self.alpha) + sample_ms * self.alpha,
+            Some(prev) => prev.mul_add(1.0 - self.alpha, sample_ms * self.alpha),
         });
     }
 
-    fn get(&self) -> Option<f64> {
+    const fn get(&self) -> Option<f64> {
         self.value_ms
     }
 }
@@ -135,7 +135,7 @@ impl UpstreamState {
             .filter_map(|l| l.get())
             .fold((0.0, 0u32), |(s, c), v| (s + v, c + 1));
 
-        if count > 0 { Some(sum / count as f64) } else { None }
+        if count > 0 { Some(sum / f64::from(count)) } else { None }
     }
 }
 
@@ -253,13 +253,13 @@ impl UpstreamManager {
         connect_failfast_hard_errors: bool,
         stats: Arc<Stats>,
     ) -> Self {
-        let states = configs.into_iter()
+        let upstream_states = configs.into_iter()
             .filter(|c| c.enabled)
             .map(UpstreamState::new)
             .collect();
 
         Self {
-            upstreams: Arc::new(RwLock::new(states)),
+            upstreams: Arc::new(RwLock::new(upstream_states)),
             connect_retry_attempts: connect_retry_attempts.max(1),
             connect_retry_backoff: Duration::from_millis(connect_retry_backoff_ms),
             connect_budget: Duration::from_millis(connect_budget_ms.max(1)),
@@ -352,7 +352,7 @@ impl UpstreamManager {
         Some(UpstreamApiSnapshot { summary, upstreams })
     }
 
-    pub fn api_policy_snapshot(&self) -> UpstreamApiPolicySnapshot {
+    pub const fn api_policy_snapshot(&self) -> UpstreamApiPolicySnapshot {
         UpstreamApiPolicySnapshot {
             connect_retry_attempts: self.connect_retry_attempts,
             connect_retry_backoff_ms: self.connect_retry_backoff.as_millis() as u64,
@@ -586,7 +586,7 @@ impl UpstreamManager {
         }
 
         let weights: Vec<(usize, f64)> = healthy.iter().map(|&i| {
-            let base = upstreams[i].config.weight as f64;
+            let base = f64::from(upstreams[i].config.weight);
             let latency_factor = upstreams[i].effective_latency(dc_idx)
                 .map(|ms| if ms > 1.0 { 1000.0 / ms } else { 1000.0 })
                 .unwrap_or(1.0);
@@ -616,7 +616,11 @@ impl UpstreamManager {
             choice -= weight;
         }
 
-        Some(healthy[0])
+        // Floating-point subtraction residual: when `choice` narrowly exceeds the last
+        // item's weight due to rounding, the last item absorbs the residual probability mass.
+        // Using healthy[0] would bias selection away from the last upstream.
+        // Safety: healthy.len() >= 2 is guaranteed by the empty and single-element guards above.
+        Some(healthy[healthy.len() - 1])
     }
 
     /// Connect to target through a selected upstream.
@@ -972,7 +976,6 @@ impl UpstreamManager {
                     Self::connect_hostname_with_dns_override(address, connect_timeout).await?
                 };
 
-                debug!(config = ?config, "Socks5 connection");
                 // replace socks user:pass with config.selected_scope, if set
                 let scope: Option<&str> = Some(config.selected_scope.as_str())
                     .filter(|s| !s.is_empty());
@@ -1677,5 +1680,79 @@ mod tests {
         );
 
         assert_eq!(bind, None);
+    }
+
+    // ===== T-U1: select_upstream weighted selection correctness =====
+
+    /// With a single healthy upstream, select_upstream must always return its index.
+    #[tokio::test]
+    async fn select_upstream_single_healthy_always_returns_its_index() {
+        let config = UpstreamConfig {
+            upstream_type: UpstreamType::Direct {
+                interface: None,
+                bind_addresses: None,
+            },
+            weight: 1,
+            enabled: true,
+            scopes: String::new(),
+            selected_scope: String::new(),
+        };
+        let manager = UpstreamManager::new(
+            vec![config],
+            1, 0, 10_000, 1, false,
+            Arc::new(crate::stats::Stats::new()),
+        );
+
+        for _ in 0..20 {
+            assert_eq!(manager.select_upstream(None, None).await, Some(0));
+        }
+    }
+
+    /// With N equal-weight healthy upstreams, every upstream must receive traffic.
+    ///
+    /// Before the fix, the floating-point residual fallback returned `healthy[0]`
+    /// instead of `healthy.last()`.  While the rounding case is rare, the systematic
+    /// bias it creates is detectable over enough draws, and the correct fallback is
+    /// the last item (which absorbed the residual probability mass in the loop).
+    #[tokio::test]
+    async fn select_upstream_all_healthy_receive_traffic_under_uniform_weights() {
+        const N: usize = 4;
+        const DRAWS: usize = 400;
+
+        let configs: Vec<UpstreamConfig> = (0..N)
+            .map(|_| UpstreamConfig {
+                upstream_type: UpstreamType::Direct {
+                    interface: None,
+                    bind_addresses: None,
+                },
+                weight: 1,
+                enabled: true,
+                scopes: String::new(),
+                selected_scope: String::new(),
+            })
+            .collect();
+
+        let manager = UpstreamManager::new(
+            configs,
+            1, 0, 10_000, 1, false,
+            Arc::new(crate::stats::Stats::new()),
+        );
+
+        let mut counts = [0usize; N];
+        for _ in 0..DRAWS {
+            if let Some(idx) = manager.select_upstream(None, None).await {
+                counts[idx] += 1;
+            }
+        }
+
+        // Under uniform weights, P(any single upstream never selected in DRAWS draws)
+        // = ((N-1)/N)^DRAWS ≈ (3/4)^400 ≈ 10^{-50}: statistically impossible.
+        let min_floor = DRAWS / (N * 5);
+        for (i, &count) in counts.iter().enumerate() {
+            assert!(
+                count >= min_floor,
+                "upstream {i} selected {count}/{DRAWS} times; minimum threshold {min_floor}"
+            );
+        }
     }
 }

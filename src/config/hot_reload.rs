@@ -1,5 +1,5 @@
-//! Hot-reload: watches the config file via inotify (Linux) / FSEvents (macOS)
-//! / ReadDirectoryChangesW (Windows) using the `notify` crate.
+//! Hot-reload: watches the config file via inotify (Linux) / `FSEvents` (macOS)
+//! / `ReadDirectoryChangesW` (Windows) using the `notify` crate.
 //! SIGHUP is also supported on Unix as an additional manual trigger.
 //!
 //! # What can be reloaded without restart
@@ -651,6 +651,16 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         warned = true;
         warn!("config reload: general.me_init_retry_attempts changed; restart required");
     }
+    if old.general.me_init_retry_backoff_base_ms != new.general.me_init_retry_backoff_base_ms
+        || old.general.me_init_retry_backoff_cap_ms != new.general.me_init_retry_backoff_cap_ms
+    {
+        warned = true;
+        warn!("config reload: general.me_init_retry_backoff_* changed; restart required");
+    }
+    if old.server.max_connections != new.server.max_connections {
+        warned = true;
+        warn!("config reload: server.max_connections changed; restart required");
+    }
     if old.general.me2dc_fallback != new.general.me2dc_fallback {
         warned = true;
         warn!("config reload: general.me2dc_fallback changed; restart required");
@@ -713,7 +723,7 @@ fn resolve_link_host(
         })
 }
 
-/// Print TG proxy links for a single user — mirrors print_proxy_links() in main.rs.
+/// Print TG proxy links for a single user — mirrors `print_proxy_links()` in main.rs.
 fn print_user_links(user: &str, secret: &str, host: &str, port: u16, cfg: &ProxyConfig) {
     info!(target: "telemt::links", "--- New user: {} ---", user);
     if cfg.general.modes.classic {
@@ -1298,19 +1308,29 @@ pub fn spawn_config_watcher(
 
         #[cfg(unix)]
         let mut sighup = {
-            use tokio::signal::unix::{SignalKind, signal};
-            signal(SignalKind::hangup()).expect("Failed to register SIGHUP handler")
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::hangup()) {
+                Ok(sig) => Some(sig),
+                Err(err) => {
+                    warn!(error = %err, "Failed to register SIGHUP handler; relying on filesystem watcher");
+                    None
+                }
+            }
         };
 
         loop {
             #[cfg(unix)]
-            tokio::select! {
-                msg = notify_rx.recv() => {
-                    if msg.is_none() { break; }
+            if let Some(signal_stream) = sighup.as_mut() {
+                tokio::select! {
+                    msg = notify_rx.recv() => {
+                        if msg.is_none() { break; }
+                    }
+                    _ = signal_stream.recv() => {
+                        info!("SIGHUP received — reloading {:?}", config_path);
+                    }
                 }
-                _ = sighup.recv() => {
-                    info!("SIGHUP received — reloading {:?}", config_path);
-                }
+            } else if notify_rx.recv().await.is_none() {
+                break;
             }
             #[cfg(not(unix))]
             if notify_rx.recv().await.is_none() { break; }

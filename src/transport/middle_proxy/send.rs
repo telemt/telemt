@@ -30,7 +30,7 @@ const PICK_PENALTY_STALE: u64 = 300;
 const PICK_PENALTY_DEGRADED: u64 = 250;
 
 impl MePool {
-    /// Send RPC_PROXY_REQ. `tag_override`: per-user ad_tag (from access.user_ad_tags); if None, uses pool default.
+/// Send `RPC_PROXY_REQ`. `tag_override`: per-user `ad_tag` (from `access.user_ad_tags`); if None, uses pool default.
     pub async fn send_proxy_req(
         self: &Arc<Self>,
         conn_id: u64,
@@ -69,7 +69,7 @@ impl MePool {
         let no_writer_mode =
             MeRouteNoWriterMode::from_u8(self.me_route_no_writer_mode.load(Ordering::Relaxed));
         let (routed_dc, unknown_target_dc) = self
-            .resolve_target_dc_for_routing(target_dc as i32)
+            .resolve_target_dc_for_routing(i32::from(target_dc))
             .await;
         let mut no_writer_deadline: Option<Instant> = None;
         let mut emergency_attempts = 0u32;
@@ -248,7 +248,7 @@ impl MePool {
                                 break;
                             }
                         }
-                        tokio::time::sleep(Duration::from_millis(100 * emergency_attempts as u64)).await;
+                        tokio::time::sleep(Duration::from_millis(100 * u64::from(emergency_attempts))).await;
                         let ws2 = self.writers.read().await;
                         writers_snapshot = ws2.clone();
                         drop(ws2);
@@ -312,8 +312,8 @@ impl MePool {
                         let right = &writers_snapshot[*rhs];
                         let left_key = (
                             self.writer_contour_rank_for_selection(left),
-                            (left.generation < self.current_generation()) as usize,
-                            left.degraded.load(Ordering::Relaxed) as usize,
+                            usize::from(left.generation < self.current_generation()),
+                            usize::from(left.degraded.load(Ordering::Relaxed)),
                             self.writer_idle_rank_for_selection(
                                 left,
                                 &writer_idle_since,
@@ -325,8 +325,8 @@ impl MePool {
                         );
                         let right_key = (
                             self.writer_contour_rank_for_selection(right),
-                            (right.generation < self.current_generation()) as usize,
-                            right.degraded.load(Ordering::Relaxed) as usize,
+                            usize::from(right.generation < self.current_generation()),
+                            usize::from(right.degraded.load(Ordering::Relaxed)),
                             self.writer_idle_rank_for_selection(
                                 right,
                                 &writer_idle_since,
@@ -342,11 +342,11 @@ impl MePool {
                     candidate_indices.sort_by_key(|idx| {
                         let w = &writers_snapshot[*idx];
                         let degraded = w.degraded.load(Ordering::Relaxed);
-                        let stale = (w.generation < self.current_generation()) as usize;
+                        let stale = usize::from(w.generation < self.current_generation());
                         (
                             self.writer_contour_rank_for_selection(w),
                             stale,
-                            degraded as usize,
+                            usize::from(degraded),
                             self.writer_idle_rank_for_selection(
                                 w,
                                 &writer_idle_since,
@@ -551,7 +551,7 @@ impl MePool {
 
         let round = *hybrid_recovery_round;
         let target_triggered = self.trigger_async_recovery_for_target_dc(routed_dc).await;
-        if !target_triggered || round % HYBRID_GLOBAL_BURST_PERIOD_ROUNDS == 0 {
+        if !target_triggered || round.is_multiple_of(HYBRID_GLOBAL_BURST_PERIOD_ROUNDS) {
             self.trigger_async_recovery_global().await;
         }
         *hybrid_recovery_round = round.saturating_add(1);
@@ -630,7 +630,7 @@ impl MePool {
             if !self.writer_eligible_for_selection(w, include_warm) {
                 continue;
             }
-            if w.writer_dc == routed_dc && preferred.iter().any(|endpoint| *endpoint == w.addr) {
+            if w.writer_dc == routed_dc && preferred.contains(&w.addr) {
                 out.push(idx);
             }
         }
@@ -709,7 +709,7 @@ impl MePool {
         let queue_used = queue_cap.saturating_sub(queue_remaining.min(queue_cap));
         let queue_util_pct = queue_used.saturating_mul(100) / queue_cap;
         let queue_penalty = queue_util_pct.saturating_mul(4);
-        let rtt_penalty = ((writer.rtt_ema_ms_x10.load(Ordering::Relaxed) as u64).saturating_add(5) / 10)
+        let rtt_penalty = (u64::from(writer.rtt_ema_ms_x10.load(Ordering::Relaxed)).saturating_add(5) / 10)
             .min(400);
 
         contour_penalty

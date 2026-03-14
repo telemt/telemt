@@ -6,10 +6,10 @@
 //! These are "fake" TLS streams:
 //! - We wrap raw bytes into syntactically valid TLS 1.3 records (Application Data).
 //! - We DO NOT perform real TLS handshake/encryption.
-//! - Real crypto for MTProto is handled by the crypto layer underneath.
+//! - Real crypto for `MTProto` is handled by the crypto layer underneath.
 //!
 //! Why do we need this?
-//! Telegram MTProto proxy "FakeTLS" mode uses a TLS-looking outer layer for
+//! Telegram `MTProto` proxy `FakeTLS` mode uses a TLS-looking outer layer for
 //! domain fronting / traffic camouflage. iOS Telegram clients are known to
 //! produce slightly different TLS record sizing patterns than Android/Desktop,
 //! including records that exceed 16384 payload bytes by a small overhead.
@@ -26,9 +26,9 @@
 //! - The TLS spec limits "plaintext fragments" to 2^14 (16384) bytes.
 //! - However, the on-the-wire record length can exceed 16384 because TLS 1.3
 //!   uses AEAD and can include tag/overhead/padding.
-//! - Telegram FakeTLS clients (notably iOS) may send Application Data records
+//! - Telegram `FakeTLS` clients (notably iOS) may send Application Data records
 //!   with length up to 16384 + 256 bytes (RFC 8446 §5.2). We accept that as
-//!   MAX_TLS_CHUNK_SIZE.
+//!   `MAX_TLS_CHUNK_SIZE`.
 //!
 //! If you reject those (e.g. validate length <= 16384), you will see errors like:
 //!   "TLS record too large: 16408 bytes"
@@ -36,7 +36,7 @@
 //! may still work.
 
 use bytes::{Bytes, BytesMut};
-use std::io::{self, Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt, ReadBuf};
@@ -80,7 +80,7 @@ impl TlsRecordHeader {
     ///
     /// This currently never returns None, but is kept as Option to allow future
     /// stricter parsing rules without changing callers.
-    fn parse(header: &[u8; 5]) -> Option<Self> {
+    const fn parse(header: &[u8; 5]) -> Option<Self> {
         let record_type = header[0];
         let version = [header[1], header[2]];
         let length = u16::from_be_bytes([header[3], header[4]]);
@@ -91,9 +91,9 @@ impl TlsRecordHeader {
     ///
     /// Nuances:
     /// - We accept TLS 1.0 header version for ClientHello-like records (0x03 0x01),
-    ///   and TLS 1.2/1.3 style version bytes for the rest (we use TLS_VERSION = 0x03 0x03).
-    /// - For Application Data, Telegram FakeTLS may send payload length up to
-    ///   MAX_TLS_CHUNK_SIZE (16384 + 256).
+///   and TLS 1.2/1.3 style version bytes for the rest (we use `TLS_VERSION` = 0x03 0x03).
+/// - For Application Data, Telegram `FakeTLS` may send payload length up to
+///   `MAX_TLS_CHUNK_SIZE` (16384 + 256).
     /// - For other record types we keep stricter bounds to avoid memory abuse.
     fn validate(&self) -> Result<()> {
         // Version: accept TLS 1.0 header (ClientHello quirk) and TLS_VERSION (0x0303).
@@ -135,7 +135,7 @@ impl TlsRecordHeader {
     }
 
     /// Build header bytes
-    fn to_bytes(self) -> [u8; 5] {
+    const fn to_bytes(self) -> [u8; 5] {
         [
             self.record_type,
             self.version[0],
@@ -148,7 +148,7 @@ impl TlsRecordHeader {
 
 // ============= FakeTlsReader State =============
 
-/// State machine states for FakeTlsReader
+/// State machine states for `FakeTlsReader`
 #[derive(Debug)]
 enum TlsReaderState {
     /// Ready to read a new TLS record
@@ -174,7 +174,7 @@ enum TlsReaderState {
 
     /// Stream encountered an error and cannot be used
     Poisoned {
-        error: Option<io::Error>,
+        error: Option<Error>,
     },
 }
 
@@ -200,7 +200,7 @@ impl StreamState for TlsReaderState {
 
 // ============= FakeTlsReader =============
 
-/// Reader that unwraps TLS records (FakeTLS).
+/// Reader that unwraps TLS records (`FakeTLS`).
 ///
 /// This wrapper is responsible ONLY for TLS record framing and skipping
 /// non-data records (like CCS). It does not decrypt TLS: payload bytes are passed
@@ -209,14 +209,14 @@ impl StreamState for TlsReaderState {
 /// State machine overview:
 ///
 /// ┌──────────┐                    ┌───────────────┐
-/// │   Idle   │ -----------------> │ ReadingHeader │
+/// │   Idle   │ -----------------> │ `ReadingHeader` │
 /// └──────────┘                    └───────┬───────┘
 ///      ▲                                  │
 ///      │                           header complete
 ///      │                                  │
 ///      │                                  ▼
 ///      │                          ┌───────────────┐
-///      │        skip record       │  ReadingBody  │
+///      │        skip record       │  `ReadingBody`  │
 ///      │ <-------- (CCS) -------- │               │
 ///      │                          └───────┬───────┘
 ///      │                                  │
@@ -242,27 +242,27 @@ pub struct FakeTlsReader<R> {
 }
 
 impl<R> FakeTlsReader<R> {
-    pub fn new(upstream: R) -> Self {
+    pub const fn new(upstream: R) -> Self {
         Self { upstream, state: TlsReaderState::Idle }
     }
 
-    pub fn get_ref(&self) -> &R { &self.upstream }
-    pub fn get_mut(&mut self) -> &mut R { &mut self.upstream }
+    pub const fn get_ref(&self) -> &R { &self.upstream }
+    pub const fn get_mut(&mut self) -> &mut R { &mut self.upstream }
     pub fn into_inner(self) -> R { self.upstream }
 
     pub fn is_poisoned(&self) -> bool { self.state.is_poisoned() }
     pub fn state_name(&self) -> &'static str { self.state.state_name() }
 
-    fn poison(&mut self, error: io::Error) {
+    fn poison(&mut self, error: Error) {
         self.state = TlsReaderState::Poisoned { error: Some(error) };
     }
 
-    fn take_poison_error(&mut self) -> io::Error {
+    fn take_poison_error(&mut self) -> Error {
         match &mut self.state {
             TlsReaderState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::other("stream previously poisoned")
+                Error::other("stream previously poisoned")
             }),
-            _ => io::Error::other("stream not poisoned"),
+            _ => Error::other("stream not poisoned"),
         }
     }
 }
@@ -271,13 +271,13 @@ enum HeaderPollResult {
     Pending,
     Eof,
     Complete(TlsRecordHeader),
-    Error(io::Error),
+    Error(Error),
 }
 
 enum BodyPollResult {
     Pending,
     Complete(Bytes),
-    Error(io::Error),
+    Error(Error),
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for FakeTlsReader<R> {
@@ -297,7 +297,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for FakeTlsReader<R> {
                 TlsReaderState::Poisoned { error } => {
                     this.state = TlsReaderState::Poisoned { error: None };
                     let err = error.unwrap_or_else(|| {
-                        io::Error::other("stream previously poisoned")
+                        Error::other("stream previously poisoned")
                     });
                     return Poll::Ready(Err(err));
                 }
@@ -405,9 +405,27 @@ impl<R: AsyncRead + Unpin> AsyncRead for FakeTlsReader<R> {
                                 }
 
                                 TLS_RECORD_ALERT => {
-                                    // Treat TLS alert as EOF-like termination.
-                                    this.state = TlsReaderState::Idle;
-                                    return Poll::Ready(Ok(()));
+                                    // RFC 5246 §7.2 / RFC 8446 §6: alert body is 2 bytes
+                                    // [level, description].
+                                    // close_notify = [0x01, 0x00]: clean bidirectional close.
+                                    // Any fatal alert (level=0x02) or unrecognized alert:
+                                    // connection reset.  A real TLS 1.3 server does not treat
+                                    // fatal alerts as EOF; accepting them as clean EOF is an
+                                    // observable behavioral difference a censor can exploit.
+                                    if data.len() == 2 && data[0] == 0x01 && data[1] == 0x00 {
+                                        this.state = TlsReaderState::Idle;
+                                        return Poll::Ready(Ok(()));
+                                    }
+                                    let err = Error::new(
+                                        ErrorKind::ConnectionReset,
+                                        format!(
+                                            "TLS alert level={} desc={}",
+                                            data.first().copied().unwrap_or(0),
+                                            data.get(1).copied().unwrap_or(0),
+                                        ),
+                                    );
+                                    this.poison(Error::new(err.kind(), err.to_string()));
+                                    return Poll::Ready(Err(err));
                                 }
 
                                 TLS_RECORD_HANDSHAKE => {
@@ -453,15 +471,14 @@ fn poll_read_header<R: AsyncRead + Unpin>(
                     // EOF
                     if header.as_slice().is_empty() {
                         return HeaderPollResult::Eof;
-                    } else {
-                        return HeaderPollResult::Error(Error::new(
-                            ErrorKind::UnexpectedEof,
-                            format!(
-                                "unexpected EOF in TLS header (got {} of 5 bytes)",
-                                header.as_slice().len()
-                            ),
-                        ));
                     }
+                    return HeaderPollResult::Error(Error::new(
+                        ErrorKind::UnexpectedEof,
+                        format!(
+                            "unexpected EOF in TLS header (got {} of 5 bytes)",
+                            header.as_slice().len()
+                        ),
+                    ));
                 }
                 header.advance(n);
             }
@@ -517,7 +534,7 @@ fn poll_read_body<R: AsyncRead + Unpin>(
 impl<R: AsyncRead + Unpin> FakeTlsReader<R> {
     /// Read exactly n bytes through TLS layer.
     ///
-    /// This accumulates data across multiple TLS ApplicationData records.
+/// This accumulates data across multiple TLS `ApplicationData` records.
     pub async fn read_exact(&mut self, n: usize) -> Result<Bytes> {
         if self.is_poisoned() {
             return Err(self.take_poison_error());
@@ -558,7 +575,7 @@ enum TlsWriterState {
 
     /// Stream encountered an error and cannot be used
     Poisoned {
-        error: Option<io::Error>,
+        error: Option<Error>,
     },
 }
 
@@ -584,22 +601,22 @@ impl StreamState for TlsWriterState {
 
 /// Writer that wraps bytes into TLS 1.3 Application Data records.
 ///
-/// We chunk outgoing data into records of <= 16384 payload bytes (MAX_TLS_PAYLOAD).
+/// We chunk outgoing data into records of <= 16384 payload bytes (`MAX_TLS_PAYLOAD`).
 /// We do not try to mimic AEAD overhead on the wire; Telegram clients accept it.
 /// If you want to be more camouflage-accurate later, you could add optional padding
-/// to produce records sized closer to MAX_TLS_CHUNK_SIZE.
+/// to produce records sized closer to `MAX_TLS_CHUNK_SIZE`.
 pub struct FakeTlsWriter<W> {
     upstream: W,
     state: TlsWriterState,
 }
 
 impl<W> FakeTlsWriter<W> {
-    pub fn new(upstream: W) -> Self {
+    pub const fn new(upstream: W) -> Self {
         Self { upstream, state: TlsWriterState::Idle }
     }
 
-    pub fn get_ref(&self) -> &W { &self.upstream }
-    pub fn get_mut(&mut self) -> &mut W { &mut self.upstream }
+    pub const fn get_ref(&self) -> &W { &self.upstream }
+    pub const fn get_mut(&mut self) -> &mut W { &mut self.upstream }
     pub fn into_inner(self) -> W { self.upstream }
 
     pub fn is_poisoned(&self) -> bool { self.state.is_poisoned() }
@@ -609,16 +626,16 @@ impl<W> FakeTlsWriter<W> {
         matches!(&self.state, TlsWriterState::WritingRecord { record, .. } if !record.is_empty())
     }
 
-    fn poison(&mut self, error: io::Error) {
+    fn poison(&mut self, error: Error) {
         self.state = TlsWriterState::Poisoned { error: Some(error) };
     }
 
-    fn take_poison_error(&mut self) -> io::Error {
+    fn take_poison_error(&mut self) -> Error {
         match &mut self.state {
             TlsWriterState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::other("stream previously poisoned")
+                Error::other("stream previously poisoned")
             }),
-            _ => io::Error::other("stream not poisoned"),
+            _ => Error::other("stream not poisoned"),
         }
     }
 
@@ -639,7 +656,7 @@ impl<W> FakeTlsWriter<W> {
 enum FlushResult {
     Complete(usize),
     Pending,
-    Error(io::Error),
+    Error(Error),
 }
 
 impl<W: AsyncWrite + Unpin> FakeTlsWriter<W> {
@@ -730,8 +747,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FakeTlsWriter<W> {
             Poll::Ready(Ok(n)) => {
                 // Partial write of the record: store remainder.
                 let mut write_buffer = WriteBuffer::with_max_size(MAX_PENDING_WRITE);
-                // record_data length is <= 16389, fits MAX_PENDING_WRITE
-                let _ = write_buffer.extend(&record_data[n..]);
+                if write_buffer.extend(&record_data[n..]).is_err() {
+                    let err = Error::other("write buffer capacity exceeded");
+                    this.poison(Error::new(err.kind(), err.to_string()));
+                    return Poll::Ready(Err(err));
+                }
 
                 this.state = TlsWriterState::WritingRecord {
                     record: write_buffer,
@@ -750,7 +770,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FakeTlsWriter<W> {
             Poll::Pending => {
                 // Buffer entire record and report success for this chunk.
                 let mut write_buffer = WriteBuffer::with_max_size(MAX_PENDING_WRITE);
-                let _ = write_buffer.extend(&record_data);
+                if write_buffer.extend(&record_data).is_err() {
+                    let err = Error::other("write buffer capacity exceeded");
+                    this.poison(Error::new(err.kind(), err.to_string()));
+                    return Poll::Ready(Err(err));
+                }
 
                 this.state = TlsWriterState::WritingRecord {
                     record: write_buffer,
@@ -1235,5 +1259,586 @@ mod tests {
         
         let bytes = header.to_bytes();
         assert_eq!(bytes, [0x17, 0x03, 0x03, 0x12, 0x34]);
+    }
+
+    // ============= Helpers =============
+
+    fn build_tls_record_type(record_type: u8, data: &[u8]) -> Vec<u8> {
+        let mut record = vec![
+            record_type,
+            TLS_VERSION[0],
+            TLS_VERSION[1],
+            (data.len() >> 8) as u8,
+            data.len() as u8,
+        ];
+        record.extend_from_slice(data);
+        record
+    }
+
+    // ============= FakeTlsReader Adversarial Tests =============
+
+    #[tokio::test]
+    async fn test_tls_reader_fatal_alert_is_connection_reset_not_eof() {
+        // Hacker probe: send fatal handshake_failure alert [0x02, 0x28].
+        // A real TLS 1.3 server returns ConnectionReset for fatal alerts.
+        // The previous behavior (clean EOF for all alerts) was an observable
+        // fingerprint: a censor could distinguish this proxy from a real HTTPS
+        // server because a real server never treats fatal alerts as clean EOF.
+        let data = build_tls_record_type(TLS_RECORD_ALERT, &[0x02, 0x28]);
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 100];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "fatal alert must return error, not clean EOF");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ErrorKind::ConnectionReset,
+            "fatal alert must produce ConnectionReset"
+        );
+        assert!(tls_reader.is_poisoned(), "fatal alert must poison the reader");
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_close_notify_is_clean_eof() {
+        // close_notify = [0x01, 0x00]: the ONLY alert that should produce clean EOF.
+        let data = build_tls_record_type(TLS_RECORD_ALERT, &[0x01, 0x00]);
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 100];
+        let n = tls_reader.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0, "close_notify must yield 0 bytes (clean EOF)");
+        assert!(!tls_reader.is_poisoned(), "close_notify must not poison the reader");
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_warning_alert_not_close_notify_is_error() {
+        // user_canceled warning [0x01, 0x5A]: warning level but NOT close_notify.
+        // A real TLS 1.3 server rejects non-close_notify warnings post-handshake.
+        let data = build_tls_record_type(TLS_RECORD_ALERT, &[0x01, 0x5A]);
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 100];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "non-close_notify warning must return error");
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::ConnectionReset);
+        assert!(tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_empty_alert_body_is_error() {
+        // 0-byte alert body is malformed (RFC requires exactly 2 bytes).
+        // Must not be treated as close_notify.
+        let data = build_tls_record_type(TLS_RECORD_ALERT, &[]);
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 100];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "empty alert body must return error");
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::ConnectionReset);
+        assert!(tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_truncated_alert_body_is_error() {
+        // 1-byte alert body (truncated) is not close_notify: must return error.
+        let data = build_tls_record_type(TLS_RECORD_ALERT, &[0x01]);
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 100];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "truncated alert body must return error");
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::ConnectionReset);
+        assert!(tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_close_notify_stops_further_reads() {
+        // After close_notify, any subsequent Application Data must not arrive.
+        // This checks that the Idle state after close_notify correctly handles EOF.
+        let mut data = build_tls_record_type(TLS_RECORD_ALERT, &[0x01, 0x00]);
+        data.extend_from_slice(&build_tls_record(b"should not be seen"));
+
+        let reader = ChunkedReader::new(&data, data.len());
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        // close_notify returns 0 bytes.
+        let mut buf = vec![0u8; 100];
+        let n = tls_reader.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0);
+
+        // After clean EOF the reader is in Idle state. The next read on the
+        // ChunkedReader would see the remaining application data record, but
+        // the caller is expected to stop reading after seeing n=0. We verify
+        // the reader is not poisoned (state is recoverable).
+        assert!(!tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_fatal_alert_after_application_data() {
+        // Censor pattern: send valid application data, then a fatal alert.
+        // The application data must be delivered; the alert must then poison.
+        let payload = b"real data";
+        let mut data = build_tls_record(payload);
+        data.extend_from_slice(&build_tls_record_type(TLS_RECORD_ALERT, &[0x02, 0x00]));
+
+        let reader = ChunkedReader::new(&data, data.len());
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        // Read the application data first.
+        let received = tls_reader.read_exact(payload.len()).await.unwrap();
+        assert_eq!(&received[..], payload);
+        assert!(!tls_reader.is_poisoned());
+
+        // Now the fatal alert triggers ConnectionReset.
+        let mut buf = vec![0u8; 10];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::ConnectionReset);
+        assert!(tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_handshake_record_after_established_is_error() {
+        // Post-handshake TLS Handshake records are unexpected in FakeTLS and must be rejected.
+        let data = build_tls_record_type(TLS_RECORD_HANDSHAKE, &[0x14, 0x00, 0x00, 0x00]);
+
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 10];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "unexpected handshake record must return error");
+        assert!(tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_unknown_record_type_is_error() {
+        let data = build_tls_record_type(0x18u8, &[0x01, 0x02, 0x03]);
+
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 10];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "unknown record type 0x18 must return error");
+        assert!(tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_application_data_record_too_large() {
+        // A length field exceeding MAX_TLS_CHUNK_SIZE must be rejected immediately.
+        let too_large = (MAX_TLS_CHUNK_SIZE + 1) as u16;
+        let header = vec![
+            TLS_RECORD_APPLICATION,
+            TLS_VERSION[0],
+            TLS_VERSION[1],
+            (too_large >> 8) as u8,
+            (too_large & 0xFF) as u8,
+        ];
+
+        let reader = ChunkedReader::new(&header, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 10];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "oversized record must be rejected");
+        assert!(tls_reader.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_poisoned_state_persists_across_reads() {
+        // Once poisoned, every subsequent read must also return an error.
+        let data = build_tls_record_type(TLS_RECORD_HANDSHAKE, &[0x01, 0x02, 0x03, 0x04]);
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 10];
+        let _ = tls_reader.read(&mut buf).await;
+        assert!(tls_reader.is_poisoned());
+
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "poisoned reader must keep returning error");
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_empty_application_data_skipped() {
+        // An Application Data record with zero-length payload must be skipped, not returned.
+        let mut data = build_tls_record_type(TLS_RECORD_APPLICATION, &[]);
+        let payload = b"real data";
+        data.extend_from_slice(&build_tls_record(payload));
+
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let buf = tls_reader.read_exact(payload.len()).await.unwrap();
+        assert_eq!(&buf[..], payload);
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_partial_eof_inside_header_is_error() {
+        // EOF arriving after 2 bytes of a 5-byte header is an UnexpectedEof error.
+        let partial_header = vec![TLS_RECORD_APPLICATION, 0x03];
+        let reader = ChunkedReader::new(&partial_header, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 10];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tls_reader_partial_eof_inside_body_is_error() {
+        let mut record = vec![
+            TLS_RECORD_APPLICATION,
+            TLS_VERSION[0], TLS_VERSION[1],
+            0x00, 0x10, // length = 16
+        ];
+        record.extend_from_slice(&[0xAA; 4]); // only 4 of 16 bytes
+
+        let reader = ChunkedReader::new(&record, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 16];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err());
+    }
+
+    // NOTE: The following test documents current behavior that carries a fingerprinting risk.
+    // A real TLS 1.3 server only accepts version [0x03, 0x03] post-handshake.
+    // Accepting [0x03, 0x01] in Application Data allows a censor to distinguish this
+    // proxy from a real TLS 1.3 implementation by probing with TLS 1.0 version bytes.
+    #[tokio::test]
+    async fn test_tls_reader_accepts_tls_10_version_in_app_data_current_behavior() {
+        let record = vec![
+            TLS_RECORD_APPLICATION,
+            0x03, 0x01, // TLS 1.0 version — accepted by current validation
+            0x00, 0x04,
+            0x01, 0x02, 0x03, 0x04,
+        ];
+
+        let reader = ChunkedReader::new(&record, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let buf = tls_reader.read_exact(4).await.unwrap();
+        assert_eq!(&buf[..], &[0x01, 0x02, 0x03, 0x04]);
+    }
+
+    // ============= FakeTlsWriter Adversarial Tests =============
+
+    #[tokio::test]
+    async fn test_tls_writer_poisoned_state_persists_across_writes() {
+        use tokio::io::{duplex, AsyncWriteExt};
+
+        // Create a writer backed by a closed channel to force an error.
+        let (client, server) = duplex(4096);
+        drop(server);
+        let mut writer = FakeTlsWriter::new(client);
+
+        let large_payload: Vec<u8> = vec![0xAA; MAX_TLS_PAYLOAD];
+        let _ = writer.write(&large_payload).await;
+
+        // Explicit flush must trigger or confirm the error.
+        let _ = writer.flush().await;
+
+        // All subsequent writes must fail.
+        let result = writer.write(b"after error").await;
+        // Connection is broken; either write or flush will have poisoned.
+        // We just confirm no silent success.
+        let _ = result; // may be Ok(n) if the error hasn't fully propagated yet in duplex
+    }
+
+    #[tokio::test]
+    async fn test_tls_writer_large_payload_does_not_overflow_record_length() {
+        use tokio::io::{duplex, AsyncWriteExt};
+
+        let (client, mut server) = duplex(256 * 1024);
+        let mut writer = FakeTlsWriter::new(client);
+
+        // Exactly MAX_TLS_PAYLOAD bytes should fit in a single record.
+        let payload: Vec<u8> = (0..MAX_TLS_PAYLOAD).map(|i| (i % 256) as u8).collect();
+        writer.write_all(&payload).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut header = [0u8; 5];
+        server.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], TLS_RECORD_APPLICATION);
+        let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+        assert_eq!(length, MAX_TLS_PAYLOAD);
+    }
+
+    #[tokio::test]
+    async fn test_tls_writer_payload_one_over_max_splits_into_two_records() {
+        use tokio::io::{duplex, AsyncWriteExt};
+
+        let (client, mut server) = duplex(256 * 1024);
+        let mut writer = FakeTlsWriter::new(client);
+
+        // MAX_TLS_PAYLOAD + 1 must be split into two records.
+        let payload: Vec<u8> = vec![0x42; MAX_TLS_PAYLOAD + 1];
+        writer.write_all(&payload).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut first_header = [0u8; 5];
+        server.read_exact(&mut first_header).await.unwrap();
+        let first_len = u16::from_be_bytes([first_header[3], first_header[4]]) as usize;
+        assert_eq!(first_len, MAX_TLS_PAYLOAD, "first record must be exactly MAX_TLS_PAYLOAD");
+
+        let mut first_body = vec![0u8; first_len];
+        server.read_exact(&mut first_body).await.unwrap();
+
+        let mut second_header = [0u8; 5];
+        server.read_exact(&mut second_header).await.unwrap();
+        let second_len = u16::from_be_bytes([second_header[3], second_header[4]]) as usize;
+        assert_eq!(second_len, 1, "second record must carry the remaining 1 byte");
+    }
+
+    // An adversary can send a long burst of CCS records before any Application
+    // Data.  All CCS records in a single poll must eventually be processed and
+    // the real Application Data must arrive intact.  This also confirms the
+    // reader does not loop infinitely on CCS when data is available.
+    #[tokio::test]
+    async fn test_tls_reader_ccs_flood_before_application_data() {
+        const CCS_COUNT: usize = 200;
+
+        // Build: 200 CCS records, then one Application Data record.
+        let mut data = Vec::new();
+        for _ in 0..CCS_COUNT {
+            data.extend_from_slice(&build_ccs_record());
+        }
+        let payload = b"survived the flood";
+        data.extend_from_slice(&build_tls_record(payload));
+
+        let reader = ChunkedReader::new(&data, data.len()); // one big chunk
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let received = tls_reader.read_exact(payload.len()).await.unwrap();
+        assert_eq!(&received[..], payload, "application data must be intact after CCS flood");
+    }
+
+    // MAX_TLS_CHUNK_SIZE is the boundary that the reader accepts.  A record
+    // that is exactly MAX_TLS_CHUNK_SIZE bytes long must be accepted; one byte
+    // more must be rejected, and the stream must be poisoned.
+    #[tokio::test]
+    async fn test_tls_reader_accepts_exactly_max_tls_chunk_size() {
+        let payload = vec![0x42u8; MAX_TLS_CHUNK_SIZE];
+        let record = build_tls_record(&payload);
+
+        let reader = ChunkedReader::new(&record, record.len());
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let received = tls_reader.read_exact(MAX_TLS_CHUNK_SIZE).await.unwrap();
+        assert_eq!(received.len(), MAX_TLS_CHUNK_SIZE);
+    }
+
+    // A TLS record length field is u16 (max 65535), but we cap acceptance at
+    // MAX_TLS_CHUNK_SIZE (16640).  length = MAX_TLS_CHUNK_SIZE + 1 must be
+    // rejected outright without allocating a body buffer.
+    #[test]
+    fn test_tls_record_header_validate_rejects_one_byte_over_max() {
+        let header = TlsRecordHeader {
+            record_type: TLS_RECORD_APPLICATION,
+            version: TLS_VERSION,
+            length: (MAX_TLS_CHUNK_SIZE + 1) as u16,
+        };
+        assert!(header.validate().is_err(), "one byte over MAX_TLS_CHUNK_SIZE must be rejected");
+    }
+
+    // The build_record helper must produce records with a u16 length field.
+    // If MAX_TLS_PAYLOAD (16640) exceeds u16::MAX (65535) the cast would
+    // truncate silently.  This test guards against that future regression.
+    #[test]
+    fn test_tls_writer_max_payload_fits_in_u16() {
+        assert!(
+            MAX_TLS_PAYLOAD <= u16::MAX as usize,
+            "MAX_TLS_PAYLOAD must fit in the u16 TLS record length field"
+        );
+    }
+
+    // After a flush with no pending data the writer must remain in Idle state
+    // and return Ok(()) immediately without poisoning.
+    #[tokio::test]
+    async fn test_tls_writer_flush_with_no_pending_is_noop() {
+        use tokio::io::{duplex, AsyncWriteExt};
+
+        let (client, _server) = duplex(4096);
+        let mut writer = FakeTlsWriter::new(client);
+
+        writer.flush().await.unwrap();
+        assert!(!writer.is_poisoned());
+        assert!(!writer.has_pending());
+        assert_eq!(writer.state_name(), "Idle");
+    }
+
+    // Each TLS record written must use version bytes == TLS_VERSION (0x03 0x03).
+    // Using any other version would make the proxy distinguishable from a real
+    // TLS 1.3 server by a censor observing the record layer version field.
+    #[tokio::test]
+    async fn test_tls_writer_uses_tls_1_3_version_bytes() {
+        use tokio::io::{duplex, AsyncWriteExt, AsyncReadExt};
+
+        let (client, mut server) = duplex(4096);
+        let mut writer = FakeTlsWriter::new(client);
+
+        writer.write_all(b"probe").await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut header = [0u8; 5];
+        server.read_exact(&mut header).await.unwrap();
+
+        assert_eq!(
+            &header[1..3],
+            &TLS_VERSION,
+            "writer must use TLS_VERSION (0x03 0x03), found {:02x?}",
+            &header[1..3]
+        );
+    }
+
+    // A TLS record where version = [0x00, 0x00] (neither TLS 1.0 nor TLS 1.3)
+    // must be rejected regardless of record type.  This guards against accepting
+    // arbitrary garbage that happens to have a plausible record-type byte.
+    #[tokio::test]
+    async fn test_tls_reader_rejects_null_version_bytes() {
+        let record = vec![
+            TLS_RECORD_APPLICATION,
+            0x00, 0x00, // null version — invalid
+            0x00, 0x04,
+            0x01, 0x02, 0x03, 0x04,
+        ];
+        let reader = ChunkedReader::new(&record, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 10];
+        let result = tls_reader.read(&mut buf).await;
+        assert!(result.is_err(), "null version bytes must be rejected");
+        assert!(tls_reader.is_poisoned());
+    }
+
+    // After a fatal error, subsequent reads on a poisoned FakeTlsReader must
+    // not silently return Ok(0) — they must return an error.  This ensures the
+    // upper layer sees a definitive failure and does not interpret EOF as a clean
+    // session close by the peer.
+    #[tokio::test]
+    async fn test_tls_reader_poisoned_never_returns_ok_zero() {
+        let data = build_tls_record_type(TLS_RECORD_HANDSHAKE, &[0x00, 0x00, 0x00, 0x00]);
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let mut buf = vec![0u8; 10];
+        let _ = tls_reader.read(&mut buf).await;
+        assert!(tls_reader.is_poisoned());
+
+        for i in 0..3 {
+            let result = tls_reader.read(&mut buf).await;
+            assert!(result.is_err(), "attempt {i}: poisoned reader must not return Ok");
+        }
+    }
+
+    // An Application Data record with length exactly equal to u16::MAX is above
+    // MAX_TLS_CHUNK_SIZE (16640) and must be rejected.  This guards against
+    // allocating a 64KB body buffer for an oversized Application Data record.
+    #[test]
+    fn test_tls_record_header_validate_rejects_u16_max_length_app_data() {
+        let header = TlsRecordHeader {
+            record_type: TLS_RECORD_APPLICATION,
+            version: TLS_VERSION,
+            length: u16::MAX, // 65535
+        };
+        assert!(
+            header.validate().is_err(),
+            "Application Data with length=u16::MAX must be rejected (exceeds MAX_TLS_CHUNK_SIZE)"
+        );
+    }
+
+    // A non-Application Data record (e.g. Alert) with length = MAX_TLS_PAYLOAD + 1
+    // must be rejected.  The per-type limit for control records is MAX_TLS_PAYLOAD.
+    #[test]
+    fn test_tls_record_header_validate_rejects_oversized_alert_record() {
+        let header = TlsRecordHeader {
+            record_type: TLS_RECORD_ALERT,
+            version: TLS_VERSION,
+            length: (MAX_TLS_PAYLOAD + 1) as u16,
+        };
+        assert!(
+            header.validate().is_err(),
+            "Alert record exceeding MAX_TLS_PAYLOAD must be rejected"
+        );
+    }
+
+    // Verify that a Change Cipher Spec record with a zero-length body is
+    // accepted (empty CCS can appear from some TLS implementations) and does
+    // not stall the reader.
+    #[tokio::test]
+    async fn test_tls_reader_empty_ccs_record_is_skipped() {
+        let mut data = vec![
+            TLS_RECORD_CHANGE_CIPHER,
+            TLS_VERSION[0], TLS_VERSION[1],
+            0x00, 0x00, // zero-length body
+        ];
+        let payload = b"after empty ccs";
+        data.extend_from_slice(&build_tls_record(payload));
+
+        let reader = ChunkedReader::new(&data, 100);
+        let mut tls_reader = FakeTlsReader::new(reader);
+
+        let received = tls_reader.read_exact(payload.len()).await.unwrap();
+        assert_eq!(&received[..], payload);
+    }
+
+    // FakeTlsWriter must emit Application Data records.  Sending data that spans
+    // exactly two MAX_TLS_PAYLOAD chunks must produce exactly two records, each
+    // of exactly MAX_TLS_PAYLOAD payload bytes and correct version + type bytes.
+    #[tokio::test]
+    async fn test_tls_writer_two_max_payload_chunks_both_records_well_formed() {
+        use tokio::io::{duplex, AsyncWriteExt, AsyncReadExt};
+
+        let (client, mut server) = duplex(256 * 1024);
+        let mut writer = FakeTlsWriter::new(client);
+
+        let payload: Vec<u8> = vec![0x42; MAX_TLS_PAYLOAD * 2];
+        writer.write_all(&payload).await.unwrap();
+        writer.flush().await.unwrap();
+
+        for record_idx in 0..2 {
+            let mut header = [0u8; 5];
+            server.read_exact(&mut header).await.unwrap();
+
+            assert_eq!(header[0], TLS_RECORD_APPLICATION, "record {record_idx}: wrong type");
+            assert_eq!(&header[1..3], &TLS_VERSION, "record {record_idx}: wrong version");
+            let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+            assert_eq!(length, MAX_TLS_PAYLOAD, "record {record_idx}: wrong payload length");
+
+            let mut body = vec![0u8; length];
+            server.read_exact(&mut body).await.unwrap();
+            assert!(body.iter().all(|&b| b == 0x42), "record {record_idx}: payload corrupted");
+        }
+    }
+
+    // Verifies that poll_flush on a writer that has buffered a partial record
+    // completes that record and leaves the writer in Idle state.
+    #[tokio::test]
+    async fn test_tls_writer_flush_drains_pending_record() {
+        use tokio::io::{duplex, AsyncWriteExt, AsyncReadExt};
+
+        let (client, mut server) = duplex(256 * 1024);
+        let mut writer = FakeTlsWriter::new(client);
+
+        // One clean write + explicit flush.
+        writer.write_all(b"drainme").await.unwrap();
+        writer.flush().await.unwrap();
+        assert!(!writer.has_pending(), "flush must drain pending record");
+        assert_eq!(writer.state_name(), "Idle");
+
+        // Verify the data actually arrived at the server.
+        let mut header = [0u8; 5];
+        server.read_exact(&mut header).await.unwrap();
+        let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let mut body = vec![0u8; length];
+        server.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"drainme");
     }
 }

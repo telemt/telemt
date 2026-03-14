@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::crypto::SecureRandom;
 use std::sync::LazyLock;
@@ -23,11 +23,11 @@ pub static TG_DATACENTERS_V4: LazyLock<Vec<IpAddr>> = LazyLock::new(|| {
 
 pub static TG_DATACENTERS_V6: LazyLock<Vec<IpAddr>> = LazyLock::new(|| {
     vec![
-        IpAddr::V6("2001:b28:f23d:f001::a".parse().unwrap()),
-        IpAddr::V6("2001:67c:04e8:f002::a".parse().unwrap()),
-        IpAddr::V6("2001:b28:f23d:f003::a".parse().unwrap()),
-        IpAddr::V6("2001:67c:04e8:f004::a".parse().unwrap()),
-        IpAddr::V6("2001:b28:f23f:f005::a".parse().unwrap()),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23d, 0xf001, 0, 0, 0, 0x000a)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x067c, 0x04e8, 0xf002, 0, 0, 0, 0x000a)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23d, 0xf003, 0, 0, 0, 0x000a)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x067c, 0x04e8, 0xf004, 0, 0, 0, 0x000a)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23f, 0xf005, 0, 0, 0, 0x000a)),
     ]
 });
 
@@ -52,16 +52,16 @@ pub static TG_MIDDLE_PROXIES_V4: LazyLock<std::collections::HashMap<i32, Vec<(Ip
 pub static TG_MIDDLE_PROXIES_V6: LazyLock<std::collections::HashMap<i32, Vec<(IpAddr, u16)>>> = 
     LazyLock::new(|| {
         let mut m = std::collections::HashMap::new();
-        m.insert(1, vec![(IpAddr::V6("2001:b28:f23d:f001::d".parse().unwrap()), 8888)]);
-        m.insert(-1, vec![(IpAddr::V6("2001:b28:f23d:f001::d".parse().unwrap()), 8888)]);
-        m.insert(2, vec![(IpAddr::V6("2001:67c:04e8:f002::d".parse().unwrap()), 80)]);
-        m.insert(-2, vec![(IpAddr::V6("2001:67c:04e8:f002::d".parse().unwrap()), 80)]);
-        m.insert(3, vec![(IpAddr::V6("2001:b28:f23d:f003::d".parse().unwrap()), 8888)]);
-        m.insert(-3, vec![(IpAddr::V6("2001:b28:f23d:f003::d".parse().unwrap()), 8888)]);
-        m.insert(4, vec![(IpAddr::V6("2001:67c:04e8:f004::d".parse().unwrap()), 8888)]);
-        m.insert(-4, vec![(IpAddr::V6("2001:67c:04e8:f004::d".parse().unwrap()), 8888)]);
-        m.insert(5, vec![(IpAddr::V6("2001:b28:f23f:f005::d".parse().unwrap()), 8888)]);
-        m.insert(-5, vec![(IpAddr::V6("2001:b28:f23f:f005::d".parse().unwrap()), 8888)]);
+        m.insert(1, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23d, 0xf001, 0, 0, 0, 0x000d)), 8888)]);
+        m.insert(-1, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23d, 0xf001, 0, 0, 0, 0x000d)), 8888)]);
+        m.insert(2, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x067c, 0x04e8, 0xf002, 0, 0, 0, 0x000d)), 80)]);
+        m.insert(-2, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x067c, 0x04e8, 0xf002, 0, 0, 0, 0x000d)), 80)]);
+        m.insert(3, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23d, 0xf003, 0, 0, 0, 0x000d)), 8888)]);
+        m.insert(-3, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23d, 0xf003, 0, 0, 0, 0x000d)), 8888)]);
+        m.insert(4, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x067c, 0x04e8, 0xf004, 0, 0, 0, 0x000d)), 8888)]);
+        m.insert(-4, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x067c, 0x04e8, 0xf004, 0, 0, 0, 0x000d)), 8888)]);
+        m.insert(5, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23f, 0xf005, 0, 0, 0, 0x000d)), 8888)]);
+        m.insert(-5, vec![(IpAddr::V6(Ipv6Addr::new(0x2001, 0x0b28, 0xf23f, 0xf005, 0, 0, 0, 0x000d)), 8888)]);
         m
     });
 
@@ -72,35 +72,35 @@ pub static TG_MIDDLE_PROXIES_V6: LazyLock<std::collections::HashMap<i32, Vec<(Ip
 #[repr(u32)]
 pub enum ProtoTag {
     /// Abridged protocol - compact framing
-    Abridged = 0xefefefef,
+    Abridged = 0xefef_efef,
     /// Intermediate protocol - simple 4-byte length prefix
-    Intermediate = 0xeeeeeeee,
+    Intermediate = 0xeeee_eeee,
     /// Secure intermediate - with random padding
-    Secure = 0xdddddddd,
+    Secure = 0xdddd_dddd,
 }
 
 impl ProtoTag {
     /// Parse protocol tag from 4 bytes
-    pub fn from_bytes(bytes: [u8; 4]) -> Option<Self> {
+    pub const fn from_bytes(bytes: [u8; 4]) -> Option<Self> {
         match u32::from_le_bytes(bytes) {
-            0xefefefef => Some(ProtoTag::Abridged),
-            0xeeeeeeee => Some(ProtoTag::Intermediate),
-            0xdddddddd => Some(ProtoTag::Secure),
+            0xefef_efef => Some(Self::Abridged),
+            0xeeee_eeee => Some(Self::Intermediate),
+            0xdddd_dddd => Some(Self::Secure),
             _ => None,
         }
     }
     
     /// Convert to 4 bytes (little-endian)
-    pub fn to_bytes(self) -> [u8; 4] {
+    pub const fn to_bytes(self) -> [u8; 4] {
         (self as u32).to_le_bytes()
     }
     
     /// Get protocol tag as bytes slice
-    pub fn as_bytes(&self) -> &'static [u8; 4] {
+    pub const fn as_bytes(&self) -> &'static [u8; 4] {
         match self {
-            ProtoTag::Abridged => &PROTO_TAG_ABRIDGED,
-            ProtoTag::Intermediate => &PROTO_TAG_INTERMEDIATE,
-            ProtoTag::Secure => &PROTO_TAG_SECURE,
+            Self::Abridged => &PROTO_TAG_ABRIDGED,
+            Self::Intermediate => &PROTO_TAG_INTERMEDIATE,
+            Self::Secure => &PROTO_TAG_SECURE,
         }
     }
 }
@@ -159,14 +159,18 @@ pub const MAX_TLS_RECORD_SIZE: usize = 16384;
 pub const MAX_TLS_CHUNK_SIZE: usize = 16384 + 256;
 
 /// Secure Intermediate payload is expected to be 4-byte aligned.
-pub fn is_valid_secure_payload_len(data_len: usize) -> bool {
+pub const fn is_valid_secure_payload_len(data_len: usize) -> bool {
     data_len.is_multiple_of(4)
 }
 
 /// Compute Secure Intermediate payload length from wire length.
-/// Secure mode strips up to 3 random tail bytes by truncating to 4-byte boundary.
-pub fn secure_payload_len_from_wire_len(wire_len: usize) -> Option<usize> {
-    if wire_len < 4 {
+///
+/// Secure Intermediate frames ALWAYS carry 1–3 bytes of random padding so that
+/// `wire_len % 4 != 0`. A frame where the wire length is divisible by 4 has
+/// zero padding, which violates the protocol invariant and must be rejected.
+/// Minimum valid wire length is 4 (data) + 1 (min padding) = 5.
+pub const fn secure_payload_len_from_wire_len(wire_len: usize) -> Option<usize> {
+    if wire_len < 4 || wire_len.is_multiple_of(4) {
         return None;
     }
     Some(wire_len - (wire_len % 4))
@@ -236,10 +240,10 @@ pub const RPC_FLAG_NOT_ENCRYPTED: u32 = 0x2;
 pub const RPC_FLAG_HAS_AD_TAG: u32    = 0x8;
 pub const RPC_FLAG_MAGIC: u32          = 0x1000;
 pub const RPC_FLAG_EXTMODE2: u32       = 0x20000;
-pub const RPC_FLAG_PAD: u32            = 0x8000000;
-pub const RPC_FLAG_INTERMEDIATE: u32   = 0x20000000;
-pub const RPC_FLAG_ABRIDGED: u32       = 0x40000000;
-pub const RPC_FLAG_QUICKACK: u32       = 0x80000000;
+pub const RPC_FLAG_PAD: u32            = 0x0800_0000;
+pub const RPC_FLAG_INTERMEDIATE: u32   = 0x2000_0000;
+pub const RPC_FLAG_ABRIDGED: u32       = 0x4000_0000;
+pub const RPC_FLAG_QUICKACK: u32       = 0x8000_0000;
 
 pub const RPC_PROXY_REQ: [u8; 4] = [0xee, 0xf1, 0xce, 0x36];
 /// RPC Proxy Answer
@@ -261,10 +265,10 @@ pub mod rpc_flags {
     pub const FLAG_HAS_AD_TAG: u32 = 0x8;
     pub const FLAG_MAGIC: u32 = 0x1000;
     pub const FLAG_EXTMODE2: u32 = 0x20000;
-    pub const FLAG_PAD: u32 = 0x8000000;
-    pub const FLAG_INTERMEDIATE: u32 = 0x20000000;
-    pub const FLAG_ABRIDGED: u32 = 0x40000000;
-    pub const FLAG_QUICKACK: u32 = 0x80000000;
+    pub const FLAG_PAD: u32 = 0x0800_0000;
+    pub const FLAG_INTERMEDIATE: u32 = 0x2000_0000;
+    pub const FLAG_ABRIDGED: u32 = 0x4000_0000;
+    pub const FLAG_QUICKACK: u32 = 0x8000_0000;
 }
 
 
@@ -284,19 +288,19 @@ pub mod rpc_flags {
     // ============= RPC Constants (u32 native endian) =============
     // From mtproto-common.h + net-tcp-rpc-common.h + mtproto-proxy.c
     
-    pub const RPC_NONCE_U32: u32           = 0x7acb87aa;
-    pub const RPC_HANDSHAKE_U32: u32       = 0x7682eef5;
-    pub const RPC_HANDSHAKE_ERROR_U32: u32 = 0x6a27beda;
-    pub const TL_PROXY_TAG_U32: u32        = 0xdb1e26ae;  // mtproto-proxy.c:121
+    pub const RPC_NONCE_U32: u32           = 0x7acb_87aa;
+    pub const RPC_HANDSHAKE_U32: u32       = 0x7682_eef5;
+    pub const RPC_HANDSHAKE_ERROR_U32: u32 = 0x6a27_beda;
+    pub const TL_PROXY_TAG_U32: u32        = 0xdb1e_26ae;  // mtproto-proxy.c:121
     
     // mtproto-common.h
-    pub const RPC_PROXY_REQ_U32: u32       = 0x36cef1ee;
-    pub const RPC_PROXY_ANS_U32: u32       = 0x4403da0d;
-    pub const RPC_CLOSE_CONN_U32: u32      = 0x1fcf425d;
-    pub const RPC_CLOSE_EXT_U32: u32       = 0x5eb634a2;
-    pub const RPC_SIMPLE_ACK_U32: u32      = 0x3bac409b;
-    pub const RPC_PING_U32: u32            = 0x5730a2df;
-    pub const RPC_PONG_U32: u32            = 0x8430eaa7;
+    pub const RPC_PROXY_REQ_U32: u32       = 0x36ce_f1ee;
+    pub const RPC_PROXY_ANS_U32: u32       = 0x4403_da0d;
+    pub const RPC_CLOSE_CONN_U32: u32      = 0x1fcf_425d;
+    pub const RPC_CLOSE_EXT_U32: u32       = 0x5eb6_34a2;
+    pub const RPC_SIMPLE_ACK_U32: u32      = 0x3bac_409b;
+    pub const RPC_PING_U32: u32            = 0x5730_a2df;
+    pub const RPC_PONG_U32: u32            = 0x8430_eaa7;
     
     pub const RPC_CRYPTO_NONE_U32: u32 = 0;
     pub const RPC_CRYPTO_AES_U32: u32  = 1;
@@ -307,10 +311,10 @@ pub mod rpc_flags {
         pub const FLAG_HAS_AD_TAG2: u32   = 0x8;
         pub const FLAG_MAGIC: u32         = 0x1000;
         pub const FLAG_EXTMODE2: u32      = 0x20000;
-        pub const FLAG_PAD: u32           = 0x8000000;
-        pub const FLAG_INTERMEDIATE: u32  = 0x20000000;
-        pub const FLAG_ABRIDGED: u32      = 0x40000000;
-        pub const FLAG_QUICKACK: u32      = 0x80000000;
+        pub const FLAG_PAD: u32           = 0x0800_0000;
+        pub const FLAG_INTERMEDIATE: u32  = 0x2000_0000;
+        pub const FLAG_ABRIDGED: u32      = 0x4000_0000;
+        pub const FLAG_QUICKACK: u32      = 0x8000_0000;
     }
 
     pub mod rpc_crypto_flags {
@@ -373,13 +377,26 @@ mod tests {
     }
 
     #[test]
-    fn secure_wire_len_roundtrip_for_aligned_payload() {
+    fn secure_wire_len_roundtrip_for_valid_padding() {
+        // Valid Secure Intermediate padding is 1..=3.  wire_len % 4 must be non-zero.
         for payload_len in (4..4096).step_by(4) {
-            for padding in 0..=3usize {
+            for padding in 1..=3usize {
                 let wire_len = payload_len + padding;
                 let recovered = secure_payload_len_from_wire_len(wire_len);
-                assert_eq!(recovered, Some(payload_len));
+                assert_eq!(recovered, Some(payload_len), "payload_len={payload_len}, padding={padding}");
             }
+        }
+    }
+
+    #[test]
+    fn secure_wire_len_rejects_zero_padding() {
+        // Any wire length divisible by 4 means zero padding, which is invalid.
+        for payload_len in (4..256).step_by(4) {
+            assert_eq!(
+                secure_payload_len_from_wire_len(payload_len),
+                None,
+                "wire_len={payload_len} is divisible by 4 and must be rejected"
+            );
         }
     }
 
@@ -389,5 +406,6 @@ mod tests {
         assert_eq!(secure_payload_len_from_wire_len(1), None);
         assert_eq!(secure_payload_len_from_wire_len(2), None);
         assert_eq!(secure_payload_len_from_wire_len(3), None);
+        assert_eq!(secure_payload_len_from_wire_len(4), None);
     }
 }

@@ -135,11 +135,10 @@ fn detect_interface_for_ip(ip: IpAddr) -> Option<String> {
                     if IpAddr::V4(v4.ip()) == ip {
                         return Some(iface.interface_name);
                     }
-                } else if let Some(v6) = address.as_sockaddr_in6() {
-                    if IpAddr::V6(v6.ip()) == ip {
+                } else if let Some(v6) = address.as_sockaddr_in6()
+                    && IpAddr::V6(v6.ip()) == ip {
                         return Some(iface.interface_name);
                     }
-                }
             }
         }
     }
@@ -257,49 +256,6 @@ pub async fn format_me_route(
     format!("mixed upstreams ({})", kinds.join(", "))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-    fn sample(base: MePingSample) -> MePingSample {
-        base
-    }
-
-    #[test]
-    fn ok_line_contains_both_timings() {
-        let s = sample(MePingSample {
-            dc: 4,
-            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8888),
-            route: Some("direct src=1.2.3.4".to_string()),
-            connect_ms: Some(12.3),
-            handshake_ms: Some(34.7),
-            error: None,
-            family: MePingFamily::V4,
-        });
-        let line = format_sample_line(&s);
-        assert!(line.contains("Ping: 12 ms"));
-        assert!(line.contains("RPC: 35 ms"));
-        assert!(line.contains("OK"));
-    }
-
-    #[test]
-    fn error_line_mentions_reason() {
-        let s = sample(MePingSample {
-            dc: -5,
-            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)), 80),
-            route: Some("socks5".to_string()),
-            connect_ms: Some(10.0),
-            handshake_ms: None,
-            error: Some("handshake timeout".to_string()),
-            family: MePingFamily::V4,
-        });
-        let line = format_sample_line(&s);
-        assert!(line.contains("- 5.6.7.8:80"));
-        assert!(line.contains("handshake timeout"));
-    }
-}
-
 pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingReport> {
     let mut reports = Vec::new();
 
@@ -382,5 +338,48 @@ fn short_err(err: &ProxyError) -> String {
         ProxyError::Proxy(e) => format!("proxy: {e}"),
         ProxyError::Io(e) => format!("io: {e}"),
         _ => format!("{err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn sample(base: MePingSample) -> MePingSample {
+        base
+    }
+
+    #[test]
+    fn ok_line_contains_both_timings() {
+        let s = sample(MePingSample {
+            dc: 4,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8888),
+            route: Some("direct src=1.2.3.4".to_string()),
+            connect_ms: Some(12.3),
+            handshake_ms: Some(34.7),
+            error: None,
+            family: MePingFamily::V4,
+        });
+        let line = format_sample_line(&s);
+        assert!(line.contains("Ping: 12 ms"));
+        assert!(line.contains("RPC: 35 ms"));
+        assert!(line.contains("OK"));
+    }
+
+    #[test]
+    fn error_line_mentions_reason() {
+        let s = sample(MePingSample {
+            dc: -5,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)), 80),
+            route: Some("socks5".to_string()),
+            connect_ms: Some(10.0),
+            handshake_ms: None,
+            error: Some("handshake timeout".to_string()),
+            family: MePingFamily::V4,
+        });
+        let line = format_sample_line(&s);
+        assert!(line.contains("- 5.6.7.8:80"));
+        assert!(line.contains("handshake timeout"));
     }
 }

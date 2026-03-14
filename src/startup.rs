@@ -26,7 +26,7 @@ pub enum StartupStatus {
 }
 
 impl StartupStatus {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Initializing => "initializing",
             Self::Ready => "ready",
@@ -44,7 +44,7 @@ pub enum StartupComponentStatus {
 }
 
 impl StartupComponentStatus {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
@@ -65,7 +65,7 @@ pub enum StartupMeStatus {
 }
 
 impl StartupMeStatus {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Initializing => "initializing",
@@ -334,7 +334,7 @@ fn component_blueprint() -> Vec<StartupComponent> {
     ]
 }
 
-fn component(id: &'static str, title: &'static str, weight: f64) -> StartupComponent {
+const fn component(id: &'static str, title: &'static str, weight: f64) -> StartupComponent {
     StartupComponent {
         id,
         title,
@@ -353,7 +353,9 @@ fn normalize_details(details: Option<String>) -> Option<String> {
         if detail.len() <= 256 {
             detail
         } else {
-            detail[..256].to_string()
+            // floor_char_boundary ensures we never slice inside a multibyte codepoint.
+            let boundary = detail.floor_char_boundary(256);
+            detail[..boundary].to_string()
         }
     })
 }
@@ -370,4 +372,92 @@ fn now_epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_details;
+
+    #[test]
+    fn normalize_details_none_returns_none() {
+        assert!(normalize_details(None).is_none());
+    }
+
+    #[test]
+    fn normalize_details_short_string_unchanged() {
+        let s = "hello".to_string();
+        assert_eq!(normalize_details(Some(s.clone())), Some(s));
+    }
+
+    #[test]
+    fn normalize_details_exactly_256_ascii_unchanged() {
+        let s = "a".repeat(256);
+        let result = normalize_details(Some(s));
+        assert_eq!(result.as_deref().map(str::len), Some(256));
+    }
+
+    #[test]
+    fn normalize_details_ascii_over_256_truncated_to_256() {
+        let s = "a".repeat(300);
+        let result = normalize_details(Some(s)).unwrap();
+        assert_eq!(result.len(), 256);
+    }
+
+    #[test]
+    fn normalize_details_multibyte_char_at_boundary_truncates_before_it() {
+        // 255 ASCII bytes + 3-byte UTF-8 '€' (E2 82 AC) = 258 bytes total.
+        // floor_char_boundary(256) must land at 255 (before the multibyte char).
+        let mut s = "a".repeat(255);
+        s.push('\u{20AC}'); // '€' — 3 bytes
+        assert_eq!(s.len(), 258);
+        let result = normalize_details(Some(s)).unwrap();
+        assert!(result.len() <= 256);
+        assert_eq!(result.len(), 255);
+    }
+
+    #[test]
+    fn normalize_details_4byte_char_spanning_byte_256_does_not_panic() {
+        // 254 ASCII bytes + 4-byte char (𝕳 = F0 9D 95 B3) = 258 bytes total.
+        // Byte 256 falls inside the 4-byte char (at position 2 of bytes 254..257).
+        // floor_char_boundary(256) must return 254, not 256, to stay before the char.
+        // The old direct slice indexing would panic; this also validates the exact boundary.
+        let mut s = "a".repeat(254);
+        s.push('\u{1D573}'); // 4-byte codepoint
+        assert_eq!(s.len(), 258);
+        let result = normalize_details(Some(s)).unwrap();
+        assert!(result.len() <= 256);
+        assert_eq!(result.len(), 254, "floor_char_boundary(256) must land at 254, not inside the 4-byte char");
+    }
+
+    #[test]
+    fn normalize_details_all_3byte_chars_truncated_on_char_boundary() {
+        // 86 × '€' (3 bytes each) = 258 bytes.
+        // floor_char_boundary(256) must return 255 (85 × 3 = 255).
+        let s = "\u{20AC}".repeat(86);
+        assert_eq!(s.len(), 258);
+        let result = normalize_details(Some(s)).unwrap();
+        assert!(result.is_char_boundary(result.len()));
+        assert_eq!(result.len(), 255);
+    }
+
+    #[test]
+    fn normalize_details_2byte_chars_boundary_at_even_offset() {
+        // 128 × 'é' (C3 A9, 2 bytes each) = 256 bytes — exactly on boundary.
+        let s = "\u{00E9}".repeat(128);
+        assert_eq!(s.len(), 256);
+        let result = normalize_details(Some(s.clone())).unwrap();
+        // Exactly 256 bytes, so returned unchanged.
+        assert_eq!(result.len(), 256);
+        assert_eq!(result, s);
+    }
+
+    #[test]
+    fn normalize_details_2byte_chars_above_boundary_truncated() {
+        // 129 × 'é' = 258 bytes.  floor_char_boundary(256) == 256 (even boundary).
+        let s = "\u{00E9}".repeat(129);
+        assert_eq!(s.len(), 258);
+        let result = normalize_details(Some(s)).unwrap();
+        assert!(result.is_char_boundary(result.len()));
+        assert_eq!(result.len(), 256); // 128 × 2 = 256
+    }
 }

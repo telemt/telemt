@@ -11,12 +11,24 @@ use tracing::{debug, info, warn};
 
 use crate::config::ProxyConfig;
 use crate::error::Result;
+use crate::network::probe::is_bogon;
 
 use super::MePool;
 use super::rotation::{MeReinitTrigger, enqueue_reinit_trigger};
 use super::secret::download_proxy_secret_with_max_len;
 use super::selftest::record_timeskew_sample;
 use std::time::SystemTime;
+
+/// Hard cap on response body size before any content parsing.
+/// Guards against memory exhaustion from a compromised or MITM-proxied endpoint.
+const MAX_PROXY_CONFIG_RESPONSE_BYTES: usize = 1_048_576; // 1 MiB
+
+/// Maximum number of proxy-for entries stored across all DC groups.
+/// Prevents unbounded HashMap growth from a malformed or adversarial config.
+const MAX_PROXY_CONFIG_ENTRIES: usize = 10_000;
+
+/// Maximum number of distinct DC groups.
+const MAX_PROXY_CONFIG_DC_GROUPS: usize = 500;
 
 async fn retry_fetch(url: &str) -> Option<ProxyConfigData> {
     let delays = [1u64, 5, 15];
@@ -49,6 +61,22 @@ pub fn parse_proxy_config_text(text: &str, http_status: u16) -> ProxyConfigData 
     let mut proxy_for_lines: u32 = 0;
     for line in text.lines() {
         if let Some((dc, ip, port)) = parse_proxy_line(line) {
+            // Enforce per-total and per-DC-group entry caps to bound memory usage.
+            if proxy_for_lines as usize >= MAX_PROXY_CONFIG_ENTRIES {
+                warn!(
+                    limit = MAX_PROXY_CONFIG_ENTRIES,
+                    "proxy-config entry limit reached; remaining lines ignored"
+                );
+                break;
+            }
+            if !map.contains_key(&dc) && map.len() >= MAX_PROXY_CONFIG_DC_GROUPS {
+                warn!(
+                    dc,
+                    limit = MAX_PROXY_CONFIG_DC_GROUPS,
+                    "proxy-config DC group limit reached; entry skipped"
+                );
+                continue;
+            }
             map.entry(dc).or_default().push((ip, port));
             proxy_for_lines = proxy_for_lines.saturating_add(1);
         }
@@ -98,9 +126,17 @@ pub async fn save_proxy_config_cache(path: &str, raw_text: &str) -> Result<()> {
 pub async fn fetch_proxy_config_with_raw(url: &str) -> Result<(ProxyConfigData, String)> {
     let resp = reqwest::get(url)
         .await
-        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}")))?
-        ;
+        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}")))?;
     let http_status = resp.status().as_u16();
+
+    // Reject early when Content-Length already exceeds the response hard cap.
+    if let Some(content_len) = resp.content_length()
+        && content_len > MAX_PROXY_CONFIG_RESPONSE_BYTES as u64
+    {
+        return Err(crate::error::ProxyError::Proxy(format!(
+            "proxy-config Content-Length {content_len} exceeds hard cap {MAX_PROXY_CONFIG_RESPONSE_BYTES}"
+        )));
+    }
 
     if let Some(date) = resp.headers().get(reqwest::header::DATE)
         && let Ok(date_str) = date.to_str()
@@ -118,10 +154,20 @@ pub async fn fetch_proxy_config_with_raw(url: &str) -> Result<(ProxyConfigData, 
         }
     }
 
-    let text = resp
-        .text()
+    let body = resp
+        .bytes()
         .await
         .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config read failed: {e}")))?;
+
+    // Secondary cap covers chunked responses that omit Content-Length.
+    if body.len() > MAX_PROXY_CONFIG_RESPONSE_BYTES {
+        return Err(crate::error::ProxyError::Proxy(format!(
+            "proxy-config response body {} bytes exceeds hard cap {MAX_PROXY_CONFIG_RESPONSE_BYTES}",
+            body.len()
+        )));
+    }
+
+    let text = String::from_utf8_lossy(&body).into_owned();
     let parsed = parse_proxy_config_text(&text, http_status);
     Ok((parsed, text))
 }
@@ -148,7 +194,7 @@ impl StableSnapshot {
         self.applied_hash == Some(hash)
     }
 
-    fn mark_applied(&mut self, hash: u64) {
+    const fn mark_applied(&mut self, hash: u64) {
         self.applied_hash = Some(hash);
     }
 }
@@ -250,6 +296,16 @@ fn parse_proxy_line(line: &str) -> Option<(i32, IpAddr, u16)> {
     let host_port = rest.trim_end_matches(';');
     let dc = dc_str.parse::<i32>().ok()?;
     let (ip, port) = parse_host_port(host_port)?;
+    // Reject bogon/reserved addresses to prevent SSRF from a compromised config source.
+    // A censor that intercepts the config download could otherwise inject loopback,
+    // private-network, or cloud-metadata IPs and use the proxy as an SSRF relay.
+    if is_bogon(ip) || ip.is_unspecified() {
+        return None;
+    }
+    // Port 0 is not a valid proxy endpoint and must be rejected before use.
+    if port == 0 {
+        return None;
+    }
     Some((dc, ip, port))
 }
 
@@ -341,8 +397,8 @@ async fn run_update_cycle(
 
     let mut ready_v4: Option<(ProxyConfigData, u64)> = None;
     let cfg_v4 = retry_fetch("https://core.telegram.org/getProxyConfig").await;
-    if let Some(cfg_v4) = cfg_v4 {
-        if snapshot_passes_guards(cfg, &cfg_v4, "getProxyConfig") {
+    if let Some(cfg_v4) = cfg_v4
+        && snapshot_passes_guards(cfg, &cfg_v4, "getProxyConfig") {
             let cfg_v4_hash = hash_proxy_config(&cfg_v4);
             let stable_hits = state.config_v4.observe(cfg_v4_hash);
             if stable_hits < required_cfg_snapshots {
@@ -361,12 +417,11 @@ async fn run_update_cycle(
                 ready_v4 = Some((cfg_v4, cfg_v4_hash));
             }
         }
-    }
 
     let mut ready_v6: Option<(ProxyConfigData, u64)> = None;
     let cfg_v6 = retry_fetch("https://core.telegram.org/getProxyConfigV6").await;
-    if let Some(cfg_v6) = cfg_v6 {
-        if snapshot_passes_guards(cfg, &cfg_v6, "getProxyConfigV6") {
+    if let Some(cfg_v6) = cfg_v6
+        && snapshot_passes_guards(cfg, &cfg_v6, "getProxyConfigV6") {
             let cfg_v6_hash = hash_proxy_config(&cfg_v6);
             let stable_hits = state.config_v6.observe(cfg_v6_hash);
             if stable_hits < required_cfg_snapshots {
@@ -385,7 +440,6 @@ async fn run_update_cycle(
                 ready_v6 = Some((cfg_v6, cfg_v6_hash));
             }
         }
-    }
 
     if ready_v4.is_some() || ready_v6.is_some() {
         if map_apply_cooldown_ready(state.last_map_apply_at, apply_cooldown) {
@@ -618,5 +672,274 @@ mod tests {
         assert_eq!(res.0, 4);
         assert_eq!(res.1, "91.108.4.195".parse::<IpAddr>().unwrap());
         assert_eq!(res.2, 8888);
+    }
+
+    // --- bogon / reserved-IP / port-0 rejection (SSRF guard) ---
+    //
+    // A censor that intercepts the proxy-config HTTPS download could inject
+    // entries pointing to loopback, private-network, or cloud-metadata addresses.
+    // Every variant must be silently dropped by parse_proxy_line.
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv4_loopback() {
+        assert!(parse_proxy_line("proxy_for 1 127.0.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 127.255.255.255:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv4_unspecified() {
+        assert!(parse_proxy_line("proxy_for 1 0.0.0.0:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv4_class_a_private() {
+        assert!(parse_proxy_line("proxy_for 1 10.0.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 10.255.255.255:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv4_class_b_private() {
+        assert!(parse_proxy_line("proxy_for 1 172.16.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 172.31.255.255:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv4_class_c_private() {
+        assert!(parse_proxy_line("proxy_for 1 192.168.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 192.168.255.255:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_cgnat_range() {
+        // RFC 6598: 100.64.0.0/10
+        assert!(parse_proxy_line("proxy_for 1 100.64.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 100.127.255.255:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_link_local() {
+        assert!(parse_proxy_line("proxy_for 1 169.254.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 169.254.169.254:80;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_documentation_ranges() {
+        // RFC 5737: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+        assert!(parse_proxy_line("proxy_for 1 192.0.2.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 198.51.100.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 203.0.113.1:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv4_multicast_and_reserved() {
+        assert!(parse_proxy_line("proxy_for 1 224.0.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 240.0.0.1:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 255.255.255.255:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv6_loopback() {
+        assert!(parse_proxy_line("proxy_for 1 [::1]:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv6_link_local() {
+        assert!(parse_proxy_line("proxy_for 1 [fe80::1]:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 [fe80::dead:beef]:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv6_unique_local() {
+        // fc00::/7 — includes both fc00::/8 and fd00::/8
+        assert!(parse_proxy_line("proxy_for 1 [fc00::1]:443;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 [fd00::1]:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_ipv6_unspecified() {
+        assert!(parse_proxy_line("proxy_for 1 [::]:443;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_port_zero() {
+        // Port 0 is an OS-assigned ephemeral port and cannot be a valid ME endpoint.
+        assert!(parse_proxy_line("proxy_for 1 91.108.4.195:0;").is_none());
+        assert!(parse_proxy_line("proxy_for 1 [2001:67c:04e8:f002::d]:0;").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_accepts_routable_ipv4() {
+        let res = parse_proxy_line("proxy_for 1 91.108.4.195:443;");
+        assert!(res.is_some(), "public routable IPv4 must be accepted");
+    }
+
+    #[test]
+    fn parse_proxy_line_accepts_routable_ipv6() {
+        let res = parse_proxy_line("proxy_for 1 [2001:67c:04e8:f002::d]:443;");
+        assert!(res.is_some(), "public routable IPv6 must be accepted");
+    }
+
+    #[test]
+    fn parse_proxy_config_text_strips_all_bogon_entries_leaves_only_public() {
+        // An adversarial config that mixes bogon and legitimate IPs.
+        // Only the public entries must pass the filter.
+        let text = [
+            "proxy_for 1 127.0.0.1:443;",
+            "proxy_for 1 10.0.0.1:443;",
+            "proxy_for 1 192.168.1.1:8888;",
+            "proxy_for 1 169.254.169.254:80;",
+            "proxy_for 1 [::1]:443;",
+            "proxy_for 1 [fe80::1]:443;",
+            "proxy_for 1 91.108.4.1:443;",
+            "proxy_for 1 149.154.160.1:8888;",
+        ]
+        .join("\n");
+        let data = parse_proxy_config_text(&text, 200);
+        assert_eq!(data.proxy_for_lines, 2, "only the two public IPs should be counted");
+        let addrs = data.map.get(&1).expect("DC 1 must have entries");
+        assert_eq!(addrs.len(), 2);
+        let ips: Vec<_> = addrs.iter().map(|(ip, _)| ip.to_string()).collect();
+        assert!(ips.contains(&"91.108.4.1".to_string()));
+        assert!(ips.contains(&"149.154.160.1".to_string()));
+    }
+
+    #[test]
+    fn parse_proxy_config_text_pure_bogon_config_yields_empty_map() {
+        // A config containing only bogon entries must produce an empty map,
+        // triggering the empty-snapshot guard further up the call chain.
+        let text = [
+            "proxy_for 1 127.0.0.1:443;",
+            "proxy_for 2 10.0.0.1:8888;",
+            "proxy_for 3 192.168.0.1:443;",
+            "proxy_for 4 [::1]:443;",
+        ]
+        .join("\n");
+        let data = parse_proxy_config_text(&text, 200);
+        assert!(data.map.is_empty(), "pure bogon config must yield empty map");
+        assert_eq!(data.proxy_for_lines, 0);
+    }
+
+    // --- parse_proxy_config_text: entry and DC-group limits ---
+    // (uses 91.108.x.x — routable public addresses, not private/bogon)
+
+    fn make_proxy_line(dc: i32, _octet: u8, idx: u32) -> String {
+        format!("proxy_for {dc} 91.108.{}.{}:443;", (idx >> 8) & 0xFF, idx & 0xFF)
+    }
+
+    #[test]
+    fn parse_proxy_config_entry_limit_stops_at_max() {
+        // Build MAX_PROXY_CONFIG_ENTRIES + 500 lines in DC 1 with distinct public IPs.
+        let extra = 500usize;
+        let total_lines = MAX_PROXY_CONFIG_ENTRIES + extra;
+        let mut text = String::new();
+        for i in 0..total_lines {
+            text.push_str(&format!(
+                "proxy_for 1 91.108.{}.{}:443;\n",
+                (i / 256) & 0xFF,
+                i & 0xFF
+            ));
+        }
+        let data = parse_proxy_config_text(&text, 200);
+        assert_eq!(
+            data.proxy_for_lines as usize,
+            MAX_PROXY_CONFIG_ENTRIES,
+            "parser must stop at MAX_PROXY_CONFIG_ENTRIES"
+        );
+    }
+
+    #[test]
+    fn parse_proxy_config_dc_group_limit_stops_at_max() {
+        // One entry per DC group; build MAX_PROXY_CONFIG_DC_GROUPS + 50 groups.
+        let extra = 50usize;
+        let total_dcs = MAX_PROXY_CONFIG_DC_GROUPS + extra;
+        let mut text = String::new();
+        for dc in 1..=(total_dcs as i32) {
+            text.push_str(&format!("proxy_for {dc} 91.108.0.1:443;\n"));
+        }
+        let data = parse_proxy_config_text(&text, 200);
+        assert!(
+            data.map.len() <= MAX_PROXY_CONFIG_DC_GROUPS,
+            "DC group count {} must not exceed MAX_PROXY_CONFIG_DC_GROUPS {}",
+            data.map.len(),
+            MAX_PROXY_CONFIG_DC_GROUPS,
+        );
+    }
+
+    #[test]
+    fn parse_proxy_config_existing_dc_group_still_accepted_when_dc_cap_full() {
+        // Fill the DC group cap then add more entries to an EXISTING DC group.
+        // Those must still be accepted (cap is only on new DC groups).
+        let mut text = String::new();
+        for dc in 1..=(MAX_PROXY_CONFIG_DC_GROUPS as i32) {
+            text.push_str(&make_proxy_line(dc, 10, 0));
+            text.push('\n');
+        }
+        // Two more entries for DC 1 (already present).
+        text.push_str(&make_proxy_line(1, 10, 1));
+        text.push('\n');
+        text.push_str(&make_proxy_line(1, 10, 2));
+        text.push('\n');
+        let data = parse_proxy_config_text(&text, 200);
+        let dc1_count = data.map.get(&1).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(
+            dc1_count, 3,
+            "entries in an existing DC group must be accepted even after DC cap is reached"
+        );
+    }
+
+    #[test]
+    fn parse_proxy_config_empty_text_produces_empty_map() {
+        let data = parse_proxy_config_text("", 200);
+        assert!(data.map.is_empty());
+        assert_eq!(data.proxy_for_lines, 0);
+    }
+
+    #[test]
+    fn parse_proxy_config_valid_small_text_round_trips() {
+        let text = "proxy_for 1 91.108.4.1:443;\nproxy_for 2 91.108.4.2:8080;\n";
+        let data = parse_proxy_config_text(text, 200);
+        assert_eq!(data.proxy_for_lines, 2);
+        assert_eq!(data.map.len(), 2);
+    }
+
+    #[test]
+    fn parse_proxy_config_ignores_non_proxy_for_lines() {
+        let text = "default 1;\nproxy_for 1 91.108.4.1:443;\n# comment\nsome garbage\n";
+        let data = parse_proxy_config_text(text, 200);
+        assert_eq!(data.proxy_for_lines, 1);
+        assert_eq!(data.default_dc, Some(1));
+    }
+
+    // --- response size cap constants ---
+
+    #[test]
+    fn max_proxy_config_response_cap_is_at_least_one_mib() {
+        const {
+            assert!(
+                MAX_PROXY_CONFIG_RESPONSE_BYTES >= 1_048_576,
+                "response cap must accommodate large but legitimate configs"
+            )
+        };
+    }
+
+    #[test]
+    fn content_length_precheck_rejects_over_cap() {
+        let over: u64 = MAX_PROXY_CONFIG_RESPONSE_BYTES as u64 + 1;
+        assert!(over > MAX_PROXY_CONFIG_RESPONSE_BYTES as u64);
+    }
+
+    #[test]
+    fn body_size_check_rejects_over_cap() {
+        let body = vec![b'x'; MAX_PROXY_CONFIG_RESPONSE_BYTES + 1];
+        assert!(
+            body.len() > MAX_PROXY_CONFIG_RESPONSE_BYTES,
+            "body over cap must be detected"
+        );
+    }
+
+    #[test]
+    fn body_size_check_accepts_exact_cap() {
+        let body = vec![b'x'; MAX_PROXY_CONFIG_RESPONSE_BYTES];
+        assert!(body.len() <= MAX_PROXY_CONFIG_RESPONSE_BYTES);
     }
 }

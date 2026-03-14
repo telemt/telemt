@@ -67,7 +67,7 @@ pub(super) struct RuntimeEdgeConnectionsSummaryData {
 }
 
 #[derive(Clone)]
-pub(crate) struct EdgeConnectionsCacheEntry {
+pub struct EdgeConnectionsCacheEntry {
     pub(super) expires_at: Instant,
     pub(super) payload: RuntimeEdgeConnectionsSummaryPayload,
     pub(super) generated_at_epoch_secs: u64,
@@ -291,4 +291,160 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_recent_events_limit, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT};
+
+    #[test]
+    fn parse_recent_events_limit_with_none_query_returns_default() {
+        assert_eq!(
+            parse_recent_events_limit(None, EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT),
+            EVENTS_DEFAULT_LIMIT
+        );
+    }
+
+    #[test]
+    fn parse_recent_events_limit_with_empty_query_returns_default() {
+        assert_eq!(
+            parse_recent_events_limit(Some(""), EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT),
+            EVENTS_DEFAULT_LIMIT
+        );
+    }
+
+    #[test]
+    fn parse_recent_events_limit_parses_valid_midrange_value() {
+        assert_eq!(
+            parse_recent_events_limit(Some("limit=100"), EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT),
+            100
+        );
+    }
+
+    // Adversarial: limit=0 must be clamped to 1 (minimum) to never produce an
+    // empty response for a request that explicitly asked for events.
+    #[test]
+    fn parse_recent_events_limit_clamps_zero_to_one() {
+        assert_eq!(
+            parse_recent_events_limit(Some("limit=0"), EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT),
+            1
+        );
+    }
+
+    // Adversarial: limit above EVENTS_MAX_LIMIT must be capped to prevent
+    // allocating unbounded memory for the response body.
+    #[test]
+    fn parse_recent_events_limit_clamps_value_above_max() {
+        let over_max = EVENTS_MAX_LIMIT + 1;
+        assert_eq!(
+            parse_recent_events_limit(
+                Some(&format!("limit={over_max}")),
+                EVENTS_DEFAULT_LIMIT,
+                EVENTS_MAX_LIMIT
+            ),
+            EVENTS_MAX_LIMIT
+        );
+    }
+
+    #[test]
+    fn parse_recent_events_limit_accepts_exactly_max() {
+        assert_eq!(
+            parse_recent_events_limit(
+                Some(&format!("limit={EVENTS_MAX_LIMIT}")),
+                EVENTS_DEFAULT_LIMIT,
+                EVENTS_MAX_LIMIT
+            ),
+            EVENTS_MAX_LIMIT
+        );
+    }
+
+    // Adversarial: numeric overflow (value > usize::MAX) must not panic and
+    // must fall back to the default limit.
+    #[test]
+    fn parse_recent_events_limit_overflow_integer_falls_back_to_default() {
+        let overflow = "99999999999999999999999999999999";
+        assert_eq!(
+            parse_recent_events_limit(
+                Some(&format!("limit={overflow}")),
+                EVENTS_DEFAULT_LIMIT,
+                EVENTS_MAX_LIMIT
+            ),
+            EVENTS_DEFAULT_LIMIT
+        );
+    }
+
+    // Adversarial: negative values must not parse as usize (which is unsigned)
+    // and must fall back to the default.
+    #[test]
+    fn parse_recent_events_limit_negative_value_falls_back_to_default() {
+        assert_eq!(
+            parse_recent_events_limit(Some("limit=-1"), EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT),
+            EVENTS_DEFAULT_LIMIT
+        );
+    }
+
+    // The key name matching is case-sensitive; LIMIT or Limit must not match.
+    #[test]
+    fn parse_recent_events_limit_key_matching_is_case_sensitive() {
+        assert_eq!(
+            parse_recent_events_limit(Some("LIMIT=200"), EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT),
+            EVENTS_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_recent_events_limit(Some("Limit=200"), EVENTS_DEFAULT_LIMIT, EVENTS_MAX_LIMIT),
+            EVENTS_DEFAULT_LIMIT
+        );
+    }
+
+    // Adversarial: a URL-encoded key like limit%3D50 must NOT match "limit" and
+    // must fall back to the default (the query string is used raw, not decoded).
+    #[test]
+    fn parse_recent_events_limit_url_encoded_key_is_not_matched() {
+        assert_eq!(
+            parse_recent_events_limit(
+                Some("limit%3D50"),
+                EVENTS_DEFAULT_LIMIT,
+                EVENTS_MAX_LIMIT
+            ),
+            EVENTS_DEFAULT_LIMIT
+        );
+    }
+
+    // When the query string contains multiple "limit" keys, the first one wins.
+    #[test]
+    fn parse_recent_events_limit_uses_first_matching_key() {
+        assert_eq!(
+            parse_recent_events_limit(
+                Some("limit=10&limit=900"),
+                EVENTS_DEFAULT_LIMIT,
+                EVENTS_MAX_LIMIT
+            ),
+            10
+        );
+    }
+
+    // Other query params before "limit" must not prevent "limit" from being matched.
+    #[test]
+    fn parse_recent_events_limit_ignores_preceding_unrelated_params() {
+        assert_eq!(
+            parse_recent_events_limit(
+                Some("foo=bar&limit=75"),
+                EVENTS_DEFAULT_LIMIT,
+                EVENTS_MAX_LIMIT
+            ),
+            75
+        );
+    }
+
+    #[test]
+    fn parse_recent_events_limit_with_no_limit_key_in_nonempty_query_returns_default() {
+        assert_eq!(
+            parse_recent_events_limit(
+                Some("since=100&format=json"),
+                EVENTS_DEFAULT_LIMIT,
+                EVENTS_MAX_LIMIT
+            ),
+            EVENTS_DEFAULT_LIMIT
+        );
+    }
 }

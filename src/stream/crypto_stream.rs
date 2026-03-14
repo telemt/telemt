@@ -6,7 +6,7 @@
 //! Key design principles:
 //! - Explicit state machines for all async operations
 //! - Never lose data on partial reads/writes
-//! - Honest reporting of bytes written (AsyncWrite contract)
+//! - Honest reporting of bytes written (`AsyncWrite` contract)
 //! - Bounded internal buffers with backpressure
 //!
 //! AES-CTR is a stream cipher: the keystream position must advance exactly by the
@@ -38,7 +38,7 @@
 //! Backpressure
 //! - pending ciphertext buffer is bounded (configurable per connection)
 //! - pending is full and upstream is pending 
-//!   -> poll_write returns Poll::Pending
+//!   -> `poll_write` returns `Poll::Pending`
 //!   -> do not accept any plaintext
 //!
 //! Performance
@@ -126,11 +126,11 @@ impl<R> CryptoReader<R> {
         }
     }
 
-    pub fn get_ref(&self) -> &R {
+    pub const fn get_ref(&self) -> &R {
         &self.upstream
     }
 
-    pub fn get_mut(&mut self) -> &mut R {
+    pub const fn get_mut(&mut self) -> &mut R {
         &mut self.upstream
     }
 
@@ -272,7 +272,7 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         Ok(result.freeze())
     }
 
-    /// Read up to max_size bytes, returning decrypted bytes as Bytes.
+/// Read up to `max_size` bytes, returning decrypted bytes as Bytes.
     pub async fn read_decrypt(&mut self, max_size: usize) -> Result<Bytes> {
         use tokio::io::AsyncReadExt;
 
@@ -466,11 +466,11 @@ impl<W> CryptoWriter<W> {
         }
     }
 
-    pub fn get_ref(&self) -> &W {
+    pub const fn get_ref(&self) -> &W {
         &self.upstream
     }
 
-    pub fn get_mut(&mut self) -> &mut W {
+    pub const fn get_mut(&mut self) -> &mut W {
         &mut self.upstream
     }
 
@@ -486,7 +486,7 @@ impl<W> CryptoWriter<W> {
         self.state.state_name()
     }
 
-    pub fn has_pending(&self) -> bool {
+    pub const fn has_pending(&self) -> bool {
         matches!(self.state, CryptoWriterState::Flushing { .. })
     }
 
@@ -537,7 +537,7 @@ impl<W> CryptoWriter<W> {
         }
     }
 
-    /// Encrypt plaintext into scratch (CTR advances by plaintext.len()).
+/// Encrypt plaintext into scratch (CTR advances by `plaintext.len()`).
     fn encrypt_into_scratch(encryptor: &mut AesCtr, scratch: &mut BytesMut, plaintext: &[u8]) {
         scratch.clear();
         scratch.reserve(plaintext.len());
@@ -751,15 +751,15 @@ pub struct PassthroughStream<S> {
 }
 
 impl<S> PassthroughStream<S> {
-    pub fn new(inner: S) -> Self {
+    pub const fn new(inner: S) -> Self {
         Self { inner }
     }
 
-    pub fn get_ref(&self) -> &S {
+    pub const fn get_ref(&self) -> &S {
         &self.inner
     }
 
-    pub fn get_mut(&mut self) -> &mut S {
+    pub const fn get_mut(&mut self) -> &mut S {
         &mut self.inner
     }
 
@@ -860,5 +860,203 @@ mod tests {
 
         let expected = &baseline_plain[50..];
         assert_eq!(pending.pending_slice(), expected);
+    }
+
+    // ============= CryptoWriter integration tests =============
+
+    /// A synchronous writer that records every byte written to it and
+    /// accepts at most `max_per_call` bytes per `poll_write`.
+    struct PartialWriter {
+        written: Vec<u8>,
+        max_per_call: usize,
+    }
+
+    impl PartialWriter {
+        fn new(max_per_call: usize) -> Self {
+            Self { written: Vec::new(), max_per_call }
+        }
+    }
+
+    impl AsyncWrite for PartialWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize>> {
+            let n = buf.len().min(self.max_per_call);
+            self.written.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A writer that returns Poll::Pending on every write, simulating a fully
+    /// stalled upstream.
+    struct BlockingWriter;
+
+    impl AsyncWrite for BlockingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    // CTR-mode encryption is a stream cipher: the counter must advance by
+    // exactly the number of plaintext bytes accepted — no more, no less.
+    // This test forces a partial upstream write (upstream accepts only half the
+    // ciphertext at a time) and verifies that the complete ciphertext decoded
+    // with a matching CTR decryptor reproduces the original plaintext.
+    // A CTR "drift" — where the counter advances by more or fewer bytes than
+    // the ciphertext actually written — would corrupt every subsequent byte.
+    #[tokio::test]
+    async fn crypto_writer_ctr_consistency_through_partial_upstream_writes() {
+        let key = [0x55u8; 32];
+        let iv = 0xDEAD_BEEF_1234_5678_9ABC_DEF0_1234_5678_u128;
+
+        let plaintext: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+
+        // Upstream accepts exactly 7 bytes per poll_write, forcing many partial
+        // write round-trips and exercising the buffering + flushing paths.
+        let upstream = PartialWriter::new(7);
+        let encryptor = AesCtr::new(&key, iv);
+        let mut writer = CryptoWriter::new(upstream, encryptor, 4096);
+
+        // write_all drives flush loops until all plaintext is accepted.
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &plaintext).await.unwrap();
+        tokio::io::AsyncWriteExt::flush(&mut writer).await.unwrap();
+
+        let mut ciphertext = writer.into_inner().written;
+        assert_eq!(ciphertext.len(), plaintext.len(), "all plaintext must be encrypted and written");
+
+        // Decrypt with an independent CTR at the same starting position.
+        let mut decryptor = AesCtr::new(&key, iv);
+        decryptor.apply(&mut ciphertext);
+        assert_eq!(ciphertext, plaintext, "CTR must not drift after partial upstream writes");
+    }
+
+    // A zero-byte write must be a no-op: it must not advance the CTR position,
+    // not enter the Flushing state, and return Ok(0).  Any CTR advancement here
+    // would desynchronise the keystream for the next real write.
+    #[tokio::test]
+    async fn crypto_writer_zero_byte_write_does_not_advance_ctr() {
+        let key = [0x33u8; 32];
+        let iv = 0x1111_2222_3333_4444_5555_6666_7777_8888_u128;
+
+        let upstream = PartialWriter::new(4096);
+        let encryptor_for_write = AesCtr::new(&key, iv);
+        let mut writer = CryptoWriter::new(upstream, encryptor_for_write, 4096);
+
+        // Zero-byte write.
+        let n = tokio::io::AsyncWriteExt::write(&mut writer, &[]).await.unwrap();
+        assert_eq!(n, 0);
+        assert!(!writer.has_pending(), "zero-byte write must not create pending state");
+
+        // Now write one real byte and verify it decrypts to the correct value.
+        let plaintext = [0xAB_u8];
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &plaintext).await.unwrap();
+        tokio::io::AsyncWriteExt::flush(&mut writer).await.unwrap();
+
+        let mut ciphertext = writer.into_inner().written;
+        assert_eq!(ciphertext.len(), 1);
+
+        let mut decryptor = AesCtr::new(&key, iv);
+        decryptor.apply(&mut ciphertext);
+        assert_eq!(ciphertext, plaintext, "CTR position must start at iv, not advance past it during zero-byte write");
+    }
+
+    // When the internal pending-ciphertext buffer is full and the upstream is
+    // blocked, poll_write MUST return Poll::Pending without accepting any
+    // plaintext.  Accepting plaintext without writing the corresponding
+    // ciphertext would permanently discard data.
+    #[test]
+    fn crypto_writer_backpressure_when_pending_full_and_upstream_blocked() {
+        use std::task::{Context, Poll};
+        use futures::task::noop_waker;
+
+        let key = [0x77u8; 32];
+        let iv = 0x0000_0000_0000_0000_0000_0000_0000_0000_u128;
+
+        // max_pending_write = 16 bytes so the buffer fills quickly.
+        let upstream = BlockingWriter;
+        let encryptor = AesCtr::new(&key, iv);
+        // Force a very small pending buffer.  The implementation clamps to 4 KiB
+        // minimum, so set it to exactly 4096 via a zero (which maps to the
+        // DEFAULT) and then we instead call with_config below.
+        let mut writer = CryptoWriter::new(upstream, encryptor, 4096);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First write: upstream is Pending, ciphertext is buffered in pending.
+        let payload = vec![0xCC; 4096];
+        let poll1 = Pin::new(&mut writer).poll_write(&mut cx, &payload);
+        // Should succeed (accepted into pending because upstream was Pending).
+        assert!(matches!(poll1, Poll::Ready(Ok(n)) if n > 0),
+            "first write should buffer into pending: {:?}", poll1);
+
+        // At this point the pending buffer is full and upstream is still blocked.
+        // A subsequent write must return Poll::Pending rather than silently
+        // dropping plaintext or overflowing the pending buffer.
+        let poll2 = Pin::new(&mut writer).poll_write(&mut cx, &[0xDD; 4096]);
+        assert!(
+            matches!(poll2, Poll::Pending),
+            "must return Pending when pending buffer is full and upstream is blocked, got {:?}", poll2
+        );
+    }
+
+    // After the reader's upstream returns an error, the reader transitions to
+    // Poisoned and every subsequent poll_read must return the same kind of error,
+    // never silently returning EOF or Ok(0).
+    #[tokio::test]
+    async fn crypto_reader_poisoned_state_persists_after_error() {
+        use tokio::io::AsyncReadExt;
+
+        // A reader that always returns an error.
+        struct ErrorReader;
+        impl AsyncRead for ErrorReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<Result<()>> {
+                Poll::Ready(Err(io::Error::new(ErrorKind::ConnectionReset, "simulated reset")))
+            }
+        }
+
+        let key = [0x99u8; 32];
+        let iv = 0x0u128;
+        let decryptor = AesCtr::new(&key, iv);
+        let mut reader = CryptoReader::new(ErrorReader, decryptor);
+
+        // First read must propagate the upstream error.
+        let mut buf = [0u8; 16];
+        let result1 = reader.read(&mut buf).await;
+        assert!(result1.is_err(), "first read must return error");
+        assert!(reader.is_poisoned(), "reader must be poisoned after upstream error");
+
+        // Every subsequent read must also return an error, never Ok(0) or EOF.
+        let result2 = reader.read(&mut buf).await;
+        assert!(result2.is_err(), "poisoned reader must keep returning error");
+
+        let result3 = reader.read(&mut buf).await;
+        assert!(result3.is_err(), "poisoned reader must keep returning error on third call");
     }
 }

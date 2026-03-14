@@ -9,7 +9,6 @@ use crate::stats::Stats;
 use super::ApiShared;
 use super::config_store::{
     AccessSection, ensure_expected_revision, load_config_from_disk, save_access_sections_to_disk,
-    save_config_to_disk,
 };
 use super::model::{
     ApiFailure, CreateUserRequest, CreateUserResponse, PatchUserRequest, RotateSecretRequest,
@@ -89,7 +88,7 @@ pub(super) async fn create_user(
     }
 
     cfg.validate()
-        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
+        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {e}")))?;
 
     let mut touched_sections = vec![AccessSection::Users];
     if touches_user_ad_tags {
@@ -127,7 +126,7 @@ pub(super) async fn create_user(
     let user = users
         .into_iter()
         .find(|entry| entry.username == body.username)
-        .unwrap_or(UserInfo {
+        .unwrap_or_else(|| UserInfo {
             username: body.username.clone(),
             user_ad_tag: None,
             max_tcp_conns: None,
@@ -157,6 +156,14 @@ pub(super) async fn patch_user(
     expected_revision: Option<String>,
     shared: &ApiShared,
 ) -> Result<(UserInfo, String), ApiFailure> {
+    // Track which sections will be modified before any body field is consumed.
+    let touches_users = body.secret.is_some();
+    let touches_user_ad_tags = body.user_ad_tag.is_some();
+    let touches_user_max_tcp_conns = body.max_tcp_conns.is_some();
+    let touches_user_expirations = body.expiration_rfc3339.is_some();
+    let touches_user_data_quota = body.data_quota_bytes.is_some();
+    let touches_user_max_unique_ips = body.max_unique_ips.is_some();
+
     if let Some(secret) = body.secret.as_ref() && !is_valid_user_secret(secret) {
         return Err(ApiFailure::bad_request(
             "secret must be exactly 32 hex characters",
@@ -196,16 +203,38 @@ pub(super) async fn patch_user(
         cfg.access.user_data_quota.insert(user.to_string(), quota);
     }
 
-    let mut updated_limit = None;
-    if let Some(limit) = body.max_unique_ips {
+    let updated_limit = if let Some(limit) = body.max_unique_ips {
         cfg.access.user_max_unique_ips.insert(user.to_string(), limit);
-        updated_limit = Some(limit);
-    }
+        Some(limit)
+    } else {
+        None
+    };
 
     cfg.validate()
-        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
+        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {e}")))?;
 
-    let revision = save_config_to_disk(&shared.config_path, &cfg).await?;
+    // Surgical section update mirrors the approach used in create_user, preserving
+    // all TOML comments and field ordering outside the modified sections.
+    let mut touched_sections = Vec::new();
+    if touches_users {
+        touched_sections.push(AccessSection::Users);
+    }
+    if touches_user_ad_tags {
+        touched_sections.push(AccessSection::UserAdTags);
+    }
+    if touches_user_max_tcp_conns {
+        touched_sections.push(AccessSection::UserMaxTcpConns);
+    }
+    if touches_user_expirations {
+        touched_sections.push(AccessSection::UserExpirations);
+    }
+    if touches_user_data_quota {
+        touched_sections.push(AccessSection::UserDataQuota);
+    }
+    if touches_user_max_unique_ips {
+        touched_sections.push(AccessSection::UserMaxUniqueIps);
+    }
+    let revision = save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
     drop(_guard);
     if let Some(limit) = updated_limit {
         shared.ip_tracker.set_user_limit(user, limit).await;
@@ -254,7 +283,7 @@ pub(super) async fn rotate_secret(
 
     cfg.access.users.insert(user.to_string(), secret.clone());
     cfg.validate()
-        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
+        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {e}")))?;
     let touched_sections = [
         AccessSection::Users,
         AccessSection::UserAdTags,
@@ -321,7 +350,7 @@ pub(super) async fn delete_user(
     cfg.access.user_max_unique_ips.remove(user);
 
     cfg.validate()
-        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
+        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {e}")))?;
     let touched_sections = [
         AccessSection::Users,
         AccessSection::UserAdTags,
@@ -364,19 +393,21 @@ pub(super) async fn users_from_config(
             .access
             .users
             .get(&username)
-            .map(|secret| {
-                build_user_links(
-                    cfg,
-                    secret,
-                    startup_detected_ip_v4,
-                    startup_detected_ip_v6,
-                )
-            })
-            .unwrap_or(UserLinks {
-                classic: Vec::new(),
-                secure: Vec::new(),
-                tls: Vec::new(),
-            });
+            .map_or(
+                UserLinks {
+                    classic: Vec::new(),
+                    secure: Vec::new(),
+                    tls: Vec::new(),
+                },
+                |secret| {
+                    build_user_links(
+                        cfg,
+                        secret,
+                        startup_detected_ip_v4,
+                        startup_detected_ip_v6,
+                    )
+                },
+            );
         users.push(UserInfo {
             user_ad_tag: cfg.access.user_ad_tags.get(&username).cloned(),
             max_tcp_conns: cfg.access.user_max_tcp_conns.get(&username).copied(),
@@ -417,22 +448,19 @@ fn build_user_links(
     for host in &hosts {
         if cfg.general.modes.classic {
             classic.push(format!(
-                "tg://proxy?server={}&port={}&secret={}",
-                host, port, secret
+                "tg://proxy?server={host}&port={port}&secret={secret}",
             ));
         }
         if cfg.general.modes.secure {
             secure.push(format!(
-                "tg://proxy?server={}&port={}&secret=dd{}",
-                host, port, secret
+                "tg://proxy?server={host}&port={port}&secret=dd{secret}",
             ));
         }
         if cfg.general.modes.tls {
             for domain in &tls_domains {
                 let domain_hex = hex::encode(domain);
                 tls.push(format!(
-                    "tg://proxy?server={}&port={}&secret=ee{}{}",
-                    host, port, secret, domain_hex
+                    "tg://proxy?server={host}&port={port}&secret=ee{secret}{domain_hex}",
                 ));
             }
         }
@@ -472,11 +500,11 @@ fn resolve_link_hosts(
             push_unique_host(&mut hosts, host);
             continue;
         }
-        if let Some(ip) = listener.announce_ip {
-            if !ip.is_unspecified() {
-                push_unique_host(&mut hosts, &ip.to_string());
-                continue;
-            }
+        if let Some(ip) = listener.announce_ip
+            && !ip.is_unspecified()
+        {
+            push_unique_host(&mut hosts, &ip.to_string());
+            continue;
         }
         if listener.ip.is_unspecified() {
             let detected_ip = if listener.ip.is_ipv4() {
