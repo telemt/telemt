@@ -1,4 +1,4 @@
-//! telemt — Telegram MTProto Proxy
+//! telemt — Telegram `MTProto` Proxy
 
 #![allow(unused_assignments)]
 
@@ -48,7 +48,7 @@ use crate::transport::UpstreamManager;
 use helpers::parse_cli;
 
 /// Runs the full telemt runtime startup pipeline and blocks until shutdown.
-pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let process_started_at = Instant::now();
     let process_started_at_epoch_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -68,7 +68,10 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             } else {
                 let default = ProxyConfig::default();
-                std::fs::write(&config_path, toml::to_string_pretty(&default).unwrap()).unwrap();
+                let rendered = toml::to_string_pretty(&default)
+                    .map_err(|err| format!("failed to render default config: {err}"))?;
+                std::fs::write(&config_path, rendered)
+                    .map_err(|err| format!("failed to write default config to {config_path}: {err}"))?;
                 eprintln!("[telemt] Created default config at {}", config_path);
                 default
             }
@@ -314,8 +317,8 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
 
-    // Connection concurrency limit
-    let max_connections = Arc::new(Semaphore::new(10_000));
+    // Semaphore capacity is set from config; guards against connection storms.
+    let max_connections = Arc::new(Semaphore::new(config.server.max_connections));
 
     let me2dc_fallback = config.general.me2dc_fallback;
     let me_init_retry_attempts = config.general.me_init_retry_attempts;

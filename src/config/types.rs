@@ -9,7 +9,7 @@ use super::defaults::*;
 // ============= Log Level =============
 
 /// Logging verbosity level.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// All messages including trace (trace + debug + info + warn + error).
@@ -26,24 +26,24 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    /// Convert to tracing EnvFilter directive string.
-    pub fn to_filter_str(&self) -> &'static str {
+/// Convert to tracing `EnvFilter` directive string.
+    pub const fn to_filter_str(&self) -> &'static str {
         match self {
-            LogLevel::Debug => "trace",
-            LogLevel::Verbose => "debug",
-            LogLevel::Normal => "info",
-            LogLevel::Silent => "warn",
+            Self::Debug => "trace",
+            Self::Verbose => "debug",
+            Self::Normal => "info",
+            Self::Silent => "warn",
         }
     }
 
     /// Parse from a loose string (CLI argument).
     pub fn from_str_loose(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "debug" | "trace" => LogLevel::Debug,
-            "verbose" => LogLevel::Verbose,
-            "normal" | "info" => LogLevel::Normal,
-            "silent" | "quiet" | "error" | "warn" => LogLevel::Silent,
-            _ => LogLevel::Normal,
+            "debug" | "trace" => Self::Debug,
+            "verbose" => Self::Verbose,
+            "normal" | "info" => Self::Normal,
+            "silent" | "quiet" | "error" | "warn" => Self::Silent,
+            _ => Self::Normal,
         }
     }
 }
@@ -51,10 +51,10 @@ impl LogLevel {
 impl std::fmt::Display for LogLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LogLevel::Debug => write!(f, "debug"),
-            LogLevel::Verbose => write!(f, "verbose"),
-            LogLevel::Normal => write!(f, "normal"),
-            LogLevel::Silent => write!(f, "silent"),
+            Self::Debug => write!(f, "debug"),
+            Self::Verbose => write!(f, "verbose"),
+            Self::Normal => write!(f, "normal"),
+            Self::Silent => write!(f, "silent"),
         }
     }
 }
@@ -70,37 +70,37 @@ pub enum MeTelemetryLevel {
 }
 
 impl MeTelemetryLevel {
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         match self {
-            MeTelemetryLevel::Silent => 0,
-            MeTelemetryLevel::Normal => 1,
-            MeTelemetryLevel::Debug => 2,
+            Self::Silent => 0,
+            Self::Normal => 1,
+            Self::Debug => 2,
         }
     }
 
-    pub fn from_u8(raw: u8) -> Self {
+    pub const fn from_u8(raw: u8) -> Self {
         match raw {
-            0 => MeTelemetryLevel::Silent,
-            2 => MeTelemetryLevel::Debug,
-            _ => MeTelemetryLevel::Normal,
+            0 => Self::Silent,
+            2 => Self::Debug,
+            _ => Self::Normal,
         }
     }
 
-    pub fn allows_normal(self) -> bool {
-        !matches!(self, MeTelemetryLevel::Silent)
+    pub const fn allows_normal(self) -> bool {
+        !matches!(self, Self::Silent)
     }
 
-    pub fn allows_debug(self) -> bool {
-        matches!(self, MeTelemetryLevel::Debug)
+    pub const fn allows_debug(self) -> bool {
+        matches!(self, Self::Debug)
     }
 }
 
 impl std::fmt::Display for MeTelemetryLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MeTelemetryLevel::Silent => write!(f, "silent"),
-            MeTelemetryLevel::Normal => write!(f, "normal"),
-            MeTelemetryLevel::Debug => write!(f, "debug"),
+            Self::Silent => write!(f, "silent"),
+            Self::Normal => write!(f, "normal"),
+            Self::Debug => write!(f, "debug"),
         }
     }
 }
@@ -115,17 +115,17 @@ pub enum MeSocksKdfPolicy {
 }
 
 impl MeSocksKdfPolicy {
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         match self {
-            MeSocksKdfPolicy::Strict => 0,
-            MeSocksKdfPolicy::Compat => 1,
+            Self::Strict => 0,
+            Self::Compat => 1,
         }
     }
 
-    pub fn from_u8(raw: u8) -> Self {
+    pub const fn from_u8(raw: u8) -> Self {
         match raw {
-            1 => MeSocksKdfPolicy::Compat,
-            _ => MeSocksKdfPolicy::Strict,
+            1 => Self::Compat,
+            _ => Self::Strict,
         }
     }
 }
@@ -141,19 +141,19 @@ pub enum MeBindStaleMode {
 }
 
 impl MeBindStaleMode {
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         match self {
-            MeBindStaleMode::Never => 0,
-            MeBindStaleMode::Ttl => 1,
-            MeBindStaleMode::Always => 2,
+            Self::Never => 0,
+            Self::Ttl => 1,
+            Self::Always => 2,
         }
     }
 
-    pub fn from_u8(raw: u8) -> Self {
+    pub const fn from_u8(raw: u8) -> Self {
         match raw {
-            0 => MeBindStaleMode::Never,
-            2 => MeBindStaleMode::Always,
-            _ => MeBindStaleMode::Ttl,
+            0 => Self::Never,
+            2 => Self::Always,
+            _ => Self::Ttl,
         }
     }
 }
@@ -168,17 +168,17 @@ pub enum MeFloorMode {
 }
 
 impl MeFloorMode {
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         match self {
-            MeFloorMode::Static => 0,
-            MeFloorMode::Adaptive => 1,
+            Self::Static => 0,
+            Self::Adaptive => 1,
         }
     }
 
-    pub fn from_u8(raw: u8) -> Self {
+    pub const fn from_u8(raw: u8) -> Self {
         match raw {
-            1 => MeFloorMode::Adaptive,
-            _ => MeFloorMode::Static,
+            1 => Self::Adaptive,
+            _ => Self::Static,
         }
     }
 }
@@ -194,20 +194,20 @@ pub enum MeRouteNoWriterMode {
 }
 
 impl MeRouteNoWriterMode {
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         match self {
-            MeRouteNoWriterMode::AsyncRecoveryFailfast => 0,
-            MeRouteNoWriterMode::InlineRecoveryLegacy => 1,
-            MeRouteNoWriterMode::HybridAsyncPersistent => 2,
+            Self::AsyncRecoveryFailfast => 0,
+            Self::InlineRecoveryLegacy => 1,
+            Self::HybridAsyncPersistent => 2,
         }
     }
 
-    pub fn from_u8(raw: u8) -> Self {
+    pub const fn from_u8(raw: u8) -> Self {
         match raw {
-            0 => MeRouteNoWriterMode::AsyncRecoveryFailfast,
-            1 => MeRouteNoWriterMode::InlineRecoveryLegacy,
-            2 => MeRouteNoWriterMode::HybridAsyncPersistent,
-            _ => MeRouteNoWriterMode::HybridAsyncPersistent,
+            0 => Self::AsyncRecoveryFailfast,
+            1 => Self::InlineRecoveryLegacy,
+            2 => Self::HybridAsyncPersistent,
+            _ => Self::HybridAsyncPersistent,
         }
     }
 }
@@ -222,18 +222,18 @@ pub enum MeWriterPickMode {
 }
 
 impl MeWriterPickMode {
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         match self {
-            MeWriterPickMode::SortedRr => 0,
-            MeWriterPickMode::P2c => 1,
+            Self::SortedRr => 0,
+            Self::P2c => 1,
         }
     }
 
-    pub fn from_u8(raw: u8) -> Self {
+    pub const fn from_u8(raw: u8) -> Self {
         match raw {
-            0 => MeWriterPickMode::SortedRr,
-            1 => MeWriterPickMode::P2c,
-            _ => MeWriterPickMode::P2c,
+            0 => Self::SortedRr,
+            1 => Self::P2c,
+            _ => Self::P2c,
         }
     }
 }
@@ -271,8 +271,6 @@ impl Default for TelemetryConfig {
         }
     }
 }
-
-// ============= Sub-Configs =============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyModes {
@@ -369,7 +367,7 @@ pub struct GeneralConfig {
     pub use_middle_proxy: bool,
 
     /// Path to proxy-secret binary file (auto-downloaded if absent).
-    /// Infrastructure secret from https://core.telegram.org/getProxySecret.
+    /// Infrastructure secret from <https://core.telegram.org/getProxySecret>.
     #[serde(default = "default_proxy_secret_path")]
     pub proxy_secret_path: Option<String>,
 
@@ -381,12 +379,12 @@ pub struct GeneralConfig {
     #[serde(default = "default_proxy_config_v6_cache_path")]
     pub proxy_config_v6_cache_path: Option<String>,
 
-    /// Global ad_tag (32 hex chars from @MTProxybot). Fallback when user has no per-user tag in access.user_ad_tags.
+    /// Global `ad_tag` (32 hex chars from `@MTProxybot`). Fallback when user has no per-user tag in `access.user_ad_tags`.
     #[serde(default)]
     pub ad_tag: Option<String>,
 
     /// Public IP override for middle-proxy NAT environments.
-    /// When set, this IP is used in ME key derivation and RPC_PROXY_REQ "our_addr".
+    /// When set, this IP is used in ME key derivation and `RPC_PROXY_REQ` `"our_addr"`.
     #[serde(default)]
     pub middle_proxy_nat_ip: Option<IpAddr>,
 
@@ -421,6 +419,15 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_init_retry_attempts")]
     pub me_init_retry_attempts: u32,
 
+    /// Initial delay in milliseconds for exponential backoff between ME init retries.
+    /// Doubles on each attempt up to `me_init_retry_backoff_cap_ms`.
+    #[serde(default = "default_me_init_retry_backoff_base_ms")]
+    pub me_init_retry_backoff_base_ms: u64,
+
+    /// Maximum delay cap in milliseconds for ME init retry exponential backoff.
+    #[serde(default = "default_me_init_retry_backoff_cap_ms")]
+    pub me_init_retry_backoff_cap_ms: u64,
+
     /// Allow fallback from Middle-End mode to direct DC when ME startup cannot be initialized.
     #[serde(default = "default_me2dc_fallback")]
     pub me2dc_fallback: bool,
@@ -441,7 +448,7 @@ pub struct GeneralConfig {
     #[serde(default = "default_true")]
     pub me_keepalive_payload_random: bool,
 
-    /// Interval in seconds for service RPC_PROXY_REQ activity signals to ME.
+/// Interval in seconds for service `RPC_PROXY_REQ` activity signals to ME.
     /// 0 disables service activity signals.
     #[serde(default = "default_rpc_proxy_req_every")]
     pub rpc_proxy_req_every: u64,
@@ -489,11 +496,11 @@ pub struct GeneralConfig {
     pub direct_relay_copy_buf_s2c_bytes: usize,
 
     /// Max pending ciphertext buffer per client writer (bytes).
-    /// Controls FakeTLS backpressure vs throughput.
+/// Controls `FakeTLS` backpressure vs throughput.
     #[serde(default = "default_crypto_pending_buffer")]
     pub crypto_pending_buffer: usize,
 
-    /// Maximum allowed client MTProto frame size (bytes).
+/// Maximum allowed client `MTProto` frame size (bytes).
     #[serde(default = "default_max_client_frame")]
     pub max_client_frame: usize,
 
@@ -724,12 +731,12 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub links: LinksConfig,
 
-    /// Minimum TLS record size when fast_mode coalescing is enabled (0 = disabled).
+/// Minimum TLS record size when `fast_mode` coalescing is enabled (0 = disabled).
     #[serde(default = "default_fast_mode_min_tls_record")]
     pub fast_mode_min_tls_record: usize,
 
     /// Unified ME updater interval in seconds for getProxyConfig/getProxyConfigV6/getProxySecret.
-    /// When omitted, effective value falls back to legacy proxy_*_auto_reload_secs fields.
+/// When omitted, effective value falls back to legacy proxy_*_`auto_reload_secs` fields.
     #[serde(default = "default_update_every")]
     pub update_every: Option<u64>,
 
@@ -882,6 +889,8 @@ impl Default for GeneralConfig {
             middle_proxy_pool_size: default_pool_size(),
             middle_proxy_warm_standby: default_middle_proxy_warm_standby(),
             me_init_retry_attempts: default_me_init_retry_attempts(),
+            me_init_retry_backoff_base_ms: default_me_init_retry_backoff_base_ms(),
+            me_init_retry_backoff_cap_ms: default_me_init_retry_backoff_cap_ms(),
             me2dc_fallback: default_me2dc_fallback(),
             me_keepalive_enabled: default_true(),
             me_keepalive_interval_secs: default_keepalive_interval(),
@@ -995,20 +1004,20 @@ impl Default for GeneralConfig {
 
 impl GeneralConfig {
     /// Resolve the active updater interval for ME infrastructure refresh tasks.
-    /// `update_every` has priority, otherwise legacy proxy_*_auto_reload_secs are used.
+/// `update_every` has priority, otherwise legacy proxy_*_`auto_reload_secs` are used.
     pub fn effective_update_every_secs(&self) -> u64 {
         self.update_every
             .unwrap_or_else(|| self.proxy_secret_auto_reload_secs.min(self.proxy_config_auto_reload_secs))
     }
 
     /// Resolve periodic zero-downtime reinit interval for ME writers.
-    pub fn effective_me_reinit_every_secs(&self) -> u64 {
+    pub const fn effective_me_reinit_every_secs(&self) -> u64 {
         self.me_reinit_every_secs
     }
 
     /// Resolve force-close timeout for stale writers.
     /// `me_reinit_drain_timeout_secs` remains backward-compatible alias.
-    pub fn effective_me_pool_force_close_secs(&self) -> u64 {
+    pub const fn effective_me_pool_force_close_secs(&self) -> u64 {
         self.me_reinit_drain_timeout_secs
     }
 }
@@ -1041,7 +1050,7 @@ impl Default for LinksConfig {
 }
 
 /// API settings for control-plane endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApiConfig {
     /// Enable or disable REST API.
     #[serde(default = "default_true")]
@@ -1117,6 +1126,10 @@ pub struct ServerConfig {
     #[serde(default = "default_port")]
     pub port: u16,
 
+    /// Maximum number of concurrent accepted client connections.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+
     #[serde(default = "default_listen_addr_ipv4")]
     pub listen_addr_ipv4: Option<String>,
 
@@ -1132,11 +1145,11 @@ pub struct ServerConfig {
     pub listen_unix_sock_perm: Option<String>,
 
     /// Enable TCP listening. Default: true when no unix socket, false when
-    /// listen_unix_sock is set. Set explicitly to override auto-detection.
+/// `listen_unix_sock` is set. Set explicitly to override auto-detection.
     #[serde(default)]
     pub listen_tcp: Option<bool>,
 
-    /// Accept HAProxy PROXY protocol headers on incoming connections.
+/// Accept `HAProxy` PROXY protocol headers on incoming connections.
     /// When enabled, real client IPs are extracted from PROXY v1/v2 headers.
     #[serde(default)]
     pub proxy_protocol: bool,
@@ -1162,6 +1175,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: default_port(),
+            max_connections: default_max_connections(),
             listen_addr_ipv4: default_listen_addr_ipv4(),
             listen_addr_ipv6: default_listen_addr_ipv6_opt(),
             listen_unix_sock: None,
@@ -1245,15 +1259,15 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_tls_front_dir")]
     pub tls_front_dir: String,
 
-    /// Minimum server_hello delay in milliseconds (anti-fingerprint).
+/// Minimum `server_hello` delay in milliseconds (anti-fingerprint).
     #[serde(default = "default_server_hello_delay_min_ms")]
     pub server_hello_delay_min_ms: u64,
 
-    /// Maximum server_hello delay in milliseconds.
+/// Maximum `server_hello` delay in milliseconds.
     #[serde(default = "default_server_hello_delay_max_ms")]
     pub server_hello_delay_max_ms: u64,
 
-    /// Number of NewSessionTicket messages to emit post-handshake.
+/// Number of `NewSessionTicket` messages to emit post-handshake.
     #[serde(default = "default_tls_new_session_tickets")]
     pub tls_new_session_tickets: u8,
 
@@ -1267,7 +1281,7 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_alpn_enforce")]
     pub alpn_enforce: bool,
 
-    /// Send PROXY protocol header when connecting to mask_host.
+/// Send PROXY protocol header when connecting to `mask_host`.
     /// 0 = disabled, 1 = v1 (text), 2 = v2 (binary).
     /// Allows the backend to see the real client IP.
     #[serde(default)]
@@ -1296,12 +1310,12 @@ impl Default for AntiCensorshipConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessConfig {
     #[serde(default = "default_access_users")]
     pub users: HashMap<String, String>,
 
-    /// Per-user ad_tag (32 hex chars from @MTProxybot).
+    /// Per-user `ad_tag` (32 hex chars from `@MTProxybot`).
     #[serde(default)]
     pub user_ad_tags: HashMap<String, String>,
 
@@ -1353,7 +1367,7 @@ impl Default for AccessConfig {
 
 // ============= Aux Structures =============
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum UpstreamType {
     Direct {
@@ -1405,10 +1419,10 @@ pub struct ListenerConfig {
     /// Migrated to `announce` automatically if `announce` is not set.
     #[serde(default)]
     pub announce_ip: Option<IpAddr>,
-    /// Per-listener PROXY protocol override. When set, overrides global server.proxy_protocol.
+/// Per-listener PROXY protocol override. When set, overrides global `server.proxy_protocol`.
     #[serde(default)]
     pub proxy_protocol: Option<bool>,
-    /// Allow multiple telemt instances to listen on the same IP:port (SO_REUSEPORT).
+/// Allow multiple telemt instances to listen on the same IP:port (`SO_REUSEPORT`).
     /// Default is false for safety.
     #[serde(default)]
     pub reuse_allow: bool,
@@ -1433,42 +1447,42 @@ pub enum ShowLink {
     Specific(Vec<String>),
 }
 
-fn default_links_show() -> ShowLink {
+const fn default_links_show() -> ShowLink {
     ShowLink::All
 }
 
 impl ShowLink {
     /// Returns true if no links should be shown.
-    pub fn is_empty(&self) -> bool {
-        matches!(self, ShowLink::None) || matches!(self, ShowLink::Specific(v) if v.is_empty())
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::None) || matches!(self, Self::Specific(v) if v.is_empty())
     }
 
     /// Resolve the list of user names to display, given all configured users.
     pub fn resolve_users<'a>(&'a self, all_users: &'a HashMap<String, String>) -> Vec<&'a String> {
         match self {
-            ShowLink::None => vec![],
-            ShowLink::All => {
+            Self::None => vec![],
+            Self::All => {
                 let mut names: Vec<&String> = all_users.keys().collect();
                 names.sort();
                 names
             }
-            ShowLink::Specific(names) => names.iter().collect(),
+            Self::Specific(names) => names.iter().collect(),
         }
     }
 }
 
 impl Serialize for ShowLink {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            ShowLink::None => Vec::<String>::new().serialize(serializer),
-            ShowLink::All => serializer.serialize_str("*"),
-            ShowLink::Specific(v) => v.serialize(serializer),
+            Self::None => Vec::<String>::new().serialize(serializer),
+            Self::All => serializer.serialize_str("*"),
+            Self::Specific(v) => v.serialize(serializer),
         }
     }
 }
 
 impl<'de> Deserialize<'de> for ShowLink {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de;
 
         struct ShowLinkVisitor;
@@ -1476,11 +1490,11 @@ impl<'de> Deserialize<'de> for ShowLink {
         impl<'de> de::Visitor<'de> for ShowLinkVisitor {
             type Value = ShowLink;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str(r#""*" or an array of user names"#)
             }
 
-            fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<ShowLink, E> {
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ShowLink, E> {
                 if v == "*" {
                     Ok(ShowLink::All)
                 } else {
@@ -1491,7 +1505,7 @@ impl<'de> Deserialize<'de> for ShowLink {
                 }
             }
 
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<ShowLink, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<ShowLink, A::Error> {
                 let mut names = Vec::new();
                 while let Some(name) = seq.next_element::<String>()? {
                     names.push(name);

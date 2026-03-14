@@ -1,0 +1,34 @@
+name: Security
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  advisory-gate:
+    name: Advisory Gate
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install latest stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: Run policy regression tests
+        run: bash tools/security/test_enforce_audit_policy.sh
+
+      - name: Enforce advisory policy
+        run: bash tools/security/enforce_audit_policy.sh

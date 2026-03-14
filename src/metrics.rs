@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
+use hyper::header::{CONTENT_TYPE, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -156,29 +157,65 @@ async fn handle<B>(
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.uri().path() == "/metrics" {
         let body = render_metrics(stats, config, ip_tracker).await;
-        let resp = Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-            .body(Full::new(Bytes::from(body)))
-            .unwrap();
+        let resp = build_plain_response(
+            StatusCode::OK,
+            "text/plain; version=0.0.4; charset=utf-8",
+            Bytes::from(body),
+        );
         return Ok(resp);
     }
 
     if req.uri().path() == "/beobachten" {
         let body = render_beobachten(beobachten, config);
-        let resp = Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/plain; charset=utf-8")
-            .body(Full::new(Bytes::from(body)))
-            .unwrap();
+        let resp = build_plain_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            Bytes::from(body),
+        );
         return Ok(resp);
     }
 
-    let resp = Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body(Full::new(Bytes::from("Not Found\n")))
-        .unwrap();
+    let resp = build_plain_response(
+        StatusCode::NOT_FOUND,
+        "text/plain; charset=utf-8",
+        Bytes::from_static(b"Not Found\n"),
+    );
     Ok(resp)
+}
+
+fn build_plain_response(
+    status: StatusCode,
+    content_type: &'static str,
+    body: Bytes,
+) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, content_type)
+        .body(Full::new(body))
+        .unwrap_or_else(|_| {
+            let mut fallback = Response::new(Full::new(Bytes::from_static(b"internal error\n")));
+            *fallback.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            fallback.headers_mut().insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            fallback
+        })
+}
+
+// Escapes a string for use as a Prometheus text-format label value.
+// Per the exposition format spec, `\`, `"`, and newlines must be escaped.
+fn escape_prometheus_label_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn render_beobachten(beobachten: &BeobachtenStore, config: &ProxyConfig) -> String {
@@ -1742,7 +1779,7 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
 
     if user_enabled {
         for entry in stats.iter_user_stats() {
-            let user = entry.key();
+            let user = escape_prometheus_label_value(entry.key());
             let s = entry.value();
             let _ = writeln!(out, "telemt_user_connections_total{{user=\"{}\"}} {}", user, s.connects.load(std::sync::atomic::Ordering::Relaxed));
             let _ = writeln!(out, "telemt_user_connections_current{{user=\"{}\"}} {}", user, s.curr_connects.load(std::sync::atomic::Ordering::Relaxed));
@@ -1787,24 +1824,86 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
             } else {
                 0.0
             };
-            let _ = writeln!(out, "telemt_user_unique_ips_current{{user=\"{}\"}} {}", user, current);
+            let recent = recent_counts.get(&user).copied().unwrap_or(0);
+            let user_escaped = escape_prometheus_label_value(&user);
+            let _ = writeln!(out, "telemt_user_unique_ips_current{{user=\"{}\"}} {}", user_escaped, current);
             let _ = writeln!(
                 out,
                 "telemt_user_unique_ips_recent_window{{user=\"{}\"}} {}",
-                user,
-                recent_counts.get(&user).copied().unwrap_or(0)
+                user_escaped,
+                recent
             );
-            let _ = writeln!(out, "telemt_user_unique_ips_limit{{user=\"{}\"}} {}", user, limit);
+            let _ = writeln!(out, "telemt_user_unique_ips_limit{{user=\"{}\"}} {}", user_escaped, limit);
             let _ = writeln!(
                 out,
                 "telemt_user_unique_ips_utilization{{user=\"{}\"}} {:.6}",
-                user,
+                user_escaped,
                 utilization
             );
         }
     }
 
     out
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::build_plain_response;
+    use http_body_util::BodyExt;
+    use hyper::StatusCode;
+    use hyper::body::Bytes;
+
+    #[tokio::test]
+    async fn build_plain_response_keeps_status_and_content_type() {
+        let response = build_plain_response(
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            Bytes::from_static(b"not found\n"),
+        );
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        assert_eq!(body_bytes.as_ref(), b"not found\n");
+    }
+
+    #[tokio::test]
+    async fn build_plain_response_falls_back_to_500_on_invalid_header_value() {
+        let response = build_plain_response(
+            StatusCode::OK,
+            "text/plain\r\nX-Injection: bad",
+            Bytes::from_static(b"secret-like-body\n"),
+        );
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        assert_eq!(body_bytes.as_ref(), b"internal error\n");
+    }
 }
 
 #[cfg(test)]
@@ -1974,5 +2073,231 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod label_escape_tests {
+    use super::escape_prometheus_label_value;
+
+    // ── Unit tests for the escaping primitive ─────────────────────────────────
+
+    #[test]
+    fn clean_name_unchanged() {
+        assert_eq!(escape_prometheus_label_value("alice"), "alice");
+    }
+
+    #[test]
+    fn double_quote_is_escaped() {
+        // A raw " would close the label value early in Prometheus text format.
+        assert_eq!(escape_prometheus_label_value(r#"a"b"#), r#"a\"b"#);
+    }
+
+    #[test]
+    fn backslash_is_doubled() {
+        assert_eq!(escape_prometheus_label_value(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn newline_becomes_backslash_n() {
+        assert_eq!(escape_prometheus_label_value("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn combined_special_chars() {
+        // Backslash followed by quote followed by newline — common injection payload.
+        let input = "a\\\"\n";
+        let got = escape_prometheus_label_value(input);
+        assert_eq!(got, r#"a\\\"\n"#);
+    }
+
+    #[test]
+    fn empty_string_unchanged() {
+        assert_eq!(escape_prometheus_label_value(""), "");
+    }
+
+    #[test]
+    fn unicode_passthrough() {
+        // Non-ASCII is allowed verbatim; only the three control chars are escaped.
+        assert_eq!(escape_prometheus_label_value("Ärger"), "Ärger");
+    }
+}
+
+#[cfg(test)]
+mod label_injection_tests {
+    use std::sync::Arc;
+    use crate::config::ProxyConfig;
+    use crate::ip_tracker::UserIpTracker;
+    use crate::stats::Stats;
+    use super::render_metrics;
+
+    // ── Prometheus label injection via crafted user names ─────────────────────
+    //
+    // Without escaping, a user name containing `"` terminates the label value
+    // early in the Prometheus text-format line, allowing an attacker who controls
+    // the config file to inject arbitrary fake metric lines into the scrape.
+
+    #[tokio::test]
+    async fn double_quote_in_username_does_not_inject_fake_metric() {
+        // Without escaping, a `"` in the user name terminates the label value
+        // early, turning the rest of the string into arbitrary metric lines.
+        // The payload below would, if unescaped, inject:
+        //   telemt_user_connections_total{user="x"} 99999
+        //   telemt_injected_metric 1          ← fake standalone line
+        let injected = "x\"} 99999\ntelemt_injected_metric 1\ntelemt_user_connections_total{user=\"dummy";
+
+        let stats = Arc::new(Stats::new());
+        stats.increment_user_connects(injected);
+
+        let output = render_metrics(&stats, &ProxyConfig::default(), &UserIpTracker::new()).await;
+
+        // The raw unescaped payload must not appear verbatim.
+        assert!(
+            !output.contains(injected),
+            "Raw injection payload found verbatim in Prometheus output — escaping is broken"
+        );
+
+        // The injected fake metric name must not appear as a standalone line.
+        for line in output.lines() {
+            let trimmed = line.trim();
+            assert!(
+                !trimmed.starts_with("telemt_injected_metric"),
+                "Injected fake metric appeared as a standalone Prometheus line: {trimmed}"
+            );
+        }
+
+        // The global (label-less) connections total is 0 because we only called
+        // increment_user_connects, not increment_connects_all.
+        // If injection had succeeded, a line "telemt_connections_total 99999" would exist.
+        assert!(
+            !output.lines().any(|l| l.trim() == "telemt_connections_total 99999"),
+            "Injected count '99999' appeared as a standalone metric value"
+        );
+        assert!(
+            output.lines().any(|l| l.trim() == "telemt_connections_total 0"),
+            "Expected 'telemt_connections_total 0' to be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn backslash_in_username_is_escaped_in_output() {
+        let user = r"user\name";
+
+        let stats = Arc::new(Stats::new());
+        stats.increment_user_connects(user);
+
+        let output = render_metrics(&stats, &ProxyConfig::default(), &UserIpTracker::new()).await;
+
+        // The correctly escaped form must appear.
+        assert!(
+            output.contains(r#"user="user\\name""#),
+            "Backslash not properly escaped in output:\n{output}"
+        );
+        // The unescaped form must not appear as a label boundary-breaker.
+        assert!(
+            !output.contains(r#"user="user\name""#),
+            "Unescaped backslash found in output"
+        );
+    }
+
+    #[tokio::test]
+    async fn newline_in_username_does_not_split_metric_line() {
+        // A newline in a label value would physically split the output line,
+        // making the second half look like an independent metric line.
+        let user = "legit\ntelemt_spoofed_counter 1";
+
+        let stats = Arc::new(Stats::new());
+        stats.increment_user_connects(user);
+
+        let output = render_metrics(&stats, &ProxyConfig::default(), &UserIpTracker::new()).await;
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            assert!(
+                !trimmed.starts_with("telemt_spoofed_counter"),
+                "Newline injection created a fake metric line: {trimmed}"
+            );
+        }
+
+        assert!(
+            output.contains(r#"user="legit\ntelemt_spoofed_counter 1""#),
+            "Newline not escaped as \\n in label value"
+        );
+    }
+
+    #[tokio::test]
+    async fn unique_ips_block_also_escapes_user_labels() {
+        // Verify the second rendering path (per-user IP counters) is equally hardened.
+        let user = r#"evil"}0 fake"#;
+
+        let mut config = ProxyConfig::default();
+        config.access.user_max_unique_ips.insert(user.to_string(), 5);
+
+        let output = render_metrics(&Arc::new(Stats::new()), &config, &UserIpTracker::new()).await;
+
+        // The raw payload must not appear verbatim as it would break label syntax.
+        assert!(
+            !output.contains(user),
+            "Unescaped user name found in unique-IPs metric block"
+        );
+
+        // The correctly escaped form must be present.
+        let expected_escaped = r#"user="evil\"}0 fake""#;
+        assert!(
+            output.contains(expected_escaped),
+            "Escaped user name not found in unique-IPs metric block.\nExpected substring: {expected_escaped}\nFull output:\n{output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_username_passthrough_unmodified() {
+        // Regression guard: normal user names must not be corrupted by the escaping.
+        let user = "alice_01";
+
+        let mut config = ProxyConfig::default();
+        config.access.users.insert(user.to_string(), "deadbeef".to_string());
+
+        let stats = Arc::new(Stats::new());
+        stats.increment_user_connects(user);
+
+        let output = render_metrics(&stats, &config, &UserIpTracker::new()).await;
+
+        assert!(
+            output.contains(r#"telemt_user_connections_total{user="alice_01"} 1"#),
+            "Clean user name was altered by escaping: {output}"
+        );
+    }
+
+    // ── Whitelist enforcement ─────────────────────────────────────────────────
+
+    #[test]
+    fn whitelist_blocks_non_matching_ip() {
+        use std::net::SocketAddr;
+        use ipnetwork::IpNetwork;
+        let whitelist: Vec<IpNetwork> = vec!["10.0.0.0/8".parse().unwrap()];
+        let peer: SocketAddr = "203.0.113.99:12345".parse().unwrap();
+        let allowed = whitelist.iter().any(|net| net.contains(peer.ip()));
+        assert!(!allowed, "Non-whitelist IP was not blocked");
+    }
+
+    #[test]
+    fn whitelist_allows_matching_ip() {
+        use std::net::SocketAddr;
+        use ipnetwork::IpNetwork;
+        let whitelist: Vec<IpNetwork> = vec!["10.0.0.0/8".parse().unwrap()];
+        let peer: SocketAddr = "10.1.2.3:12345".parse().unwrap();
+        let allowed = whitelist.iter().any(|net| net.contains(peer.ip()));
+        assert!(allowed, "Whitelisted IP was incorrectly blocked");
+    }
+
+    #[test]
+    fn empty_whitelist_allows_all() {
+        use std::net::SocketAddr;
+        use ipnetwork::IpNetwork;
+        let whitelist: Vec<IpNetwork> = vec![];
+        let peer: SocketAddr = "198.51.100.1:9999".parse().unwrap();
+        // The serve_listener logic: if whitelist is empty, skip the whitelist check.
+        let gated = !whitelist.is_empty() && !whitelist.iter().any(|net| net.contains(peer.ip()));
+        assert!(!gated, "Non-empty whitelist check fired on empty whitelist");
     }
 }

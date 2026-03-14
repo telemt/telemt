@@ -24,12 +24,12 @@ impl FrameMeta {
         Self::default()
     }
     
-    pub fn with_quickack(mut self) -> Self {
+    pub const fn with_quickack(mut self) -> Self {
         self.quickack = true;
         self
     }
     
-    pub fn with_simple_ack(mut self) -> Self {
+    pub const fn with_simple_ack(mut self) -> Self {
         self.simple_ack = true;
         self
     }
@@ -62,7 +62,7 @@ pub struct ReadHalf<R> {
 }
 
 impl<R> ReadHalf<R> {
-    pub fn new(inner: R) -> Self {
+    pub const fn new(inner: R) -> Self {
         Self { inner }
     }
     
@@ -87,7 +87,7 @@ pub struct WriteHalf<W> {
 }
 
 impl<W> WriteHalf<W> {
-    pub fn new(inner: W) -> Self {
+    pub const fn new(inner: W) -> Self {
         Self { inner }
     }
     

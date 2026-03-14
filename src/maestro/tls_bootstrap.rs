@@ -98,8 +98,8 @@ pub(crate) async fn bootstrap_tls_front(
 
         let cache_refresh = cache.clone();
         let domains_refresh = tls_domains.to_vec();
-        let host_refresh = mask_host.clone();
-        let unix_sock_refresh = mask_unix_sock.clone();
+        let host_refresh = mask_host;
+        let unix_sock_refresh = mask_unix_sock;
         let upstream_refresh = upstream_manager.clone();
         tokio::spawn(async move {
             loop {

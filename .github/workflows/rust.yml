@@ -45,10 +45,65 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
-# clippy dont fail on warnings because of active development of telemt 
-# and many warnings
-    - name: Run clippy
-      run: cargo clippy -- --cap-lints warn
+    - name: Check benches compile
+      run: cargo check --benches
+
+    - name: Run clippy policy regression tests
+      run: bash tools/security/test_clippy_policy.sh
+
+    - name: Run clippy for production targets (strict)
+      run: >-
+        cargo clippy --workspace --lib --bins --all-features --
+        -D warnings
+        -D clippy::correctness
+        -D clippy::all
+        -D clippy::pedantic
+        -D clippy::cargo
+        -A clippy::redundant_pub_crate
+        -D clippy::await_holding_lock
+        -D clippy::await_holding_refcell_ref
+        -D clippy::debug_assert_with_mut_call
+        -D clippy::macro_use_imports
+        -D clippy::cast_ptr_alignment
+        -D clippy::cast_lossless
+        -D clippy::cast_possible_truncation
+        -D clippy::cast_possible_wrap
+        -D clippy::ptr_as_ptr
+        -D clippy::large_stack_arrays
+        -D clippy::float_cmp
+        -D clippy::same_functions_in_if_condition
+        -D clippy::cognitive_complexity
+        -D missing_docs
+        -D missing_debug_implementations
+        -D trivial_casts
+        -D trivial_numeric_casts
+        -D unused_extern_crates
+        -D unused_import_braces
+        -D unused_qualifications
+        -D rust_2018_idioms
+        -W clippy::nursery
+        -F clippy::unwrap_used
+        -F clippy::expect_used
+        -F clippy::panic
+        -F clippy::todo
+        -F clippy::unimplemented
+
+    - name: Run clippy for test targets (scoped)
+      run: >-
+        cargo clippy --workspace --tests --all-features --
+        -D clippy::correctness
+        -A clippy::expect_used
+        -A clippy::panic
+        -A clippy::unwrap_used
+        -A clippy::todo
+        -A clippy::unimplemented
+        -A clippy::redundant_pub_crate
+        -A clippy::missing_const_for_fn
+        -A clippy::option_if_let_else
+        -A clippy::unused_async
+        -A clippy::cast_lossless
+        -A clippy::cast_possible_truncation
+        -A clippy::cast_possible_wrap
 
     - name: Check for unused dependencies
       run: cargo udeps || true

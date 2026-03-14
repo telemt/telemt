@@ -15,6 +15,7 @@ use std::time::Instant;
 
 const STUN_BATCH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Probes a configured STUN server and returns dual-stack reflection data.
 #[allow(dead_code)]
 pub async fn stun_probe(stun_addr: Option<String>) -> Result<crate::network::stun::DualStunResult> {
     let stun_addr = stun_addr.unwrap_or_else(|| {
@@ -29,6 +30,7 @@ pub async fn stun_probe(stun_addr: Option<String>) -> Result<crate::network::stu
     stun_probe_dual(&stun_addr).await
 }
 
+/// Attempts to detect a public IPv4 address via external HTTP providers.
 #[allow(dead_code)]
 pub async fn detect_public_ip() -> Option<IpAddr> {
     fetch_public_ipv4_with_retry().await.ok().flatten().map(IpAddr::V4)
@@ -308,7 +310,13 @@ impl MePool {
             .probe_stun_batch_for_family(&primary_servers, family, attempt, bind_ip)
             .await;
 
-        if selected_reflected.is_none() && !configured_servers.is_empty() && primary_servers != configured_servers {
+        let missing_primary_reflection = selected_reflected.is_none();
+        let has_configured_servers = !configured_servers.is_empty();
+        let primary_differs_from_configured = primary_servers != configured_servers;
+        let should_retry_with_configured =
+            missing_primary_reflection && has_configured_servers && primary_differs_from_configured;
+
+        if should_retry_with_configured {
             let (rediscovered_live, rediscovered_reflected) = self
                 .probe_stun_batch_for_family(&configured_servers, family, attempt, bind_ip)
                 .await;
@@ -346,7 +354,7 @@ impl MePool {
         }
 
         if use_shared_cache {
-            let backoff = Duration::from_secs(60 * 2u64.pow((attempt as u32).min(6)));
+            let backoff = Duration::from_secs(60 * 2u64.pow(u32::from(attempt).min(6)));
             *self.stun_backoff_until.write().await = Some(Instant::now() + backoff);
         }
         None
@@ -356,8 +364,8 @@ impl MePool {
 async fn fetch_public_ipv4_with_retry() -> Result<Option<Ipv4Addr>> {
     let providers = [
         "https://checkip.amazonaws.com",
-        "http://v4.ident.me",
-        "http://ipv4.icanhazip.com",
+        "https://v4.ident.me",
+        "https://ipv4.icanhazip.com",
     ];
     for url in providers {
         if let Ok(Some(ip)) = fetch_public_ipv4_once(url).await {
@@ -376,6 +384,97 @@ async fn fetch_public_ipv4_once(url: &str) -> Result<Option<Ipv4Addr>> {
         ProxyError::Proxy(format!("public IP detection read failed: {e}"))
     })?;
 
-    let ip = text.trim().parse().ok();
-    Ok(ip)
+    Ok(parse_public_ipv4_response(text.trim()))
+}
+
+fn parse_public_ipv4_response(body: &str) -> Option<Ipv4Addr> {
+    let ip = body.parse::<Ipv4Addr>().ok()?;
+    if is_bogon(IpAddr::V4(ip)) {
+        return None;
+    }
+    Some(ip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_public_ipv4_response;
+    use std::net::Ipv4Addr;
+
+    fn should_retry_with_configured(
+        selected_reflected: Option<std::net::SocketAddr>,
+        configured_servers: &[String],
+        primary_servers: &[String],
+    ) -> bool {
+        let missing_primary_reflection = selected_reflected.is_none();
+        let has_configured_servers = !configured_servers.is_empty();
+        let primary_differs_from_configured = primary_servers != configured_servers;
+
+        missing_primary_reflection && has_configured_servers && primary_differs_from_configured
+    }
+
+    #[test]
+    fn fallback_retry_is_disabled_when_reflection_already_selected() {
+        let configured = vec!["stun-a.example:3478".to_string()];
+        let primary = vec!["stun-b.example:3478".to_string()];
+        let selected = Some(std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 10)),
+            44444,
+        ));
+
+        assert!(!should_retry_with_configured(selected, &configured, &primary));
+    }
+
+    #[test]
+    fn fallback_retry_is_disabled_when_no_configured_servers_exist() {
+        let configured = Vec::new();
+        let primary = vec!["stun-live.example:3478".to_string()];
+
+        assert!(!should_retry_with_configured(None, &configured, &primary));
+    }
+
+    #[test]
+    fn fallback_retry_is_disabled_when_primary_matches_configured() {
+        let configured = vec![
+            "stun-a.example:3478".to_string(),
+            "stun-b.example:3478".to_string(),
+        ];
+        let primary = configured.clone();
+
+        assert!(!should_retry_with_configured(None, &configured, &primary));
+    }
+
+    #[test]
+    fn fallback_retry_is_enabled_only_for_missing_reflection_and_mismatched_server_sets() {
+        let configured = vec![
+            "stun-a.example:3478".to_string(),
+            "stun-b.example:3478".to_string(),
+        ];
+        let primary = vec!["stun-live.example:3478".to_string()];
+
+        assert!(should_retry_with_configured(None, &configured, &primary));
+    }
+
+    #[test]
+    fn parse_public_ipv4_response_accepts_public_ipv4() {
+        let parsed = parse_public_ipv4_response("1.1.1.1");
+        assert_eq!(parsed, Some(Ipv4Addr::new(1, 1, 1, 1)));
+    }
+
+    #[test]
+    fn parse_public_ipv4_response_rejects_bogon_ipv4() {
+        let parsed = parse_public_ipv4_response("10.0.0.4");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_public_ipv4_response_rejects_payload_with_extra_tokens() {
+        let parsed = parse_public_ipv4_response("1.1.1.1\n8.8.8.8");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_public_ipv4_response_rejects_trailing_garbage() {
+        let parsed = parse_public_ipv4_response("1.1.1.1 trailing");
+        assert!(parsed.is_none());
+    }
 }

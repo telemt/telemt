@@ -1,4 +1,4 @@
-//! MTProto frame types and traits
+//! `MTProto` frame types and traits
 //!
 //! This module defines the common types and traits used by all
 //! frame encoding/decoding implementations.
@@ -14,7 +14,7 @@ use crate::crypto::SecureRandom;
 
 // ============= Frame Types =============
 
-/// A decoded MTProto frame
+/// A decoded `MTProto` frame
 #[derive(Debug, Clone)]
 pub struct Frame {
     /// Frame payload data
@@ -33,7 +33,7 @@ impl Frame {
     }
     
     /// Create a new frame with data and metadata
-    pub fn with_meta(data: Bytes, meta: FrameMeta) -> Self {
+    pub const fn with_meta(data: Bytes, meta: FrameMeta) -> Self {
         Self { data, meta }
     }
     
@@ -43,16 +43,16 @@ impl Frame {
     }
     
     /// Check if frame is empty
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
     
     /// Get frame length
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.data.len()
     }
     
-    /// Create a QuickAck request frame
+/// Create a `QuickAck` request frame
     pub fn quickack(data: Bytes) -> Self {
         Self {
             data,
@@ -93,25 +93,25 @@ impl FrameMeta {
     }
     
     /// Create with quickack flag
-    pub fn with_quickack(mut self) -> Self {
+    pub const fn with_quickack(mut self) -> Self {
         self.quickack = true;
         self
     }
     
-    /// Create with simple_ack flag
-    pub fn with_simple_ack(mut self) -> Self {
+/// Create with `simple_ack` flag
+    pub const fn with_simple_ack(mut self) -> Self {
         self.simple_ack = true;
         self
     }
     
     /// Create with padding length
-    pub fn with_padding(mut self, len: u8) -> Self {
+    pub const fn with_padding(mut self, len: u8) -> Self {
         self.padding_len = len;
         self
     }
     
     /// Check if any special flags are set
-    pub fn has_flags(&self) -> bool {
+    pub const fn has_flags(&self) -> bool {
         self.quickack || self.simple_ack
     }
 }

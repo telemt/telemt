@@ -1,8 +1,8 @@
 //! Fake TLS 1.3 Handshake
 //!
-//! This module handles the fake TLS 1.3 handshake used by MTProto proxy
+//! This module handles the fake TLS 1.3 handshake used by `MTProto` proxy
 //! for domain fronting. The handshake looks like valid TLS 1.3 but
-//! actually carries MTProto authentication data.
+//! actually carries `MTProto` authentication data.
 
 #![allow(dead_code)]
 
@@ -13,13 +13,14 @@ use super::constants::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use num_bigint::BigUint;
 use num_traits::One;
+use subtle::ConstantTimeEq;
 
 // ============= Public Constants =============
 
 /// TLS handshake digest length
 pub const TLS_DIGEST_LEN: usize = 32;
 
-/// Position of digest in TLS ClientHello
+/// Position of digest in TLS `ClientHello`
 pub const TLS_DIGEST_POS: usize = 11;
 
 /// Length to store for replay protection (first 16 bytes of digest)
@@ -55,7 +56,7 @@ mod named_curve {
 pub struct TlsValidation {
     /// Username that validated
     pub user: String,
-    /// Session ID from ClientHello
+    /// Session ID from `ClientHello`
     pub session_id: Vec<u8>,
     /// Client digest for response generation
     pub digest: [u8; TLS_DIGEST_LEN],
@@ -116,6 +117,13 @@ impl TlsExtensionBuilder {
 
     /// Add ALPN extension with a single selected protocol.
     fn add_alpn(&mut self, proto: &[u8]) -> &mut Self {
+        // RFC 7301 §3.1: the protocol name length is encoded in a single byte,
+        // so the protocol name must be at most 255 bytes. Silently skip rather
+        // than writing mismatched length fields that corrupt subsequent extensions.
+        let Ok(proto_len) = u8::try_from(proto.len()) else {
+            return self;
+        };
+
         // Extension type: ALPN (0x0010)
         self.extensions.extend_from_slice(&extension_type::ALPN.to_be_bytes());
 
@@ -124,8 +132,7 @@ impl TlsExtensionBuilder {
         //   protocols length (2 bytes)
         //     protocol name length (1 byte)
         //     protocol name bytes
-        let proto_len = proto.len() as u8;
-        let list_len: u16 = 1 + proto_len as u16;
+        let list_len: u16 = 1 + u16::from(proto_len);
         let ext_len: u16 = 2 + list_len;
 
         self.extensions.extend_from_slice(&ext_len.to_be_bytes());
@@ -158,11 +165,11 @@ impl TlsExtensionBuilder {
 
 // ============= ServerHello Builder =============
 
-/// Builder for TLS ServerHello with correct structure
+/// Builder for TLS `ServerHello` with correct structure
 struct ServerHelloBuilder {
     /// Random bytes (32 bytes, will contain digest)
     random: [u8; 32],
-    /// Session ID (echoed from ClientHello)
+    /// Session ID (echoed from `ClientHello`)
     session_id: Vec<u8>,
     /// Cipher suite
     cipher_suite: [u8; 2],
@@ -202,7 +209,7 @@ impl ServerHelloBuilder {
         self
     }
     
-    /// Build ServerHello message (without record header)
+    /// Build `ServerHello` message (without record header)
     fn build_message(&self) -> Vec<u8> {
         let mut ext_builder = self.extensions.clone();
         if let Some(ref alpn) = self.alpn {
@@ -253,7 +260,7 @@ impl ServerHelloBuilder {
         message
     }
     
-    /// Build complete ServerHello TLS record
+    /// Build complete `ServerHello` TLS record
     fn build_record(&self) -> Vec<u8> {
         let message = self.build_message();
         
@@ -273,7 +280,7 @@ impl ServerHelloBuilder {
 
 // ============= Public Functions =============
 
-/// Validate TLS ClientHello against user secrets
+/// Validate TLS `ClientHello` against user secrets
 ///
 /// Returns validation result if a matching user is found.
 pub fn validate_tls_handshake(
@@ -281,63 +288,67 @@ pub fn validate_tls_handshake(
     secrets: &[(String, Vec<u8>)],
     ignore_time_skew: bool,
 ) -> Option<TlsValidation> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    validate_tls_handshake_at_time(handshake, secrets, ignore_time_skew, now)
+}
+
+fn validate_tls_handshake_at_time(
+    handshake: &[u8],
+    secrets: &[(String, Vec<u8>)],
+    ignore_time_skew: bool,
+    now: i64,
+) -> Option<TlsValidation> {
     if handshake.len() < TLS_DIGEST_POS + TLS_DIGEST_LEN + 1 {
         return None;
     }
-    
+
     // Extract digest
     let digest: [u8; TLS_DIGEST_LEN] = handshake[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN]
         .try_into()
         .ok()?;
-    
+
     // Extract session ID
     let session_id_len_pos = TLS_DIGEST_POS + TLS_DIGEST_LEN;
     let session_id_len = handshake.get(session_id_len_pos).copied()? as usize;
     let session_id_start = session_id_len_pos + 1;
-    
+
     if handshake.len() < session_id_start + session_id_len {
         return None;
     }
-    
+
     let session_id = handshake[session_id_start..session_id_start + session_id_len].to_vec();
-    
+
     // Build message for HMAC (with zeroed digest)
     let mut msg = handshake.to_vec();
     msg[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN].fill(0);
     
-    // Get current time
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    
     for (user, secret) in secrets {
         let computed = sha256_hmac(secret, &msg);
-        
-        // XOR digests
-        let xored: Vec<u8> = digest.iter()
-            .zip(computed.iter())
-            .map(|(a, b)| a ^ b)
-            .collect();
-        
-        // Check that first 28 bytes are zeros (timestamp in last 4)
-        if !xored[..28].iter().all(|&b| b == 0) {
+
+        // XOR the received digest against the computed HMAC to extract the embedded timestamp.
+        // The protocol embeds timestamp in the last 4 bytes; the first 28 must be zero on match.
+        let mut xored = [0u8; TLS_DIGEST_LEN];
+        for i in 0..TLS_DIGEST_LEN {
+            xored[i] = digest[i] ^ computed[i];
+        }
+
+        // Constant-time prefix check prevents timing-based HMAC forgery (OWASP ASVS V6.2.1).
+        // ConstantTimeEq evaluates all 28 bytes without short-circuiting.
+        if xored[..28].ct_eq(&[0u8; 28]).unwrap_u8() == 0 {
             continue;
         }
-        
-        // Extract timestamp
-        let timestamp = u32::from_le_bytes(xored[28..32].try_into().unwrap());
-        let time_diff = now - timestamp as i64;
+
+        // Extract timestamp from last 4 bytes (the only non-zero part on valid match).
+        let ts_bytes = [xored[28], xored[29], xored[30], xored[31]];
+        let timestamp = u32::from_le_bytes(ts_bytes);
+        let time_diff = now - i64::from(timestamp);
         
         // Check time skew
-        if !ignore_time_skew {
-            // Allow very small timestamps (boot time instead of unix time)
-            // This is a quirk in some clients that use uptime instead of real time
-            let is_boot_time = timestamp < 60 * 60 * 24 * 1000; // < ~2.7 years in seconds
-            
-            if !is_boot_time && !(TIME_SKEW_MIN..=TIME_SKEW_MAX).contains(&time_diff) {
-                continue;
-            }
+        if !ignore_time_skew && !(TIME_SKEW_MIN..=TIME_SKEW_MAX).contains(&time_diff) {
+            continue;
         }
         
         return Some(TlsValidation {
@@ -374,10 +385,10 @@ pub fn gen_fake_x25519_key(rng: &SecureRandom) -> [u8; 32] {
     result
 }
 
-/// Build TLS ServerHello response
+/// Build TLS `ServerHello` response
 ///
 /// This builds a complete TLS 1.3-like response including:
-/// - ServerHello record with extensions
+/// - `ServerHello` record with extensions
 /// - Change Cipher Spec record
 /// - Fake encrypted certificate (Application Data record)
 ///
@@ -461,7 +472,7 @@ pub fn build_server_hello(
     response
 }
 
-/// Extract SNI (server_name) from a TLS ClientHello.
+/// Extract SNI (`server_name`) from a TLS `ClientHello`.
 pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
     if handshake.len() < 43 || handshake[0] != TLS_RECORD_HANDSHAKE {
         return None;
@@ -525,8 +536,13 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
                 if sn_pos + name_len > sn_end {
                     break;
                 }
+                // RFC 6066 §3: HostName must be an ASCII-compatible encoding (ACE).
+                // Reject non-ASCII UTF-8 and embedded NUL bytes which can cause
+                // string-confusion in downstream routing or logging systems.
                 if name_type == 0 && name_len > 0
                     && let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len])
+                    && host.is_ascii()
+                    && !host.contains('\0')
                 {
                     return Some(host.to_string());
                 }
@@ -539,7 +555,7 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
     None
 }
 
-/// Extract ALPN protocol list from ClientHello, return in offered order.
+/// Extract ALPN protocol list from `ClientHello`, return in offered order.
 pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
     let mut pos = 5; // after record header
     if handshake.get(pos) != Some(&0x01) {
@@ -586,7 +602,7 @@ pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
 }
 
 
-/// Check if bytes look like a TLS ClientHello
+/// Check if bytes look like a TLS `ClientHello`
 pub fn is_tls_handshake(first_bytes: &[u8]) -> bool {
     if first_bytes.len() < 3 {
         return false;
@@ -598,7 +614,7 @@ pub fn is_tls_handshake(first_bytes: &[u8]) -> bool {
         && first_bytes[2] == 0x01
 }
 
-/// Parse TLS record header, returns (record_type, length)
+/// Parse TLS record header, returns (`record_type`, length)
 pub fn parse_tls_record_header(header: &[u8; 5]) -> Option<(u8, u16)> {
     let record_type = header[0];
     let version = [header[1], header[2]];
@@ -670,6 +686,34 @@ fn validate_server_hello_structure(data: &[u8]) -> Result<(), ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_handshake_with_timestamp(
+        secret: &[u8],
+        timestamp: u32,
+        session_id: &[u8],
+    ) -> Vec<u8> {
+        let mut handshake = vec![0u8; 5 + 4 + 2 + 32 + 1 + session_id.len() + 2 + 1 + 2];
+        handshake[0] = TLS_RECORD_HANDSHAKE;
+        handshake[1..3].copy_from_slice(&[0x03, 0x01]);
+        let record_len = (handshake.len().saturating_sub(5)) as u16;
+        handshake[3..5].copy_from_slice(&record_len.to_be_bytes());
+
+        // Session ID length and value are read by validator and must fit in buffer.
+        let session_pos = TLS_DIGEST_POS + TLS_DIGEST_LEN;
+        handshake[session_pos] = session_id.len() as u8;
+        handshake[session_pos + 1..session_pos + 1 + session_id.len()].copy_from_slice(session_id);
+
+        let mut msg = handshake.clone();
+        msg[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN].fill(0);
+        let computed = sha256_hmac(secret, &msg);
+        let mut digest = computed;
+        let ts_bytes = timestamp.to_le_bytes();
+        for i in 0..4 {
+            digest[28 + i] ^= ts_bytes[i];
+        }
+        handshake[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN].copy_from_slice(&digest);
+        handshake
+    }
     
     #[test]
     fn test_is_tls_handshake() {
@@ -738,7 +782,7 @@ mod tests {
         let session_id = vec![0x01, 0x02, 0x03, 0x04];
         let key = [0x55u8; 32];
         
-        let builder = ServerHelloBuilder::new(session_id.clone())
+        let builder = ServerHelloBuilder::new(session_id)
             .with_x25519_key(&key)
             .with_tls13_version();
         
@@ -858,6 +902,68 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[test]
+    fn test_validate_tls_handshake_rejects_large_skew_with_injected_now() {
+        let secret = b"secret";
+        let user = "u1".to_string();
+        let handshake = make_handshake_with_timestamp(secret, 1_700_000_000, &[0x01, 0x02]);
+        let secrets = vec![(user, secret.to_vec())];
+
+        let result = validate_tls_handshake_at_time(&handshake, &secrets, false, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_tls_handshake_rejects_boot_time_timestamp_with_large_skew() {
+        let secret = b"secret";
+        let user = "u2".to_string();
+        let handshake = make_handshake_with_timestamp(secret, 1_000, &[0xAA]);
+        let secrets = vec![(user, secret.to_vec())];
+
+        let result = validate_tls_handshake_at_time(&handshake, &secrets, false, 10_000);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_tls_handshake_accepts_exact_skew_boundaries() {
+        let secret = b"secret";
+        let user = "u3".to_string();
+        let now = 1_700_000_000_i64;
+        let min_boundary_timestamp = (now - TIME_SKEW_MIN) as u32;
+        let max_boundary_timestamp = (now - TIME_SKEW_MAX) as u32;
+        let secrets = vec![(user.clone(), secret.to_vec())];
+
+        let min_boundary = make_handshake_with_timestamp(secret, min_boundary_timestamp, &[0x10]);
+        let max_boundary = make_handshake_with_timestamp(secret, max_boundary_timestamp, &[0x11]);
+
+        let min_result = validate_tls_handshake_at_time(&min_boundary, &secrets, false, now);
+        let max_result = validate_tls_handshake_at_time(&max_boundary, &secrets, false, now);
+
+        assert!(min_result.is_some());
+        assert!(max_result.is_some());
+        assert_eq!(min_result.map(|v| v.user), Some(user.clone()));
+        assert_eq!(max_result.map(|v| v.user), Some(user));
+    }
+
+    #[test]
+    fn test_validate_tls_handshake_rejects_skew_just_outside_boundaries() {
+        let secret = b"secret";
+        let user = "u4".to_string();
+        let now = 1_700_000_000_i64;
+        let too_old_timestamp = (now - TIME_SKEW_MAX - 1) as u32;
+        let too_new_timestamp = (now - TIME_SKEW_MIN + 1) as u32;
+        let secrets = vec![(user, secret.to_vec())];
+
+        let too_new = make_handshake_with_timestamp(secret, too_new_timestamp, &[0x20]);
+        let too_old = make_handshake_with_timestamp(secret, too_old_timestamp, &[0x21]);
+
+        let too_new_result = validate_tls_handshake_at_time(&too_new, &secrets, false, now);
+        let too_old_result = validate_tls_handshake_at_time(&too_old, &secrets, false, now);
+
+        assert!(too_new_result.is_none());
+        assert!(too_old_result.is_none());
+    }
+
     fn build_client_hello_with_exts(exts: Vec<(u16, Vec<u8>)>, host: &str) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&TLS_VERSION); // legacy version
@@ -953,5 +1059,302 @@ mod tests {
             .map(|p| std::str::from_utf8(p).unwrap().to_string())
             .collect();
         assert_eq!(alpn_str, vec!["h2", "spdy", "h3"]);
+    }
+
+    // === Constant-time HMAC comparison ===
+
+    // A digest where only byte 27 (the last of the 28-byte prefix) differs from the
+    // correct HMAC must be rejected. This tests that the comparison is not evaluated
+    // as early-exit and that no partial match is accepted.
+    #[test]
+    fn test_validate_single_byte_prefix_mismatch_rejected() {
+        let secret = b"secret";
+        let now = 1_700_000_000_i64;
+        let ts = now as u32;
+        let mut handshake = make_handshake_with_timestamp(secret, ts, &[0x01]);
+
+        // Flip bit in byte 27 of the stored digest to create a 1-byte mismatch.
+        handshake[TLS_DIGEST_POS + 27] ^= 0x01;
+
+        let secrets = vec![("u".to_string(), secret.to_vec())];
+        let result = validate_tls_handshake_at_time(&handshake, &secrets, false, now);
+        assert!(result.is_none(), "single-byte prefix mismatch must be rejected");
+    }
+
+    // First byte wrong — validates the comparison doesn't skip byte 0.
+    #[test]
+    fn test_validate_first_byte_mismatch_rejected() {
+        let secret = b"secret";
+        let now = 1_700_000_000_i64;
+        let ts = now as u32;
+        let mut handshake = make_handshake_with_timestamp(secret, ts, &[0x02]);
+        handshake[TLS_DIGEST_POS] ^= 0xFF;
+        let secrets = vec![("u".to_string(), secret.to_vec())];
+        let result = validate_tls_handshake_at_time(&handshake, &secrets, false, now);
+        assert!(result.is_none(), "first-byte mismatch must be rejected");
+    }
+
+    // Empty secrets slice — must always return None without panic.
+    #[test]
+    fn test_validate_empty_secrets_always_none() {
+        let handshake = make_handshake_with_timestamp(b"x", 1_700_000_000u32, &[]);
+        let result = validate_tls_handshake_at_time(&handshake, &[], false, 1_700_000_000);
+        assert!(result.is_none());
+    }
+
+    // When multiple users are configured only the matching one must be returned.
+    #[test]
+    fn test_validate_multi_user_selects_first_match() {
+        let secret_a = b"correct_secret";
+        let secret_b = b"wrong_secret";
+        let now = 1_700_000_000_i64;
+        let handshake = make_handshake_with_timestamp(secret_a, now as u32, &[0xAA]);
+        let secrets = vec![
+            ("a".to_string(), secret_a.to_vec()),
+            ("b".to_string(), secret_b.to_vec()),
+        ];
+        let result = validate_tls_handshake_at_time(&handshake, &secrets, false, now);
+        assert_eq!(result.map(|v| v.user), Some("a".to_string()));
+    }
+
+    #[test]
+    fn test_validate_multi_user_selects_second_match() {
+        let secret_a = b"wrong_secret";
+        let secret_b = b"correct_secret";
+        let now = 1_700_000_000_i64;
+        let handshake = make_handshake_with_timestamp(secret_b, now as u32, &[0xBB]);
+        let secrets = vec![
+            ("a".to_string(), secret_a.to_vec()),
+            ("b".to_string(), secret_b.to_vec()),
+        ];
+        let result = validate_tls_handshake_at_time(&handshake, &secrets, false, now);
+        assert_eq!(result.map(|v| v.user), Some("b".to_string()));
+    }
+
+    // Completely wrong secret — no user should match.
+    #[test]
+    fn test_validate_wrong_secret_always_none() {
+        let now = 1_700_000_000_i64;
+        let handshake = make_handshake_with_timestamp(b"real_secret", now as u32, &[0x01]);
+        let secrets = vec![("u".to_string(), b"different_secret".to_vec())];
+        let result = validate_tls_handshake_at_time(&handshake, &secrets, false, now);
+        assert!(result.is_none());
+    }
+
+    // === Boundary / truncation safety ===
+
+    // Zero-byte input must never panic.
+    #[test]
+    fn test_validate_empty_handshake_safe() {
+        let result = validate_tls_handshake_at_time(
+            &[],
+            &[("u".to_string(), b"s".to_vec())],
+            true,
+            0,
+        );
+        assert!(result.is_none());
+    }
+
+    // Exactly at the minimum length boundary (TLS_DIGEST_POS + TLS_DIGEST_LEN + 1 bytes).
+    #[test]
+    fn test_validate_minimum_length_boundary_safe() {
+        let len = TLS_DIGEST_POS + TLS_DIGEST_LEN + 1;
+        let buf = vec![0u8; len];
+        let result = validate_tls_handshake_at_time(
+            &buf,
+            &[("u".to_string(), b"s".to_vec())],
+            true,
+            0,
+        );
+        assert!(result.is_none());
+    }
+
+    // session_id_len field claims more bytes than remain in the buffer.
+    #[test]
+    fn test_validate_session_id_overflows_buffer_safe() {
+        let mut buf = vec![0u8; TLS_DIGEST_POS + TLS_DIGEST_LEN + 3];
+        // session_id_len byte = 255, but only 2 bytes remain
+        buf[TLS_DIGEST_POS + TLS_DIGEST_LEN] = 255;
+        let result = validate_tls_handshake_at_time(
+            &buf,
+            &[("u".to_string(), b"x".to_vec())],
+            true,
+            0,
+        );
+        assert!(result.is_none(), "oversized session_id_len must be rejected safely");
+    }
+
+    // === SNI / ALPN parsers ===
+
+    // SNI name_len that extends beyond the extension data must not panic.
+    #[test]
+    fn test_extract_sni_truncated_name_len_safe() {
+        let ch = build_client_hello_with_exts(vec![], "ok.test");
+        // Corrupt the SNI name_len to be way too large to trigger bound checks.
+        let mut ch = ch;
+        if let Some(pos) = ch.windows(3).position(|w| w[0] == 0x00 && w[1] == 0x00 && w[2] == 0x00)
+            && pos + 5 < ch.len()
+        {
+            ch[pos + 3] = 0xFF;
+            ch[pos + 4] = 0xFF;
+        }
+        // Must not panic regardless of corruption.
+        let _ = extract_sni_from_client_hello(&ch);
+    }
+
+    // A completely random byte buffer must not panic for either SNI or ALPN parser.
+    #[test]
+    fn test_extract_sni_random_garbage_safe() {
+        let garbage = b"\x16\x03\x01\xFF\xFF\x01\x00\x00\xFE\x03\x03\xDE\xAD";
+        let _ = extract_sni_from_client_hello(garbage);
+        let _ = extract_alpn_from_client_hello(garbage);
+    }
+
+    // ALPN entry with protocol length = 0 must not panic and must not add empty vec.
+    #[test]
+    fn test_extract_alpn_zero_length_protocol_safe() {
+        let mut alpn_data = Vec::new();
+        // list_len = 1 (one byte: the zero proto_len)
+        alpn_data.extend_from_slice(&1u16.to_be_bytes());
+        alpn_data.push(0); // proto_len = 0
+        let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "test");
+        let alpn = extract_alpn_from_client_hello(&ch);
+        // A zero-length protocol is technically invalid; the parser may include or skip it,
+        // but must not panic or return garbage.
+        assert!(alpn.len() <= 1);
+    }
+
+    // ALPN list_len claims more bytes than the extension contains.
+    #[test]
+    fn test_extract_alpn_oversized_list_len_safe() {
+        let mut alpn_data = Vec::new();
+        alpn_data.extend_from_slice(&0xFFFFu16.to_be_bytes()); // huge list_len
+        alpn_data.push(2);
+        alpn_data.extend_from_slice(b"h2");
+        let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "test");
+        let alpn = extract_alpn_from_client_hello(&ch);
+        // Parser clips to elen boundary; at most 1 entry present.
+        assert!(alpn.len() <= 1);
+    }
+
+    // Extension total length field claims more bytes than the record contains.
+    #[test]
+    fn test_extract_sni_ext_len_overflow_safe() {
+        let mut ch = build_client_hello_with_exts(vec![], "safe.test");
+        // Overwrite the extensions length field (at fixed offset) with 0xFFFF.
+        // Locate it: 5 (record hdr) + 1 (CH type) + 3 (len) + 2 (ver) + 32 (random) = 43,
+        // then skip session_id (1+len), ciphers (2+len), compression (1+1). In our helper
+        // session_id_len=0, cipher_len=2, comp_len=1: offset = 43 + 1 + 4 + 2 = 50.
+        if ch.len() > 51 {
+            ch[50] = 0xFF;
+            ch[51] = 0xFF;
+        }
+        let _ = extract_sni_from_client_hello(&ch);
+        let _ = extract_alpn_from_client_hello(&ch);
+    }
+
+    // An ALPN protocol name of exactly 256 bytes overflows the u8 length field.
+    // The extension must be silently skipped so that the extension buffer length
+    // prefix remains consistent and subsequent extensions are not corrupted.
+    #[test]
+    fn test_add_alpn_oversized_proto_silently_skipped() {
+        let key = [0x42u8; 32];
+        let long_proto = vec![b'h'; 256]; // 256 bytes — overflows u8 length field
+
+        let mut builder = TlsExtensionBuilder::new();
+        builder.add_key_share(&key);
+        builder.add_alpn(&long_proto);
+        builder.add_supported_versions(0x0304);
+
+        let result = builder.build();
+
+        // Outer length prefix must equal the actual extension data byte count.
+        let declared_len = u16::from_be_bytes([result[0], result[1]]) as usize;
+        assert_eq!(
+            declared_len,
+            result.len() - 2,
+            "extension buffer length prefix must match actual bytes when ALPN is skipped"
+        );
+
+        // ALPN extension (type 0x0010) must not appear in the output.
+        let exts_data = &result[2..];
+        let mut pos = 0;
+        while pos + 4 <= exts_data.len() {
+            let etype = u16::from_be_bytes([exts_data[pos], exts_data[pos + 1]]);
+            let elen = u16::from_be_bytes([exts_data[pos + 2], exts_data[pos + 3]]) as usize;
+            assert!(
+                pos + 4 + elen <= exts_data.len(),
+                "extension at offset {pos} has out-of-bounds length {elen}"
+            );
+            assert_ne!(
+                etype, 0x0010,
+                "ALPN extension (0x0010) must not appear when protocol name overflows u8"
+            );
+            pos += 4 + elen;
+        }
+    }
+
+    // A 255-byte ALPN protocol name (the maximum valid value) must be accepted
+    // and produce a well-formed extension.
+    #[test]
+    fn test_add_alpn_max_valid_proto_255_accepted() {
+        let max_proto = vec![b'x'; 255];
+
+        let mut builder = TlsExtensionBuilder::new();
+        builder.add_alpn(&max_proto);
+
+        let result = builder.build();
+        let declared_len = u16::from_be_bytes([result[0], result[1]]) as usize;
+        assert_eq!(declared_len, result.len() - 2, "length prefix must be consistent");
+
+        // Verify the ALPN extension is present with the correct protocol name length byte.
+        let exts_data = &result[2..];
+        assert!(exts_data.len() >= 4);
+        let etype = u16::from_be_bytes([exts_data[0], exts_data[1]]);
+        assert_eq!(etype, 0x0010, "ALPN extension must be present for 255-byte proto");
+        // The protocol name length byte is at exts_data[6] (skip type(2)+ext_len(2)+list_len(2)).
+        assert!(exts_data.len() > 6);
+        assert_eq!(exts_data[6], 255u8, "protocol name length byte must be 255");
+    }
+
+    // SNI containing an embedded NUL byte must be rejected.
+    // NUL injection can cause string truncation in downstream C-style systems
+    // (e.g., logging, SNI-based routing middleware).
+    #[test]
+    fn test_extract_sni_nul_byte_rejected() {
+        let ch = build_client_hello_with_exts(vec![], "evil\x00.com");
+        let sni = extract_sni_from_client_hello(&ch);
+        assert!(sni.is_none(), "SNI with embedded NUL byte must be rejected");
+    }
+
+    // SNI containing non-ASCII UTF-8 characters must be rejected.
+    // RFC 6066 §3 requires HostName to be an ASCII-compatible encoding (ACE / punycode);
+    // raw Unicode (e.g., U+00E9 é) is not a valid TLS SNI hostname.
+    #[test]
+    fn test_extract_sni_non_ascii_utf8_rejected() {
+        // "héllo.com" contains U+00E9 which encodes as 0xC3 0xA9 in UTF-8.
+        let ch = build_client_hello_with_exts(vec![], "h\u{00e9}llo.com");
+        let sni = extract_sni_from_client_hello(&ch);
+        assert!(sni.is_none(), "non-ASCII UTF-8 SNI must be rejected per RFC 6066");
+    }
+
+    // A pure ASCII SNI (including punycode-encoded IDN) must still be accepted.
+    #[test]
+    fn test_extract_sni_valid_ascii_accepted() {
+        let ch = build_client_hello_with_exts(vec![], "xn--hllo-bpa.example");
+        let sni = extract_sni_from_client_hello(&ch);
+        assert_eq!(
+            sni.as_deref(),
+            Some("xn--hllo-bpa.example"),
+            "valid ASCII (punycode IDN) SNI must be accepted"
+        );
+    }
+
+    // NUL-only hostname must be rejected even though it passes utf8 validation.
+    #[test]
+    fn test_extract_sni_all_nul_hostname_rejected() {
+        let ch = build_client_hello_with_exts(vec![], "\x00\x00\x00");
+        let sni = extract_sni_from_client_hello(&ch);
+        assert!(sni.is_none(), "all-NUL SNI hostname must be rejected");
     }
 }

@@ -1,4 +1,4 @@
-//! MTProto Defs + Cons
+//! `MTProto` Defs + Cons
 
 pub mod constants;
 pub mod frame;

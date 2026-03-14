@@ -58,11 +58,11 @@ pub(super) enum WriterContour {
 }
 
 impl WriterContour {
-    pub(super) fn as_u8(self) -> u8 {
+    pub(super) const fn as_u8(self) -> u8 {
         self as u8
     }
 
-    pub(super) fn from_u8(value: u8) -> Self {
+    pub(super) const fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::Warm,
             1 => Self::Active,
@@ -97,8 +97,8 @@ pub struct MePool {
     pub(super) nat_stun_live_servers: Arc<RwLock<Vec<String>>>,
     pub(super) nat_probe_concurrency: usize,
     pub(super) detected_ipv6: Option<Ipv6Addr>,
-    pub(super) nat_probe_attempts: std::sync::atomic::AtomicU8,
-    pub(super) nat_probe_disabled: std::sync::atomic::AtomicBool,
+    pub(super) nat_probe_attempts: AtomicU8,
+    pub(super) nat_probe_disabled: AtomicBool,
     pub(super) stun_backoff_until: Arc<RwLock<Option<Instant>>>,
     pub(super) me_one_retry: u8,
     pub(super) me_one_timeout: Duration,
@@ -386,22 +386,22 @@ impl MePool {
                 me_adaptive_floor_recover_grace_secs,
             ),
             me_adaptive_floor_writers_per_core_total: AtomicU32::new(
-                me_adaptive_floor_writers_per_core_total as u32,
+                u32::from(me_adaptive_floor_writers_per_core_total),
             ),
             me_adaptive_floor_cpu_cores_override: AtomicU32::new(
-                me_adaptive_floor_cpu_cores_override as u32,
+                u32::from(me_adaptive_floor_cpu_cores_override),
             ),
             me_adaptive_floor_max_extra_writers_single_per_core: AtomicU32::new(
-                me_adaptive_floor_max_extra_writers_single_per_core as u32,
+                u32::from(me_adaptive_floor_max_extra_writers_single_per_core),
             ),
             me_adaptive_floor_max_extra_writers_multi_per_core: AtomicU32::new(
-                me_adaptive_floor_max_extra_writers_multi_per_core as u32,
+                u32::from(me_adaptive_floor_max_extra_writers_multi_per_core),
             ),
             me_adaptive_floor_max_active_writers_per_core: AtomicU32::new(
-                me_adaptive_floor_max_active_writers_per_core as u32,
+                u32::from(me_adaptive_floor_max_active_writers_per_core),
             ),
             me_adaptive_floor_max_warm_writers_per_core: AtomicU32::new(
-                me_adaptive_floor_max_warm_writers_per_core as u32,
+                u32::from(me_adaptive_floor_max_warm_writers_per_core),
             ),
             me_adaptive_floor_max_active_writers_global: AtomicU32::new(
                 me_adaptive_floor_max_active_writers_global,
@@ -452,7 +452,7 @@ impl MePool {
             )),
             me_hardswap_warmup_delay_min_ms: AtomicU64::new(me_hardswap_warmup_delay_min_ms),
             me_hardswap_warmup_delay_max_ms: AtomicU64::new(me_hardswap_warmup_delay_max_ms),
-            me_hardswap_warmup_extra_passes: AtomicU32::new(me_hardswap_warmup_extra_passes as u32),
+            me_hardswap_warmup_extra_passes: AtomicU32::new(u32::from(me_hardswap_warmup_extra_passes)),
             me_hardswap_warmup_pass_backoff_base_ms: AtomicU64::new(
                 me_hardswap_warmup_pass_backoff_base_ms,
             ),
@@ -539,7 +539,7 @@ impl MePool {
         self.me_hardswap_warmup_delay_max_ms
             .store(hardswap_warmup_delay_max_ms, Ordering::Relaxed);
         self.me_hardswap_warmup_extra_passes
-            .store(hardswap_warmup_extra_passes as u32, Ordering::Relaxed);
+            .store(u32::from(hardswap_warmup_extra_passes), Ordering::Relaxed);
         self.me_hardswap_warmup_pass_backoff_base_ms
             .store(hardswap_warmup_pass_backoff_base_ms, Ordering::Relaxed);
         self.me_bind_stale_mode
@@ -582,27 +582,27 @@ impl MePool {
         self.me_adaptive_floor_recover_grace_secs
             .store(adaptive_floor_recover_grace_secs, Ordering::Relaxed);
         self.me_adaptive_floor_writers_per_core_total
-            .store(adaptive_floor_writers_per_core_total as u32, Ordering::Relaxed);
+            .store(u32::from(adaptive_floor_writers_per_core_total), Ordering::Relaxed);
         self.me_adaptive_floor_cpu_cores_override
-            .store(adaptive_floor_cpu_cores_override as u32, Ordering::Relaxed);
+            .store(u32::from(adaptive_floor_cpu_cores_override), Ordering::Relaxed);
         self.me_adaptive_floor_max_extra_writers_single_per_core
             .store(
-                adaptive_floor_max_extra_writers_single_per_core as u32,
+                u32::from(adaptive_floor_max_extra_writers_single_per_core),
                 Ordering::Relaxed,
             );
         self.me_adaptive_floor_max_extra_writers_multi_per_core
             .store(
-                adaptive_floor_max_extra_writers_multi_per_core as u32,
+                u32::from(adaptive_floor_max_extra_writers_multi_per_core),
                 Ordering::Relaxed,
             );
         self.me_adaptive_floor_max_active_writers_per_core
             .store(
-                adaptive_floor_max_active_writers_per_core as u32,
+                u32::from(adaptive_floor_max_active_writers_per_core),
                 Ordering::Relaxed,
             );
         self.me_adaptive_floor_max_warm_writers_per_core
             .store(
-                adaptive_floor_max_warm_writers_per_core as u32,
+                u32::from(adaptive_floor_max_warm_writers_per_core),
                 Ordering::Relaxed,
             );
         self.me_adaptive_floor_max_active_writers_global
@@ -644,7 +644,7 @@ impl MePool {
         self.translate_our_addr_with_reflection(addr, None)
     }
 
-    pub fn registry(&self) -> &Arc<ConnRegistry> {
+    pub const fn registry(&self) -> &Arc<ConnRegistry> {
         &self.registry
     }
 
@@ -831,7 +831,7 @@ impl MePool {
 
     // Keeps per-contour (active/warm) writer budget bounded by CPU count.
     // Baseline is 86 writers on the first core and +48 for each extra core.
-    fn adaptive_floor_cpu_budget_per_contour_cap(&self, cores: usize) -> usize {
+    const fn adaptive_floor_cpu_budget_per_contour_cap(&self, cores: usize) -> usize {
         const FIRST_CORE_WRITER_BUDGET: usize = 86;
         const EXTRA_CORE_WRITER_BUDGET: usize = 48;
         if cores == 0 {

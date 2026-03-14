@@ -193,7 +193,7 @@ impl MePool {
         let pool = Arc::downgrade(self);
         let cancel_ping = cancel.clone();
         let tx_ping = tx.clone();
-        let ping_tracker_ping = ping_tracker.clone();
+        let ping_tracker_ping = ping_tracker;
         let cleanup_done = Arc::new(AtomicBool::new(false));
         let cleanup_for_reader = cleanup_done.clone();
         let cleanup_for_ping = cleanup_done.clone();
@@ -204,7 +204,7 @@ impl MePool {
         let tx_signal = tx.clone();
         let stats_signal = self.stats.clone();
         let cancel_signal = cancel.clone();
-        let cleanup_for_signal = cleanup_done.clone();
+        let cleanup_for_signal = cleanup_done;
         let pool_signal = Arc::downgrade(self);
         let keepalive_jitter_signal = self.me_keepalive_jitter;
         let cancel_reader_token = cancel.clone();
@@ -247,11 +247,10 @@ impl MePool {
             {
                 pool.remove_writer_and_close_clients(writer_id).await;
             }
-            if let Err(e) = res {
-                if !idle_close_by_peer {
+            if let Err(e) = res
+                && !idle_close_by_peer {
                     warn!(error = %e, "ME reader ended");
                 }
-            }
             let mut ws = writers_arc.write().await;
             ws.retain(|w| w.id != writer_id);
             info!(remaining = ws.len(), "Dead ME writer removed from pool");
@@ -345,7 +344,7 @@ impl MePool {
                             stats_ping.increment_me_keepalive_timeout_by(expired as u64);
                         }
                     }
-                    tracker.insert(sent_id, (std::time::Instant::now(), writer_id));
+                    tracker.insert(sent_id, (Instant::now(), writer_id));
                 }
                 ping_id = ping_id.wrapping_add(1);
                 stats_ping.increment_me_keepalive_sent();
@@ -517,7 +516,7 @@ impl MePool {
                 if trigger_refill {
                     self.stats.increment_me_writer_removed_unexpected_total();
                 }
-                close_tx = Some(w.tx.clone());
+                close_tx = Some(w.tx);
                 self.conn_count.fetch_sub(1, Ordering::Relaxed);
             }
         }

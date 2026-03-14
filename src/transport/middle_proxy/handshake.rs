@@ -18,7 +18,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::config::MeSocksKdfPolicy;
-use crate::crypto::{SecureRandom, build_middleproxy_prekey, derive_middleproxy_keys, sha256};
+use crate::crypto::{SecureRandom, derive_middleproxy_keys};
 use crate::error::{ProxyError, Result};
 use crate::network::IpFamily;
 use crate::network::probe::is_bogon;
@@ -28,10 +28,10 @@ use crate::protocol::constants::{
 };
 use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind};
 
-use super::codec::{
-    RpcChecksumMode, build_handshake_payload, build_nonce_payload, build_rpc_frame,
+use super::codec::
+    {RpcChecksumMode, build_handshake_payload, build_nonce_payload, build_rpc_frame,
     cbc_decrypt_inplace, cbc_encrypt_padded, parse_handshake_flags, parse_nonce_payload,
-    read_rpc_frame_plaintext, rpc_crc,
+    read_rpc_frame_plaintext, rpc_crc, HANDSHAKE_MAX_PLAINTEXT_FRAME_LEN,
 };
 use super::selftest::{BndAddrStatus, BndPortStatus, record_bnd_status, record_upstream_bnd_status};
 use super::wire::{extract_ip_material, IpMaterial};
@@ -46,7 +46,7 @@ enum KdfClientPortSource {
 }
 
 impl KdfClientPortSource {
-    fn from_socks_bound_port(socks_bound_port: Option<u16>) -> Self {
+    const fn from_socks_bound_port(socks_bound_port: Option<u16>) -> Self {
         if socks_bound_port.is_some() {
             Self::SocksBound
         } else {
@@ -133,7 +133,7 @@ impl MePool {
         )
     }
 
-    fn bnd_port_status(bound: Option<SocketAddr>) -> BndPortStatus {
+    const fn bnd_port_status(bound: Option<SocketAddr>) -> BndPortStatus {
         match bound {
             Some(addr) if addr.port() == 0 => BndPortStatus::Zero,
             Some(_) => BndPortStatus::Ok,
@@ -226,15 +226,26 @@ impl MePool {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)]
     fn configure_user_timeout(fd: RawFd) -> std::io::Result<()> {
+        use std::mem::size_of_val;
+
         let timeout_ms: c_int = 30_000;
+
+        let optlen = size_of_val(&timeout_ms) as libc::socklen_t;
+        let optval = std::ptr::from_ref(&timeout_ms).cast::<libc::c_void>();
+
+        // SAFETY:
+        // - `fd` is expected to be a valid TCP socket descriptor from `TcpStream::as_raw_fd`.
+        // - `optval` points to `timeout_ms`, which remains alive for this FFI call.
+        // - `optlen` matches the exact byte size of `timeout_ms` required by TCP_USER_TIMEOUT.
         let rc = unsafe {
             libc::setsockopt(
                 fd,
                 libc::IPPROTO_TCP,
                 libc::TCP_USER_TIMEOUT,
-                &timeout_ms as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&timeout_ms) as libc::socklen_t,
+                optval,
+                optlen,
             )
         };
         if rc != 0 {
@@ -330,7 +341,9 @@ impl MePool {
         }
         let (mut rd, mut wr) = tokio::io::split(stream);
 
-        let my_nonce: [u8; 16] = rng.bytes(16).try_into().unwrap();
+        let nonce_vec = rng.bytes(16);
+        let mut my_nonce = [0u8; 16];
+        my_nonce.copy_from_slice(&nonce_vec);
         let crypto_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -347,7 +360,7 @@ impl MePool {
             (key_selector, secret)
         };
         let nonce_payload = build_nonce_payload(ks, crypto_ts, &my_nonce);
-        let nonce_frame = build_rpc_frame(-2, &nonce_payload, RpcChecksumMode::Crc32);
+        let nonce_frame = build_rpc_frame(-2, &nonce_payload, RpcChecksumMode::Crc32)?;
         let dump = hex_dump(&nonce_frame[..nonce_frame.len().min(44)]);
         debug!(
             key_selector = format_args!("0x{ks:08x}"),
@@ -361,7 +374,7 @@ impl MePool {
 
         let (srv_seq, srv_nonce_payload) = timeout(
             Duration::from_secs(ME_HANDSHAKE_TIMEOUT_SECS),
-            read_rpc_frame_plaintext(&mut rd),
+            read_rpc_frame_plaintext(&mut rd, HANDSHAKE_MAX_PLAINTEXT_FRAME_LEN),
         )
         .await
         .map_err(|_| ProxyError::TgHandshakeTimeout)??;
@@ -379,15 +392,15 @@ impl MePool {
         }
 
         if srv_key_select != ks {
-            return Err(ProxyError::InvalidHandshake(format!(
-                "Server key_select 0x{srv_key_select:08x} != client 0x{ks:08x}"
-            )));
+            return Err(ProxyError::InvalidHandshake(
+                "ME server key selector mismatch".to_string(),
+            ));
         }
 
         let skew = crypto_ts.abs_diff(srv_ts);
         if skew > 30 {
             return Err(ProxyError::InvalidHandshake(format!(
-                "nonce crypto_ts skew too large: client={crypto_ts}, server={srv_ts}, skew={skew}s"
+                "nonce crypto_ts skew too large: {skew}s"
             )));
         }
 
@@ -399,8 +412,6 @@ impl MePool {
             %transport_peer_addr,
             %peer_addr_nat,
             socks_bound_addr = socks_bound_addr.map(|v| v.to_string()),
-            key_selector = format_args!("0x{ks:08x}"),
-            crypto_schema = format_args!("0x{schema:08x}"),
             skew_secs = skew,
             "ME key derivation parameters"
         );
@@ -478,35 +489,6 @@ impl MePool {
             }
         };
 
-        let diag_level: u8 = std::env::var("ME_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-
-        let prekey_client = build_middleproxy_prekey(
-            &srv_nonce,
-            &my_nonce,
-            &ts_bytes,
-            srv_ip_opt.as_ref().map(|x| &x[..]),
-            &client_port_bytes,
-            b"CLIENT",
-            clt_ip_opt.as_ref().map(|x| &x[..]),
-            &server_port_bytes,
-            &secret,
-            clt_v6_opt.as_ref(),
-            srv_v6_opt.as_ref(),
-        );
-        let prekey_server = build_middleproxy_prekey(
-            &srv_nonce,
-            &my_nonce,
-            &ts_bytes,
-            srv_ip_opt.as_ref().map(|x| &x[..]),
-            &client_port_bytes,
-            b"SERVER",
-            clt_ip_opt.as_ref().map(|x| &x[..]),
-            &server_port_bytes,
-            &secret,
-            clt_v6_opt.as_ref(),
-            srv_v6_opt.as_ref(),
-        );
-
         let (wk, wi) = derive_middleproxy_keys(
             &srv_nonce,
             &my_nonce,
@@ -542,42 +524,8 @@ impl MePool {
             peer_addr.port(),
             requested_crc_mode.advertised_flags(),
         );
-        let hs_frame = build_rpc_frame(-1, &hs_payload, RpcChecksumMode::Crc32);
-        if diag_level >= 1 {
-            info!(
-                write_key = %hex_dump(&wk),
-                write_iv = %hex_dump(&wi),
-                read_key = %hex_dump(&rk),
-                read_iv = %hex_dump(&ri),
-                srv_ip = %srv_ip_opt.map(|ip| hex_dump(&ip)).unwrap_or_default(),
-                clt_ip = %clt_ip_opt.map(|ip| hex_dump(&ip)).unwrap_or_default(),
-                srv_port = %hex_dump(&server_port_bytes),
-                clt_port = %hex_dump(&client_port_bytes),
-                crypto_ts = %hex_dump(&ts_bytes),
-                nonce_srv = %hex_dump(&srv_nonce),
-                nonce_clt = %hex_dump(&my_nonce),
-                prekey_sha256_client = %hex_dump(&sha256(&prekey_client)),
-                prekey_sha256_server = %hex_dump(&sha256(&prekey_server)),
-                hs_plain = %hex_dump(&hs_frame),
-                proxy_secret_sha256 = %hex_dump(&sha256(&secret)),
-                "ME diag: derived keys and handshake plaintext"
-            );
-        }
-        if diag_level >= 2 {
-            info!(
-                prekey_client = %hex_dump(&prekey_client),
-                prekey_server = %hex_dump(&prekey_server),
-                "ME diag: full prekey buffers"
-            );
-        }
-
+        let hs_frame = build_rpc_frame(-1, &hs_payload, RpcChecksumMode::Crc32)?;
         let (encrypted_hs, write_iv) = cbc_encrypt_padded(&wk, &wi, &hs_frame)?;
-        if diag_level >= 1 {
-            info!(
-                hs_cipher = %hex_dump(&encrypted_hs),
-                "ME diag: handshake ciphertext"
-            );
-        }
         wr.write_all(&encrypted_hs).await.map_err(ProxyError::Io)?;
         wr.flush().await.map_err(ProxyError::Io)?;
 
@@ -615,7 +563,9 @@ impl MePool {
             }
 
             while dec_buf.len() >= 4 {
-                let fl = u32::from_le_bytes(dec_buf[0..4].try_into().unwrap()) as usize;
+                let mut fl_bytes = [0u8; 4];
+                fl_bytes.copy_from_slice(&dec_buf[0..4]);
+                let fl = u32::from_le_bytes(fl_bytes) as usize;
 
                 if fl == 4 {
                     let _ = dec_buf.split_to(4);
@@ -632,7 +582,9 @@ impl MePool {
 
                 let frame = dec_buf.split_to(fl);
                 let pe = fl - 4;
-                let ec = u32::from_le_bytes(frame[pe..pe + 4].try_into().unwrap());
+                let mut ec_bytes = [0u8; 4];
+                ec_bytes.copy_from_slice(&frame[pe..pe + 4]);
+                let ec = u32::from_le_bytes(ec_bytes);
                 let ac = rpc_crc(RpcChecksumMode::Crc32, &frame[..pe]);
                 if ec != ac {
                     return Err(ProxyError::InvalidHandshake(format!(
@@ -646,10 +598,14 @@ impl MePool {
                         "Handshake payload too short".to_string(),
                     ));
                 }
-                let hs_type = u32::from_le_bytes(hs_payload[0..4].try_into().unwrap());
+                let mut hs_type_bytes = [0u8; 4];
+                hs_type_bytes.copy_from_slice(&hs_payload[0..4]);
+                let hs_type = u32::from_le_bytes(hs_type_bytes);
                 if hs_type == RPC_HANDSHAKE_ERROR_U32 {
                     let err_code = if hs_payload.len() >= 8 {
-                        i32::from_le_bytes(hs_payload[4..8].try_into().unwrap())
+                        let mut err_code_bytes = [0u8; 4];
+                        err_code_bytes.copy_from_slice(&hs_payload[4..8]);
+                        i32::from_le_bytes(err_code_bytes)
                     } else {
                         -1
                     };
@@ -720,6 +676,8 @@ fn hex_dump(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
     use tokio::net::{TcpListener, TcpStream};
 
     #[tokio::test]
@@ -776,5 +734,42 @@ mod tests {
             .with_time(Duration::from_secs(30))
             .with_interval(Duration::from_secs(10))
             .with_retries(3);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_configure_user_timeout_invalid_fd_rejected() {
+        let err = match MePool::configure_user_timeout(-1) {
+            Ok(()) => panic!("expected invalid file descriptor error"),
+            Err(error) => error,
+        };
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_configure_user_timeout_valid_fd() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("bind failed: {error}"),
+        };
+
+        let addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(error) => panic!("local_addr failed: {error}"),
+        };
+
+        let stream = match TcpStream::connect(addr).await {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("connect failed: {error}"),
+        };
+
+        match MePool::configure_user_timeout(stream.as_raw_fd()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("configure_user_timeout failed: {error}"),
+        }
     }
 }

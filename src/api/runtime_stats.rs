@@ -473,7 +473,7 @@ async fn get_minimal_payload_cached(
     Some((generated_at_epoch_secs, payload))
 }
 
-fn disabled_me_writers(now_epoch_secs: u64, reason: &'static str) -> MeWritersData {
+const fn disabled_me_writers(now_epoch_secs: u64, reason: &'static str) -> MeWritersData {
     MeWritersData {
         middle_proxy_enabled: false,
         reason: Some(reason),
@@ -491,7 +491,7 @@ fn disabled_me_writers(now_epoch_secs: u64, reason: &'static str) -> MeWritersDa
     }
 }
 
-fn disabled_dcs(now_epoch_secs: u64, reason: &'static str) -> DcStatusData {
+const fn disabled_dcs(now_epoch_secs: u64, reason: &'static str) -> DcStatusData {
     DcStatusData {
         middle_proxy_enabled: false,
         reason: Some(reason),
@@ -500,7 +500,7 @@ fn disabled_dcs(now_epoch_secs: u64, reason: &'static str) -> DcStatusData {
     }
 }
 
-fn map_route_kind(value: UpstreamRouteKind) -> &'static str {
+const fn map_route_kind(value: UpstreamRouteKind) -> &'static str {
     match value {
         UpstreamRouteKind::Direct => "direct",
         UpstreamRouteKind::Socks4 => "socks4",
@@ -508,7 +508,7 @@ fn map_route_kind(value: UpstreamRouteKind) -> &'static str {
     }
 }
 
-fn map_ip_preference(value: IpPreference) -> &'static str {
+const fn map_ip_preference(value: IpPreference) -> &'static str {
     match value {
         IpPreference::Unknown => "unknown",
         IpPreference::PreferV6 => "prefer_v6",

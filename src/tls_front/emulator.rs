@@ -3,7 +3,7 @@ use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE, TLS_VERSION,
 };
 use crate::protocol::tls::{TLS_DIGEST_LEN, TLS_DIGEST_POS, gen_fake_x25519_key};
-use crate::tls_front::types::{CachedTlsData, ParsedCertificateInfo, TlsProfileSource};
+use crate::tls_front::types::{CachedTlsData, ParsedCertificateInfo};
 
 const MIN_APP_DATA: usize = 64;
 const MAX_APP_DATA: usize = 16640; // RFC 8446 §5.2 allows up to 2^14 + 256
@@ -20,7 +20,7 @@ fn jitter_and_clamp_sizes(sizes: &[usize], rng: &SecureRandom) -> Vec<usize> {
             let mut rand_bytes = [0u8; 2];
             rand_bytes.copy_from_slice(&rng.bytes(2));
             let span = 2 * jitter_range + 1;
-            let delta = (u16::from_le_bytes(rand_bytes) as i64 % span) - jitter_range;
+            let delta = (i64::from(u16::from_le_bytes(rand_bytes)) % span) - jitter_range;
             let adjusted = (base as i64 + delta).clamp(MIN_APP_DATA as i64, MAX_APP_DATA as i64);
             adjusted as usize
         })
@@ -95,7 +95,7 @@ fn build_compact_cert_info_payload(cert_info: &ParsedCertificateInfo) -> Option<
     Some(payload)
 }
 
-/// Build a ServerHello + CCS + ApplicationData sequence using cached TLS metadata.
+/// Build a `ServerHello` + CCS + `ApplicationData` sequence using cached TLS metadata.
 pub fn build_emulated_server_hello(
     secret: &[u8],
     client_digest: &[u8; TLS_DIGEST_LEN],
@@ -106,18 +106,29 @@ pub fn build_emulated_server_hello(
     alpn: Option<Vec<u8>>,
     new_session_tickets: u8,
 ) -> Vec<u8> {
+    // TLS 1.3 §4.1.3: legacy_session_id is bounded to 32 bytes.
+    // A probe sending > 32 bytes can fingerprint servers that silently truncate
+    // the length field without shrinking the actual bytes written (protocol mismatch).
+    let session_id = &session_id[..session_id.len().min(32)];
+
     // --- ServerHello ---
     let mut extensions = Vec::new();
+    // KeyShare (x25519)
     let key = gen_fake_x25519_key(rng);
-    extensions.extend_from_slice(&0x0033u16.to_be_bytes());
-    extensions.extend_from_slice(&(2 + 2 + 32u16).to_be_bytes());
-    extensions.extend_from_slice(&0x001du16.to_be_bytes());
+    extensions.extend_from_slice(&0x0033u16.to_be_bytes()); // key_share
+    extensions.extend_from_slice(&(2 + 2 + 32u16).to_be_bytes()); // len
+    extensions.extend_from_slice(&0x001du16.to_be_bytes()); // X25519
     extensions.extend_from_slice(&(32u16).to_be_bytes());
     extensions.extend_from_slice(&key);
+    // supported_versions (TLS1.3)
     extensions.extend_from_slice(&0x002bu16.to_be_bytes());
     extensions.extend_from_slice(&(2u16).to_be_bytes());
     extensions.extend_from_slice(&0x0304u16.to_be_bytes());
     if let Some(alpn_proto) = &alpn {
+        // RFC 7301 §3.1: protocol name length is encoded as a single byte (max 255).
+        // A probe sending an oversized ALPN can detect servers that corrupt the
+        // length field via as-u8 truncation (300 & 0xFF = 44 ≠ actual 300).
+        let alpn_proto = &alpn_proto[..alpn_proto.len().min(255)];
         extensions.extend_from_slice(&0x0010u16.to_be_bytes());
         let list_len: u16 = 1 + alpn_proto.len() as u16;
         let ext_len: u16 = 2 + list_len;
@@ -126,6 +137,7 @@ pub fn build_emulated_server_hello(
         extensions.push(alpn_proto.len() as u8);
         extensions.extend_from_slice(alpn_proto);
     }
+
     let extensions_len = extensions.len() as u16;
 
     let body_len = 2 + // version
@@ -170,22 +182,11 @@ pub fn build_emulated_server_hello(
     ];
 
     // --- ApplicationData (fake encrypted records) ---
-    let sizes = match cached.behavior_profile.source {
-        TlsProfileSource::Raw | TlsProfileSource::Merged => cached
-            .app_data_records_sizes
-            .first()
-            .copied()
-            .or_else(|| cached.behavior_profile.app_data_record_sizes.first().copied())
-            .map(|size| vec![size])
-            .unwrap_or_else(|| vec![cached.total_app_data_len.max(1024)]),
-        _ => {
-            let mut sizes = cached.app_data_records_sizes.clone();
-            if sizes.is_empty() {
-                sizes.push(cached.total_app_data_len.max(1024));
-            }
-            sizes
-        }
-    };
+    // Use the same number and sizes of ApplicationData records as the cached server.
+    let mut sizes = cached.app_data_records_sizes.clone();
+    if sizes.is_empty() {
+        sizes.push(cached.total_app_data_len.max(1024));
+    }
     let mut sizes = jitter_and_clamp_sizes(&sizes, rng);
     let compact_payload = cached
         .cert_info
@@ -277,9 +278,7 @@ pub fn build_emulated_server_hello(
 mod tests {
     use std::time::SystemTime;
 
-    use crate::tls_front::types::{
-        CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsProfileSource,
-    };
+    use crate::tls_front::types::{CachedTlsData, ParsedServerHello, TlsCertPayload};
 
     use super::build_emulated_server_hello;
     use crate::crypto::SecureRandom;
@@ -310,7 +309,6 @@ mod tests {
             cert_payload,
             app_data_records_sizes: vec![64],
             total_app_data_len: 64,
-            behavior_profile: TlsBehaviorProfile::default(),
             fetched_at: SystemTime::now(),
             domain: "example.com".to_string(),
         }
@@ -397,20 +395,65 @@ mod tests {
         assert!(payload.starts_with(b"CN=example.com"));
     }
 
-    #[test]
-    fn test_build_emulated_server_hello_ignores_tail_records_for_raw_profile() {
-        let mut cached = make_cached(None);
-        cached.app_data_records_sizes = vec![27, 3905, 537, 69];
-        cached.total_app_data_len = 4538;
-        cached.behavior_profile.source = TlsProfileSource::Merged;
-        cached.behavior_profile.app_data_record_sizes = vec![27, 3905, 537];
-        cached.behavior_profile.ticket_record_sizes = vec![69];
+    /// Walk the ServerHello extensions and return the ALPN protocol name length byte.
+    ///
+    /// Response layout:
+    ///   [0..5)  TLS record header
+    ///   [5]     handshake type (0x02)
+    ///   [6..9)  handshake body length (u24)
+    ///   [9..11) legacy_version
+    ///   [11..43) random (32 bytes, HMAC target)
+    ///   [43]    session_id_len
+    ///   [44..44+session_id_len) session_id
+    ///   (+2) cipher_suite, (+1) compression, (+2) ext_total_len, then ext loop
+    fn find_alpn_proto_len(response: &[u8]) -> Option<u8> {
+        let record_len = u16::from_be_bytes([*response.get(3)?, *response.get(4)?]) as usize;
+        let hshake = response.get(5..5 + record_len)?;
+        let body_len = u32::from_be_bytes([
+            0,
+            *hshake.get(1)?,
+            *hshake.get(2)?,
+            *hshake.get(3)?,
+        ]) as usize;
+        let body = hshake.get(4..4 + body_len)?;
 
+        // version(2) + random(32) + session_id_len(1)
+        let sid_len = *body.get(34)? as usize;
+        let after_sid = 35 + sid_len;
+        // cipher_suite(2) + compression(1)
+        let ext_len_pos = after_sid + 3;
+        let ext_data_len =
+            u16::from_be_bytes([*body.get(ext_len_pos)?, *body.get(ext_len_pos + 1)?]) as usize;
+        let ext_start = ext_len_pos + 2;
+        let ext_end = ext_start + ext_data_len;
+
+        let mut pos = ext_start;
+        while pos + 4 <= ext_end {
+            let etype = u16::from_be_bytes([*body.get(pos)?, *body.get(pos + 1)?]);
+            let elen = u16::from_be_bytes([*body.get(pos + 2)?, *body.get(pos + 3)?]) as usize;
+            pos += 4;
+            if etype == 0x0010 {
+                // ALPN data: protocol_name_list_len(2) + proto_name_len(1) + proto_bytes
+                return body.get(pos + 2).copied();
+            }
+            pos = pos.checked_add(elen)?;
+        }
+        None
+    }
+
+    #[test]
+    fn session_id_longer_than_32_bytes_is_clamped_in_server_hello() {
+        // A censor can probe with a 64-byte session_id.  A spec-compliant server
+        // returns at most 32 bytes; a server that writes `len as u8` with the full
+        // 64-byte payload would produce a malformed ServerHello, leaking its identity.
+        let cached = make_cached(None);
         let rng = SecureRandom::new();
+        let long_session_id = vec![0xab; 64];
+
         let response = build_emulated_server_hello(
             b"secret",
-            &[0x12; 32],
-            &[0x34; 16],
+            &[0u8; 32],
+            &long_session_id,
             &cached,
             false,
             &rng,
@@ -418,12 +461,152 @@ mod tests {
             0,
         );
 
-        let hello_len = u16::from_be_bytes([response[3], response[4]]) as usize;
-        let ccs_start = 5 + hello_len;
-        let app_start = ccs_start + 6;
-        let app_len = u16::from_be_bytes([response[app_start + 3], response[app_start + 4]]) as usize;
+        // response[43] is the session_id_len byte (immediately after the 32-byte random).
+        assert_eq!(response[43], 32, "session_id_len must be clamped to 32");
+    }
 
-        assert_eq!(response[app_start], TLS_RECORD_APPLICATION);
-        assert_eq!(app_start + 5 + app_len, response.len());
+    #[test]
+    fn session_id_of_exactly_32_bytes_preserved_verbatim() {
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+        let session_id = vec![0xcc; 32];
+
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0u8; 32],
+            &session_id,
+            &cached,
+            false,
+            &rng,
+            None,
+            0,
+        );
+
+        assert_eq!(response[43], 32);
+        // Bytes [44..76) hold the session_id; HMAC only overwrites [11..43).
+        assert_eq!(&response[44..76], session_id.as_slice());
+    }
+
+    #[test]
+    fn session_id_empty_preserved() {
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0u8; 32],
+            &[],
+            &cached,
+            false,
+            &rng,
+            None,
+            0,
+        );
+
+        assert_eq!(response[43], 0, "empty session_id_len must be 0");
+    }
+
+    #[test]
+    fn session_id_255_bytes_is_clamped_to_32() {
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+        let extreme_session_id = vec![0xff; 255];
+
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0u8; 32],
+            &extreme_session_id,
+            &cached,
+            false,
+            &rng,
+            None,
+            0,
+        );
+
+        assert_eq!(response[43], 32);
+    }
+
+    #[test]
+    fn alpn_proto_longer_than_255_bytes_is_clamped_no_protocol_corruption() {
+        // Without the clamp, `alpn_proto.len() as u8` = 300 & 0xFF = 44.
+        // The list_len field would say 301 bytes but proto_len would say 44 —
+        // making the extension structurally incoherent and detectable by a censor.
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+        let long_alpn = vec![b'x'; 300];
+
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0u8; 32],
+            &[],
+            &cached,
+            false,
+            &rng,
+            Some(long_alpn),
+            0,
+        );
+
+        assert_eq!(response[0], TLS_RECORD_HANDSHAKE);
+        let proto_len = find_alpn_proto_len(&response);
+        assert_eq!(proto_len, Some(255), "proto_len must be 255 after clamping, not 300 & 0xFF = 44");
+    }
+
+    #[test]
+    fn alpn_proto_of_255_bytes_is_preserved_exactly() {
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+        let alpn_255 = vec![b'h'; 255];
+
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0u8; 32],
+            &[],
+            &cached,
+            false,
+            &rng,
+            Some(alpn_255),
+            0,
+        );
+
+        assert_eq!(find_alpn_proto_len(&response), Some(255));
+    }
+
+    #[test]
+    fn alpn_proto_short_preserved_exactly() {
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+        let alpn = b"h2".to_vec();
+
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0u8; 32],
+            &[],
+            &cached,
+            false,
+            &rng,
+            Some(alpn),
+            0,
+        );
+
+        assert_eq!(find_alpn_proto_len(&response), Some(2));
+    }
+
+    #[test]
+    fn no_alpn_produces_no_alpn_extension() {
+        let cached = make_cached(None);
+        let rng = SecureRandom::new();
+
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0u8; 32],
+            &[],
+            &cached,
+            false,
+            &rng,
+            None,
+            0,
+        );
+
+        assert_eq!(find_alpn_proto_len(&response), None, "no ALPN extension must appear when alpn=None");
     }
 }

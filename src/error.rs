@@ -6,8 +6,6 @@ use std::fmt;
 use std::net::SocketAddr;
 use thiserror::Error;
 
-// ============= Stream Errors =============
-
 /// Errors specific to stream I/O operations
 #[derive(Debug)]
 pub enum StreamError {
@@ -88,25 +86,23 @@ impl From<StreamError> for std::io::Error {
         match err {
             StreamError::Io(e) => e,
             StreamError::UnexpectedEof => {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, err)
+                Self::new(std::io::ErrorKind::UnexpectedEof, err)
             }
             StreamError::Poisoned { .. } => {
-                std::io::Error::other(err)
+                Self::other(err)
             }
             StreamError::BufferOverflow { .. } => {
-                std::io::Error::new(std::io::ErrorKind::OutOfMemory, err)
+                Self::new(std::io::ErrorKind::OutOfMemory, err)
             }
             StreamError::InvalidFrame { .. } => {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, err)
+                Self::new(std::io::ErrorKind::InvalidData, err)
             }
             StreamError::PartialRead { .. } | StreamError::PartialWrite { .. } => {
-                std::io::Error::other(err)
+                Self::other(err)
             }
         }
     }
 }
-
-// ============= Recoverable Trait =============
 
 /// Trait for errors that may be recoverable
 pub trait Recoverable {
@@ -160,24 +156,16 @@ impl Recoverable for std::io::Error {
     }
 }
 
-// ============= Main Proxy Errors =============
-
 #[derive(Error, Debug)]
 pub enum ProxyError {
-    // ============= Crypto Errors =============
-    
     #[error("Crypto error: {0}")]
     Crypto(String),
     
     #[error("Invalid key length: expected {expected}, got {got}")]
     InvalidKeyLength { expected: usize, got: usize },
     
-    // ============= Stream Errors =============
-    
     #[error("Stream error: {0}")]
     Stream(#[from] StreamError),
-    
-    // ============= Protocol Errors =============
     
     #[error("Invalid handshake: {0}")]
     InvalidHandshake(String),
@@ -209,8 +197,6 @@ pub enum ProxyError {
     #[error("Telegram handshake timeout")]
     TgHandshakeTimeout,
     
-    // ============= Network Errors =============
-    
     #[error("Connection timeout to {addr}")]
     ConnectionTimeout { addr: String },
     
@@ -220,23 +206,17 @@ pub enum ProxyError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     
-    // ============= Proxy Protocol Errors =============
-    
     #[error("Invalid proxy protocol header")]
     InvalidProxyProtocol,
     
     #[error("Proxy error: {0}")]
     Proxy(String),
     
-    // ============= Config Errors =============
-    
     #[error("Config error: {0}")]
     Config(String),
     
     #[error("Invalid secret for user {user}: {reason}")]
     InvalidSecret { user: String, reason: String },
-    
-    // ============= User Errors =============
     
     #[error("User {user} expired")]
     UserExpired { user: String },
@@ -252,8 +232,6 @@ pub enum ProxyError {
     
     #[error("Rate limited")]
     RateLimited,
-    
-    // ============= General Errors =============
     
     #[error("Internal error: {0}")]
     Internal(String),
@@ -298,40 +276,40 @@ pub enum HandshakeResult<T, R, W> {
 
 impl<T, R, W> HandshakeResult<T, R, W> {
     /// Check if successful
-    pub fn is_success(&self) -> bool {
-        matches!(self, HandshakeResult::Success(_))
+    pub const fn is_success(&self) -> bool {
+        matches!(self, Self::Success(_))
     }
     
     /// Check if bad client
-    pub fn is_bad_client(&self) -> bool {
-        matches!(self, HandshakeResult::BadClient { .. })
+    pub const fn is_bad_client(&self) -> bool {
+        matches!(self, Self::BadClient { .. })
     }
     
     /// Map the success value
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> HandshakeResult<U, R, W> {
         match self {
-            HandshakeResult::Success(v) => HandshakeResult::Success(f(v)),
-            HandshakeResult::BadClient { reader, writer } => HandshakeResult::BadClient { reader, writer },
-            HandshakeResult::Error(e) => HandshakeResult::Error(e),
+            Self::Success(v) => HandshakeResult::Success(f(v)),
+            Self::BadClient { reader, writer } => HandshakeResult::BadClient { reader, writer },
+            Self::Error(e) => HandshakeResult::Error(e),
         }
     }
 }
 
 impl<T, R, W> From<ProxyError> for HandshakeResult<T, R, W> {
     fn from(err: ProxyError) -> Self {
-        HandshakeResult::Error(err)
+        Self::Error(err)
     }
 }
 
 impl<T, R, W> From<std::io::Error> for HandshakeResult<T, R, W> {
     fn from(err: std::io::Error) -> Self {
-        HandshakeResult::Error(ProxyError::Io(err))
+        Self::Error(ProxyError::Io(err))
     }
 }
 
 impl<T, R, W> From<StreamError> for HandshakeResult<T, R, W> {
     fn from(err: StreamError) -> Self {
-        HandshakeResult::Error(ProxyError::Stream(err))
+        Self::Error(ProxyError::Stream(err))
     }
 }
 
@@ -409,5 +387,144 @@ mod tests {
         
         let err = ProxyError::InvalidProxyProtocol;
         assert!(err.to_string().contains("proxy protocol"));
+    }
+
+    #[test]
+    fn stream_error_source_chain_tracks_io_error() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
+        let stream_err: StreamError = io_err.into();
+        assert!(stream_err.source().is_some(),
+            "StreamError::Io must propagate source to the inner io::Error");
+
+        let partial = StreamError::PartialRead { expected: 10, got: 5 };
+        assert!(partial.source().is_none(),
+            "PartialRead must have no chained source error");
+    }
+
+    #[test]
+    fn all_stream_error_variants_have_non_empty_display() {
+        let cases: &[(&str, &dyn std::fmt::Display)] = &[
+            ("PartialRead",    &StreamError::PartialRead { expected: 100, got: 1 }),
+            ("PartialWrite",   &StreamError::PartialWrite { expected: 200, written: 0 }),
+            ("Poisoned",       &StreamError::Poisoned { reason: "corrupted".into() }),
+            ("BufferOverflow", &StreamError::BufferOverflow { limit: 4096, attempted: 8192 }),
+            ("InvalidFrame",   &StreamError::InvalidFrame { details: "bad magic byte".into() }),
+            ("UnexpectedEof",  &StreamError::UnexpectedEof),
+        ];
+        for (name, v) in cases {
+            assert!(!v.to_string().is_empty(),
+                "StreamError::{name} must have a non-empty Display");
+        }
+    }
+
+    #[test]
+    fn recoverable_trait_all_stream_error_variants() {
+        // Transient OS-level conditions that the caller may retry.
+        assert!(StreamError::Io(
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, "")
+        ).is_recoverable(), "WouldBlock must be recoverable");
+        assert!(StreamError::Io(
+            std::io::Error::new(std::io::ErrorKind::Interrupted, "")
+        ).is_recoverable(), "Interrupted must be recoverable");
+
+        // Terminal conditions — stream is dead, retrying would be incorrect.
+        assert!(!StreamError::Io(
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "")
+        ).is_recoverable(), "BrokenPipe must not be recoverable");
+        assert!(!StreamError::Poisoned { reason: "x".into() }.is_recoverable());
+        assert!(!StreamError::BufferOverflow { limit: 0, attempted: 1 }.is_recoverable());
+        assert!(!StreamError::UnexpectedEof.is_recoverable());
+        assert!(!StreamError::InvalidFrame { details: "x".into() }.is_recoverable());
+    }
+
+    #[test]
+    fn can_continue_reflects_stream_liveness() {
+        // Poisoned and Eof mean the stream can never be used again.
+        assert!(!StreamError::Poisoned { reason: "x".into() }.can_continue());
+        assert!(!StreamError::UnexpectedEof.can_continue());
+        assert!(!StreamError::BufferOverflow { limit: 0, attempted: 1 }.can_continue());
+
+        // These do not necessarily kill the stream.
+        assert!(StreamError::InvalidFrame { details: "x".into() }.can_continue());
+        assert!(StreamError::PartialRead { expected: 1, got: 0 }.can_continue());
+        assert!(StreamError::PartialWrite { expected: 1, written: 0 }.can_continue());
+    }
+
+    #[test]
+    fn stream_error_to_io_error_covers_all_variants() {
+        // Every variant must map to the appropriate io::ErrorKind
+        // so upstream callers using io::Error matching behave correctly.
+        let eof: std::io::Error = StreamError::UnexpectedEof.into();
+        assert_eq!(eof.kind(), std::io::ErrorKind::UnexpectedEof);
+
+        let overflow: std::io::Error =
+            StreamError::BufferOverflow { limit: 0, attempted: 1 }.into();
+        assert_eq!(overflow.kind(), std::io::ErrorKind::OutOfMemory);
+
+        let invalid: std::io::Error =
+            StreamError::InvalidFrame { details: "x".into() }.into();
+        assert_eq!(invalid.kind(), std::io::ErrorKind::InvalidData);
+
+        // These must convert without panic; exact kind is implementation-defined.
+        let _: std::io::Error = StreamError::PartialRead { expected: 1, got: 0 }.into();
+        let _: std::io::Error = StreamError::PartialWrite { expected: 1, written: 0 }.into();
+        let _: std::io::Error = StreamError::Poisoned { reason: "x".into() }.into();
+    }
+
+    #[test]
+    fn handshake_result_map_preserves_all_variants() {
+        let s: HandshakeResult<i32, (), ()> = HandshakeResult::Success(10);
+        assert!(matches!(s.map(|v| v * 5), HandshakeResult::Success(50)));
+
+        let b: HandshakeResult<i32, &str, &str> =
+            HandshakeResult::BadClient { reader: "r", writer: "w" };
+        assert!(matches!(b.map(|v: i32| v + 1), HandshakeResult::BadClient { .. }));
+
+        let e: HandshakeResult<i32, (), ()> =
+            HandshakeResult::Error(ProxyError::Internal("test".into()));
+        assert!(matches!(e.map(|v| v + 1), HandshakeResult::Error(_)));
+    }
+
+    #[test]
+    fn proxy_error_recoverable_reflects_security_intent() {
+        // Transient network conditions — a retry is valid.
+        assert!(
+            ProxyError::ConnectionTimeout { addr: "1.2.3.4:443".into() }.is_recoverable(),
+            "ConnectionTimeout is a transient network event"
+        );
+        assert!(ProxyError::RateLimited.is_recoverable(),
+            "RateLimited implies a future retry is valid");
+
+        // Security violations must NEVER be retried. Accepting the same
+        // replayed packet again would constitute a vulnerability.
+        let addr: std::net::SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        assert!(!ProxyError::ReplayAttack { addr }.is_recoverable(),
+            "ReplayAttack must not be recoverable — retrying would accept the attack");
+
+        // Protocol and authentication errors are always final.
+        assert!(!ProxyError::InvalidHandshake("bad".into()).is_recoverable());
+        assert!(!ProxyError::UnknownUser.is_recoverable());
+        assert!(!ProxyError::UserExpired { user: "x".into() }.is_recoverable());
+    }
+
+    #[test]
+    fn proxy_error_display_contains_contextual_fields() {
+        // Structured error fields must appear in Display output so that
+        // log messages carry enough context for incident investigation.
+        let err = ProxyError::InvalidKeyLength { expected: 32, got: 16 };
+        let s = err.to_string();
+        assert!(s.contains("32") && s.contains("16"),
+            "InvalidKeyLength display must include both expected and got values");
+
+        let err = ProxyError::TimeSkew { client_time: 1000, server_time: 9999 };
+        let s = err.to_string();
+        assert!(s.contains("1000") && s.contains("9999"),
+            "TimeSkew display must include both timestamps");
+
+        let addr: std::net::SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let err = ProxyError::ReplayAttack { addr };
+        assert!(err.to_string().contains("10.0.0.1"),
+            "ReplayAttack display must include the source address");
     }
 }

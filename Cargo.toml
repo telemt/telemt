@@ -22,6 +22,7 @@ hmac = "0.12"
 crc32fast = "1.4"
 crc32c = "0.6"
 zeroize = { version = "1.8", features = ["derive"] }
+subtle = "2.6"
 
 # Network
 socket2 = { version = "0.5", features = ["all"] }
@@ -69,6 +70,7 @@ tokio-test = "0.4"
 criterion = "0.5"
 proptest = "1.4"
 futures = "0.3"
+static_assertions = "1.1"
 
 [[bench]]
 name = "crypto_bench"

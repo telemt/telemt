@@ -200,7 +200,7 @@ pub(crate) async fn spawn_runtime_tasks(
             .await;
         });
 
-        let pool_clone = pool.clone();
+        let pool_clone = pool;
         let config_rx_clone = config_rx.clone();
         let reinit_tx_updater = reinit_tx.clone();
         tokio::spawn(async move {
@@ -213,7 +213,7 @@ pub(crate) async fn spawn_runtime_tasks(
         });
 
         let config_rx_clone_rot = config_rx.clone();
-        let reinit_tx_rotation = reinit_tx.clone();
+        let reinit_tx_rotation = reinit_tx;
         tokio::spawn(async move {
             crate::transport::middle_proxy::me_rotation_task(config_rx_clone_rot, reinit_tx_rotation)
                 .await;
@@ -241,9 +241,9 @@ pub(crate) async fn apply_runtime_log_filter(
     } else {
         EnvFilter::new(effective_log_level.to_filter_str())
     };
-    filter_handle
-        .reload(runtime_filter)
-        .expect("Failed to switch log filter");
+    if let Err(err) = filter_handle.reload(runtime_filter) {
+        tracing::warn!(error = %err, "Failed to switch log filter");
+    }
 
     tokio::spawn(async move {
         loop {
@@ -251,7 +251,7 @@ pub(crate) async fn apply_runtime_log_filter(
                 break;
             }
             let level = log_level_rx.borrow_and_update().clone();
-            let new_filter = tracing_subscriber::EnvFilter::new(level.to_filter_str());
+            let new_filter = EnvFilter::new(level.to_filter_str());
             if let Err(e) = filter_handle.reload(new_filter) {
                 tracing::error!("config reload: failed to update log filter: {}", e);
             }

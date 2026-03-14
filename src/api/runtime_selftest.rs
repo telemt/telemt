@@ -279,7 +279,7 @@ fn classify_ip(ip: IpAddr) -> &'static str {
     "good"
 }
 
-fn map_route_kind(value: UpstreamRouteKind) -> &'static str {
+const fn map_route_kind(value: UpstreamRouteKind) -> &'static str {
     match value {
         UpstreamRouteKind::Direct => "direct",
         UpstreamRouteKind::Socks4 => "socks4",

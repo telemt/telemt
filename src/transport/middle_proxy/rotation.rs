@@ -16,10 +16,10 @@ pub enum MeReinitTrigger {
 }
 
 impl MeReinitTrigger {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
-            MeReinitTrigger::Periodic => "periodic",
-            MeReinitTrigger::MapChanged => "map-change",
+            Self::Periodic => "periodic",
+            Self::MapChanged => "map-change",
         }
     }
 }
@@ -30,10 +30,10 @@ pub fn enqueue_reinit_trigger(
 ) {
     match tx.try_send(trigger) {
         Ok(()) => {}
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+        Err(mpsc::error::TrySendError::Full(_)) => {
             debug!(trigger = trigger.as_str(), "ME reinit trigger dropped (queue full)");
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+        Err(mpsc::error::TrySendError::Closed(_)) => {
             warn!(trigger = trigger.as_str(), "ME reinit trigger dropped (scheduler closed)");
         }
     }

@@ -1,4 +1,4 @@
-//! Stream wrappers for MTProto protocol layers
+//! Stream wrappers for `MTProto` protocol layers
 
 pub mod state;
 pub mod buffer_pool;

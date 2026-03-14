@@ -262,8 +262,8 @@ impl MePool {
                 WriterContour::Draining => "draining",
             };
 
-            if !draining {
-                if let Some(dc_idx) = dc {
+            if !draining
+                && let Some(dc_idx) = dc {
                     *live_writers_by_dc_endpoint
                         .entry((dc_idx, endpoint))
                         .or_insert(0) += 1;
@@ -274,7 +274,6 @@ impl MePool {
                         entry.1 += 1;
                     }
                 }
-            }
 
             writer_rows.push(MeApiWriterStatusSnapshot {
                 writer_id: writer.id,
@@ -576,14 +575,14 @@ fn extend_signed_endpoints(
     }
 }
 
-fn floor_mode_label(mode: MeFloorMode) -> &'static str {
+const fn floor_mode_label(mode: MeFloorMode) -> &'static str {
     match mode {
         MeFloorMode::Static => "static",
         MeFloorMode::Adaptive => "adaptive",
     }
 }
 
-fn bind_stale_mode_label(mode: MeBindStaleMode) -> &'static str {
+const fn bind_stale_mode_label(mode: MeBindStaleMode) -> &'static str {
     match mode {
         MeBindStaleMode::Never => "never",
         MeBindStaleMode::Ttl => "ttl",
@@ -591,21 +590,21 @@ fn bind_stale_mode_label(mode: MeBindStaleMode) -> &'static str {
     }
 }
 
-fn writer_pick_mode_label(mode: crate::config::MeWriterPickMode) -> &'static str {
+const fn writer_pick_mode_label(mode: crate::config::MeWriterPickMode) -> &'static str {
     match mode {
         crate::config::MeWriterPickMode::SortedRr => "sorted_rr",
         crate::config::MeWriterPickMode::P2c => "p2c",
     }
 }
 
-fn socks_kdf_policy_label(policy: MeSocksKdfPolicy) -> &'static str {
+const fn socks_kdf_policy_label(policy: MeSocksKdfPolicy) -> &'static str {
     match policy {
         MeSocksKdfPolicy::Strict => "strict",
         MeSocksKdfPolicy::Compat => "compat",
     }
 }
 
-fn ip_preference_label(preference: IpPreference) -> &'static str {
+const fn ip_preference_label(preference: IpPreference) -> &'static str {
     match preference {
         IpPreference::Unknown => "unknown",
         IpPreference::PreferV6 => "prefer_v6",
