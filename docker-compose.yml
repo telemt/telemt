@@ -6,7 +6,8 @@ services:
     restart: unless-stopped
     ports:
       - "443:443"
-      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:9090:9090"   # Metrics
+      - "127.0.0.1:9091:9091"   # API
     # Allow caching 'proxy-secret' in read-only container
     working_dir: /run/telemt
     volumes:
@@ -28,3 +29,8 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
