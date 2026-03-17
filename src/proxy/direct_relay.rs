@@ -2,6 +2,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -21,6 +23,45 @@ use crate::proxy::route_mode::{
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
+
+const UNKNOWN_DC_LOG_DISTINCT_LIMIT: usize = 1024;
+static LOGGED_UNKNOWN_DCS: OnceLock<Mutex<HashSet<i16>>> = OnceLock::new();
+
+// In tests, this function shares global mutable state. Callers that also use
+// cache-reset helpers must hold `unknown_dc_test_lock()` to keep assertions
+// deterministic under parallel execution.
+fn should_log_unknown_dc(dc_idx: i16) -> bool {
+    let set = LOGGED_UNKNOWN_DCS.get_or_init(|| Mutex::new(HashSet::new()));
+    match set.lock() {
+        Ok(mut guard) => {
+            if guard.contains(&dc_idx) {
+                return false;
+            }
+            if guard.len() >= UNKNOWN_DC_LOG_DISTINCT_LIMIT {
+                return false;
+            }
+            guard.insert(dc_idx)
+        }
+        // If the lock is poisoned, keep logging rather than silently dropping
+        // operator-visible diagnostics.
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+fn clear_unknown_dc_log_cache_for_testing() {
+    if let Some(set) = LOGGED_UNKNOWN_DCS.get()
+        && let Ok(mut guard) = set.lock()
+    {
+        guard.clear();
+    }
+}
+
+#[cfg(test)]
+fn unknown_dc_test_lock() -> &'static Mutex<()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 pub(crate) async fn handle_via_direct<R, W>(
     client_reader: CryptoReader<R>,
@@ -64,7 +105,6 @@ where
     debug!(peer = %success.peer, "TG handshake complete, starting relay");
 
     stats.increment_user_connects(user);
-    stats.increment_user_curr_connects(user);
     stats.increment_current_connections_direct();
 
     let relay_result = relay_bidirectional(
@@ -109,7 +149,6 @@ where
     };
 
     stats.decrement_current_connections_direct();
-    stats.decrement_user_curr_connects(user);
 
     match &relay_result {
         Ok(()) => debug!(user = %user, "Direct relay completed"),
@@ -160,6 +199,7 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
         warn!(dc_idx = dc_idx, "Requested non-standard DC with no override; falling back to default cluster");
         if config.general.unknown_dc_file_log_enabled
             && let Some(path) = &config.general.unknown_dc_log_path
+            && should_log_unknown_dc(dc_idx)
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
             let path = path.clone();
@@ -175,7 +215,7 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
     let fallback_idx = if default_dc >= 1 && default_dc <= num_dcs {
         default_dc - 1
     } else {
-        1
+        0
     };
 
     info!(
@@ -203,8 +243,6 @@ async fn do_tg_handshake_static(
     let (nonce, _tg_enc_key, _tg_enc_iv, _tg_dec_key, _tg_dec_iv) = generate_tg_nonce(
         success.proto_tag,
         success.dc_idx,
-        &success.dec_key,
-        success.dec_iv,
         &success.enc_key,
         success.enc_iv,
         rng,
@@ -230,3 +268,7 @@ async fn do_tg_handshake_static(
         CryptoWriter::new(write_half, tg_encryptor, max_pending),
     ))
 }
+
+#[cfg(test)]
+#[path = "direct_relay_security_tests.rs"]
+mod security_tests;

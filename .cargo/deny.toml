@@ -1,0 +1,15 @@
+[bans]
+multiple-versions = "deny"
+wildcards = "allow"
+highlight = "all"
+
+# Explicitly flag the weak cryptography so the agent is forced to justify its existence
+[[bans.skip]]
+name = "md-5"
+version = "*"
+reason = "MUST VERIFY: Only allowed for legacy checksums, never for security."
+
+[[bans.skip]]
+name = "sha1"
+version = "*"
+reason = "MUST VERIFY: Only allowed for backwards compatibility."

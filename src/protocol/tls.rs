@@ -13,6 +13,7 @@ use super::constants::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use num_bigint::BigUint;
 use num_traits::One;
+use subtle::ConstantTimeEq;
 
 // ============= Public Constants =============
 
@@ -28,6 +29,8 @@ pub const TLS_DIGEST_HALF_LEN: usize = 16;
 /// Time skew limits for anti-replay (in seconds)
 pub const TIME_SKEW_MIN: i64 = -20 * 60; // 20 minutes before
 pub const TIME_SKEW_MAX: i64 = 10 * 60;  // 10 minutes after
+/// Maximum accepted boot-time timestamp (seconds) before skew checks are enforced.
+pub const BOOT_TIME_MAX_SECS: u32 = 7 * 24 * 60 * 60;
 
 // ============= Private Constants =============
 
@@ -125,7 +128,7 @@ impl TlsExtensionBuilder {
         //     protocol name length (1 byte)
         //     protocol name bytes
         let proto_len = proto.len() as u8;
-        let list_len: u16 = 1 + proto_len as u16;
+        let list_len: u16 = 1 + u16::from(proto_len);
         let ext_len: u16 = 2 + list_len;
 
         self.extensions.extend_from_slice(&ext_len.to_be_bytes());
@@ -273,13 +276,86 @@ impl ServerHelloBuilder {
 
 // ============= Public Functions =============
 
-/// Validate TLS ClientHello against user secrets
+/// Validate TLS ClientHello against user secrets.
 ///
 /// Returns validation result if a matching user is found.
+/// The result **must** be used — ignoring it silently bypasses authentication.
+#[must_use]
 pub fn validate_tls_handshake(
     handshake: &[u8],
     secrets: &[(String, Vec<u8>)],
     ignore_time_skew: bool,
+) -> Option<TlsValidation> {
+    validate_tls_handshake_with_replay_window(
+        handshake,
+        secrets,
+        ignore_time_skew,
+        u64::from(BOOT_TIME_MAX_SECS),
+    )
+}
+
+/// Validate TLS ClientHello and cap the boot-time bypass by replay-cache TTL.
+///
+/// A boot-time timestamp is only accepted when it falls below both
+/// `BOOT_TIME_MAX_SECS` and the configured replay window, preventing timestamp
+/// reuse outside replay cache coverage.
+#[must_use]
+pub fn validate_tls_handshake_with_replay_window(
+    handshake: &[u8],
+    secrets: &[(String, Vec<u8>)],
+    ignore_time_skew: bool,
+    replay_window_secs: u64,
+) -> Option<TlsValidation> {
+    // Only pay the clock syscall when we will actually compare against it.
+    // If `ignore_time_skew` is set, a broken or unavailable system clock
+    // must not block legitimate clients — that would be a DoS via clock failure.
+    let now = if !ignore_time_skew {
+        system_time_to_unix_secs(SystemTime::now())?
+    } else {
+        0_i64
+    };
+
+    let replay_window_u32 = u32::try_from(replay_window_secs).unwrap_or(u32::MAX);
+    let boot_time_cap_secs = BOOT_TIME_MAX_SECS.min(replay_window_u32);
+
+    validate_tls_handshake_at_time_with_boot_cap(
+        handshake,
+        secrets,
+        ignore_time_skew,
+        now,
+        boot_time_cap_secs,
+    )
+}
+
+fn system_time_to_unix_secs(now: SystemTime) -> Option<i64> {
+    // `try_from` rejects values that overflow i64 (> ~292 billion years CE),
+    // whereas `as i64` would silently wrap to a negative timestamp and corrupt
+    // every subsequent time-skew comparison.
+    let d = now.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(d.as_secs()).ok()
+}
+
+fn validate_tls_handshake_at_time(
+    handshake: &[u8],
+    secrets: &[(String, Vec<u8>)],
+    ignore_time_skew: bool,
+    now: i64,
+) -> Option<TlsValidation> {
+    validate_tls_handshake_at_time_with_boot_cap(
+        handshake,
+        secrets,
+        ignore_time_skew,
+        now,
+        BOOT_TIME_MAX_SECS,
+    )
+}
+
+fn validate_tls_handshake_at_time_with_boot_cap(
+    handshake: &[u8],
+    secrets: &[(String, Vec<u8>)],
+    ignore_time_skew: bool,
+    now: i64,
+    boot_time_cap_secs: u32,
 ) -> Option<TlsValidation> {
     if handshake.len() < TLS_DIGEST_POS + TLS_DIGEST_LEN + 1 {
         return None;
@@ -305,50 +381,56 @@ pub fn validate_tls_handshake(
     let mut msg = handshake.to_vec();
     msg[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN].fill(0);
     
-    // Get current time
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    
+    let mut first_match: Option<TlsValidation> = None;
+
     for (user, secret) in secrets {
         let computed = sha256_hmac(secret, &msg);
-        
-        // XOR digests
-        let xored: Vec<u8> = digest.iter()
-            .zip(computed.iter())
-            .map(|(a, b)| a ^ b)
-            .collect();
-        
-        // Check that first 28 bytes are zeros (timestamp in last 4)
-        if !xored[..28].iter().all(|&b| b == 0) {
+
+        // Constant-time equality check on the 28-byte HMAC window.
+        // A variable-time short-circuit here lets an active censor measure how many
+        // bytes matched, enabling secret brute-force via timing side-channels.
+        // Direct comparison on the original arrays avoids a heap allocation and
+        // removes the `try_into().unwrap()` that the intermediate Vec would require.
+        if !bool::from(digest[..28].ct_eq(&computed[..28])) {
             continue;
         }
-        
-        // Extract timestamp
-        let timestamp = u32::from_le_bytes(xored[28..32].try_into().unwrap());
-        let time_diff = now - timestamp as i64;
-        
-        // Check time skew
+
+        // The last 4 bytes encode the timestamp as XOR(digest[28..32], computed[28..32]).
+        // Inline array construction is infallible: both slices are [u8; 32] by construction.
+        let timestamp = u32::from_le_bytes([
+            digest[28] ^ computed[28],
+            digest[29] ^ computed[29],
+            digest[30] ^ computed[30],
+            digest[31] ^ computed[31],
+        ]);
+
+        // time_diff is only meaningful (and `now` is only valid) when we are
+        // actually checking the window.  Keep both inside the guard to make
+        // the dead-code path explicit and prevent accidental future use of
+        // a sentinel `now` value outside its intended scope.
         if !ignore_time_skew {
             // Allow very small timestamps (boot time instead of unix time)
             // This is a quirk in some clients that use uptime instead of real time
-            let is_boot_time = timestamp < 60 * 60 * 24 * 1000; // < ~2.7 years in seconds
-            
-            if !is_boot_time && !(TIME_SKEW_MIN..=TIME_SKEW_MAX).contains(&time_diff) {
-                continue;
+            let is_boot_time = timestamp < boot_time_cap_secs;
+            if !is_boot_time {
+                let time_diff = now - i64::from(timestamp);
+                if !(TIME_SKEW_MIN..=TIME_SKEW_MAX).contains(&time_diff) {
+                    continue;
+                }
             }
         }
         
-        return Some(TlsValidation {
-            user: user.clone(),
-            session_id,
-            digest,
-            timestamp,
-        });
+        if first_match.is_none() {
+            first_match = Some(TlsValidation {
+                user: user.clone(),
+                session_id: session_id.clone(),
+                digest,
+                timestamp,
+            });
+        }
     }
-    
-    None
+
+    first_match
 }
 
 fn curve25519_prime() -> BigUint {
@@ -528,7 +610,9 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
                 if name_type == 0 && name_len > 0
                     && let Ok(host) = std::str::from_utf8(&handshake[sn_pos..sn_pos + name_len])
                 {
-                    return Some(host.to_string());
+                    if is_valid_sni_hostname(host) {
+                        return Some(host.to_string());
+                    }
                 }
                 sn_pos += name_len;
             }
@@ -537,6 +621,35 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+fn is_valid_sni_hostname(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Extract ALPN protocol list from ClientHello, return in offered order.
@@ -667,291 +780,29 @@ fn validate_server_hello_structure(data: &[u8]) -> Result<(), ProxyError> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_is_tls_handshake() {
-        assert!(is_tls_handshake(&[0x16, 0x03, 0x01]));
-        assert!(is_tls_handshake(&[0x16, 0x03, 0x01, 0x02, 0x00]));
-        assert!(!is_tls_handshake(&[0x17, 0x03, 0x01])); // Application data
-        assert!(!is_tls_handshake(&[0x16, 0x03, 0x02])); // Wrong version
-        assert!(!is_tls_handshake(&[0x16, 0x03])); // Too short
-    }
-    
-    #[test]
-    fn test_parse_tls_record_header() {
-        let header = [0x16, 0x03, 0x01, 0x02, 0x00];
-        let result = parse_tls_record_header(&header).unwrap();
-        assert_eq!(result.0, TLS_RECORD_HANDSHAKE);
-        assert_eq!(result.1, 512);
-        
-        let header = [0x17, 0x03, 0x03, 0x40, 0x00];
-        let result = parse_tls_record_header(&header).unwrap();
-        assert_eq!(result.0, TLS_RECORD_APPLICATION);
-        assert_eq!(result.1, 16384);
-    }
-    
-    #[test]
-    fn test_gen_fake_x25519_key() {
-        let rng = SecureRandom::new();
-        let key1 = gen_fake_x25519_key(&rng);
-        let key2 = gen_fake_x25519_key(&rng);
-        
-        assert_eq!(key1.len(), 32);
-        assert_eq!(key2.len(), 32);
-        assert_ne!(key1, key2); // Should be random
-    }
+// ============= Compile-time Security Invariants =============
 
-    #[test]
-    fn test_fake_x25519_key_is_quadratic_residue() {
-        let rng = SecureRandom::new();
-        let key = gen_fake_x25519_key(&rng);
-        let p = curve25519_prime();
-        let k_num = BigUint::from_bytes_le(&key);
-        let exponent = (&p - BigUint::one()) >> 1;
-        let legendre = k_num.modpow(&exponent, &p);
-        assert_eq!(legendre, BigUint::one());
-    }
-    
-    #[test]
-    fn test_tls_extension_builder() {
-        let key = [0x42u8; 32];
-        
-        let mut builder = TlsExtensionBuilder::new();
-        builder.add_key_share(&key);
-        builder.add_supported_versions(0x0304);
-        
-        let result = builder.build();
-        
-        // Check length prefix
-        let len = u16::from_be_bytes([result[0], result[1]]) as usize;
-        assert_eq!(len, result.len() - 2);
-        
-        // Check key_share extension is present
-        assert!(result.len() > 40); // At least key share
-    }
-    
-    #[test]
-    fn test_server_hello_builder() {
-        let session_id = vec![0x01, 0x02, 0x03, 0x04];
-        let key = [0x55u8; 32];
-        
-        let builder = ServerHelloBuilder::new(session_id.clone())
-            .with_x25519_key(&key)
-            .with_tls13_version();
-        
-        let record = builder.build_record();
-        
-        // Validate structure
-        validate_server_hello_structure(&record).expect("Invalid ServerHello structure");
-        
-        // Check record type
-        assert_eq!(record[0], TLS_RECORD_HANDSHAKE);
-        
-        // Check version
-        assert_eq!(&record[1..3], &TLS_VERSION);
-        
-        // Check message type (ServerHello = 0x02)
-        assert_eq!(record[5], 0x02);
-    }
-    
-    #[test]
-    fn test_build_server_hello_structure() {
-        let secret = b"test secret";
-        let client_digest = [0x42u8; 32];
-        let session_id = vec![0xAA; 32];
-        
-        let rng = SecureRandom::new();
-        let response = build_server_hello(secret, &client_digest, &session_id, 2048, &rng, None, 0);
-        
-        // Should have at least 3 records
-        assert!(response.len() > 100);
-        
-        // First record should be ServerHello
-        assert_eq!(response[0], TLS_RECORD_HANDSHAKE);
-        
-        // Validate ServerHello structure
-        validate_server_hello_structure(&response).expect("Invalid ServerHello");
-        
-        // Find Change Cipher Spec
-        let server_hello_len = 5 + u16::from_be_bytes([response[3], response[4]]) as usize;
-        let ccs_start = server_hello_len;
-        
-        assert!(response.len() > ccs_start + 6);
-        assert_eq!(response[ccs_start], TLS_RECORD_CHANGE_CIPHER);
-        
-        // Find Application Data
-        let ccs_len = 5 + u16::from_be_bytes([response[ccs_start + 3], response[ccs_start + 4]]) as usize;
-        let app_start = ccs_start + ccs_len;
-        
-        assert!(response.len() > app_start + 5);
-        assert_eq!(response[app_start], TLS_RECORD_APPLICATION);
-    }
-    
-    #[test]
-    fn test_build_server_hello_digest() {
-        let secret = b"test secret key here";
-        let client_digest = [0x42u8; 32];
-        let session_id = vec![0xAA; 32];
-        
-        let rng = SecureRandom::new();
-        let response1 = build_server_hello(secret, &client_digest, &session_id, 1024, &rng, None, 0);
-        let response2 = build_server_hello(secret, &client_digest, &session_id, 1024, &rng, None, 0);
-        
-        // Digest position should have non-zero data
-        let digest1 = &response1[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN];
-        assert!(!digest1.iter().all(|&b| b == 0));
-        
-        // Different calls should have different digests (due to random cert)
-        let digest2 = &response2[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN];
-        assert_ne!(digest1, digest2);
-    }
-    
-    #[test]
-    fn test_server_hello_extensions_length() {
-        let session_id = vec![0x01; 32];
-        let key = [0x55u8; 32];
-        
-        let builder = ServerHelloBuilder::new(session_id)
-            .with_x25519_key(&key)
-            .with_tls13_version();
-        
-        let record = builder.build_record();
-        
-        // Parse to find extensions
-        let msg_start = 5; // After record header
-        let msg_len = u32::from_be_bytes([0, record[6], record[7], record[8]]) as usize;
-        
-        // Skip to session ID
-        let session_id_pos = msg_start + 4 + 2 + 32; // header(4) + version(2) + random(32)
-        let session_id_len = record[session_id_pos] as usize;
-        
-        // Skip to extensions
-        let ext_len_pos = session_id_pos + 1 + session_id_len + 2 + 1; // session_id + cipher(2) + compression(1)
-        let ext_len = u16::from_be_bytes([record[ext_len_pos], record[ext_len_pos + 1]]) as usize;
-        
-        // Verify extensions length matches actual data
-        let extensions_data = &record[ext_len_pos + 2..msg_start + 4 + msg_len];
-        assert_eq!(ext_len, extensions_data.len(), 
-            "Extension length mismatch: declared {}, actual {}", ext_len, extensions_data.len());
-    }
-    
-    #[test]
-    fn test_validate_tls_handshake_format() {
-        // Build a minimal ClientHello-like structure
-        let mut handshake = vec![0u8; 100];
-        
-        // Put a valid-looking digest at position 11
-        handshake[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN]
-            .copy_from_slice(&[0x42; 32]);
-        
-        // Session ID length
-        handshake[TLS_DIGEST_POS + TLS_DIGEST_LEN] = 32;
-        
-        // This won't validate (wrong HMAC) but shouldn't panic
-        let secrets = vec![("test".to_string(), b"secret".to_vec())];
-        let result = validate_tls_handshake(&handshake, &secrets, true);
-        
-        // Should return None (no match) but not panic
-        assert!(result.is_none());
-    }
+/// Compile-time checks that enforce invariants the rest of the code relies on.
+/// Using `static_assertions` ensures these can never silently break across
+/// refactors without a compile error.
+mod compile_time_security_checks {
+    use super::{TLS_DIGEST_LEN, TLS_DIGEST_HALF_LEN};
+    use static_assertions::const_assert;
 
-    fn build_client_hello_with_exts(exts: Vec<(u16, Vec<u8>)>, host: &str) -> Vec<u8> {
-        let mut body = Vec::new();
-        body.extend_from_slice(&TLS_VERSION); // legacy version
-        body.extend_from_slice(&[0u8; 32]); // random
-        body.push(0); // session id len
-        body.extend_from_slice(&2u16.to_be_bytes()); // cipher suites len
-        body.extend_from_slice(&[0x13, 0x01]); // TLS_AES_128_GCM_SHA256
-        body.push(1); // compression len
-        body.push(0); // null compression
+    // The digest must be exactly one SHA-256 output.
+    const_assert!(TLS_DIGEST_LEN == 32);
 
-        // Build SNI extension
-        let host_bytes = host.as_bytes();
-        let mut sni_ext = Vec::new();
-        sni_ext.extend_from_slice(&(host_bytes.len() as u16 + 3).to_be_bytes());
-        sni_ext.push(0);
-        sni_ext.extend_from_slice(&(host_bytes.len() as u16).to_be_bytes());
-        sni_ext.extend_from_slice(host_bytes);
+    // Replay-dedup stores the first half; verify it is literally half.
+    const_assert!(TLS_DIGEST_HALF_LEN * 2 == TLS_DIGEST_LEN);
 
-        let mut ext_blob = Vec::new();
-        for (typ, data) in exts {
-            ext_blob.extend_from_slice(&typ.to_be_bytes());
-            ext_blob.extend_from_slice(&(data.len() as u16).to_be_bytes());
-            ext_blob.extend_from_slice(&data);
-        }
-        // SNI last
-        ext_blob.extend_from_slice(&0x0000u16.to_be_bytes());
-        ext_blob.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
-        ext_blob.extend_from_slice(&sni_ext);
-
-        body.extend_from_slice(&(ext_blob.len() as u16).to_be_bytes());
-        body.extend_from_slice(&ext_blob);
-
-        let mut handshake = Vec::new();
-        handshake.push(0x01); // ClientHello
-        let len_bytes = (body.len() as u32).to_be_bytes();
-        handshake.extend_from_slice(&len_bytes[1..4]);
-        handshake.extend_from_slice(&body);
-
-        let mut record = Vec::new();
-        record.push(TLS_RECORD_HANDSHAKE);
-        record.extend_from_slice(&[0x03, 0x01]);
-        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
-        record.extend_from_slice(&handshake);
-        record
-    }
-
-    #[test]
-    fn test_extract_sni_with_grease_extension() {
-        // GREASE type 0x0a0a with zero length before SNI
-        let ch = build_client_hello_with_exts(vec![(0x0a0a, Vec::new())], "example.com");
-        let sni = extract_sni_from_client_hello(&ch);
-        assert_eq!(sni.as_deref(), Some("example.com"));
-    }
-
-    #[test]
-    fn test_extract_sni_tolerates_empty_unknown_extension() {
-        let ch = build_client_hello_with_exts(vec![(0x1234, Vec::new())], "test.local");
-        let sni = extract_sni_from_client_hello(&ch);
-        assert_eq!(sni.as_deref(), Some("test.local"));
-    }
-
-    #[test]
-    fn test_extract_alpn_single() {
-        let mut alpn_data = Vec::new();
-        // list length = 3 (1 length byte + "h2")
-        alpn_data.extend_from_slice(&3u16.to_be_bytes());
-        alpn_data.push(2);
-        alpn_data.extend_from_slice(b"h2");
-        let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "alpn.test");
-        let alpn = extract_alpn_from_client_hello(&ch);
-        let alpn_str: Vec<String> = alpn
-            .iter()
-            .map(|p| std::str::from_utf8(p).unwrap().to_string())
-            .collect();
-        assert_eq!(alpn_str, vec!["h2"]);
-    }
-
-    #[test]
-    fn test_extract_alpn_multiple() {
-        let mut alpn_data = Vec::new();
-        // list length = 11 (sum of per-proto lengths including length bytes)
-        alpn_data.extend_from_slice(&11u16.to_be_bytes());
-        alpn_data.push(2);
-        alpn_data.extend_from_slice(b"h2");
-        alpn_data.push(4);
-        alpn_data.extend_from_slice(b"spdy");
-        alpn_data.push(2);
-        alpn_data.extend_from_slice(b"h3");
-        let ch = build_client_hello_with_exts(vec![(0x0010, alpn_data)], "alpn.test");
-        let alpn = extract_alpn_from_client_hello(&ch);
-        let alpn_str: Vec<String> = alpn
-            .iter()
-            .map(|p| std::str::from_utf8(p).unwrap().to_string())
-            .collect();
-        assert_eq!(alpn_str, vec!["h2", "spdy", "h3"]);
-    }
+    // The HMAC check window (28 bytes) plus the embedded timestamp (4 bytes)
+    // must exactly fill the digest.  If TLS_DIGEST_LEN ever changes, these
+    // assertions will catch the mismatch before any timing-oracle fix is broke.
+    const_assert!(28 + 4 == TLS_DIGEST_LEN);
 }
+
+// ============= Security-focused regression tests =============
+
+#[cfg(test)]
+#[path = "tls_security_tests.rs"]
+mod security_tests;

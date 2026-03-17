@@ -1156,6 +1156,13 @@ pub struct ServerConfig {
     #[serde(default = "default_proxy_protocol_header_timeout_ms")]
     pub proxy_protocol_header_timeout_ms: u64,
 
+    /// Trusted source CIDRs allowed to send incoming PROXY protocol headers.
+    ///
+    /// When non-empty, connections from addresses outside this allowlist are
+    /// rejected before `src_addr` is applied.
+    #[serde(default)]
+    pub proxy_protocol_trusted_cidrs: Vec<IpNetwork>,
+
     #[serde(default)]
     pub metrics_port: Option<u16>,
 
@@ -1185,6 +1192,7 @@ impl Default for ServerConfig {
             listen_tcp: None,
             proxy_protocol: false,
             proxy_protocol_header_timeout_ms: default_proxy_protocol_header_timeout_ms(),
+            proxy_protocol_trusted_cidrs: Vec::new(),
             metrics_port: None,
             metrics_whitelist: default_metrics_whitelist(),
             api: ApiConfig::default(),

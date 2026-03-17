@@ -2026,6 +2026,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2087,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "telemt"
-version = "3.3.15"
+version = "3.3.19"
 dependencies = [
  "aes",
  "anyhow",
@@ -2127,6 +2133,8 @@ dependencies = [
  "sha1",
  "sha2",
  "socket2 0.5.10",
+ "static_assertions",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",

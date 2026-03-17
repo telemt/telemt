@@ -4,7 +4,10 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use ipnetwork::IpNetwork;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -23,7 +26,7 @@ enum HandshakeOutcome {
 
 use crate::config::ProxyConfig;
 use crate::crypto::SecureRandom;
-use crate::error::{HandshakeResult, ProxyError, Result};
+use crate::error::{HandshakeResult, ProxyError, Result, StreamError};
 use crate::ip_tracker::UserIpTracker;
 use crate::protocol::constants::*;
 use crate::protocol::tls;
@@ -63,12 +66,28 @@ fn record_handshake_failure_class(
     peer_ip: IpAddr,
     error: &ProxyError,
 ) {
-    let class = if error.to_string().contains("expected 64 bytes, got 0") {
-        "expected_64_got_0"
-    } else {
-        "other"
+    let class = match error {
+        ProxyError::Io(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+            "expected_64_got_0"
+        }
+        ProxyError::Stream(StreamError::UnexpectedEof) => "expected_64_got_0",
+        _ => "other",
     };
     record_beobachten_class(beobachten, config, peer_ip, class);
+}
+
+fn is_trusted_proxy_source(peer_ip: IpAddr, trusted: &[IpNetwork]) -> bool {
+    if trusted.is_empty() {
+        static EMPTY_PROXY_TRUST_WARNED: OnceLock<AtomicBool> = OnceLock::new();
+        let warned = EMPTY_PROXY_TRUST_WARNED.get_or_init(|| AtomicBool::new(false));
+        if !warned.swap(true, Ordering::Relaxed) {
+            warn!(
+                "PROXY protocol enabled but server.proxy_protocol_trusted_cidrs is empty; rejecting all PROXY headers by default"
+            );
+        }
+        return false;
+    }
+    trusted.iter().any(|cidr| cidr.contains(peer_ip))
 }
 
 pub async fn handle_client_stream<S>(
@@ -104,6 +123,17 @@ where
         );
         match timeout(proxy_header_timeout, parse_proxy_protocol(&mut stream, peer)).await {
             Ok(Ok(info)) => {
+                if !is_trusted_proxy_source(peer.ip(), &config.server.proxy_protocol_trusted_cidrs)
+                {
+                    stats.increment_connects_bad();
+                    warn!(
+                        peer = %peer,
+                        trusted = ?config.server.proxy_protocol_trusted_cidrs,
+                        "Rejecting PROXY protocol header from untrusted source"
+                    );
+                    record_beobachten_class(&beobachten, &config, peer.ip(), "other");
+                    return Err(ProxyError::InvalidProxyProtocol);
+                }
                 debug!(
                     peer = %peer,
                     client = %info.src_addr,
@@ -149,8 +179,13 @@ where
         if is_tls {
             let tls_len = u16::from_be_bytes([first_bytes[3], first_bytes[4]]) as usize;
 
-            if tls_len < 512 {
-                debug!(peer = %real_peer, tls_len = tls_len, "TLS handshake too short");
+// RFC 8446 §5.1 mandates that TLSPlaintext records must not exceed 2^14
+        // bytes (16_384). A client claiming a larger record is non-compliant and
+        // may be an active probe attempting to force large allocations.
+        //
+        // Also enforce a minimum record size to avoid trivial/garbage probes.
+        if !(512..=MAX_TLS_RECORD_SIZE).contains(&tls_len) {
+                debug!(peer = %real_peer, tls_len = tls_len, max_tls_len = MAX_TLS_RECORD_SIZE, "TLS handshake length out of bounds");
                 stats.increment_connects_bad();
                 let (reader, writer) = tokio::io::split(stream);
                 handle_bad_client(
@@ -204,9 +239,19 @@ where
                 &config, &replay_checker, true, Some(tls_user.as_str()),
             ).await {
                 HandshakeResult::Success(result) => result,
-                HandshakeResult::BadClient { reader: _, writer: _ } => {
+                HandshakeResult::BadClient { reader, writer } => {
                     stats.increment_connects_bad();
                     debug!(peer = %peer, "Valid TLS but invalid MTProto handshake");
+                    handle_bad_client(
+                        reader,
+                        writer,
+                        &mtproto_handshake,
+                        real_peer,
+                        local_addr,
+                        &config,
+                        &beobachten,
+                    )
+                    .await;
                     return Ok(HandshakeOutcome::Handled);
                 }
                 HandshakeResult::Error(e) => return Err(e),
@@ -445,6 +490,24 @@ impl RunningClientHandler {
             .await
             {
                 Ok(Ok(info)) => {
+                    if !is_trusted_proxy_source(
+                        self.peer.ip(),
+                        &self.config.server.proxy_protocol_trusted_cidrs,
+                    ) {
+                        self.stats.increment_connects_bad();
+                        warn!(
+                            peer = %self.peer,
+                            trusted = ?self.config.server.proxy_protocol_trusted_cidrs,
+                            "Rejecting PROXY protocol header from untrusted source"
+                        );
+                        record_beobachten_class(
+                            &self.beobachten,
+                            &self.config,
+                            self.peer.ip(),
+                            "other",
+                        );
+                        return Err(ProxyError::InvalidProxyProtocol);
+                    }
                     debug!(
                         peer = %self.peer,
                         client = %info.src_addr,
@@ -513,8 +576,10 @@ impl RunningClientHandler {
 
         debug!(peer = %peer, tls_len = tls_len, "Reading TLS handshake");
 
-        if tls_len < 512 {
-            debug!(peer = %peer, tls_len = tls_len, "TLS handshake too short");
+        // See RFC 8446 §5.1: TLSPlaintext records must not exceed 16_384 bytes.
+        // Treat too-small or too-large lengths as active probes and mask them.
+        if !(512..=MAX_TLS_RECORD_SIZE).contains(&tls_len) {
+            debug!(peer = %peer, tls_len = tls_len, max_tls_len = MAX_TLS_RECORD_SIZE, "TLS handshake length out of bounds");
             self.stats.increment_connects_bad();
             let (reader, writer) = self.stream.into_split();
             handle_bad_client(
@@ -590,12 +655,19 @@ impl RunningClientHandler {
         .await
         {
             HandshakeResult::Success(result) => result,
-            HandshakeResult::BadClient {
-                reader: _,
-                writer: _,
-            } => {
+            HandshakeResult::BadClient { reader, writer } => {
                 stats.increment_connects_bad();
                 debug!(peer = %peer, "Valid TLS but invalid MTProto handshake");
+                handle_bad_client(
+                    reader,
+                    writer,
+                    &mtproto_handshake,
+                    peer,
+                    local_addr,
+                    &config,
+                    &self.beobachten,
+                )
+                .await;
                 return Ok(HandshakeOutcome::Handled);
             }
             HandshakeResult::Error(e) => return Err(e),
@@ -742,7 +814,7 @@ impl RunningClientHandler {
                     client_writer,
                     success,
                     pool.clone(),
-                    stats,
+                    stats.clone(),
                     config,
                     buffer_pool,
                     local_addr,
@@ -759,7 +831,7 @@ impl RunningClientHandler {
                     client_writer,
                     success,
                     upstream_manager,
-                    stats,
+                    stats.clone(),
                     config,
                     buffer_pool,
                     rng,
@@ -776,7 +848,7 @@ impl RunningClientHandler {
                 client_writer,
                 success,
                 upstream_manager,
-                stats,
+                stats.clone(),
                 config,
                 buffer_pool,
                 rng,
@@ -787,6 +859,7 @@ impl RunningClientHandler {
             .await
         };
 
+        stats.decrement_user_curr_connects(&user);
         ip_tracker.remove_ip(&user, peer_addr.ip()).await;
         relay_result
     }
@@ -806,9 +879,29 @@ impl RunningClientHandler {
             });
         }
 
-        let ip_reserved = match ip_tracker.check_and_add(user, peer_addr.ip()).await {
-            Ok(()) => true,
+        if let Some(quota) = config.access.user_data_quota.get(user)
+            && stats.get_user_total_octets(user) >= *quota
+        {
+            return Err(ProxyError::DataQuotaExceeded {
+                user: user.to_string(),
+            });
+        }
+
+        let limit = config
+            .access
+            .user_max_tcp_conns
+            .get(user)
+            .map(|v| *v as u64);
+        if !stats.try_acquire_user_curr_connects(user, limit) {
+            return Err(ProxyError::ConnectionLimitExceeded {
+                user: user.to_string(),
+            });
+        }
+
+        match ip_tracker.check_and_add(user, peer_addr.ip()).await {
+            Ok(()) => {}
             Err(reason) => {
+                stats.decrement_user_curr_connects(user);
                 warn!(
                     user = %user,
                     ip = %peer_addr.ip(),
@@ -819,33 +912,12 @@ impl RunningClientHandler {
                     user: user.to_string(),
                 });
             }
-        };
-        // IP limit check
-
-        if let Some(limit) = config.access.user_max_tcp_conns.get(user)
-            && stats.get_user_curr_connects(user) >= *limit as u64
-        {
-            if ip_reserved {
-                ip_tracker.remove_ip(user, peer_addr.ip()).await;
-                stats.increment_ip_reservation_rollback_tcp_limit_total();
-            }
-            return Err(ProxyError::ConnectionLimitExceeded {
-                user: user.to_string(),
-            });
-        }
-
-        if let Some(quota) = config.access.user_data_quota.get(user)
-            && stats.get_user_total_octets(user) >= *quota
-        {
-            if ip_reserved {
-                ip_tracker.remove_ip(user, peer_addr.ip()).await;
-                stats.increment_ip_reservation_rollback_quota_limit_total();
-            }
-            return Err(ProxyError::DataQuotaExceeded {
-                user: user.to_string(),
-            });
         }
 
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "client_security_tests.rs"]
+mod security_tests;

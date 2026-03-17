@@ -1256,6 +1256,33 @@ impl Stats {
         Self::touch_user_stats(stats.value());
         stats.curr_connects.fetch_add(1, Ordering::Relaxed);
     }
+
+    pub fn try_acquire_user_curr_connects(&self, user: &str, limit: Option<u64>) -> bool {
+        if !self.telemetry_user_enabled() {
+            return true;
+        }
+
+        self.maybe_cleanup_user_stats();
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+
+        let counter = &stats.curr_connects;
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            if let Some(max) = limit && current >= max {
+                return false;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current.saturating_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
     
     pub fn decrement_user_curr_connects(&self, user: &str) {
         self.maybe_cleanup_user_stats();

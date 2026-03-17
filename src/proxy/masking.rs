@@ -14,11 +14,40 @@ use crate::network::dns_overrides::resolve_socket_addr;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 
+#[cfg(not(test))]
 const MASK_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const MASK_TIMEOUT: Duration = Duration::from_millis(50);
 /// Maximum duration for the entire masking relay.
 /// Limits resource consumption from slow-loris attacks and port scanners.
+#[cfg(not(test))]
 const MASK_RELAY_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const MASK_RELAY_TIMEOUT: Duration = Duration::from_millis(200);
 const MASK_BUFFER_SIZE: usize = 8192;
+
+async fn write_proxy_header_with_timeout<W>(mask_write: &mut W, header: &[u8]) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    match timeout(MASK_TIMEOUT, mask_write.write_all(header)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            debug!("Timeout writing proxy protocol header to mask backend");
+            false
+        }
+    }
+}
+
+async fn consume_client_data_with_timeout<R>(reader: R)
+where
+    R: AsyncRead + Unpin,
+{
+    if timeout(MASK_RELAY_TIMEOUT, consume_client_data(reader)).await.is_err() {
+        debug!("Timed out while consuming client data on masking fallback path");
+    }
+}
 
 /// Detect client type based on initial data
 fn detect_client_type(data: &[u8]) -> &'static str {
@@ -71,7 +100,7 @@ where
 
     if !config.censorship.mask {
         // Masking disabled, just consume data
-        consume_client_data(reader).await;
+        consume_client_data_with_timeout(reader).await;
         return;
     }
 
@@ -107,7 +136,7 @@ where
                     }
                 };
                 if let Some(header) = proxy_header {
-                    if mask_write.write_all(&header).await.is_err() {
+                    if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
                         return;
                     }
                 }
@@ -117,11 +146,11 @@ where
             }
             Ok(Err(e)) => {
                 debug!(error = %e, "Failed to connect to mask unix socket");
-                consume_client_data(reader).await;
+                consume_client_data_with_timeout(reader).await;
             }
             Err(_) => {
                 debug!("Timeout connecting to mask unix socket");
-                consume_client_data(reader).await;
+                consume_client_data_with_timeout(reader).await;
             }
         }
         return;
@@ -166,7 +195,7 @@ where
 
             let (mask_read, mut mask_write) = stream.into_split();
             if let Some(header) = proxy_header {
-                if mask_write.write_all(&header).await.is_err() {
+                if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
                     return;
                 }
             }
@@ -176,11 +205,11 @@ where
         }
         Ok(Err(e)) => {
             debug!(error = %e, "Failed to connect to mask host");
-            consume_client_data(reader).await;
+            consume_client_data_with_timeout(reader).await;
         }
         Err(_) => {
             debug!("Timeout connecting to mask host");
-            consume_client_data(reader).await;
+            consume_client_data_with_timeout(reader).await;
         }
     }
 }
@@ -194,55 +223,51 @@ async fn relay_to_mask<R, W, MR, MW>(
     initial_data: &[u8],
 )
 where
-    R: AsyncRead + Unpin + Send + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
-    MR: AsyncRead + Unpin + Send + 'static,
-    MW: AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+    MR: AsyncRead + Unpin + Send,
+    MW: AsyncWrite + Unpin + Send,
 {
     // Send initial data to mask host
     if mask_write.write_all(initial_data).await.is_err() {
         return;
     }
+    if mask_write.flush().await.is_err() {
+        return;
+    }
 
-    // Relay traffic
-    let c2m = tokio::spawn(async move {
-        let mut buf = vec![0u8; MASK_BUFFER_SIZE];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => {
-                    let _ = mask_write.shutdown().await;
-                    break;
-                }
-                Ok(n) => {
-                    if mask_write.write_all(&buf[..n]).await.is_err() {
+    let mut client_buf = vec![0u8; MASK_BUFFER_SIZE];
+    let mut mask_buf = vec![0u8; MASK_BUFFER_SIZE];
+
+    loop {
+        tokio::select! {
+            client_read = reader.read(&mut client_buf) => {
+                match client_read {
+                    Ok(0) | Err(_) => {
+                        let _ = mask_write.shutdown().await;
                         break;
+                    }
+                    Ok(n) => {
+                        if mask_write.write_all(&client_buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            mask_read_res = mask_read.read(&mut mask_buf) => {
+                match mask_read_res {
+                    Ok(0) | Err(_) => {
+                        let _ = writer.shutdown().await;
+                        break;
+                    }
+                    Ok(n) => {
+                        if writer.write_all(&mask_buf[..n]).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
         }
-    });
-
-    let m2c = tokio::spawn(async move {
-        let mut buf = vec![0u8; MASK_BUFFER_SIZE];
-        loop {
-            match mask_read.read(&mut buf).await {
-                Ok(0) | Err(_) => {
-                    let _ = writer.shutdown().await;
-                    break;
-                }
-                Ok(n) => {
-                    if writer.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    // Wait for either to complete
-    tokio::select! {
-        _ = c2m => {}
-        _ = m2c => {}
     }
 }
 
@@ -255,3 +280,7 @@ async fn consume_client_data<R: AsyncRead + Unpin>(mut reader: R) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "masking_security_tests.rs"]
+mod security_tests;
