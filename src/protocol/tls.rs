@@ -802,3 +802,7 @@ mod compile_time_security_checks {
 #[cfg(test)]
 #[path = "tls_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "tls_adversarial_tests.rs"]
+mod adversarial_tests;

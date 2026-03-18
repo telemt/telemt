@@ -971,6 +971,10 @@ mod security_tests;
 #[path = "handshake_gap_short_tls_probe_throttle_security_tests.rs"]
 mod gap_short_tls_probe_throttle_security_tests;
 
+#[cfg(test)]
+#[path = "handshake_adversarial_tests.rs"]
+mod adversarial_tests;
+
 /// Compile-time guard: HandshakeSuccess holds cryptographic key material and
 /// must never be Copy.  A Copy impl would allow silent key duplication,
 /// undermining the zeroize-on-drop guarantee.
