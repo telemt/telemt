@@ -715,6 +715,13 @@ impl Stats {
             }
         }
     }
+
+    /// Correct the `pool_drain_active` gauge to match the actual count.
+    /// Called periodically to recover from any increment/decrement drift
+    /// caused by cleanup races.
+    pub fn sync_pool_drain_active(&self, actual: u64) {
+        self.pool_drain_active.store(actual, Ordering::Relaxed);
+    }
     pub fn increment_pool_force_close_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.pool_force_close_total.fetch_add(1, Ordering::Relaxed);
