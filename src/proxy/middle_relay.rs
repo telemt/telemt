@@ -31,6 +31,7 @@ enum C2MeCommand {
     Close,
 }
 
+
 const DESYNC_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const DESYNC_ERROR_CLASS: &str = "frame_too_large_crypto_desync";
 const C2ME_CHANNEL_CAPACITY_FALLBACK: usize = 128;

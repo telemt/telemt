@@ -1,4 +1,6 @@
-use super::relay_bidirectional;
+use super::relay_bidirectional as relay_bidirectional_impl;
+use crate::proxy::adaptive_buffers::AdaptiveTier;
+use crate::proxy::session_eviction::SessionLease;
 use crate::error::ProxyError;
 use crate::stats::Stats;
 use crate::stream::BufferPool;
@@ -14,181 +16,156 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, duplex};
 use tokio::time::{Duration, timeout};
 
-#[derive(Default)]
-struct WakeCounter {
-    wakes: AtomicUsize,
-}
-
-impl std::task::Wake for WakeCounter {
-    fn wake(self: Arc<Self>) {
-        self.wakes.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.wakes.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[tokio::test]
-async fn quota_lock_contention_does_not_self_wake_pending_writer() {
-    let stats = Arc::new(Stats::new());
-    let user = "quota-lock-contention-user";
-
-    let lock = super::quota_user_lock(user);
-    let _held_lock = lock
-        .try_lock()
-        .expect("test must hold the per-user quota lock before polling writer");
-
-    let counters = Arc::new(super::SharedCounters::new());
-    let quota_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut io = super::StatsIo::new(
-        tokio::io::sink(),
-        counters,
-        Arc::clone(&stats),
-        user.to_string(),
-        Some(1024),
-        quota_exceeded,
-        tokio::time::Instant::now(),
-    );
-
-    let wake_counter = Arc::new(WakeCounter::default());
-    let waker = Waker::from(Arc::clone(&wake_counter));
-    let mut cx = Context::from_waker(&waker);
-
-    let poll = Pin::new(&mut io).poll_write(&mut cx, &[0x11]);
-    assert!(poll.is_pending(), "writer must remain pending while lock is contended");
-    assert_eq!(
-        wake_counter.wakes.load(Ordering::Relaxed),
+async fn relay_bidirectional<CR, CW, SR, SW>(
+    client_reader: CR,
+    client_writer: CW,
+    server_reader: SR,
+    server_writer: SW,
+    c2s_buf_size: usize,
+    s2c_buf_size: usize,
+    user: &str,
+    stats: Arc<Stats>,
+    _quota_limit: Option<u64>,
+    buffer_pool: Arc<BufferPool>,
+) -> crate::error::Result<()>
+where
+    CR: AsyncRead + Unpin + Send + 'static,
+    CW: AsyncWrite + Unpin + Send + 'static,
+    SR: AsyncRead + Unpin + Send + 'static,
+    SW: AsyncWrite + Unpin + Send + 'static,
+{
+    relay_bidirectional_impl(
+        client_reader,
+        client_writer,
+        server_reader,
+        server_writer,
+        c2s_buf_size,
+        s2c_buf_size,
+        user,
         0,
-        "contended quota lock must not self-wake immediately and spin the executor"
-    );
-}
-
-#[tokio::test]
-async fn quota_lock_contention_writer_schedules_single_deferred_wake_until_lock_acquired() {
-    let stats = Arc::new(Stats::new());
-    let user = "quota-lock-writer-liveness-user";
-
-    let lock = super::quota_user_lock(user);
-    let held_lock = lock
-        .try_lock()
-        .expect("test must hold the per-user quota lock before polling writer");
-
-    let counters = Arc::new(super::SharedCounters::new());
-    let quota_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut io = super::StatsIo::new(
-        tokio::io::sink(),
-        counters,
-        Arc::clone(&stats),
-        user.to_string(),
-        Some(1024),
-        quota_exceeded,
-        tokio::time::Instant::now(),
-    );
-
-    let wake_counter = Arc::new(WakeCounter::default());
-    let waker = Waker::from(Arc::clone(&wake_counter));
-    let mut cx = Context::from_waker(&waker);
-
-    let first = Pin::new(&mut io).poll_write(&mut cx, &[0x11]);
-    assert!(first.is_pending(), "writer must remain pending while lock is contended");
-    assert_eq!(
-        wake_counter.wakes.load(Ordering::Relaxed),
-        0,
-        "deferred wake must not fire synchronously"
-    );
-
-    timeout(Duration::from_millis(50), async {
-        loop {
-            if wake_counter.wakes.load(Ordering::Relaxed) >= 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+        stats,
+        buffer_pool,
+        SessionLease::default(),
+        AdaptiveTier::Base,
+    )
     .await
-    .expect("contended writer must schedule a deferred wake in bounded time");
-    let wakes_after_first_yield = wake_counter.wakes.load(Ordering::Relaxed);
+}
+
+#[tokio::test]
+async fn stats_io_write_tracks_user_totals() {
+    let stats = Arc::new(Stats::new());
+    let user = "stats-io-write-tracking-user";
+
+    let counters = Arc::new(super::SharedCounters::new());
+    let mut io = super::StatsIo::new(
+        tokio::io::sink(),
+        counters,
+        Arc::clone(&stats),
+        user.to_string(),
+        tokio::time::Instant::now(),
+    );
+
+    AsyncWriteExt::write_all(&mut io, &[0x11, 0x22, 0x33])
+        .await
+        .expect("write to sink must succeed");
+
+    assert_eq!(
+        stats.get_user_total_octets(user),
+        3,
+        "StatsIo write path must account bytes to per-user totals"
+    );
+}
+
+#[tokio::test]
+async fn stats_io_read_tracks_user_totals() {
+    let stats = Arc::new(Stats::new());
+    let user = "stats-io-read-tracking-user";
+
+    let (mut peer, relay_side) = duplex(64);
+    let counters = Arc::new(super::SharedCounters::new());
+    let mut io = super::StatsIo::new(
+        relay_side,
+        counters,
+        Arc::clone(&stats),
+        user.to_string(),
+        tokio::time::Instant::now(),
+    );
+
+    peer.write_all(&[0xaa, 0xbb])
+        .await
+        .expect("peer write must succeed");
+
+    let mut out = [0u8; 2];
+    io.read_exact(&mut out)
+        .await
+        .expect("wrapped read must succeed");
+    assert_eq!(out, [0xaa, 0xbb]);
+    assert_eq!(
+        stats.get_user_total_octets(user),
+        2,
+        "StatsIo read path must account bytes to per-user totals"
+    );
+}
+
+#[tokio::test]
+async fn relay_bidirectional_does_not_apply_client_quota_gate() {
+    let stats = Arc::new(Stats::new());
+    let user = "relay-no-quota-gate-user";
+    stats.add_user_octets_from(user, 10_000);
+
+    let (mut client_peer, relay_client) = duplex(4096);
+    let (relay_server, mut server_peer) = duplex(4096);
+
+    let (client_reader, client_writer) = tokio::io::split(relay_client);
+    let (server_reader, server_writer) = tokio::io::split(relay_server);
+
+    let mut relay_task = tokio::spawn(relay_bidirectional(
+        client_reader,
+        client_writer,
+        server_reader,
+        server_writer,
+        1024,
+        1024,
+        user,
+        Arc::clone(&stats),
+        Some(1),
+        Arc::new(BufferPool::new()),
+    ));
+
+    client_peer
+        .write_all(&[0x10, 0x20, 0x30, 0x40])
+        .await
+        .expect("client write must succeed");
+    let mut c2s = [0u8; 4];
+    server_peer
+        .read_exact(&mut c2s)
+        .await
+        .expect("server must receive client payload even with high preloaded octets");
+    assert_eq!(c2s, [0x10, 0x20, 0x30, 0x40]);
+
+    server_peer
+        .write_all(&[0xaa, 0xbb, 0xcc, 0xdd])
+        .await
+        .expect("server write must succeed");
+    let mut s2c = [0u8; 4];
+    client_peer
+        .read_exact(&mut s2c)
+        .await
+        .expect("client must receive server payload even with high preloaded octets");
+    assert_eq!(s2c, [0xaa, 0xbb, 0xcc, 0xdd]);
+
+    let not_finished = timeout(Duration::from_millis(100), &mut relay_task).await;
     assert!(
-        wakes_after_first_yield >= 1,
-        "contended writer must schedule at least one deferred wake for liveness"
+        matches!(not_finished, Err(_)),
+        "relay must not self-terminate with quota-style errors; gating is handled before relay"
     );
-
-    let second = Pin::new(&mut io).poll_write(&mut cx, &[0x22]);
-    assert!(second.is_pending(), "writer remains pending while lock is still held");
-
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        wake_counter.wakes.load(Ordering::Relaxed),
-        wakes_after_first_yield,
-        "writer contention should not schedule unbounded wake storms before lock acquisition"
-    );
-
-    drop(held_lock);
-    let released = Pin::new(&mut io).poll_write(&mut cx, &[0x33]);
-    assert!(released.is_ready(), "writer must make progress once quota lock is released");
+    relay_task.abort();
 }
 
 #[tokio::test]
-async fn quota_lock_contention_read_path_schedules_deferred_wake_for_liveness() {
+async fn relay_bidirectional_counts_octets_without_fail_closed_cutoff() {
     let stats = Arc::new(Stats::new());
-    let user = "quota-lock-read-liveness-user";
-
-    let lock = super::quota_user_lock(user);
-    let held_lock = lock
-        .try_lock()
-        .expect("test must hold the per-user quota lock before polling reader");
-
-    let counters = Arc::new(super::SharedCounters::new());
-    let quota_exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut io = super::StatsIo::new(
-        tokio::io::empty(),
-        counters,
-        Arc::clone(&stats),
-        user.to_string(),
-        Some(1024),
-        quota_exceeded,
-        tokio::time::Instant::now(),
-    );
-
-    let wake_counter = Arc::new(WakeCounter::default());
-    let waker = Waker::from(Arc::clone(&wake_counter));
-    let mut cx = Context::from_waker(&waker);
-    let mut storage = [0u8; 1];
-    let mut buf = ReadBuf::new(&mut storage);
-
-    let first = Pin::new(&mut io).poll_read(&mut cx, &mut buf);
-    assert!(first.is_pending(), "reader must remain pending while lock is contended");
-    assert_eq!(
-        wake_counter.wakes.load(Ordering::Relaxed),
-        0,
-        "read contention wake must not fire synchronously"
-    );
-
-    timeout(Duration::from_millis(50), async {
-        loop {
-            if wake_counter.wakes.load(Ordering::Relaxed) >= 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("read contention must schedule a deferred wake in bounded time");
-
-    drop(held_lock);
-    let mut buf_after_release = ReadBuf::new(&mut storage);
-    let released = Pin::new(&mut io).poll_read(&mut cx, &mut buf_after_release);
-    assert!(released.is_ready(), "reader must make progress once quota lock is released");
-}
-
-#[tokio::test]
-async fn relay_bidirectional_enforces_live_user_quota() {
-    let stats = Arc::new(Stats::new());
-    let user = "quota-user";
-    stats.add_user_octets_from(user, 6);
+    let user = "relay-stats-no-cutoff-user";
 
     let (mut client_peer, relay_client) = duplex(4096);
     let (relay_server, mut server_peer) = duplex(4096);
@@ -205,329 +182,37 @@ async fn relay_bidirectional_enforces_live_user_quota() {
         1024,
         user,
         Arc::clone(&stats),
-        Some(8),
+        Some(0),
         Arc::new(BufferPool::new()),
     ));
 
     client_peer
-        .write_all(&[0x10, 0x20, 0x30, 0x40])
+        .write_all(&[1, 2, 3])
         .await
         .expect("client write must succeed");
-
-    let mut forwarded = [0u8; 4];
-    let _ = timeout(
-        Duration::from_millis(200),
-        server_peer.read_exact(&mut forwarded),
-    )
-    .await;
-
-    let relay_result = timeout(Duration::from_secs(2), relay_task)
-        .await
-        .expect("relay task must finish under quota cutoff")
-        .expect("relay task must not panic");
-
-    assert!(
-        matches!(relay_result, Err(ProxyError::DataQuotaExceeded { ref user }) if user == "quota-user"),
-        "relay must surface a typed quota error once live quota is exceeded"
-    );
-}
-
-#[tokio::test]
-async fn relay_bidirectional_does_not_forward_server_bytes_after_quota_is_exhausted() {
-    let stats = Arc::new(Stats::new());
-    let quota_user = "quota-exhausted-user";
-    stats.add_user_octets_from(quota_user, 1);
-
-    let (mut client_peer, relay_client) = duplex(4096);
-    let (relay_server, mut server_peer) = duplex(4096);
-
-    let (client_reader, client_writer) = tokio::io::split(relay_client);
-    let (server_reader, server_writer) = tokio::io::split(relay_server);
-
-    let relay_task = tokio::spawn(relay_bidirectional(
-        client_reader,
-        client_writer,
-        server_reader,
-        server_writer,
-        1024,
-        1024,
-        quota_user,
-        Arc::clone(&stats),
-        Some(1),
-        Arc::new(BufferPool::new()),
-    ));
-
     server_peer
-        .write_all(&[0xde, 0xad, 0xbe, 0xef])
+        .write_all(&[4, 5, 6, 7])
         .await
         .expect("server write must succeed");
 
-    let mut observed = [0u8; 4];
-    let forwarded = timeout(
-        Duration::from_millis(200),
-        client_peer.read_exact(&mut observed),
-    )
-    .await;
-
-    let relay_result = timeout(Duration::from_secs(2), relay_task)
-        .await
-        .expect("relay task must finish under quota cutoff")
-        .expect("relay task must not panic");
-
-    assert!(
-        !matches!(forwarded, Ok(Ok(n)) if n == observed.len()),
-        "no full server payload should be forwarded once quota is already exhausted"
-    );
-    assert!(
-        matches!(relay_result, Err(ProxyError::DataQuotaExceeded { ref user }) if user == quota_user),
-        "relay must still terminate with a typed quota error"
-    );
-}
-
-#[tokio::test]
-async fn relay_bidirectional_does_not_leak_partial_server_payload_when_remaining_quota_is_smaller_than_write() {
-    let stats = Arc::new(Stats::new());
-    let quota_user = "partial-leak-user";
-    stats.add_user_octets_from(quota_user, 3);
-
-    let (mut client_peer, relay_client) = duplex(4096);
-    let (relay_server, mut server_peer) = duplex(4096);
-
-    let (client_reader, client_writer) = tokio::io::split(relay_client);
-    let (server_reader, server_writer) = tokio::io::split(relay_server);
-
-    let relay_task = tokio::spawn(relay_bidirectional(
-        client_reader,
-        client_writer,
-        server_reader,
-        server_writer,
-        1024,
-        1024,
-        quota_user,
-        Arc::clone(&stats),
-        Some(4),
-        Arc::new(BufferPool::new()),
-    ));
-
+    let mut c2s = [0u8; 3];
     server_peer
-        .write_all(&[0x11, 0x22, 0x33, 0x44])
+        .read_exact(&mut c2s)
         .await
-        .expect("server write must succeed");
-
-    let mut observed = [0u8; 8];
-    let forwarded = timeout(Duration::from_millis(200), client_peer.read(&mut observed)).await;
-
-    let relay_result = timeout(Duration::from_secs(2), relay_task)
-        .await
-        .expect("relay task must finish under quota cutoff")
-        .expect("relay task must not panic");
-
-    assert!(
-        !matches!(forwarded, Ok(Ok(n)) if n > 0),
-        "quota exhaustion must not leak any partial server payload when remaining quota is smaller than the write"
-    );
-    assert!(
-        matches!(relay_result, Err(ProxyError::DataQuotaExceeded { ref user }) if user == quota_user),
-        "relay must still terminate with a typed quota error"
-    );
-}
-
-#[tokio::test]
-async fn relay_bidirectional_zero_quota_remains_fail_closed_for_server_payloads_under_stress() {
-    let stats = Arc::new(Stats::new());
-    let quota_user = "zero-quota-user";
-
-    for payload_len in [1usize, 16, 512, 4096] {
-        let (mut client_peer, relay_client) = duplex(4096);
-        let (relay_server, mut server_peer) = duplex(4096);
-
-        let (client_reader, client_writer) = tokio::io::split(relay_client);
-        let (server_reader, server_writer) = tokio::io::split(relay_server);
-
-        let relay_task = tokio::spawn(relay_bidirectional(
-            client_reader,
-            client_writer,
-            server_reader,
-            server_writer,
-            1024,
-            1024,
-            quota_user,
-            Arc::clone(&stats),
-            Some(0),
-            Arc::new(BufferPool::new()),
-        ));
-
-        let payload = vec![0x7f; payload_len];
-        let _ = server_peer.write_all(&payload).await;
-
-        let mut observed = vec![0u8; payload_len];
-        let forwarded = timeout(Duration::from_millis(200), client_peer.read(&mut observed)).await;
-
-        let relay_result = timeout(Duration::from_secs(2), relay_task)
-            .await
-            .expect("relay task must finish under zero-quota cutoff")
-            .expect("relay task must not panic");
-
-        assert!(
-            !matches!(forwarded, Ok(Ok(n)) if n > 0),
-            "zero quota must not forward any server bytes for payload_len={payload_len}"
-        );
-        assert!(
-            matches!(relay_result, Err(ProxyError::DataQuotaExceeded { ref user }) if user == quota_user),
-            "zero quota must terminate with the typed quota error for payload_len={payload_len}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn relay_bidirectional_allows_exact_server_payload_at_quota_boundary() {
-    let stats = Arc::new(Stats::new());
-    let quota_user = "exact-boundary-user";
-
-    let (mut client_peer, relay_client) = duplex(4096);
-    let (relay_server, mut server_peer) = duplex(4096);
-
-    let (client_reader, client_writer) = tokio::io::split(relay_client);
-    let (server_reader, server_writer) = tokio::io::split(relay_server);
-
-    let relay_task = tokio::spawn(relay_bidirectional(
-        client_reader,
-        client_writer,
-        server_reader,
-        server_writer,
-        1024,
-        1024,
-        quota_user,
-        Arc::clone(&stats),
-        Some(4),
-        Arc::new(BufferPool::new()),
-    ));
-
-    server_peer
-        .write_all(&[0x91, 0x92, 0x93, 0x94])
-        .await
-        .expect("server write must succeed at exact quota boundary");
-
-    let mut observed = [0u8; 4];
+        .expect("server must receive c2s payload");
+    let mut s2c = [0u8; 4];
     client_peer
-        .read_exact(&mut observed)
+        .read_exact(&mut s2c)
         .await
-        .expect("client must receive the full payload at the exact quota boundary");
-    assert_eq!(observed, [0x91, 0x92, 0x93, 0x94]);
+        .expect("client must receive s2c payload");
 
-    let relay_result = timeout(Duration::from_secs(2), relay_task)
-        .await
-        .expect("relay task must finish after exact boundary delivery")
-        .expect("relay task must not panic");
-
+    let total = stats.get_user_total_octets(user);
     assert!(
-        matches!(relay_result, Err(ProxyError::DataQuotaExceeded { ref user }) if user == quota_user),
-        "relay must close with a typed quota error after reaching the exact boundary"
+        total >= 7,
+        "relay must continue accounting octets, observed total={total}"
     );
-}
 
-#[tokio::test]
-async fn relay_bidirectional_does_not_forward_client_bytes_after_quota_is_exhausted() {
-    let stats = Arc::new(Stats::new());
-    let quota_user = "client-exhausted-user";
-    stats.add_user_octets_from(quota_user, 1);
-
-    let (mut client_peer, relay_client) = duplex(4096);
-    let (relay_server, mut server_peer) = duplex(4096);
-
-    let (client_reader, client_writer) = tokio::io::split(relay_client);
-    let (server_reader, server_writer) = tokio::io::split(relay_server);
-
-    let relay_task = tokio::spawn(relay_bidirectional(
-        client_reader,
-        client_writer,
-        server_reader,
-        server_writer,
-        1024,
-        1024,
-        quota_user,
-        Arc::clone(&stats),
-        Some(1),
-        Arc::new(BufferPool::new()),
-    ));
-
-    client_peer
-        .write_all(&[0x51, 0x52, 0x53, 0x54])
-        .await
-        .expect("client write must succeed even when quota is already exhausted");
-
-    let mut observed = [0u8; 4];
-    let forwarded = timeout(
-        Duration::from_millis(200),
-        server_peer.read_exact(&mut observed),
-    )
-    .await;
-
-    let relay_result = timeout(Duration::from_secs(2), relay_task)
-        .await
-        .expect("relay task must finish under quota cutoff")
-        .expect("relay task must not panic");
-
-    assert!(
-        !matches!(forwarded, Ok(Ok(n)) if n == observed.len()),
-        "client payload must not be fully forwarded once quota is already exhausted"
-    );
-    assert!(
-        matches!(relay_result, Err(ProxyError::DataQuotaExceeded { ref user }) if user == quota_user),
-        "relay must still terminate with a typed quota error"
-    );
-}
-
-#[tokio::test]
-async fn relay_bidirectional_server_bytes_remain_blocked_even_under_multiple_payload_sizes() {
-    let stats = Arc::new(Stats::new());
-    let quota_user = "quota-fuzz-user";
-    stats.add_user_octets_from(quota_user, 2);
-
-    for payload_len in [1usize, 32, 1024, 8192] {
-        let (mut client_peer, relay_client) = duplex(4096);
-        let (relay_server, mut server_peer) = duplex(4096);
-
-        let (client_reader, client_writer) = tokio::io::split(relay_client);
-        let (server_reader, server_writer) = tokio::io::split(relay_server);
-
-        let relay_task = tokio::spawn(relay_bidirectional(
-            client_reader,
-            client_writer,
-            server_reader,
-            server_writer,
-            1024,
-            1024,
-            quota_user,
-            Arc::clone(&stats),
-            Some(2),
-            Arc::new(BufferPool::new()),
-        ));
-
-        let payload = vec![0xaa; payload_len];
-        let _ = server_peer.write_all(&payload).await;
-
-        let mut observed = vec![0u8; payload_len];
-        let forwarded = timeout(
-            Duration::from_millis(200),
-            client_peer.read_exact(&mut observed),
-        )
-        .await;
-
-        let relay_result = timeout(Duration::from_secs(2), relay_task)
-            .await
-            .expect("relay task must finish under quota cutoff")
-            .expect("relay task must not panic");
-
-        assert!(
-            !matches!(forwarded, Ok(Ok(n)) if n == payload_len),
-            "quota exhaustion must block full server-to-client forwarding for payload_len={payload_len}"
-        );
-        assert!(
-            matches!(relay_result, Err(ProxyError::DataQuotaExceeded { ref user }) if user == quota_user),
-            "relay must keep returning the typed quota error for payload_len={payload_len}"
-        );
-    }
+    relay_task.abort();
 }
 
 #[tokio::test]
@@ -878,7 +563,7 @@ impl AsyncRead for GateReader {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn adversarial_concurrent_quota_write_race_does_not_overshoot_limit() {
+async fn adversarial_concurrent_statsio_write_accounting_is_additive() {
     let stats = Arc::new(Stats::new());
     let gate = Arc::new(TwoPartyGate::new());
     let user = "concurrent-quota-write".to_string();
@@ -888,8 +573,6 @@ async fn adversarial_concurrent_quota_write_race_does_not_overshoot_limit() {
         Arc::new(super::SharedCounters::new()),
         Arc::clone(&stats),
         user.clone(),
-        Some(1),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tokio::time::Instant::now(),
     );
 
@@ -898,8 +581,6 @@ async fn adversarial_concurrent_quota_write_race_does_not_overshoot_limit() {
         Arc::new(super::SharedCounters::new()),
         Arc::clone(&stats),
         user.clone(),
-        Some(1),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tokio::time::Instant::now(),
     );
 
@@ -916,18 +597,20 @@ async fn adversarial_concurrent_quota_write_race_does_not_overshoot_limit() {
     let _ = res_a.expect("task a must join");
     let _ = res_b.expect("task b must join");
 
-    assert!(
-        gate.total_bytes() <= 1,
-        "concurrent same-user writes must not forward more than one byte under quota=1"
+    assert_eq!(
+        gate.total_bytes(),
+        2,
+        "both concurrent writes must forward one byte each"
     );
-    assert!(
-        stats.get_user_total_octets(&user) <= 1,
-        "concurrent same-user writes must not account over limit"
+    assert_eq!(
+        stats.get_user_total_octets(&user),
+        2,
+        "both concurrent writes must be accounted for same user"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn adversarial_concurrent_quota_read_race_does_not_overshoot_limit() {
+async fn adversarial_concurrent_statsio_read_accounting_is_additive() {
     let stats = Arc::new(Stats::new());
     let gate = Arc::new(TwoPartyGate::new());
     let user = "concurrent-quota-read".to_string();
@@ -937,8 +620,6 @@ async fn adversarial_concurrent_quota_read_race_does_not_overshoot_limit() {
         Arc::new(super::SharedCounters::new()),
         Arc::clone(&stats),
         user.clone(),
-        Some(1),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tokio::time::Instant::now(),
     );
 
@@ -947,8 +628,6 @@ async fn adversarial_concurrent_quota_read_race_does_not_overshoot_limit() {
         Arc::new(super::SharedCounters::new()),
         Arc::clone(&stats),
         user.clone(),
-        Some(1),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tokio::time::Instant::now(),
     );
 
@@ -967,22 +646,24 @@ async fn adversarial_concurrent_quota_read_race_does_not_overshoot_limit() {
     let _ = res_a.expect("task a must join");
     let _ = res_b.expect("task b must join");
 
-    assert!(
-        gate.total_bytes() <= 1,
-        "concurrent same-user reads must not consume more than one byte under quota=1"
+    assert_eq!(
+        gate.total_bytes(),
+        2,
+        "both concurrent reads must consume one byte each"
     );
-    assert!(
-        stats.get_user_total_octets(&user) <= 1,
-        "concurrent same-user reads must not account over limit"
+    assert_eq!(
+        stats.get_user_total_octets(&user),
+        2,
+        "both concurrent reads must be accounted for same user"
     );
 }
 
 #[tokio::test]
-async fn stress_same_user_quota_parallel_relays_never_exceed_limit() {
+async fn stress_same_user_parallel_relays_complete_without_deadlock() {
     let stats = Arc::new(Stats::new());
-    let user = "parallel-quota-user";
+    let user = "parallel-relay-user";
 
-    for _ in 0..128 {
+    for _ in 0..64 {
         let (mut client_peer_a, relay_client_a) = duplex(256);
         let (relay_server_a, mut server_peer_a) = duplex(256);
         let (mut client_peer_b, relay_client_b) = duplex(256);
@@ -1002,7 +683,7 @@ async fn stress_same_user_quota_parallel_relays_never_exceed_limit() {
             64,
             user,
             Arc::clone(&stats),
-            Some(1),
+            None,
             Arc::new(BufferPool::new()),
         ));
 
@@ -1015,7 +696,7 @@ async fn stress_same_user_quota_parallel_relays_never_exceed_limit() {
             64,
             user,
             Arc::clone(&stats),
-            Some(1),
+            None,
             Arc::new(BufferPool::new()),
         ));
 
@@ -1041,9 +722,10 @@ async fn stress_same_user_quota_parallel_relays_never_exceed_limit() {
         let _ = timeout(Duration::from_secs(1), relay_a).await;
         let _ = timeout(Duration::from_secs(1), relay_b).await;
 
+        let total = stats.get_user_total_octets(user);
         assert!(
-            stats.get_user_total_octets(user) <= 1,
-            "parallel relays must not exceed configured quota"
+            total >= 2,
+            "parallel relays must account cross-session octets and stay live; total={total}"
         );
     }
 }

@@ -21,6 +21,11 @@ enum HandshakeOutcome {
     Handled,
 }
 
+#[cfg(test)]
+#[path = "client_limits_security_tests.rs"]
+mod limits_security_tests;
+
+
 use crate::config::ProxyConfig;
 use crate::crypto::SecureRandom;
 use crate::error::{HandshakeResult, ProxyError, Result};

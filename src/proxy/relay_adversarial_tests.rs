@@ -1,10 +1,45 @@
-use super::*;
-use crate::error::ProxyError;
+use crate::proxy::adaptive_buffers::AdaptiveTier;
+use crate::proxy::session_eviction::SessionLease;
 use crate::stats::Stats;
 use crate::stream::BufferPool;
 use std::sync::Arc;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, Instant, timeout};
+
+async fn relay_bidirectional<CR, CW, SR, SW>(
+    client_reader: CR,
+    client_writer: CW,
+    server_reader: SR,
+    server_writer: SW,
+    c2s_buf_size: usize,
+    s2c_buf_size: usize,
+    user: &str,
+    stats: Arc<Stats>,
+    _quota_limit: Option<u64>,
+    buffer_pool: Arc<BufferPool>,
+) -> crate::error::Result<()>
+where
+    CR: tokio::io::AsyncRead + Unpin + Send + 'static,
+    CW: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    SR: tokio::io::AsyncRead + Unpin + Send + 'static,
+    SW: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    super::relay_bidirectional(
+        client_reader,
+        client_writer,
+        server_reader,
+        server_writer,
+        c2s_buf_size,
+        s2c_buf_size,
+        user,
+        0,
+        stats,
+        buffer_pool,
+        SessionLease::default(),
+        AdaptiveTier::Base,
+    )
+    .await
+}
 
 // ------------------------------------------------------------------
 // Priority 3: Async Relay HOL Blocking Prevention (OWASP ASVS 5.1.5)
@@ -97,26 +132,23 @@ async fn relay_quota_mid_session_cutoff() {
         Arc::new(BufferPool::new()),
     ));
 
-    // Send 4000 bytes (Ok)
+    // Relay must continue forwarding; quota gating now lives in client limits path.
     let buf1 = vec![0x42; 4000];
     cp_writer.write_all(&buf1).await.unwrap();
     let mut server_recv = vec![0u8; 4000];
     sp_reader.read_exact(&mut server_recv).await.unwrap();
+    assert_eq!(server_recv, buf1);
 
-    // Send another 2000 bytes (Total 6000 > 5000)
+    // Even when passing legacy quota-like threshold, relay should remain transport-only.
     let buf2 = vec![0x42; 2000];
-    let _ = cp_writer.write_all(&buf2).await;
-    
-    let relay_res = timeout(Duration::from_secs(1), relay_task).await.unwrap();
-    
-    match relay_res {
-        Ok(Err(ProxyError::DataQuotaExceeded { .. })) => {
-            // Expected
-        }
-        other => panic!("Expected DataQuotaExceeded error, got: {:?}", other),
-    }
+    cp_writer.write_all(&buf2).await.unwrap();
+    let mut server_recv2 = vec![0u8; 2000];
+    sp_reader.read_exact(&mut server_recv2).await.unwrap();
+    assert_eq!(server_recv2, buf2);
 
-    let mut small_buf = [0u8; 1];
-    let n = sp_reader.read(&mut small_buf).await.unwrap();
-    assert_eq!(n, 0, "Server must see EOF after quota reached");
+    let not_finished = timeout(Duration::from_millis(100), relay_task).await;
+    assert!(
+        matches!(not_finished, Err(_)),
+        "relay must not terminate with DataQuotaExceeded; admission is enforced pre-relay"
+    );
 }

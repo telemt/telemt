@@ -2131,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "telemt"
-version = "3.3.20"
+version = "3.3.23"
 dependencies = [
  "aes",
  "anyhow",

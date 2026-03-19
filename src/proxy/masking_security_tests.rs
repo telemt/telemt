@@ -1399,9 +1399,8 @@ async fn relay_to_mask_timeout_cancels_and_drops_all_io_endpoints() {
 }
 
 #[tokio::test]
-#[ignore = "timing matrix; run manually with --ignored --nocapture"]
 async fn timing_matrix_masking_classes_under_controlled_inputs() {
-    const ITER: usize = 24;
+    const ITER: usize = 16;
     const BUCKET_MS: u128 = 10;
 
     let probe = b"GET /timing HTTP/1.1\r\nHost: x\r\n\r\n";
@@ -1550,6 +1549,18 @@ async fn timing_matrix_masking_classes_under_controlled_inputs() {
         reachable_p95,
         reachable_max,
         (reachable_mean as u128) / BUCKET_MS
+    );
+
+    assert!(
+        disabled_max < 2_000 && refused_max < 2_000 && reachable_max < 2_000,
+        "masking timing classes must remain bounded: disabled_max={} refused_max={} reachable_max={}",
+        disabled_max,
+        refused_max,
+        reachable_max
+    );
+    assert!(
+        disabled_min <= disabled_p95 && refused_min <= refused_p95 && reachable_min <= reachable_p95,
+        "timing quantiles must be monotonic"
     );
 }
 

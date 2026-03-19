@@ -103,6 +103,14 @@ struct CombinedStream<R, W> {
     writer: W,
 }
 
+#[cfg(test)]
+#[path = "relay_security_tests.rs"]
+mod security_tests;
+
+#[cfg(test)]
+#[path = "relay_adversarial_tests.rs"]
+mod adversarial_tests;
+
 impl<R, W> CombinedStream<R, W> {
     fn new(reader: R, writer: W) -> Self {
         Self { reader, writer }

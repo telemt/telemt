@@ -14,6 +14,7 @@ use std::num::NonZeroUsize;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use tracing::debug;
 
 use crate::config::{MeTelemetryLevel, MeWriterPickMode};
@@ -148,6 +149,14 @@ pub struct Stats {
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
 
+#[cfg(test)]
+#[path = "connection_lease_security_tests.rs"]
+mod connection_lease_security_tests;
+
+#[cfg(test)]
+#[path = "replay_checker_security_tests.rs"]
+mod replay_checker_security_tests;
+
 #[derive(Default)]
 pub struct UserStats {
     pub connects: AtomicU64,
@@ -157,6 +166,35 @@ pub struct UserStats {
     pub msgs_from_client: AtomicU64,
     pub msgs_to_client: AtomicU64,
     pub last_seen_epoch_secs: AtomicU64,
+}
+
+enum ConnectionLeaseKind {
+    Direct,
+    Middle,
+}
+
+pub struct ConnectionLease {
+    stats: Arc<Stats>,
+    kind: ConnectionLeaseKind,
+    armed: bool,
+}
+
+impl ConnectionLease {
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ConnectionLease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match self.kind {
+            ConnectionLeaseKind::Direct => self.stats.decrement_current_connections_direct(),
+            ConnectionLeaseKind::Middle => self.stats.decrement_current_connections_me(),
+        }
+    }
 }
 
 impl Stats {
@@ -291,6 +329,22 @@ impl Stats {
     }
     pub fn decrement_current_connections_me(&self) {
         Self::decrement_atomic_saturating(&self.current_connections_me);
+    }
+    pub fn acquire_direct_connection_lease(self: &Arc<Self>) -> ConnectionLease {
+        self.increment_current_connections_direct();
+        ConnectionLease {
+            stats: Arc::clone(self),
+            kind: ConnectionLeaseKind::Direct,
+            armed: true,
+        }
+    }
+    pub fn acquire_me_connection_lease(self: &Arc<Self>) -> ConnectionLease {
+        self.increment_current_connections_me();
+        ConnectionLease {
+            stats: Arc::clone(self),
+            kind: ConnectionLeaseKind::Middle,
+            armed: true,
+        }
     }
     pub fn increment_relay_adaptive_promotions_total(&self) {
         if self.telemetry_core_enabled() {

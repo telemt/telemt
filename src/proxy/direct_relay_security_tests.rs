@@ -3,6 +3,7 @@ use crate::config::{UpstreamConfig, UpstreamType};
 use crate::crypto::{AesCtr, SecureRandom};
 use crate::protocol::constants::ProtoTag;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
+use crate::proxy::session_eviction::SessionLease;
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
@@ -16,6 +17,40 @@ use tokio::io::AsyncReadExt;
 use tokio::io::duplex;
 use tokio::net::TcpListener;
 use tokio::time::{timeout, Duration as TokioDuration};
+
+async fn handle_via_direct_compat<R, W>(
+    client_reader: CryptoReader<R>,
+    client_writer: CryptoWriter<W>,
+    success: HandshakeSuccess,
+    upstream_manager: Arc<UpstreamManager>,
+    stats: Arc<Stats>,
+    config: Arc<ProxyConfig>,
+    buffer_pool: Arc<BufferPool>,
+    rng: Arc<SecureRandom>,
+    route_rx: tokio::sync::watch::Receiver<crate::proxy::route_mode::RouteCutoverState>,
+    route_snapshot: crate::proxy::route_mode::RouteCutoverState,
+    session_id: u64,
+) -> crate::error::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    super::handle_via_direct(
+        client_reader,
+        client_writer,
+        success,
+        upstream_manager,
+        stats,
+        config,
+        buffer_pool,
+        rng,
+        route_rx,
+        route_snapshot,
+        session_id,
+        SessionLease::default(),
+    )
+    .await
+}
 
 fn make_crypto_reader<R>(reader: R) -> CryptoReader<R>
 where
@@ -951,7 +986,7 @@ async fn direct_relay_abort_midflight_releases_route_gauge() {
         is_tls: false,
     };
 
-    let relay_task = tokio::spawn(handle_via_direct(
+    let relay_task = tokio::spawn(handle_via_direct_compat(
         client_reader,
         client_writer,
         success,
@@ -1051,7 +1086,7 @@ async fn direct_relay_cutover_midflight_releases_route_gauge() {
         is_tls: false,
     };
 
-    let relay_task = tokio::spawn(handle_via_direct(
+    let relay_task = tokio::spawn(handle_via_direct_compat(
         client_reader,
         client_writer,
         success,
@@ -1180,7 +1215,7 @@ async fn direct_relay_cutover_storm_multi_session_keeps_generic_errors_and_relea
             is_tls: false,
         };
 
-        relay_tasks.push(tokio::spawn(handle_via_direct(
+        relay_tasks.push(tokio::spawn(handle_via_direct_compat(
             client_reader,
             client_writer,
             success,
@@ -1383,7 +1418,7 @@ async fn negative_direct_relay_dc_connection_refused_fails_fast() {
 
     let result = timeout(
         TokioDuration::from_secs(2),
-        handle_via_direct(
+        handle_via_direct_compat(
             client_reader,
             client_writer,
             success,
@@ -1472,7 +1507,7 @@ async fn adversarial_direct_relay_cutover_integrity() {
     let stats_for_task = stats.clone();
     let runtime_clone = route_runtime.clone();
     let session_task = tokio::spawn(async move {
-        handle_via_direct(
+        handle_via_direct_compat(
             client_reader,
             client_writer,
             success,
