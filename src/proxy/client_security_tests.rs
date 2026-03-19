@@ -7,6 +7,7 @@ use crate::protocol::tls;
 use crate::proxy::handshake::HandshakeSuccess;
 use crate::stream::{CryptoReader, CryptoWriter};
 use crate::transport::proxy_protocol::ProxyProtocolV1Builder;
+use std::net::Ipv4Addr;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -628,6 +629,54 @@ async fn proxy_protocol_header_from_untrusted_peer_range_is_rejected_under_load(
             "burst idx {idx}: untrusted source must be rejected"
         );
     }
+}
+
+#[tokio::test]
+async fn reservation_limit_failure_does_not_leak_curr_connects_counter() {
+    let user = "leak-check-user";
+    let mut config = crate::config::ProxyConfig::default();
+    config.access.user_max_tcp_conns.insert(user.to_string(), 1);
+
+    let stats = Arc::new(crate::stats::Stats::new());
+    let ip_tracker = Arc::new(crate::ip_tracker::UserIpTracker::new());
+    ip_tracker.set_user_limit(user, 8).await;
+
+    let first_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 200, 1)), 50001);
+    let first = RunningClientHandler::acquire_user_connection_reservation_static(
+        user,
+        &config,
+        stats.clone(),
+        first_peer,
+        ip_tracker.clone(),
+    )
+    .await
+    .expect("first reservation must succeed");
+
+    assert_eq!(stats.get_user_curr_connects(user), 1);
+    assert_eq!(ip_tracker.get_active_ip_count(user).await, 1);
+
+    let second_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 200, 2)), 50002);
+    let second = RunningClientHandler::acquire_user_connection_reservation_static(
+        user,
+        &config,
+        stats.clone(),
+        second_peer,
+        ip_tracker.clone(),
+    )
+    .await;
+
+    assert!(
+        matches!(second, Err(crate::error::ProxyError::ConnectionLimitExceeded { user: denied }) if denied == user),
+        "second reservation must be rejected at the configured tcp-conns limit"
+    );
+    assert_eq!(stats.get_user_curr_connects(user), 1, "failed acquisition must not leak a counter increment");
+    assert_eq!(ip_tracker.get_active_ip_count(user).await, 1, "failed acquisition must not mutate IP tracker state");
+
+    first.release().await;
+    ip_tracker.drain_cleanup_queue().await;
+
+    assert_eq!(stats.get_user_curr_connects(user), 0);
+    assert_eq!(ip_tracker.get_active_ip_count(user).await, 0);
 }
 
 #[tokio::test]

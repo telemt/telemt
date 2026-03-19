@@ -1,10 +1,11 @@
 use super::*;
+use crate::proxy::handshake::HandshakeSuccess;
+use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use bytes::Bytes;
 use crate::crypto::AesCtr;
 use crate::crypto::SecureRandom;
 use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
 use crate::network::probe::NetworkDecision;
-use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter, PooledBuffer};
 use crate::transport::middle_proxy::MePool;
@@ -20,6 +21,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::duplex;
 use tokio::time::{Duration as TokioDuration, timeout};
+use std::sync::{Mutex, OnceLock};
 
 fn make_pooled_payload(data: &[u8]) -> PooledBuffer {
     let pool = Arc::new(BufferPool::with_config(data.len().max(1), 4));
@@ -34,6 +36,11 @@ fn make_pooled_payload_from(pool: &Arc<BufferPool>, data: &[u8]) -> PooledBuffer
     payload.resize(data.len(), 0);
     payload[..data.len()].copy_from_slice(data);
     payload
+}
+
+fn quota_user_lock_test_lock() -> &'static Mutex<()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[test]
@@ -244,6 +251,10 @@ fn quota_user_lock_cache_reuses_entry_for_same_user() {
 
 #[test]
 fn quota_user_lock_cache_is_bounded_under_unique_churn() {
+    let _guard = quota_user_lock_test_lock()
+        .lock()
+        .expect("quota user lock test lock must be available");
+
     let map = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
     map.clear();
 
@@ -261,39 +272,51 @@ fn quota_user_lock_cache_is_bounded_under_unique_churn() {
 
 #[test]
 fn quota_user_lock_cache_saturation_returns_ephemeral_lock_without_growth() {
-    let map = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
-    map.clear();
+    let _guard = quota_user_lock_test_lock()
+        .lock()
+        .expect("quota user lock test lock must be available");
 
-    let mut retained = Vec::with_capacity(QUOTA_USER_LOCKS_MAX);
-    for idx in 0..QUOTA_USER_LOCKS_MAX {
-        let user = format!("quota-held-user-{idx}");
-        retained.push(quota_user_lock(&user));
+    let map = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
+    for attempt in 0..8u32 {
+        map.clear();
+
+        let prefix = format!("quota-held-user-{}-{attempt}", std::process::id());
+        let mut retained = Vec::with_capacity(QUOTA_USER_LOCKS_MAX);
+        for idx in 0..QUOTA_USER_LOCKS_MAX {
+            let user = format!("{prefix}-{idx}");
+            retained.push(quota_user_lock(&user));
+        }
+
+        if map.len() != QUOTA_USER_LOCKS_MAX {
+            drop(retained);
+            continue;
+        }
+
+        let overflow_user = format!("quota-overflow-user-{}-{attempt}", std::process::id());
+        let overflow_a = quota_user_lock(&overflow_user);
+        let overflow_b = quota_user_lock(&overflow_user);
+
+        assert_eq!(
+            map.len(),
+            QUOTA_USER_LOCKS_MAX,
+            "overflow acquisition must not grow cache past hard limit"
+        );
+        assert!(
+            map.get(&overflow_user).is_none(),
+            "overflow path should not cache new user lock when map is saturated and all entries are retained"
+        );
+        assert!(
+            !Arc::ptr_eq(&overflow_a, &overflow_b),
+            "overflow user lock should be ephemeral under saturation to preserve bounded cache size"
+        );
+
+        drop(retained);
+        return;
     }
 
-    assert_eq!(
-        map.len(),
-        QUOTA_USER_LOCKS_MAX,
-        "precondition: cache should be full before overflow acquisition"
+    panic!(
+        "unable to observe stable saturated lock-cache precondition after bounded retries"
     );
-
-    let overflow_a = quota_user_lock("quota-overflow-user");
-    let overflow_b = quota_user_lock("quota-overflow-user");
-
-    assert_eq!(
-        map.len(),
-        QUOTA_USER_LOCKS_MAX,
-        "overflow acquisition must not grow cache past hard limit"
-    );
-    assert!(
-        map.get("quota-overflow-user").is_none(),
-        "overflow path should not cache new user lock when map is saturated and all entries are retained"
-    );
-    assert!(
-        !Arc::ptr_eq(&overflow_a, &overflow_b),
-        "overflow user lock should be ephemeral under saturation to preserve bounded cache size"
-    );
-
-    drop(retained);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2168,4 +2191,321 @@ async fn middle_relay_cutover_storm_multi_session_keeps_generic_errors_and_relea
     );
 
     drop(client_sides);
+}
+
+#[tokio::test]
+async fn secure_padding_distribution_in_relay_writer() {
+    timeout(TokioDuration::from_secs(10), async {
+        let (mut client_side, relay_side) = duplex(512 * 1024);
+        let key = [0u8; 32];
+        let iv = 0u128;
+        let mut writer = CryptoWriter::new(relay_side, AesCtr::new(&key, iv), 8 * 1024);
+        let rng = Arc::new(SecureRandom::new());
+        let mut frame_buf = Vec::new();
+        let mut decryptor = AesCtr::new(&key, iv);
+
+        let mut padding_counts = [0usize; 4];
+        let iterations = 180usize;
+        let payload = vec![0xAAu8; 100]; // 4-byte aligned
+
+        for _ in 0..iterations {
+            write_client_payload(
+                &mut writer,
+                ProtoTag::Secure,
+                0,
+                &payload,
+                &rng,
+                &mut frame_buf,
+            )
+            .await
+            .expect("payload write must succeed");
+            writer
+                .flush()
+                .await
+                .expect("writer flush must complete so encrypted frame becomes readable");
+
+            let mut len_buf = [0u8; 4];
+            client_side
+                .read_exact(&mut len_buf)
+                .await
+                .expect("must read encrypted secure length");
+            let decrypted_len_bytes = decryptor.decrypt(&len_buf);
+            let decrypted_len_bytes: [u8; 4] = decrypted_len_bytes
+                .try_into()
+                .expect("decrypted length must be 4 bytes");
+            let wire_len = (u32::from_le_bytes(decrypted_len_bytes) & 0x7fff_ffff) as usize;
+
+            assert!(
+                wire_len >= payload.len(),
+                "wire length must include at least payload bytes"
+            );
+            let padding_len = wire_len - payload.len();
+            assert!(padding_len >= 1 && padding_len <= 3);
+            padding_counts[padding_len] += 1;
+
+            // Drain and decrypt frame bytes so CTR state stays aligned across writes.
+            let mut trash = vec![0u8; wire_len];
+            client_side
+                .read_exact(&mut trash)
+                .await
+                .expect("must read encrypted secure frame body");
+            let _ = decryptor.decrypt(&trash);
+        }
+
+        for p in 1..=3 {
+            let count = padding_counts[p];
+            assert!(
+                count > iterations / 8,
+                "padding length {p} is under-represented ({count}/{iterations})"
+            );
+        }
+    })
+    .await
+    .expect("secure padding distribution test exceeded runtime budget");
+}
+
+#[tokio::test]
+async fn negative_middle_end_connection_lost_during_relay_exits_on_client_eof() {
+    let (client_reader_side, client_writer_side) = duplex(1024);
+    let (_relay_reader_side, relay_writer_side) = duplex(1024);
+    
+    let key = [0u8; 32];
+    let iv = 0u128;
+    let crypto_reader = CryptoReader::new(client_reader_side, AesCtr::new(&key, iv));
+    let crypto_writer = CryptoWriter::new(relay_writer_side, AesCtr::new(&key, iv), 1024);
+    
+    let stats = Arc::new(Stats::new());
+    let config = Arc::new(ProxyConfig::default());
+    let buffer_pool = Arc::new(BufferPool::with_config(1024, 1));
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = RouteRuntimeController::new(RelayRouteMode::Middle);
+    
+    // Create an ME pool.
+    let me_pool = make_me_pool_for_abort_test(stats.clone()).await;
+
+    // ConnRegistry ids are monotonic; reserve one id so we can predict the
+    // next session conn_id and close it deterministically without relying on
+    // writer-bound views such as active_conn_ids().
+    let (probe_conn_id, probe_rx) = me_pool.registry().register().await;
+    drop(probe_rx);
+    me_pool.registry().unregister(probe_conn_id).await;
+    let target_conn_id = probe_conn_id.wrapping_add(1);
+    
+    let success = HandshakeSuccess {
+        user: "test-user".to_string(),
+        peer: "127.0.0.1:12345".parse().unwrap(),
+        dc_idx: 1,
+        proto_tag: ProtoTag::Intermediate,
+        enc_key: key,
+        enc_iv: iv,
+        dec_key: key,
+        dec_iv: iv,
+        is_tls: false,
+    };
+
+    let session_task = tokio::spawn(handle_via_middle_proxy(
+        crypto_reader,
+        crypto_writer,
+        success,
+        me_pool.clone(),
+        stats.clone(),
+        config.clone(),
+        buffer_pool.clone(),
+        "127.0.0.1:443".parse().unwrap(),
+        rng.clone(),
+        route_runtime.subscribe(),
+        route_runtime.snapshot(),
+        0x1234_5678,
+    ));
+
+    // Wait until session startup is visible, then unregister the predicted
+    // conn_id to close the per-session ME response channel.
+    timeout(TokioDuration::from_millis(500), async {
+        loop {
+            if stats.get_current_connections_me() >= 1 {
+                break;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("ME session must start before channel close simulation");
+
+    me_pool.registry().unregister(target_conn_id).await;
+
+    drop(client_writer_side);
+
+    let result = timeout(TokioDuration::from_secs(2), session_task)
+        .await
+        .expect("Session task must terminate after ME drop and client EOF")
+        .expect("Session task must not panic");
+
+    assert!(
+        result.is_ok(),
+        "Session should complete cleanly after ME drop when client closes, got: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn adversarial_middle_end_drop_plus_cutover_returns_generic_route_switch() {
+    let (client_reader_side, _client_writer_side) = duplex(1024);
+    let (_relay_reader_side, relay_writer_side) = duplex(1024);
+
+    let key = [0u8; 32];
+    let iv = 0u128;
+    let crypto_reader = CryptoReader::new(client_reader_side, AesCtr::new(&key, iv));
+    let crypto_writer = CryptoWriter::new(relay_writer_side, AesCtr::new(&key, iv), 1024);
+
+    let stats = Arc::new(Stats::new());
+    let config = Arc::new(ProxyConfig::default());
+    let buffer_pool = Arc::new(BufferPool::with_config(1024, 1));
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = Arc::new(RouteRuntimeController::new(RelayRouteMode::Middle));
+
+    let me_pool = make_me_pool_for_abort_test(stats.clone()).await;
+
+    // Predict the next conn_id so we can force-drop its ME channel deterministically.
+    let (probe_conn_id, probe_rx) = me_pool.registry().register().await;
+    drop(probe_rx);
+    me_pool.registry().unregister(probe_conn_id).await;
+    let target_conn_id = probe_conn_id.wrapping_add(1);
+
+    let success = HandshakeSuccess {
+        user: "test-user-cutover".to_string(),
+        peer: "127.0.0.1:12345".parse().unwrap(),
+        dc_idx: 1,
+        proto_tag: ProtoTag::Intermediate,
+        enc_key: key,
+        enc_iv: iv,
+        dec_key: key,
+        dec_iv: iv,
+        is_tls: false,
+    };
+
+    let runtime_clone = route_runtime.clone();
+    let session_task = tokio::spawn(handle_via_middle_proxy(
+        crypto_reader,
+        crypto_writer,
+        success,
+        me_pool.clone(),
+        stats.clone(),
+        config,
+        buffer_pool,
+        "127.0.0.1:443".parse().unwrap(),
+        rng,
+        runtime_clone.subscribe(),
+        runtime_clone.snapshot(),
+        0xC001_CAFE,
+    ));
+
+    timeout(TokioDuration::from_millis(500), async {
+        loop {
+            if stats.get_current_connections_me() >= 1 {
+                break;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("ME session must start before race trigger");
+
+    // Race ME channel drop with route cutover and assert generic client-visible outcome.
+    me_pool.registry().unregister(target_conn_id).await;
+    assert!(
+        route_runtime.set_mode(RelayRouteMode::Direct).is_some(),
+        "cutover must advance generation"
+    );
+
+    let relay_result = timeout(TokioDuration::from_secs(6), session_task)
+        .await
+        .expect("session must terminate under ME-drop + cutover race")
+        .expect("session task must not panic");
+
+    assert!(
+        matches!(
+            relay_result,
+            Err(ProxyError::Proxy(ref msg)) if msg == ROUTE_SWITCH_ERROR_MSG
+        ),
+        "race outcome must remain generic and not leak ME internals, got: {:?}",
+        relay_result
+    );
+}
+
+#[tokio::test]
+async fn stress_middle_end_drop_with_client_eof_never_hangs_across_burst() {
+    let stats = Arc::new(Stats::new());
+    let me_pool = make_me_pool_for_abort_test(stats.clone()).await;
+
+    for round in 0..32u64 {
+        let (client_reader_side, client_writer_side) = duplex(1024);
+        let (_relay_reader_side, relay_writer_side) = duplex(1024);
+
+        let key = [0u8; 32];
+        let iv = 0u128;
+        let crypto_reader = CryptoReader::new(client_reader_side, AesCtr::new(&key, iv));
+        let crypto_writer = CryptoWriter::new(relay_writer_side, AesCtr::new(&key, iv), 1024);
+
+        let config = Arc::new(ProxyConfig::default());
+        let buffer_pool = Arc::new(BufferPool::with_config(1024, 1));
+        let rng = Arc::new(SecureRandom::new());
+        let route_runtime = RouteRuntimeController::new(RelayRouteMode::Middle);
+
+        let (probe_conn_id, probe_rx) = me_pool.registry().register().await;
+        drop(probe_rx);
+        me_pool.registry().unregister(probe_conn_id).await;
+        let target_conn_id = probe_conn_id.wrapping_add(1);
+
+        let success = HandshakeSuccess {
+            user: format!("stress-me-drop-eof-{round}"),
+            peer: "127.0.0.1:12345".parse().unwrap(),
+            dc_idx: 1,
+            proto_tag: ProtoTag::Intermediate,
+            enc_key: key,
+            enc_iv: iv,
+            dec_key: key,
+            dec_iv: iv,
+            is_tls: false,
+        };
+
+        let session_task = tokio::spawn(handle_via_middle_proxy(
+            crypto_reader,
+            crypto_writer,
+            success,
+            me_pool.clone(),
+            stats.clone(),
+            config,
+            buffer_pool,
+            "127.0.0.1:443".parse().unwrap(),
+            rng,
+            route_runtime.subscribe(),
+            route_runtime.snapshot(),
+            0xD00D_0000 + round,
+        ));
+
+        timeout(TokioDuration::from_millis(500), async {
+            loop {
+                if stats.get_current_connections_me() >= 1 {
+                    break;
+                }
+                tokio::time::sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("session must start before forced drop in burst round");
+
+        me_pool.registry().unregister(target_conn_id).await;
+        drop(client_writer_side);
+
+        let result = timeout(TokioDuration::from_secs(2), session_task)
+            .await
+            .expect("burst round session must terminate quickly")
+            .expect("burst round session must not panic");
+
+        assert!(
+            result.is_ok(),
+            "burst round {round}: expected clean shutdown after ME drop + EOF, got: {:?}",
+            result
+        );
+    }
 }

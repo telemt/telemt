@@ -286,13 +286,26 @@ fn extract_sni_with_duplicate_extensions_rejected() {
     ext.extend_from_slice(&(sni2.len() as u16).to_be_bytes());
     ext.extend_from_slice(&sni2);
     
-    let mut h = vec![0x16, 0x03, 0x03, 0x00, 0x80, 0x01, 0x00, 0x00, 0x7C, 0x03, 0x03];
-    h.extend_from_slice(&[0u8; 32]);
-    h.push(0);
-    h.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
-    h.extend_from_slice(&[0x01, 0x00]);
-    h.extend_from_slice(&(ext.len() as u16).to_be_bytes());
-    h.extend_from_slice(&ext);
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[0u8; 32]);
+    body.push(0);
+    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+    body.extend_from_slice(&[0x01, 0x00]);
+    body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext);
+
+    let mut handshake = Vec::new();
+    handshake.push(0x01);
+    let body_len = (body.len() as u32).to_be_bytes();
+    handshake.extend_from_slice(&body_len[1..4]);
+    handshake.extend_from_slice(&body);
+
+    let mut h = Vec::new();
+    h.push(0x16);
+    h.extend_from_slice(&[0x03, 0x03]);
+    h.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+    h.extend_from_slice(&handshake);
     
     // Parser might return first, see second, or fail. OWASP ASVS prefers rejection of unexpected dups.
     // Telemt's `extract_sni` returns the first one found.
