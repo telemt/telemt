@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -222,6 +223,89 @@ async fn reap_draining_writers_removes_empty_draining_writers() {
     reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
 
     assert_eq!(current_writer_ids(&pool).await, vec![3]);
+}
+
+#[tokio::test]
+async fn reap_draining_writers_does_not_block_on_stuck_writer_close_signal() {
+    let pool = make_pool(128).await;
+    let now_epoch_secs = MePool::now_epoch_secs();
+
+    let (blocked_tx, blocked_rx) = mpsc::channel::<WriterCommand>(1);
+    assert!(
+        blocked_tx
+            .try_send(WriterCommand::Data(Bytes::from_static(b"stuck")))
+            .is_ok()
+    );
+    let blocked_rx_guard = tokio::spawn(async move {
+        let _hold_rx = blocked_rx;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let blocked_writer_id = 90u64;
+    let blocked_writer = MeWriter {
+        id: blocked_writer_id,
+        addr: SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            4500 + blocked_writer_id as u16,
+        ),
+        source_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        writer_dc: 2,
+        generation: 1,
+        contour: Arc::new(AtomicU8::new(WriterContour::Draining.as_u8())),
+        created_at: Instant::now() - Duration::from_secs(blocked_writer_id),
+        tx: blocked_tx.clone(),
+        cancel: CancellationToken::new(),
+        degraded: Arc::new(AtomicBool::new(false)),
+        rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
+        draining: Arc::new(AtomicBool::new(true)),
+        draining_started_at_epoch_secs: Arc::new(AtomicU64::new(
+            now_epoch_secs.saturating_sub(120),
+        )),
+        drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
+        allow_drain_fallback: Arc::new(AtomicBool::new(false)),
+    };
+    pool.writers.write().await.push(blocked_writer);
+    pool.registry
+        .register_writer(blocked_writer_id, blocked_tx)
+        .await;
+    pool.conn_count.fetch_add(1, Ordering::Relaxed);
+
+    insert_draining_writer(&pool, 91, now_epoch_secs.saturating_sub(110), 0, 0).await;
+
+    let mut warn_next_allowed = HashMap::new();
+    let mut soft_evict_next_allowed = HashMap::new();
+
+    let reap_res = tokio::time::timeout(
+        Duration::from_millis(500),
+        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed),
+    )
+    .await;
+    blocked_rx_guard.abort();
+
+    assert!(reap_res.is_ok(), "reap should not block on close signal");
+    assert!(current_writer_ids(&pool).await.is_empty());
+    assert_eq!(pool.stats.get_me_writer_close_signal_drop_total(), 2);
+    assert_eq!(pool.stats.get_me_writer_close_signal_channel_full_total(), 1);
+    assert_eq!(pool.stats.get_me_draining_writers_reap_progress_total(), 2);
+    let activity = pool.registry.writer_activity_snapshot().await;
+    assert!(!activity.bound_clients_by_writer.contains_key(&blocked_writer_id));
+    assert!(!activity.bound_clients_by_writer.contains_key(&91));
+    let (probe_conn_id, _rx) = pool.registry.register().await;
+    assert!(
+        !pool.registry
+            .bind_writer(
+                probe_conn_id,
+                blocked_writer_id,
+                ConnMeta {
+                    target_dc: 2,
+                    client_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 6400),
+                    our_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+                    proto_flags: 0,
+                },
+            )
+            .await
+    );
+    let _ = pool.registry.unregister(probe_conn_id).await;
 }
 
 #[tokio::test]

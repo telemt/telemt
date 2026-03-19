@@ -1692,6 +1692,57 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_close_signal_drop_total Close-signal drops for already-removed ME writers"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_close_signal_drop_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_close_signal_drop_total {}",
+        if me_allows_normal {
+            stats.get_me_writer_close_signal_drop_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_close_signal_channel_full_total Close-signal drops caused by full writer command channels"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_close_signal_channel_full_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_close_signal_channel_full_total {}",
+        if me_allows_normal {
+            stats.get_me_writer_close_signal_channel_full_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_draining_writers_reap_progress_total Draining-writer removals processed by reap cleanup"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_draining_writers_reap_progress_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_draining_writers_reap_progress_total {}",
+        if me_allows_normal {
+            stats.get_me_draining_writers_reap_progress_total()
+        } else {
+            0
+        }
+    );
+
     let _ = writeln!(out, "# HELP telemt_me_writer_removed_total Total ME writer removals");
     let _ = writeln!(out, "# TYPE telemt_me_writer_removed_total counter");
     let _ = writeln!(
@@ -2124,6 +2175,13 @@ mod tests {
         assert!(output.contains("# TYPE telemt_me_rpc_proxy_req_signal_sent_total counter"));
         assert!(output.contains("# TYPE telemt_me_idle_close_by_peer_total counter"));
         assert!(output.contains("# TYPE telemt_me_writer_removed_total counter"));
+        assert!(output.contains("# TYPE telemt_me_writer_close_signal_drop_total counter"));
+        assert!(output.contains(
+            "# TYPE telemt_me_writer_close_signal_channel_full_total counter"
+        ));
+        assert!(output.contains(
+            "# TYPE telemt_me_draining_writers_reap_progress_total counter"
+        ));
         assert!(output.contains("# TYPE telemt_pool_drain_soft_evict_total counter"));
         assert!(output.contains("# TYPE telemt_pool_drain_soft_evict_writer_total counter"));
         assert!(output.contains(

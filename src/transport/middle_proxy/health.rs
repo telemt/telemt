@@ -314,6 +314,8 @@ pub(super) async fn reap_draining_writers(
         }
         pool.stats.increment_pool_force_close_total();
         pool.remove_writer_and_close_clients(writer_id).await;
+        pool.stats
+            .increment_me_draining_writers_reap_progress_total();
         closed_total = closed_total.saturating_add(1);
     }
     for writer_id in empty_writer_ids {
@@ -324,6 +326,8 @@ pub(super) async fn reap_draining_writers(
             continue;
         }
         pool.remove_writer_and_close_clients(writer_id).await;
+        pool.stats
+            .increment_me_draining_writers_reap_progress_total();
         closed_total = closed_total.saturating_add(1);
     }
 

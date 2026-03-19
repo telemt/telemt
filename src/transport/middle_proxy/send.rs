@@ -643,13 +643,19 @@ impl MePool {
             let mut p = Vec::with_capacity(12);
             p.extend_from_slice(&RPC_CLOSE_EXT_U32.to_le_bytes());
             p.extend_from_slice(&conn_id.to_le_bytes());
-            if w.tx
-                .send(WriterCommand::DataAndFlush(Bytes::from(p)))
-                .await
-                .is_err()
-            {
-                debug!("ME close write failed");
-                self.remove_writer_and_close_clients(w.writer_id).await;
+            match w.tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    debug!(
+                        conn_id,
+                        writer_id = w.writer_id,
+                        "ME close skipped: writer command channel is full"
+                    );
+                }
+                Err(TrySendError::Closed(_)) => {
+                    debug!("ME close write failed");
+                    self.remove_writer_and_close_clients(w.writer_id).await;
+                }
             }
         } else {
             debug!(conn_id, "ME close skipped (writer missing)");
@@ -666,8 +672,12 @@ impl MePool {
             p.extend_from_slice(&conn_id.to_le_bytes());
             match w.tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
                 Ok(()) => {}
-                Err(TrySendError::Full(cmd)) => {
-                    let _ = tokio::time::timeout(Duration::from_millis(50), w.tx.send(cmd)).await;
+                Err(TrySendError::Full(_)) => {
+                    debug!(
+                        conn_id,
+                        writer_id = w.writer_id,
+                        "ME close_conn skipped: writer command channel is full"
+                    );
                 }
                 Err(TrySendError::Closed(_)) => {
                     debug!(conn_id, "ME close_conn skipped: writer channel closed");

@@ -169,6 +169,7 @@ impl ConnRegistry {
         None
     }
 
+    #[allow(dead_code)]
     pub async fn route(&self, id: u64, resp: MeResponse) -> RouteResult {
         let tx = {
             let inner = self.inner.read().await;
@@ -445,30 +446,38 @@ impl ConnRegistry {
     }
 
     pub async fn writer_lost(&self, writer_id: u64) -> Vec<BoundConn> {
-        let mut inner = self.inner.write().await;
-        inner.writers.remove(&writer_id);
-        inner.last_meta_for_writer.remove(&writer_id);
-        inner.writer_idle_since_epoch_secs.remove(&writer_id);
-        let conns = inner
-            .conns_for_writer
-            .remove(&writer_id)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
-
+        let mut close_txs = Vec::<mpsc::Sender<MeResponse>>::new();
         let mut out = Vec::new();
-        for conn_id in conns {
-            if inner.writer_for_conn.get(&conn_id).copied() != Some(writer_id) {
-                continue;
-            }
-            inner.writer_for_conn.remove(&conn_id);
-            if let Some(m) = inner.meta.get(&conn_id) {
-                out.push(BoundConn {
-                    conn_id,
-                    meta: m.clone(),
-                });
+        {
+            let mut inner = self.inner.write().await;
+            inner.writers.remove(&writer_id);
+            inner.last_meta_for_writer.remove(&writer_id);
+            inner.writer_idle_since_epoch_secs.remove(&writer_id);
+            let conns = inner
+                .conns_for_writer
+                .remove(&writer_id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            for conn_id in conns {
+                if inner.writer_for_conn.get(&conn_id).copied() != Some(writer_id) {
+                    continue;
+                }
+                inner.writer_for_conn.remove(&conn_id);
+                if let Some(client_tx) = inner.map.remove(&conn_id) {
+                    close_txs.push(client_tx);
+                }
+                if let Some(meta) = inner.meta.remove(&conn_id) {
+                    out.push(BoundConn { conn_id, meta });
+                }
             }
         }
+
+        for client_tx in close_txs {
+            let _ = client_tx.try_send(MeResponse::Close);
+        }
+
         out
     }
 
@@ -491,6 +500,7 @@ impl ConnRegistry {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Duration;
 
     use super::ConnMeta;
     use super::ConnRegistry;
@@ -661,6 +671,39 @@ mod tests {
         let removed_writer = registry.unregister(conn_id).await;
         assert_eq!(removed_writer, Some(20));
         assert!(registry.is_writer_empty(20).await);
+    }
+
+    #[tokio::test]
+    async fn writer_lost_removes_bound_conn_from_registry_and_signals_close() {
+        let registry = ConnRegistry::new();
+        let (conn_id, mut rx) = registry.register().await;
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx).await;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+
+        let lost = registry.writer_lost(10).await;
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].conn_id, conn_id);
+        assert!(registry.get_writer(conn_id).await.is_none());
+        assert!(registry.get_meta(conn_id).await.is_none());
+        assert_eq!(registry.unregister(conn_id).await, None);
+        let close = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+        assert!(matches!(close, Ok(Some(MeResponse::Close))));
     }
 
     #[tokio::test]

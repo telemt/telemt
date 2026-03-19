@@ -124,6 +124,9 @@ pub struct Stats {
     pool_drain_soft_evict_total: AtomicU64,
     pool_drain_soft_evict_writer_total: AtomicU64,
     pool_stale_pick_total: AtomicU64,
+    me_writer_close_signal_drop_total: AtomicU64,
+    me_writer_close_signal_channel_full_total: AtomicU64,
+    me_draining_writers_reap_progress_total: AtomicU64,
     me_writer_removed_total: AtomicU64,
     me_writer_removed_unexpected_total: AtomicU64,
     me_refill_triggered_total: AtomicU64,
@@ -788,6 +791,24 @@ impl Stats {
             self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn increment_me_writer_close_signal_drop_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_close_signal_drop_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_close_signal_channel_full_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_close_signal_channel_full_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_draining_writers_reap_progress_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_draining_writers_reap_progress_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_writer_removed_total(&self) {
         if self.telemetry_me_allows_debug() {
             self.me_writer_removed_total.fetch_add(1, Ordering::Relaxed);
@@ -1312,6 +1333,17 @@ impl Stats {
     }
     pub fn get_pool_stale_pick_total(&self) -> u64 {
         self.pool_stale_pick_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_close_signal_drop_total(&self) -> u64 {
+        self.me_writer_close_signal_drop_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_close_signal_channel_full_total(&self) -> u64 {
+        self.me_writer_close_signal_channel_full_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_draining_writers_reap_progress_total(&self) -> u64 {
+        self.me_draining_writers_reap_progress_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_writer_removed_total(&self) -> u64 {
         self.me_writer_removed_total.load(Ordering::Relaxed)
