@@ -12,8 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::io::duplex;
 use tokio::net::TcpListener;
+use tokio::time::{timeout, Duration as TokioDuration};
 
 fn make_crypto_reader<R>(reader: R) -> CryptoReader<R>
 where
@@ -1321,4 +1323,195 @@ fn stress_prefer_v6_override_matrix_is_deterministic_under_mixed_inputs() {
         assert_eq!(first, second, "override resolution must stay deterministic for dc {idx}");
         assert!(first.is_ipv6(), "dc {idx}: v6 override should be preferred");
     }
+}
+
+#[tokio::test]
+async fn negative_direct_relay_dc_connection_refused_fails_fast() {
+    let (client_reader_side, _client_writer_side) = duplex(1024);
+    let (_client_reader_relay, client_writer_side) = duplex(1024);
+    
+    let key = [0u8; 32];
+    let iv = 0u128;
+    let client_reader = CryptoReader::new(client_reader_side, AesCtr::new(&key, iv));
+    let client_writer = CryptoWriter::new(client_writer_side, AesCtr::new(&key, iv), 1024);
+    
+    let stats = Arc::new(Stats::new());
+    let buffer_pool = Arc::new(BufferPool::with_config(1024, 1));
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = RouteRuntimeController::new(RelayRouteMode::Direct);
+
+    // Reserve an ephemeral port and immediately release it to deterministically
+    // exercise the direct-connect failure path without long-lived hangs.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dc_addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let mut config_with_override = ProxyConfig::default();
+    config_with_override.dc_overrides.insert("1".to_string(), vec![dc_addr.to_string()]);
+    let config = Arc::new(config_with_override);
+    
+    let upstream_manager = Arc::new(UpstreamManager::new(
+        vec![UpstreamConfig {
+            enabled: true,
+            weight: 1,
+            scopes: String::new(),
+            upstream_type: UpstreamType::Direct {
+                interface: None,
+                bind_addresses: None,
+            },
+            selected_scope: String::new(),
+        }],
+        1,
+        100,
+        5000,
+        3,
+        false,
+        stats.clone(),
+    ));
+    
+    let success = HandshakeSuccess {
+        user: "test-user".to_string(),
+        peer: "127.0.0.1:12345".parse().unwrap(),
+        dc_idx: 1,
+        proto_tag: ProtoTag::Intermediate,
+        enc_key: key,
+        enc_iv: iv,
+        dec_key: key,
+        dec_iv: iv,
+        is_tls: false,
+    };
+
+    let result = timeout(
+        TokioDuration::from_secs(2),
+        handle_via_direct(
+            client_reader,
+            client_writer,
+            success,
+            upstream_manager,
+            stats,
+            config,
+            buffer_pool,
+            rng,
+            route_runtime.subscribe(),
+            route_runtime.snapshot(),
+            0xABCD_1234,
+        ),
+    )
+    .await
+    .expect("direct relay must fail fast on connection-refused upstream");
+
+    assert!(
+        result.is_err(),
+        "connection-refused upstream must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_direct_relay_cutover_integrity() {
+    let (client_reader_side, _client_writer_side) = duplex(1024);
+    let (_client_reader_relay, client_writer_side) = duplex(1024);
+    
+    let key = [0u8; 32];
+    let iv = 0u128;
+    let client_reader = CryptoReader::new(client_reader_side, AesCtr::new(&key, iv));
+    let client_writer = CryptoWriter::new(client_writer_side, AesCtr::new(&key, iv), 1024);
+    
+    let stats = Arc::new(Stats::new());
+    let buffer_pool = Arc::new(BufferPool::with_config(1024, 1));
+    let rng = Arc::new(SecureRandom::new());
+    let route_runtime = RouteRuntimeController::new(RelayRouteMode::Direct);
+    
+    // Mock upstream server.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dc_addr = listener.local_addr().unwrap();
+    
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // Read handshake nonce.
+        let mut nonce = [0u8; 64];
+        let _ = stream.read_exact(&mut nonce).await;
+        // Keep connection open.
+        tokio::time::sleep(TokioDuration::from_secs(5)).await;
+    });
+
+    let mut config_with_override = ProxyConfig::default();
+    config_with_override.dc_overrides.insert("1".to_string(), vec![dc_addr.to_string()]);
+    let config = Arc::new(config_with_override);
+    
+    let upstream_manager = Arc::new(UpstreamManager::new(
+        vec![UpstreamConfig {
+            enabled: true,
+            weight: 1,
+            scopes: String::new(),
+            upstream_type: UpstreamType::Direct {
+                interface: None,
+                bind_addresses: None,
+            },
+            selected_scope: String::new(),
+        }],
+        1,
+        100,
+        5000,
+        3,
+        false,
+        stats.clone(),
+    ));
+    
+    let success = HandshakeSuccess {
+        user: "test-user".to_string(),
+        peer: "127.0.0.1:12345".parse().unwrap(),
+        dc_idx: 1,
+        proto_tag: ProtoTag::Intermediate,
+        enc_key: key,
+        enc_iv: iv,
+        dec_key: key,
+        dec_iv: iv,
+        is_tls: false,
+    };
+
+    let stats_for_task = stats.clone();
+    let runtime_clone = route_runtime.clone();
+    let session_task = tokio::spawn(async move {
+        handle_via_direct(
+            client_reader,
+            client_writer,
+            success,
+            upstream_manager,
+            stats_for_task,
+            config,
+            buffer_pool,
+            rng,
+            runtime_clone.subscribe(),
+            runtime_clone.snapshot(),
+            0xABCD_1234,
+        ).await
+    });
+
+    timeout(TokioDuration::from_secs(2), async {
+        loop {
+            if stats.get_current_connections_direct() == 1 {
+                break;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("direct relay session must start before cutover");
+    
+    // Trigger cutover.
+    route_runtime.set_mode(RelayRouteMode::Middle).unwrap();
+    
+    // The session should terminate after the staggered delay (1000-2000ms).
+    let result = timeout(TokioDuration::from_secs(5), session_task)
+        .await
+        .expect("Session must terminate after cutover")
+        .expect("Session must not panic");
+
+    assert!(
+        matches!(
+            result,
+            Err(ProxyError::Proxy(ref msg)) if msg == ROUTE_SWITCH_ERROR_MSG
+        ),
+        "Session must terminate with route switch error on cutover"
+    );
 }

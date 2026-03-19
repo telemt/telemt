@@ -968,8 +968,12 @@ pub fn encrypt_tg_nonce(nonce: &[u8; HANDSHAKE_LEN]) -> Vec<u8> {
 mod security_tests;
 
 #[cfg(test)]
-#[path = "handshake_gap_short_tls_probe_throttle_security_tests.rs"]
-mod gap_short_tls_probe_throttle_security_tests;
+#[path = "handshake_adversarial_tests.rs"]
+mod adversarial_tests;
+
+#[cfg(test)]
+#[path = "handshake_fuzz_security_tests.rs"]
+mod fuzz_security_tests;
 
 /// Compile-time guard: HandshakeSuccess holds cryptographic key material and
 /// must never be Copy.  A Copy impl would allow silent key duplication,

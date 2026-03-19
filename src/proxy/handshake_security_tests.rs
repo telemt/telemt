@@ -1997,6 +1997,42 @@ fn auth_probe_round_limited_overcap_eviction_marks_saturation_and_keeps_newcomer
     );
 }
 
+#[tokio::test]
+async fn gap_t01_short_tls_probe_burst_is_throttled() {
+    let _guard = auth_probe_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_auth_probe_state_for_testing();
+
+    let config = test_config_with_secret_hex("11111111111111111111111111111111");
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.171:44361".parse().unwrap();
+
+    let too_short = vec![0x16, 0x03, 0x01];
+
+    for _ in 0..AUTH_PROBE_BACKOFF_START_FAILS {
+        let result = handle_tls_handshake(
+            &too_short,
+            tokio::io::empty(),
+            tokio::io::sink(),
+            peer,
+            &config,
+            &replay_checker,
+            &rng,
+            None,
+        )
+        .await;
+        assert!(matches!(result, HandshakeResult::BadClient { .. }));
+    }
+
+    assert!(
+        auth_probe_fail_streak_for_testing(peer.ip())
+            .is_some_and(|streak| streak >= AUTH_PROBE_BACKOFF_START_FAILS),
+        "short TLS probe bursts must increase auth-probe fail streak"
+    );
+}
+
 #[test]
 fn stress_auth_probe_overcap_churn_does_not_starve_high_threat_sentinel_bucket() {
     let _guard = auth_probe_test_lock()

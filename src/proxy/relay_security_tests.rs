@@ -1140,3 +1140,46 @@ async fn relay_bidirectional_light_fuzz_permission_denied_messages_remain_io_err
         );
     }
 }
+
+#[tokio::test]
+async fn relay_half_close_keeps_reverse_direction_progressing() {
+    let stats = Arc::new(Stats::new());
+    let user = "half-close-user";
+
+    let (client_peer, relay_client) = duplex(1024);
+    let (relay_server, server_peer) = duplex(1024);
+
+    let (client_reader, client_writer) = tokio::io::split(relay_client);
+    let (server_reader, server_writer) = tokio::io::split(relay_server);
+    let (mut cp_reader, mut cp_writer) = tokio::io::split(client_peer);
+    let (mut sp_reader, mut sp_writer) = tokio::io::split(server_peer);
+
+    let relay_task = tokio::spawn(relay_bidirectional(
+        client_reader,
+        client_writer,
+        server_reader,
+        server_writer,
+        8192,
+        8192,
+        user,
+        Arc::clone(&stats),
+        None,
+        Arc::new(BufferPool::new()),
+    ));
+
+    sp_writer.write_all(&[0x10, 0x20, 0x30, 0x40]).await.unwrap();
+    sp_writer.shutdown().await.unwrap();
+
+    let mut inbound = [0u8; 4];
+    cp_reader.read_exact(&mut inbound).await.unwrap();
+    assert_eq!(inbound, [0x10, 0x20, 0x30, 0x40]);
+
+    cp_writer.write_all(&[0xaa, 0xbb, 0xcc, 0xdd]).await.unwrap();
+    let mut outbound = [0u8; 4];
+    sp_reader.read_exact(&mut outbound).await.unwrap();
+    assert_eq!(outbound, [0xaa, 0xbb, 0xcc, 0xdd]);
+
+    relay_task.abort();
+    let joined = relay_task.await;
+    assert!(joined.is_err(), "aborted relay task must return join error");
+}

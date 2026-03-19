@@ -317,3 +317,7 @@ async fn consume_client_data<R: AsyncRead + Unpin>(mut reader: R) {
 #[cfg(test)]
 #[path = "masking_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "masking_adversarial_tests.rs"]
+mod adversarial_tests;

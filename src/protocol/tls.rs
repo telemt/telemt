@@ -544,6 +544,11 @@ pub fn extract_sni_from_client_hello(handshake: &[u8]) -> Option<String> {
         return None;
     }
 
+    let record_len = u16::from_be_bytes([handshake[3], handshake[4]]) as usize;
+    if handshake.len() < 5 + record_len {
+        return None;
+    }
+
     let mut pos = 5; // after record header
     if handshake.get(pos).copied()? != 0x01 {
         return None; // not ClientHello
@@ -649,6 +654,15 @@ fn is_valid_sni_hostname(host: &str) -> bool {
 
 /// Extract ALPN protocol list from ClientHello, return in offered order.
 pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
+    if handshake.len() < 5 || handshake[0] != TLS_RECORD_HANDSHAKE {
+        return Vec::new();
+    }
+
+    let record_len = u16::from_be_bytes([handshake[3], handshake[4]]) as usize;
+    if handshake.len() < 5 + record_len {
+        return Vec::new();
+    }
+
     let mut pos = 5; // after record header
     if handshake.get(pos) != Some(&0x01) {
         return Vec::new();
@@ -802,3 +816,11 @@ mod compile_time_security_checks {
 #[cfg(test)]
 #[path = "tls_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "tls_adversarial_tests.rs"]
+mod adversarial_tests;
+
+#[cfg(test)]
+#[path = "tls_fuzz_security_tests.rs"]
+mod fuzz_security_tests;
