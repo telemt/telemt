@@ -1550,7 +1550,56 @@ async fn maybe_rotate_single_endpoint_shadow(
     );
 }
 
-#[cfg(test)]
+    /// Last-resort safety net for draining writers stuck past their deadline.
+    ///
+    /// Runs every `TICK_SECS` and force-closes any writer whose
+    /// `drain_deadline_epoch_secs` has been exceeded by more than
+    /// `ZOMBIE_THRESHOLD_SECS`.  Intentionally kept trivial to minimise
+    /// the probability of panicking itself.
+    pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
+        const TICK_SECS: u64 = 30;
+        const ZOMBIE_THRESHOLD_SECS: u64 = 300;
+    
+        loop {
+            tokio::time::sleep(Duration::from_secs(TICK_SECS)).await;
+    
+            let now_epoch_secs = MePool::now_epoch_secs();
+    
+            // Collect zombie IDs under a short read-lock.
+            let zombie_ids: Vec<u64> = {
+                let ws = pool.writers.read().await;
+                ws.iter()
+                    .filter(|w| w.draining.load(std::sync::atomic::Ordering::Relaxed))
+                    .filter(|w| {
+                        let deadline = w
+                            .drain_deadline_epoch_secs
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        deadline != 0
+                            && now_epoch_secs.saturating_sub(deadline) > ZOMBIE_THRESHOLD_SECS
+                    })
+                    .map(|w| w.id)
+                    .collect()
+            };
+    
+            if zombie_ids.is_empty() {
+                continue;
+            }
+    
+            warn!(
+                zombie_count = zombie_ids.len(),
+                threshold_secs = ZOMBIE_THRESHOLD_SECS,
+                "Zombie draining writers detected by watchdog, force-closing"
+            );
+            for writer_id in zombie_ids {
+                pool.remove_writer_and_close_clients(writer_id).await;
+                pool.stats.increment_pool_force_close_total();
+                pool.stats
+                    .increment_me_draining_writers_reap_progress_total();
+            }
+        }
+    }
+    
+    #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};

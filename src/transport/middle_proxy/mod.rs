@@ -30,7 +30,7 @@ mod health_adversarial_tests;
 
 use bytes::Bytes;
 
-pub use health::{me_drain_timeout_enforcer, me_health_monitor};
+pub use health::{me_drain_timeout_enforcer, me_health_monitor, me_zombie_writer_watchdog};
 #[allow(unused_imports)]
 pub use ping::{run_me_ping, format_sample_line, format_me_route, MePingReport, MePingSample, MePingFamily};
 pub use pool::MePool;
