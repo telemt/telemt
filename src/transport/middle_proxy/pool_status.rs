@@ -166,10 +166,10 @@ impl MePool {
             return false;
         }
 
-        let writers = self.writers.read().await.clone();
+        let writers = self.writers.load_full();
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
-        for writer in writers {
-            if writer.draining.load(Ordering::Relaxed) {
+        for writer in writers.iter() {
+            if writer.draining.load(Ordering::Acquire) {
                 continue;
             }
             if let Ok(dc) = i16::try_from(writer.writer_dc) {
@@ -203,10 +203,10 @@ impl MePool {
             return false;
         }
 
-        let writers = self.writers.read().await.clone();
+        let writers = self.writers.load_full();
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
-        for writer in writers {
-            if writer.draining.load(Ordering::Relaxed) {
+        for writer in writers.iter() {
+            if writer.draining.load(Ordering::Acquire) {
                 continue;
             }
             if let Ok(dc) = i16::try_from(writer.writer_dc) {
@@ -255,7 +255,7 @@ impl MePool {
         let idle_since = self.registry.writer_idle_since_snapshot().await;
         let activity = self.registry.writer_activity_snapshot().await;
         let rtt = self.rtt_stats.lock().await.clone();
-        let writers = self.writers.read().await.clone();
+        let writers = self.writers.load_full();
 
         let mut live_writers_by_dc_endpoint = HashMap::<(i16, SocketAddr), usize>::new();
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
@@ -263,10 +263,10 @@ impl MePool {
         let mut dc_rtt_agg = HashMap::<i16, (f64, u64)>::new();
         let mut writer_rows = Vec::<MeApiWriterStatusSnapshot>::with_capacity(writers.len());
 
-        for writer in writers {
+        for writer in writers.iter() {
             let endpoint = writer.addr;
             let dc = i16::try_from(writer.writer_dc).ok();
-            let draining = writer.draining.load(Ordering::Relaxed);
+            let draining = writer.draining.load(Ordering::Acquire);
             let degraded = writer.degraded.load(Ordering::Relaxed);
             let matches_active_generation = writer.generation == active_generation;
             let in_desired_map = dc
@@ -296,7 +296,7 @@ impl MePool {
                 && drain_ttl_secs > 0
                 && drain_started_at_epoch_secs
                     .is_some_and(|started| now_epoch_secs.saturating_sub(started) > drain_ttl_secs);
-            let state = match WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) {
+            let state = match WriterContour::from_u8(writer.contour.load(Ordering::Acquire)) {
                 WriterContour::Warm => "warm",
                 WriterContour::Active => "active",
                 WriterContour::Draining => "draining",
@@ -501,7 +501,7 @@ impl MePool {
         }
 
         MeApiRuntimeSnapshot {
-            active_generation: self.active_generation.load(Ordering::Relaxed),
+            active_generation: self.active_generation.load(Ordering::Acquire),
             warm_generation: self.warm_generation.load(Ordering::Relaxed),
             pending_hardswap_generation: self.pending_hardswap_generation.load(Ordering::Relaxed),
             pending_hardswap_age_secs,

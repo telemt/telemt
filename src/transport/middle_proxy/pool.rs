@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, A
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use arc_swap::ArcSwap;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{
@@ -82,7 +83,7 @@ pub struct SecretSnapshot {
 #[allow(dead_code)]
 pub struct MePool {
     pub(super) registry: Arc<ConnRegistry>,
-    pub(super) writers: Arc<RwLock<Vec<MeWriter>>>,
+    pub(super) writers: Arc<ArcSwap<Arc<Vec<MeWriter>>>>,
     pub(super) rr: AtomicU64,
     pub(super) decision: NetworkDecision,
     pub(super) upstream: Option<Arc<UpstreamManager>>,
@@ -329,7 +330,7 @@ impl MePool {
         );
         Arc::new(Self {
             registry,
-            writers: Arc::new(RwLock::new(Vec::new())),
+            writers: Arc::new(ArcSwap::from_pointee(Vec::new())),
             rr: AtomicU64::new(0),
             decision,
             upstream,
@@ -512,7 +513,7 @@ impl MePool {
     }
 
     pub fn current_generation(&self) -> u64 {
-        self.active_generation.load(Ordering::Relaxed)
+        self.active_generation.load(Ordering::Acquire)
     }
 
     pub fn set_runtime_ready(&self, ready: bool) {
@@ -728,7 +729,7 @@ impl MePool {
         MeSocksKdfPolicy::from_u8(self.me_socks_kdf_policy.load(Ordering::Relaxed))
     }
 
-    pub(super) fn writers_arc(&self) -> Arc<RwLock<Vec<MeWriter>>> {
+    pub(super) fn writers_arc(&self) -> Arc<ArcSwap<Arc<Vec<MeWriter>>>> {
         self.writers.clone()
     }
 
@@ -776,14 +777,14 @@ impl MePool {
     }
 
     pub(super) async fn non_draining_writer_counts_by_contour(&self) -> (usize, usize, usize) {
-        let ws = self.writers.read().await;
+        let ws = self.writers.load_full();
         let mut active = 0usize;
         let mut warm = 0usize;
         for writer in ws.iter() {
-            if writer.draining.load(Ordering::Relaxed) {
+            if writer.draining.load(Ordering::Acquire) {
                 continue;
             }
-            match WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) {
+            match WriterContour::from_u8(writer.contour.load(Ordering::Acquire)) {
                 WriterContour::Active => active = active.saturating_add(1),
                 WriterContour::Warm => warm = warm.saturating_add(1),
                 WriterContour::Draining => {}

@@ -36,26 +36,26 @@ impl MePool {
     }
 
     fn clear_pending_hardswap_state(&self) {
-        self.pending_hardswap_generation.store(0, Ordering::Relaxed);
+        self.pending_hardswap_generation.store(0, Ordering::Release);
         self.pending_hardswap_started_at_epoch_secs
-            .store(0, Ordering::Relaxed);
-        self.pending_hardswap_map_hash.store(0, Ordering::Relaxed);
-        self.warm_generation.store(0, Ordering::Relaxed);
+            .store(0, Ordering::Release);
+        self.pending_hardswap_map_hash.store(0, Ordering::Release);
+        self.warm_generation.store(0, Ordering::Release);
     }
 
     async fn promote_warm_generation_to_active(&self, generation: u64) {
-        self.active_generation.store(generation, Ordering::Relaxed);
-        self.warm_generation.store(0, Ordering::Relaxed);
+        self.active_generation.store(generation, Ordering::Release);
+        self.warm_generation.store(0, Ordering::Release);
 
-        let ws = self.writers.read().await;
+        let ws = self.writers.load_full();
         for writer in ws.iter() {
-            if writer.draining.load(Ordering::Relaxed) {
+            if writer.draining.load(Ordering::Acquire) {
                 continue;
             }
             if writer.generation == generation {
                 writer
                     .contour
-                    .store(WriterContour::Active.as_u8(), Ordering::Relaxed);
+                    .store(WriterContour::Active.as_u8(), Ordering::Release);
             }
         }
     }
@@ -177,9 +177,9 @@ impl MePool {
         dc: i32,
         endpoints: &HashSet<SocketAddr>,
     ) -> usize {
-        let ws = self.writers.read().await;
+        let ws = self.writers.load_full();
         ws.iter()
-            .filter(|w| !w.draining.load(Ordering::Relaxed))
+            .filter(|w| !w.draining.load(Ordering::Acquire))
             .filter(|w| w.generation == generation)
             .filter(|w| w.writer_dc == dc)
             .filter(|w| endpoints.contains(&w.addr))
@@ -191,9 +191,9 @@ impl MePool {
         dc: i32,
         endpoints: &HashSet<SocketAddr>,
     ) -> usize {
-        let ws = self.writers.read().await;
+        let ws = self.writers.load_full();
         ws.iter()
-            .filter(|w| !w.draining.load(Ordering::Relaxed))
+            .filter(|w| !w.draining.load(Ordering::Acquire))
             .filter(|w| w.writer_dc == dc)
             .filter(|w| endpoints.contains(&w.addr))
             .count()
@@ -358,12 +358,12 @@ impl MePool {
                 }
                 let next_generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
                 self.pending_hardswap_generation
-                    .store(next_generation, Ordering::Relaxed);
+                    .store(next_generation, Ordering::Release);
                 self.pending_hardswap_started_at_epoch_secs
-                    .store(now_epoch_secs, Ordering::Relaxed);
+                    .store(now_epoch_secs, Ordering::Release);
                 self.pending_hardswap_map_hash
-                    .store(desired_map_hash, Ordering::Relaxed);
-                self.warm_generation.store(next_generation, Ordering::Relaxed);
+                    .store(desired_map_hash, Ordering::Release);
+                self.warm_generation.store(next_generation, Ordering::Release);
                 next_generation
             }
         } else {
@@ -372,17 +372,17 @@ impl MePool {
         };
 
         if hardswap {
-            self.warm_generation.store(generation, Ordering::Relaxed);
+            self.warm_generation.store(generation, Ordering::Release);
             self.warmup_generation_for_all_dcs(rng, generation, &desired_by_dc)
                 .await;
         } else {
             self.reconcile_connections(rng).await;
         }
 
-        let writers = self.writers.read().await;
+        let writers = self.writers.load_full();
         let active_writer_addrs: HashSet<(i32, SocketAddr)> = writers
             .iter()
-            .filter(|w| !w.draining.load(Ordering::Relaxed))
+            .filter(|w| !w.draining.load(Ordering::Acquire))
             .map(|w| (w.writer_dc, w.addr))
             .collect();
         let min_ratio = Self::permille_to_ratio(
@@ -405,7 +405,7 @@ impl MePool {
         if hardswap {
             let fresh_writer_addrs: HashSet<(i32, SocketAddr)> = writers
                 .iter()
-                .filter(|w| !w.draining.load(Ordering::Relaxed))
+                .filter(|w| !w.draining.load(Ordering::Acquire))
                 .filter(|w| w.generation == generation)
                 .map(|w| (w.writer_dc, w.addr))
                 .collect();
@@ -441,7 +441,7 @@ impl MePool {
 
         let stale_writer_ids: Vec<u64> = writers
             .iter()
-            .filter(|w| !w.draining.load(Ordering::Relaxed))
+            .filter(|w| !w.draining.load(Ordering::Acquire))
             .filter(|w| {
                 if hardswap {
                     w.generation < generation

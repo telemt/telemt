@@ -34,10 +34,13 @@ fn is_me_peer_closed_error(error: &ProxyError) -> bool {
 
 impl MePool {
     pub(crate) async fn prune_closed_writers(self: &Arc<Self>) {
-        let closed_writer_ids: Vec<u64> = {
-            let ws = self.writers.read().await;
-            ws.iter().filter(|w| w.tx.is_closed()).map(|w| w.id).collect()
-        };
+        let closed_writer_ids: Vec<u64> = self
+            .writers
+            .load_full()
+            .iter()
+            .filter(|w| w.tx.is_closed())
+            .map(|w| w.id)
+            .collect();
         if closed_writer_ids.is_empty() {
             return;
         }
@@ -178,7 +181,9 @@ impl MePool {
             drain_deadline_epoch_secs: drain_deadline_epoch_secs.clone(),
             allow_drain_fallback: allow_drain_fallback.clone(),
         };
-        self.writers.write().await.push(writer.clone());
+        let mut new_writers = (*self.writers.load_full()).clone();
+        new_writers.push(writer.clone());
+        self.writers.store(Arc::new(new_writers));
         self.registry.register_writer(writer_id, tx.clone()).await;
         self.registry.mark_writer_idle(writer_id).await;
         self.conn_count.fetch_add(1, Ordering::Relaxed);
@@ -254,8 +259,9 @@ impl MePool {
                     warn!(error = %e, "ME reader ended");
                 }
             }
-            let mut ws = writers_arc.write().await;
+            let mut ws = (*writers_arc.load_full()).clone();
             ws.retain(|w| w.id != writer_id);
+            writers_arc.store(Arc::new(ws.clone()));
             info!(remaining = ws.len(), "Dead ME writer removed from pool");
         });
 
@@ -503,26 +509,30 @@ impl MePool {
         let mut removed_dc: Option<i32> = None;
         let mut removed_uptime: Option<Duration> = None;
         let mut trigger_refill = false;
+        if let Some(pos) = self
+            .writers
+            .load_full()
+            .iter()
+            .position(|w| w.id == writer_id)
         {
-            let mut ws = self.writers.write().await;
-            if let Some(pos) = ws.iter().position(|w| w.id == writer_id) {
-                let w = ws.remove(pos);
-                let was_draining = w.draining.load(Ordering::Relaxed);
-                if was_draining {
-                    self.stats.decrement_pool_drain_active();
-                }
-                self.stats.increment_me_writer_removed_total();
-                w.cancel.cancel();
-                removed_addr = Some(w.addr);
-                removed_dc = Some(w.writer_dc);
-                removed_uptime = Some(w.created_at.elapsed());
-                trigger_refill = !was_draining;
-                if trigger_refill {
-                    self.stats.increment_me_writer_removed_unexpected_total();
-                }
-                close_tx = Some(w.tx.clone());
-                self.conn_count.fetch_sub(1, Ordering::Relaxed);
+            let mut ws = (*self.writers.load_full()).clone();
+            let w = ws.remove(pos);
+            self.writers.store(Arc::new(ws));
+            let was_draining = w.draining.load(Ordering::Acquire);
+            if was_draining {
+                self.stats.decrement_pool_drain_active();
             }
+            self.stats.increment_me_writer_removed_total();
+            w.cancel.cancel();
+            removed_addr = Some(w.addr);
+            removed_dc = Some(w.writer_dc);
+            removed_uptime = Some(w.created_at.elapsed());
+            trigger_refill = !was_draining;
+            if trigger_refill {
+                self.stats.increment_me_writer_removed_unexpected_total();
+            }
+            close_tx = Some(w.tx.clone());
+            self.conn_count.fetch_sub(1, Ordering::Relaxed);
         }
         // State invariant:
         // - writer is removed from `self.writers` (pool visibility),
@@ -576,25 +586,27 @@ impl MePool {
     ) {
         let timeout = timeout.filter(|d| !d.is_zero());
         let found = {
-            let mut ws = self.writers.write().await;
+            let current = self.writers.load_full();
+            let mut ws = (*current).clone();
             if let Some(w) = ws.iter_mut().find(|w| w.id == writer_id) {
-                let already_draining = w.draining.swap(true, Ordering::Relaxed);
+                let already_draining = w.draining.swap(true, Ordering::Acquire);
                 w.allow_drain_fallback
-                    .store(allow_drain_fallback, Ordering::Relaxed);
+                    .store(allow_drain_fallback, Ordering::Release);
                 let now_epoch_secs = Self::now_epoch_secs();
                 w.draining_started_at_epoch_secs
-                    .store(now_epoch_secs, Ordering::Relaxed);
+                    .store(now_epoch_secs, Ordering::Release);
                 let drain_deadline_epoch_secs = timeout
                     .map(|duration| now_epoch_secs.saturating_add(duration.as_secs()))
                     .unwrap_or(0);
                 w.drain_deadline_epoch_secs
-                    .store(drain_deadline_epoch_secs, Ordering::Relaxed);
+                    .store(drain_deadline_epoch_secs, Ordering::Release);
                 if !already_draining {
                     self.stats.increment_pool_drain_active();
                 }
                 w.contour
-                    .store(WriterContour::Draining.as_u8(), Ordering::Relaxed);
-                w.draining.store(true, Ordering::Relaxed);
+                    .store(WriterContour::Draining.as_u8(), Ordering::Release);
+                w.draining.store(true, Ordering::Release);
+                self.writers.store(Arc::new(ws));
                 true
             } else {
                 false
@@ -620,10 +632,10 @@ impl MePool {
     }
 
     pub(super) fn writer_accepts_new_binding(&self, writer: &MeWriter) -> bool {
-        if !writer.draining.load(Ordering::Relaxed) {
+        if !writer.draining.load(Ordering::Acquire) {
             return true;
         }
-        if !writer.allow_drain_fallback.load(Ordering::Relaxed) {
+        if !writer.allow_drain_fallback.load(Ordering::Acquire) {
             return false;
         }
 

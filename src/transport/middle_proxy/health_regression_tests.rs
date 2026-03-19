@@ -138,7 +138,9 @@ async fn insert_draining_writer(
         drain_deadline_epoch_secs: Arc::new(AtomicU64::new(drain_deadline_epoch_secs)),
         allow_drain_fallback: Arc::new(AtomicBool::new(false)),
     };
-    pool.writers.write().await.push(writer);
+    let mut writers = (*pool.writers.load_full()).clone();
+    writers.push(writer);
+    pool.writers.store(Arc::new(writers));
     pool.registry.register_writer(writer_id, tx).await;
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
     for idx in 0..bound_clients {
@@ -256,7 +258,9 @@ async fn reap_draining_writers_does_not_block_on_stuck_writer_close_signal() {
         drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
         allow_drain_fallback: Arc::new(AtomicBool::new(false)),
     };
-    pool.writers.write().await.push(blocked_writer);
+    let mut writers = (*pool.writers.load_full()).clone();
+    writers.push(blocked_writer);
+    pool.writers.store(Arc::new(writers));
     pool.registry
         .register_writer(blocked_writer_id, blocked_tx)
         .await;
@@ -357,7 +361,7 @@ async fn reap_draining_writers_limits_closes_per_health_tick() {
 
     reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
 
-    assert_eq!(pool.writers.read().await.len(), writer_total - close_budget);
+    assert_eq!(pool.writers.load_full().len(), writer_total - close_budget);
 }
 
 #[tokio::test]
@@ -380,13 +384,13 @@ async fn reap_draining_writers_backlog_drains_across_ticks() {
     let mut soft_evict_next_allowed = HashMap::new();
 
     for _ in 0..8 {
-        if pool.writers.read().await.is_empty() {
+        if pool.writers.load_full().is_empty() {
             break;
         }
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
     }
 
-    assert!(pool.writers.read().await.is_empty());
+    assert!(pool.writers.load_full().is_empty());
 }
 
 #[tokio::test]
@@ -411,12 +415,12 @@ async fn reap_draining_writers_threshold_backlog_converges_to_threshold() {
 
     for _ in 0..16 {
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
-        if pool.writers.read().await.len() <= threshold as usize {
+        if pool.writers.load_full().len() <= threshold as usize {
             break;
         }
     }
 
-    assert_eq!(pool.writers.read().await.len(), threshold as usize);
+    assert_eq!(pool.writers.load_full().len(), threshold as usize);
 }
 
 #[tokio::test]
@@ -521,14 +525,14 @@ async fn reap_draining_writers_warn_state_never_exceeds_live_draining_population
             .await;
         }
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
-        assert!(warn_next_allowed.len() <= pool.writers.read().await.len());
+        assert!(warn_next_allowed.len() <= pool.writers.load_full().len());
 
         let existing_writer_ids = current_writer_ids(&pool).await;
         for writer_id in existing_writer_ids.into_iter().take(4) {
             let _ = pool.remove_writer_and_close_clients(writer_id).await;
         }
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
-        assert!(warn_next_allowed.len() <= pool.writers.read().await.len());
+        assert!(warn_next_allowed.len() <= pool.writers.load_full().len());
     }
 }
 
@@ -558,13 +562,13 @@ async fn reap_draining_writers_mixed_backlog_converges_without_leaking_warn_stat
 
     for _ in 0..16 {
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
-        if pool.writers.read().await.len() <= 6 {
+        if pool.writers.load_full().len() <= 6 {
             break;
         }
     }
 
-    assert!(pool.writers.read().await.len() <= 6);
-    assert!(warn_next_allowed.len() <= pool.writers.read().await.len());
+    assert!(pool.writers.load_full().len() <= 6);
+    assert!(warn_next_allowed.len() <= pool.writers.load_full().len());
 }
 
 #[tokio::test]

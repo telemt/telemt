@@ -158,9 +158,8 @@ impl MePool {
             }
 
             let mut writers_snapshot = {
-                let ws = self.writers.read().await;
+                let ws = self.writers.load_full();
                 if ws.is_empty() {
-                    drop(ws);
                     match no_writer_mode {
                         MeRouteNoWriterMode::AsyncRecoveryFailfast => {
                             let deadline = *no_writer_deadline.get_or_insert_with(|| {
@@ -200,19 +199,19 @@ impl MePool {
                                             }
                                         }
                                     }
-                                    if !self.writers.read().await.is_empty() {
+                                    if !self.writers.load_full().is_empty() {
                                         break;
                                     }
                                 }
                             }
 
-                            if !self.writers.read().await.is_empty() {
+                            if !self.writers.load_full().is_empty() {
                                 continue;
                             }
                             let deadline = *no_writer_deadline
                                 .get_or_insert_with(|| Instant::now() + self.me_route_inline_recovery_wait);
                             if !self.wait_for_writer_until(deadline).await {
-                                if !self.writers.read().await.is_empty() {
+                                if !self.writers.load_full().is_empty() {
                                     continue;
                                 }
                                 self.stats.increment_me_no_writer_failfast_total();
@@ -241,15 +240,15 @@ impl MePool {
                         }
                     }
                 }
-                ws.clone()
+                ws
             };
 
             let mut candidate_indices = self
-                .candidate_indices_for_dc(&writers_snapshot, routed_dc, false)
+                .candidate_indices_for_dc(writers_snapshot.as_ref(), routed_dc, false)
                 .await;
             if candidate_indices.is_empty() {
                 candidate_indices = self
-                    .candidate_indices_for_dc(&writers_snapshot, routed_dc, true)
+                    .candidate_indices_for_dc(writers_snapshot.as_ref(), routed_dc, true)
                     .await;
             }
             if let Some(skip_writer_id) = skip_writer_id {
@@ -304,15 +303,13 @@ impl MePool {
                             }
                         }
                         tokio::time::sleep(Duration::from_millis(100 * emergency_attempts as u64)).await;
-                        let ws2 = self.writers.read().await;
-                        writers_snapshot = ws2.clone();
-                        drop(ws2);
+                        writers_snapshot = self.writers.load_full();
                         candidate_indices = self
-                            .candidate_indices_for_dc(&writers_snapshot, routed_dc, false)
+                            .candidate_indices_for_dc(writers_snapshot.as_ref(), routed_dc, false)
                             .await;
                         if candidate_indices.is_empty() {
                             candidate_indices = self
-                                .candidate_indices_for_dc(&writers_snapshot, routed_dc, true)
+                                .candidate_indices_for_dc(writers_snapshot.as_ref(), routed_dc, true)
                                 .await;
                         }
                         if candidate_indices.is_empty() {
@@ -354,7 +351,7 @@ impl MePool {
             let ordered_candidate_indices = if pick_mode == MeWriterPickMode::P2c {
                 self.p2c_ordered_candidate_indices(
                     &candidate_indices,
-                    &writers_snapshot,
+                    writers_snapshot.as_ref(),
                     &writer_idle_since,
                     now_epoch_secs,
                     start,
@@ -427,17 +424,17 @@ impl MePool {
                 }
                 let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
                 let (payload, meta) = build_routed_payload(effective_our_addr);
+                if !self.registry.bind_writer(conn_id, w.id, meta.clone()).await {
+                    debug!(
+                        conn_id,
+                        writer_id = w.id,
+                        "ME writer disappeared before bind commit, retrying"
+                    );
+                    continue;
+                }
                 match w.tx.try_send(WriterCommand::Data(payload.clone())) {
                     Ok(()) => {
                         self.stats.increment_me_writer_pick_success_try_total(pick_mode);
-                        if !self.registry.bind_writer(conn_id, w.id, meta).await {
-                            debug!(
-                                conn_id,
-                                writer_id = w.id,
-                                "ME writer disappeared before bind commit, retrying"
-                            );
-                            continue;
-                        }
                         if w.generation < self.current_generation() {
                             self.stats.increment_pool_stale_pick_total();
                             debug!(
@@ -451,11 +448,19 @@ impl MePool {
                         return Ok(());
                     }
                     Err(TrySendError::Full(_)) => {
+                        let _ = self
+                            .registry
+                            .evict_bound_conn_if_writer(conn_id, w.id)
+                            .await;
                         if fallback_blocking_idx.is_none() {
                             fallback_blocking_idx = Some(idx);
                         }
                     }
                     Err(TrySendError::Closed(_)) => {
+                        let _ = self
+                            .registry
+                            .evict_bound_conn_if_writer(conn_id, w.id)
+                            .await;
                         self.stats.increment_me_writer_pick_closed_total(pick_mode);
                         warn!(writer_id = w.id, "ME writer channel closed");
                         self.remove_writer_and_close_clients(w.id).await;
@@ -477,6 +482,14 @@ impl MePool {
             self.stats.increment_me_writer_pick_blocking_fallback_total();
             let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
             let (payload, meta) = build_routed_payload(effective_our_addr);
+            if !self.registry.bind_writer(conn_id, w.id, meta.clone()).await {
+                debug!(
+                    conn_id,
+                    writer_id = w.id,
+                    "ME writer disappeared before fallback bind commit, retrying"
+                );
+                continue;
+            }
             match send_writer_command_with_timeout(
                 &w.tx,
                 WriterCommand::Data(payload.clone()),
@@ -487,25 +500,25 @@ impl MePool {
                 Ok(()) => {
                     self.stats
                         .increment_me_writer_pick_success_fallback_total(pick_mode);
-                    if !self.registry.bind_writer(conn_id, w.id, meta).await {
-                        debug!(
-                            conn_id,
-                            writer_id = w.id,
-                            "ME writer disappeared before fallback bind commit, retrying"
-                        );
-                        continue;
-                    }
                     if w.generation < self.current_generation() {
                         self.stats.increment_pool_stale_pick_total();
                     }
                     return Ok(());
                 }
                 Err(TimedSendError::Closed(_)) => {
+                    let _ = self
+                        .registry
+                        .evict_bound_conn_if_writer(conn_id, w.id)
+                        .await;
                     self.stats.increment_me_writer_pick_closed_total(pick_mode);
                     warn!(writer_id = w.id, "ME writer channel closed (blocking)");
                     self.remove_writer_and_close_clients(w.id).await;
                 }
                 Err(TimedSendError::Timeout(_)) => {
+                    let _ = self
+                        .registry
+                        .evict_bound_conn_if_writer(conn_id, w.id)
+                        .await;
                     self.stats.increment_me_writer_pick_full_total(pick_mode);
                     debug!(
                         conn_id,
@@ -520,18 +533,18 @@ impl MePool {
 
     async fn wait_for_writer_until(&self, deadline: Instant) -> bool {
         let waiter = self.writer_available.notified();
-        if !self.writers.read().await.is_empty() {
+        if !self.writers.load_full().is_empty() {
             return true;
         }
         let now = Instant::now();
         if now >= deadline {
-            return !self.writers.read().await.is_empty();
+            return !self.writers.load_full().is_empty();
         }
         let timeout = deadline.saturating_duration_since(now);
         if tokio::time::timeout(timeout, waiter).await.is_ok() {
             return true;
         }
-        !self.writers.read().await.is_empty()
+        !self.writers.load_full().is_empty()
     }
 
     async fn wait_for_candidate_until(&self, routed_dc: i32, deadline: Instant) -> bool {
@@ -560,19 +573,16 @@ impl MePool {
     }
 
     async fn has_candidate_for_target_dc(&self, routed_dc: i32) -> bool {
-        let writers_snapshot = {
-            let ws = self.writers.read().await;
-            if ws.is_empty() {
-                return false;
-            }
-            ws.clone()
-        };
+        let writers_snapshot = self.writers.load_full();
+        if writers_snapshot.is_empty() {
+            return false;
+        }
         let mut candidate_indices = self
-            .candidate_indices_for_dc(&writers_snapshot, routed_dc, false)
+            .candidate_indices_for_dc(writers_snapshot.as_ref(), routed_dc, false)
             .await;
         if candidate_indices.is_empty() {
             candidate_indices = self
-                .candidate_indices_for_dc(&writers_snapshot, routed_dc, true)
+                .candidate_indices_for_dc(writers_snapshot.as_ref(), routed_dc, true)
                 .await;
         }
         !candidate_indices.is_empty()
@@ -736,7 +746,7 @@ impl MePool {
             return false;
         }
 
-        match WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) {
+        match WriterContour::from_u8(writer.contour.load(Ordering::Acquire)) {
             WriterContour::Active => true,
             WriterContour::Warm => include_warm,
             WriterContour::Draining => true,
@@ -744,7 +754,7 @@ impl MePool {
     }
 
     fn writer_contour_rank_for_selection(&self, writer: &super::pool::MeWriter) -> usize {
-        match WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) {
+        match WriterContour::from_u8(writer.contour.load(Ordering::Acquire)) {
             WriterContour::Active => 0,
             WriterContour::Warm => 1,
             WriterContour::Draining => 2,
@@ -776,7 +786,7 @@ impl MePool {
         idle_since_by_writer: &HashMap<u64, u64>,
         now_epoch_secs: u64,
     ) -> u64 {
-        let contour_penalty = match WriterContour::from_u8(writer.contour.load(Ordering::Relaxed)) {
+        let contour_penalty = match WriterContour::from_u8(writer.contour.load(Ordering::Acquire)) {
             WriterContour::Active => 0,
             WriterContour::Warm => PICK_PENALTY_WARM,
             WriterContour::Draining => PICK_PENALTY_DRAINING,

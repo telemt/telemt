@@ -147,7 +147,9 @@ async fn insert_draining_writer(
         allow_drain_fallback: Arc::new(AtomicBool::new(false)),
     };
 
-    pool.writers.write().await.push(writer);
+    let mut writers = (*pool.writers.load_full()).clone();
+    writers.push(writer);
+    pool.writers.store(Arc::new(writers));
     pool.registry.register_writer(writer_id, tx).await;
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
 
@@ -174,7 +176,7 @@ async fn insert_draining_writer(
 }
 
 async fn writer_count(pool: &Arc<MePool>) -> usize {
-    pool.writers.read().await.len()
+    pool.writers.load_full().len()
 }
 
 async fn sorted_writer_ids(pool: &Arc<MePool>) -> Vec<u64> {

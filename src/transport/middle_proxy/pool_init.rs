@@ -132,7 +132,7 @@ impl MePool {
             }
         }
 
-        if self.writers.read().await.is_empty() {
+        if self.writers.load_full().is_empty() {
             return Err(ProxyError::Proxy("No ME connections".into()));
         }
         info!(

@@ -189,14 +189,14 @@ pub(super) async fn reap_draining_writers(
     let drain_threshold = pool
         .me_pool_drain_threshold
         .load(std::sync::atomic::Ordering::Relaxed);
-    let writers = pool.writers.read().await.clone();
+    let writers = pool.writers.load_full();
     let activity = pool.registry.writer_activity_snapshot().await;
     let mut draining_writers = Vec::new();
     let mut empty_writer_ids = Vec::<u64>::new();
     let mut timeout_expired_writer_ids = Vec::<u64>::new();
     let mut force_close_writer_ids = Vec::<u64>::new();
-    for writer in writers {
-        if !writer.draining.load(std::sync::atomic::Ordering::Relaxed) {
+    for writer in writers.iter().cloned() {
+        if !writer.draining.load(std::sync::atomic::Ordering::Acquire) {
             continue;
         }
         if draining_writer_timeout_expired(pool, &writer, now_epoch_secs, drain_ttl_secs) {
@@ -497,12 +497,13 @@ async fn check_family(
 
     let mut live_addr_counts = HashMap::<(i32, SocketAddr), usize>::new();
     let mut live_writer_ids_by_addr = HashMap::<(i32, SocketAddr), Vec<u64>>::new();
-    for writer in pool.writers.read().await.iter().filter(|w| {
-        !w.draining.load(std::sync::atomic::Ordering::Relaxed)
+    let writers_snapshot = pool.writers.load_full();
+    for writer in writers_snapshot.iter().filter(|w| {
+        !w.draining.load(std::sync::atomic::Ordering::Acquire)
     }) {
         if !matches!(
             super::pool::WriterContour::from_u8(
-                writer.contour.load(std::sync::atomic::Ordering::Relaxed),
+                writer.contour.load(std::sync::atomic::Ordering::Acquire),
             ),
             super::pool::WriterContour::Active
         ) {
@@ -1566,20 +1567,20 @@ async fn maybe_rotate_single_endpoint_shadow(
             let now_epoch_secs = MePool::now_epoch_secs();
     
             // Collect zombie IDs under a short read-lock.
-            let zombie_ids: Vec<u64> = {
-                let ws = pool.writers.read().await;
-                ws.iter()
-                    .filter(|w| w.draining.load(std::sync::atomic::Ordering::Relaxed))
-                    .filter(|w| {
-                        let deadline = w
-                            .drain_deadline_epoch_secs
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        deadline != 0
-                            && now_epoch_secs.saturating_sub(deadline) > ZOMBIE_THRESHOLD_SECS
-                    })
-                    .map(|w| w.id)
-                    .collect()
-            };
+            let zombie_ids: Vec<u64> = pool
+                .writers
+                .load_full()
+                .iter()
+                .filter(|w| w.draining.load(std::sync::atomic::Ordering::Acquire))
+                .filter(|w| {
+                    let deadline = w
+                        .drain_deadline_epoch_secs
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    deadline != 0
+                        && now_epoch_secs.saturating_sub(deadline) > ZOMBIE_THRESHOLD_SECS
+                })
+                .map(|w| w.id)
+                .collect();
     
             if zombie_ids.is_empty() {
                 continue;
@@ -1737,7 +1738,9 @@ mod tests {
             drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
             allow_drain_fallback: Arc::new(AtomicBool::new(false)),
         };
-        pool.writers.write().await.push(writer);
+        let mut writers = (*pool.writers.load_full()).clone();
+        writers.push(writer);
+        pool.writers.store(Arc::new(writers));
         pool.registry.register_writer(writer_id, tx).await;
         pool.conn_count.fetch_add(1, Ordering::Relaxed);
         assert!(
@@ -1769,7 +1772,7 @@ mod tests {
 
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
 
-        let writer_ids: Vec<u64> = pool.writers.read().await.iter().map(|writer| writer.id).collect();
+        let writer_ids: Vec<u64> = pool.writers.load_full().iter().map(|writer| writer.id).collect();
         assert_eq!(writer_ids, vec![20, 30]);
         assert!(pool.registry.get_writer(conn_a).await.is_none());
         assert_eq!(pool.registry.get_writer(conn_b).await.unwrap().writer_id, 20);
@@ -1788,7 +1791,7 @@ mod tests {
 
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
 
-        let writer_ids: Vec<u64> = pool.writers.read().await.iter().map(|writer| writer.id).collect();
+        let writer_ids: Vec<u64> = pool.writers.load_full().iter().map(|writer| writer.id).collect();
         assert_eq!(writer_ids, vec![10, 20, 30]);
         assert_eq!(pool.registry.get_writer(conn_a).await.unwrap().writer_id, 10);
         assert_eq!(pool.registry.get_writer(conn_b).await.unwrap().writer_id, 20);

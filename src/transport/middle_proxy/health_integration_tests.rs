@@ -144,7 +144,9 @@ async fn insert_draining_writer(
         drain_deadline_epoch_secs: Arc::new(AtomicU64::new(drain_deadline_epoch_secs)),
         allow_drain_fallback: Arc::new(AtomicBool::new(false)),
     };
-    pool.writers.write().await.push(writer);
+    let mut writers = (*pool.writers.load_full()).clone();
+    writers.push(writer);
+    pool.writers.store(Arc::new(writers));
     pool.registry.register_writer(writer_id, tx).await;
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
     for idx in 0..bound_clients {
@@ -190,7 +192,7 @@ async fn me_health_monitor_drains_expired_backlog_over_multiple_cycles() {
     monitor.abort();
     let _ = monitor.await;
 
-    assert!(pool.writers.read().await.is_empty());
+    assert!(pool.writers.load_full().is_empty());
 }
 
 #[tokio::test]
@@ -206,7 +208,7 @@ async fn me_health_monitor_cleans_empty_draining_writers_without_force_close() {
     monitor.abort();
     let _ = monitor.await;
 
-    assert!(pool.writers.read().await.is_empty());
+    assert!(pool.writers.load_full().is_empty());
 }
 
 #[tokio::test]
@@ -231,5 +233,5 @@ async fn me_health_monitor_converges_retry_like_threshold_backlog_to_empty() {
     monitor.abort();
     let _ = monitor.await;
 
-    assert!(pool.writers.read().await.is_empty());
+    assert!(pool.writers.load_full().is_empty());
 }

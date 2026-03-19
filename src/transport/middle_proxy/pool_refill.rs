@@ -119,9 +119,9 @@ impl MePool {
         }
         if candidates.len() > 1 {
             let mut active_by_endpoint = HashMap::<SocketAddr, usize>::new();
-            let ws = self.writers.read().await;
+            let ws = self.writers.load_full();
             for writer in ws.iter() {
-                if writer.draining.load(Ordering::Relaxed) {
+                if writer.draining.load(Ordering::Acquire) {
                     continue;
                 }
                 if writer.writer_dc != dc {
@@ -129,7 +129,7 @@ impl MePool {
                 }
                 if !matches!(
                     super::pool::WriterContour::from_u8(
-                        writer.contour.load(Ordering::Relaxed),
+                        writer.contour.load(Ordering::Acquire),
                     ),
                     super::pool::WriterContour::Active
                 ) {
@@ -139,7 +139,6 @@ impl MePool {
                     *active_by_endpoint.entry(writer.addr).or_insert(0) += 1;
                 }
             }
-            drop(ws);
             candidates.sort_by_key(|addr| (active_by_endpoint.get(addr).copied().unwrap_or(0), *addr));
         }
         let start = (self.rr.fetch_add(1, Ordering::Relaxed) as usize) % candidates.len();
