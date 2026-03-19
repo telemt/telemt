@@ -71,11 +71,19 @@ impl MePool {
         }
 
         if let Some((addr, expiry)) = earliest_quarantine {
+            let remaining = expiry.saturating_duration_since(now);
+            if remaining.is_zero() {
+                return vec![addr];
+            }
+            drop(guard);
             debug!(
                 %addr,
-                wait_ms = expiry.saturating_duration_since(now).as_millis(),
-                "All ME endpoints are quarantined for the DC group; retrying earliest one"
+                wait_ms = remaining.as_millis(),
+                "All ME endpoints quarantined; waiting for earliest to expire"
             );
+            // After sleeping, the quarantine entry is expired but not removed yet.
+            // Callers that check is_endpoint_quarantined() will lazily clean it via retain().
+            tokio::time::sleep(remaining).await;
             return vec![addr];
         }
 
