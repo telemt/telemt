@@ -8,8 +8,47 @@ const DEFAULT_STUN_TCP_FALLBACK: bool = true;
 const DEFAULT_MIDDLE_PROXY_WARM_STANDBY: usize = 16;
 const DEFAULT_ME_RECONNECT_MAX_CONCURRENT_PER_DC: u32 = 8;
 const DEFAULT_ME_RECONNECT_FAST_RETRY_COUNT: u32 = 16;
-const DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS: u32 = 3;
-const DEFAULT_UPSTREAM_UNHEALTHY_FAIL_THRESHOLD: u32 = 4;
+const DEFAULT_ME_SINGLE_ENDPOINT_SHADOW_WRITERS: u8 = 2;
+const DEFAULT_ME_ADAPTIVE_FLOOR_IDLE_SECS: u64 = 90;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MIN_WRITERS_SINGLE_ENDPOINT: u8 = 1;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MIN_WRITERS_MULTI_ENDPOINT: u8 = 1;
+const DEFAULT_ME_ADAPTIVE_FLOOR_RECOVER_GRACE_SECS: u64 = 180;
+const DEFAULT_ME_ADAPTIVE_FLOOR_WRITERS_PER_CORE_TOTAL: u16 = 48;
+const DEFAULT_ME_ADAPTIVE_FLOOR_CPU_CORES_OVERRIDE: u16 = 0;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_EXTRA_WRITERS_SINGLE_PER_CORE: u16 = 1;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_EXTRA_WRITERS_MULTI_PER_CORE: u16 = 2;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_PER_CORE: u16 = 64;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_PER_CORE: u16 = 64;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_GLOBAL: u32 = 256;
+const DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_GLOBAL: u32 = 256;
+const DEFAULT_ME_WRITER_CMD_CHANNEL_CAPACITY: usize = 4096;
+const DEFAULT_ME_ROUTE_CHANNEL_CAPACITY: usize = 768;
+const DEFAULT_ME_C2ME_CHANNEL_CAPACITY: usize = 1024;
+const DEFAULT_ME_READER_ROUTE_DATA_WAIT_MS: u64 = 2;
+const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_FRAMES: usize = 32;
+const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_BYTES: usize = 128 * 1024;
+const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_DELAY_US: u64 = 500;
+const DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE: bool = true;
+const DEFAULT_DIRECT_RELAY_COPY_BUF_C2S_BYTES: usize = 64 * 1024;
+const DEFAULT_DIRECT_RELAY_COPY_BUF_S2C_BYTES: usize = 256 * 1024;
+const DEFAULT_ME_WRITER_PICK_SAMPLE_SIZE: u8 = 3;
+const DEFAULT_ME_HEALTH_INTERVAL_MS_UNHEALTHY: u64 = 1000;
+const DEFAULT_ME_HEALTH_INTERVAL_MS_HEALTHY: u64 = 3000;
+const DEFAULT_ME_ADMISSION_POLL_MS: u64 = 1000;
+const DEFAULT_ME_WARN_RATE_LIMIT_MS: u64 = 5000;
+const DEFAULT_ME_ROUTE_HYBRID_MAX_WAIT_MS: u64 = 3000;
+const DEFAULT_ME_ROUTE_BLOCKING_SEND_TIMEOUT_MS: u64 = 250;
+const DEFAULT_ME_C2ME_SEND_TIMEOUT_MS: u64 = 4000;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_ENABLED: bool = true;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_GRACE_SECS: u64 = 10;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_PER_WRITER: u8 = 2;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_BUDGET_PER_CORE: u16 = 16;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_COOLDOWN_MS: u64 = 1000;
+const DEFAULT_USER_MAX_UNIQUE_IPS_WINDOW_SECS: u64 = 30;
+const DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS: u64 = 250;
+const DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS: u32 = 2;
+const DEFAULT_UPSTREAM_UNHEALTHY_FAIL_THRESHOLD: u32 = 5;
+const DEFAULT_UPSTREAM_CONNECT_BUDGET_MS: u64 = 3000;
 const DEFAULT_LISTEN_ADDR_IPV6: &str = "::";
 const DEFAULT_ACCESS_USER: &str = "default";
 const DEFAULT_ACCESS_SECRET: &str = "00000000000000000000000000000000";
@@ -24,6 +63,10 @@ pub(crate) fn default_port() -> u16 {
 
 pub(crate) fn default_tls_domain() -> String {
     "petrovich.ru".to_string()
+}
+
+pub(crate) fn default_tls_fetch_scope() -> String {
+    String::new()
 }
 
 pub(crate) fn default_mask_port() -> u16 {
@@ -55,11 +98,11 @@ pub(crate) fn default_connect_timeout() -> u64 {
 }
 
 pub(crate) fn default_keepalive() -> u64 {
-    60
+    15
 }
 
 pub(crate) fn default_ack_timeout() -> u64 {
-    300
+    90
 }
 pub(crate) fn default_me_one_retry() -> u8 {
     12
@@ -88,6 +131,43 @@ pub(crate) fn default_metrics_whitelist() -> Vec<IpNetwork> {
     ]
 }
 
+pub(crate) fn default_api_listen() -> String {
+    "0.0.0.0:9091".to_string()
+}
+
+pub(crate) fn default_api_whitelist() -> Vec<IpNetwork> {
+    vec!["127.0.0.0/8".parse().unwrap()]
+}
+
+pub(crate) fn default_api_request_body_limit_bytes() -> usize {
+    64 * 1024
+}
+
+pub(crate) fn default_api_minimal_runtime_enabled() -> bool {
+    true
+}
+
+pub(crate) fn default_api_minimal_runtime_cache_ttl_ms() -> u64 {
+    1000
+}
+
+pub(crate) fn default_api_runtime_edge_enabled() -> bool { false }
+pub(crate) fn default_api_runtime_edge_cache_ttl_ms() -> u64 { 1000 }
+pub(crate) fn default_api_runtime_edge_top_n() -> usize { 10 }
+pub(crate) fn default_api_runtime_edge_events_capacity() -> usize { 256 }
+
+pub(crate) fn default_proxy_protocol_header_timeout_ms() -> u64 {
+    500
+}
+
+pub(crate) fn default_server_max_connections() -> u32 {
+    10_000
+}
+
+pub(crate) fn default_accept_permit_timeout_ms() -> u64 {
+    DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS
+}
+
 pub(crate) fn default_prefer_4() -> u8 {
     4
 }
@@ -104,12 +184,24 @@ pub(crate) fn default_unknown_dc_log_path() -> Option<String> {
     Some("unknown-dc.txt".to_string())
 }
 
+pub(crate) fn default_unknown_dc_file_log_enabled() -> bool {
+    false
+}
+
 pub(crate) fn default_pool_size() -> usize {
     8
 }
 
 pub(crate) fn default_proxy_secret_path() -> Option<String> {
     Some("proxy-secret".to_string())
+}
+
+pub(crate) fn default_proxy_config_v4_cache_path() -> Option<String> {
+    Some("cache/proxy-config-v4.txt".to_string())
+}
+
+pub(crate) fn default_proxy_config_v6_cache_path() -> Option<String> {
+    Some("cache/proxy-config-v6.txt".to_string())
 }
 
 pub(crate) fn default_middle_proxy_nat_stun() -> Option<String> {
@@ -128,12 +220,20 @@ pub(crate) fn default_middle_proxy_warm_standby() -> usize {
     DEFAULT_MIDDLE_PROXY_WARM_STANDBY
 }
 
+pub(crate) fn default_me_init_retry_attempts() -> u32 {
+    0
+}
+
+pub(crate) fn default_me2dc_fallback() -> bool {
+    true
+}
+
 pub(crate) fn default_keepalive_interval() -> u64 {
-    25
+    8
 }
 
 pub(crate) fn default_keepalive_jitter() -> u64 {
-    5
+    2
 }
 
 pub(crate) fn default_warmup_step_delay_ms() -> u64 {
@@ -160,16 +260,172 @@ pub(crate) fn default_me_reconnect_fast_retry_count() -> u32 {
     DEFAULT_ME_RECONNECT_FAST_RETRY_COUNT
 }
 
+pub(crate) fn default_me_single_endpoint_shadow_writers() -> u8 {
+    DEFAULT_ME_SINGLE_ENDPOINT_SHADOW_WRITERS
+}
+
+pub(crate) fn default_me_single_endpoint_outage_mode_enabled() -> bool {
+    true
+}
+
+pub(crate) fn default_me_single_endpoint_outage_disable_quarantine() -> bool {
+    true
+}
+
+pub(crate) fn default_me_single_endpoint_outage_backoff_min_ms() -> u64 {
+    250
+}
+
+pub(crate) fn default_me_single_endpoint_outage_backoff_max_ms() -> u64 {
+    3000
+}
+
+pub(crate) fn default_me_single_endpoint_shadow_rotate_every_secs() -> u64 {
+    900
+}
+
+pub(crate) fn default_me_adaptive_floor_idle_secs() -> u64 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_IDLE_SECS
+}
+
+pub(crate) fn default_me_adaptive_floor_min_writers_single_endpoint() -> u8 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MIN_WRITERS_SINGLE_ENDPOINT
+}
+
+pub(crate) fn default_me_adaptive_floor_min_writers_multi_endpoint() -> u8 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MIN_WRITERS_MULTI_ENDPOINT
+}
+
+pub(crate) fn default_me_adaptive_floor_recover_grace_secs() -> u64 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_RECOVER_GRACE_SECS
+}
+
+pub(crate) fn default_me_adaptive_floor_writers_per_core_total() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_WRITERS_PER_CORE_TOTAL
+}
+
+pub(crate) fn default_me_adaptive_floor_cpu_cores_override() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_CPU_CORES_OVERRIDE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_extra_writers_single_per_core() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_EXTRA_WRITERS_SINGLE_PER_CORE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_extra_writers_multi_per_core() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_EXTRA_WRITERS_MULTI_PER_CORE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_active_writers_per_core() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_PER_CORE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_warm_writers_per_core() -> u16 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_PER_CORE
+}
+
+pub(crate) fn default_me_adaptive_floor_max_active_writers_global() -> u32 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_ACTIVE_WRITERS_GLOBAL
+}
+
+pub(crate) fn default_me_adaptive_floor_max_warm_writers_global() -> u32 {
+    DEFAULT_ME_ADAPTIVE_FLOOR_MAX_WARM_WRITERS_GLOBAL
+}
+
+pub(crate) fn default_me_writer_cmd_channel_capacity() -> usize {
+    DEFAULT_ME_WRITER_CMD_CHANNEL_CAPACITY
+}
+
+pub(crate) fn default_me_route_channel_capacity() -> usize {
+    DEFAULT_ME_ROUTE_CHANNEL_CAPACITY
+}
+
+pub(crate) fn default_me_c2me_channel_capacity() -> usize {
+    DEFAULT_ME_C2ME_CHANNEL_CAPACITY
+}
+
+pub(crate) fn default_me_reader_route_data_wait_ms() -> u64 {
+    DEFAULT_ME_READER_ROUTE_DATA_WAIT_MS
+}
+
+pub(crate) fn default_me_d2c_flush_batch_max_frames() -> usize {
+    DEFAULT_ME_D2C_FLUSH_BATCH_MAX_FRAMES
+}
+
+pub(crate) fn default_me_d2c_flush_batch_max_bytes() -> usize {
+    DEFAULT_ME_D2C_FLUSH_BATCH_MAX_BYTES
+}
+
+pub(crate) fn default_me_d2c_flush_batch_max_delay_us() -> u64 {
+    DEFAULT_ME_D2C_FLUSH_BATCH_MAX_DELAY_US
+}
+
+pub(crate) fn default_me_d2c_ack_flush_immediate() -> bool {
+    DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE
+}
+
+pub(crate) fn default_direct_relay_copy_buf_c2s_bytes() -> usize {
+    DEFAULT_DIRECT_RELAY_COPY_BUF_C2S_BYTES
+}
+
+pub(crate) fn default_direct_relay_copy_buf_s2c_bytes() -> usize {
+    DEFAULT_DIRECT_RELAY_COPY_BUF_S2C_BYTES
+}
+
+pub(crate) fn default_me_writer_pick_sample_size() -> u8 {
+    DEFAULT_ME_WRITER_PICK_SAMPLE_SIZE
+}
+
+pub(crate) fn default_me_health_interval_ms_unhealthy() -> u64 {
+    DEFAULT_ME_HEALTH_INTERVAL_MS_UNHEALTHY
+}
+
+pub(crate) fn default_me_health_interval_ms_healthy() -> u64 {
+    DEFAULT_ME_HEALTH_INTERVAL_MS_HEALTHY
+}
+
+pub(crate) fn default_me_admission_poll_ms() -> u64 {
+    DEFAULT_ME_ADMISSION_POLL_MS
+}
+
+pub(crate) fn default_me_warn_rate_limit_ms() -> u64 {
+    DEFAULT_ME_WARN_RATE_LIMIT_MS
+}
+
+pub(crate) fn default_me_route_hybrid_max_wait_ms() -> u64 {
+    DEFAULT_ME_ROUTE_HYBRID_MAX_WAIT_MS
+}
+
+pub(crate) fn default_me_route_blocking_send_timeout_ms() -> u64 {
+    DEFAULT_ME_ROUTE_BLOCKING_SEND_TIMEOUT_MS
+}
+
+pub(crate) fn default_me_c2me_send_timeout_ms() -> u64 {
+    DEFAULT_ME_C2ME_SEND_TIMEOUT_MS
+}
+
 pub(crate) fn default_upstream_connect_retry_attempts() -> u32 {
     DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS
 }
 
 pub(crate) fn default_upstream_connect_retry_backoff_ms() -> u64 {
-    250
+    100
 }
 
 pub(crate) fn default_upstream_unhealthy_fail_threshold() -> u32 {
     DEFAULT_UPSTREAM_UNHEALTHY_FAIL_THRESHOLD
+}
+
+pub(crate) fn default_upstream_connect_budget_ms() -> u64 {
+    DEFAULT_UPSTREAM_CONNECT_BUDGET_MS
+}
+
+pub(crate) fn default_upstream_connect_failfast_hard_errors() -> bool {
+    false
+}
+
+pub(crate) fn default_rpc_proxy_req_every() -> u64 {
+    0
 }
 
 pub(crate) fn default_crypto_pending_buffer() -> usize {
@@ -194,6 +450,18 @@ pub(crate) fn default_me_route_backpressure_high_timeout_ms() -> u64 {
 
 pub(crate) fn default_me_route_backpressure_high_watermark_pct() -> u8 {
     80
+}
+
+pub(crate) fn default_me_route_no_writer_wait_ms() -> u64 {
+    250
+}
+
+pub(crate) fn default_me_route_inline_recovery_attempts() -> u32 {
+    3
+}
+
+pub(crate) fn default_me_route_inline_recovery_wait_ms() -> u64 {
+    3000
 }
 
 pub(crate) fn default_beobachten_minutes() -> u64 {
@@ -277,6 +545,18 @@ pub(crate) fn default_me_reinit_every_secs() -> u64 {
     15 * 60
 }
 
+pub(crate) fn default_me_reinit_singleflight() -> bool {
+    true
+}
+
+pub(crate) fn default_me_reinit_trigger_channel() -> usize {
+    64
+}
+
+pub(crate) fn default_me_reinit_coalesce_window_ms() -> u64 {
+    200
+}
+
 pub(crate) fn default_me_hardswap_warmup_delay_min_ms() -> u64 {
     1000
 }
@@ -301,6 +581,18 @@ pub(crate) fn default_me_config_apply_cooldown_secs() -> u64 {
     300
 }
 
+pub(crate) fn default_me_snapshot_require_http_2xx() -> bool {
+    true
+}
+
+pub(crate) fn default_me_snapshot_reject_empty_map() -> bool {
+    true
+}
+
+pub(crate) fn default_me_snapshot_min_proxy_for_lines() -> u32 {
+    1
+}
+
 pub(crate) fn default_proxy_secret_stable_snapshots() -> u8 {
     2
 }
@@ -309,20 +601,60 @@ pub(crate) fn default_proxy_secret_rotate_runtime() -> bool {
     true
 }
 
+pub(crate) fn default_me_secret_atomic_snapshot() -> bool {
+    true
+}
+
 pub(crate) fn default_proxy_secret_len_max() -> usize {
     256
 }
 
 pub(crate) fn default_me_reinit_drain_timeout_secs() -> u64 {
-    120
+    90
 }
 
 pub(crate) fn default_me_pool_drain_ttl_secs() -> u64 {
     90
 }
 
+pub(crate) fn default_me_instadrain() -> bool {
+    false
+}
+
+pub(crate) fn default_me_pool_drain_threshold() -> u64 {
+    32
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_enabled() -> bool {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_ENABLED
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_grace_secs() -> u64 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_GRACE_SECS
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_per_writer() -> u8 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_PER_WRITER
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_budget_per_core() -> u16 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_BUDGET_PER_CORE
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_cooldown_ms() -> u64 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_COOLDOWN_MS
+}
+
+pub(crate) fn default_me_bind_stale_ttl_secs() -> u64 {
+    default_me_pool_drain_ttl_secs()
+}
+
 pub(crate) fn default_me_pool_min_fresh_ratio() -> f32 {
     0.8
+}
+
+pub(crate) fn default_me_deterministic_writer_sort() -> bool {
+    true
 }
 
 pub(crate) fn default_hardswap() -> bool {
@@ -358,6 +690,14 @@ pub(crate) fn default_access_users() -> HashMap<String, String> {
         DEFAULT_ACCESS_USER.to_string(),
         DEFAULT_ACCESS_SECRET.to_string(),
     )])
+}
+
+pub(crate) fn default_user_max_unique_ips_window_secs() -> u64 {
+    DEFAULT_USER_MAX_UNIQUE_IPS_WINDOW_SECS
+}
+
+pub(crate) fn default_user_max_unique_ips_global_each() -> usize {
+    0
 }
 
 // Custom deserializer helpers

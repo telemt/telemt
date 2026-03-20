@@ -1,0 +1,165 @@
+###### TELEMT Public License 3 ######
+##### Copyright (c) 2026 Telemt #####
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this Software and associated documentation files (the "Software"),
+to use, reproduce, modify, prepare derivative works of, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, provided that all
+copyright notices, license terms, and conditions set forth in this License
+are preserved and complied with.
+
+### Official Translations
+
+The canonical version of this License is the English version.
+Official translations are provided for informational purposes only
+and for convenience, and do not have legal force. In case of any
+discrepancy, the English version of this License shall prevail.
+Available versions:
+- English in Markdown: docs/LICENSE/LICENSE.md
+- German: docs/LICENSE/LICENSE.de.md
+- Russian: docs/LICENSE/LICENSE.ru.md
+
+### License Versioning Policy
+
+This License is version 3 of the TELEMT Public License.
+Each version of the Software is licensed under the License that
+accompanies its corresponding source code distribution.
+
+Future versions of the Software may be distributed under a different
+version of the TELEMT Public License or under a different license,
+as determined by the Telemt maintainers.
+
+Any such change of license applies only to the versions of the
+Software distributed with the new license and SHALL NOT retroactively
+affect any previously released versions of the Software.
+
+Recipients of the Software are granted rights only under the License
+provided with the version of the Software they received.
+
+Redistributions of the Software, including Modified Versions, MUST
+preserve the copyright notices, license text, and conditions of this
+License for all portions of the Software derived from Telemt.
+
+Additional terms or licenses may be applied to modifications or
+additional code added by a redistributor, provided that such terms
+do not restrict or alter the rights granted under this License for
+the original Telemt Software.
+
+Nothing in this section limits the rights granted under this License
+for versions of the Software already released.
+
+### Definitions
+
+For the purposes of this License:
+- "Software" means the Telemt software, including source code, documentation,
+and any associated files distributed under this License.
+- "Contributor" means any person or entity that submits code, patches,
+documentation, or other contributions to the Software that are accepted
+into the Software by the maintainers.
+- "Contribution" means any work of authorship intentionally submitted
+to the Software for inclusion in the Software.
+- "Modified Version" means any version of the Software that has been
+changed, adapted, extended, or otherwise modified from the original
+Software.
+- "Maintainers" means the individuals or entities responsible for
+the official Telemt project and its releases.
+
+#### 1 Attribution
+
+Redistributions of the Software, in source or binary form, MUST RETAIN the
+above copyright notice, this license text, and any existing attribution
+notices.
+
+#### 2 Modification Notice
+
+If you modify the Software, you MUST clearly state that the Software has been
+modified and include a brief description of the changes made.
+
+Modified versions MUST NOT be presented as the original Telemt.
+
+#### 3 Trademark and Branding
+
+This license DOES NOT grant permission to use the name "Telemt", 
+the Telemt logo, or any Telemt trademarks or branding.
+
+Redistributed or modified versions of the Software MAY NOT use the Telemt
+name in a way that suggests endorsement or official origin without explicit
+permission from the Telemt maintainers.
+
+Use of the name "Telemt" to describe a modified version of the Software
+is permitted only if the modified version is clearly identified as a
+modified or unofficial version.
+
+Any distribution that could reasonably confuse users into believing that
+the software is an official Telemt release is prohibited.
+
+#### 4 Binary Distribution Transparency
+
+If you distribute compiled binaries of the Software,
+you are ENCOURAGED to provide access to the corresponding
+source code and build instructions where reasonably possible.
+
+This helps preserve transparency and allows recipients to verify the
+integrity and reproducibility of distributed builds.
+
+#### 5 Patent Grant and Defensive Termination Clause
+
+Each contributor grants you a perpetual, worldwide, non-exclusive,
+no-charge, royalty-free, irrevocable patent license to make, have made,
+use, offer to sell, sell, import, and otherwise transfer the Software.
+
+This patent license applies only to those patent claims necessarily
+infringed by the contributor’s contribution alone or by combination of
+their contribution with the Software.
+
+If you initiate or participate in any patent litigation, including
+cross-claims or counterclaims, alleging that the Software or any
+contribution incorporated within the Software constitutes patent
+infringement, then **all rights granted to you under this license shall
+terminate immediately** as of the date such litigation is filed.
+
+Additionally, if you initiate legal action alleging that the
+Software itself infringes your patent or other intellectual
+property rights, then all rights granted to you under this
+license SHALL TERMINATE automatically.
+
+#### 6 Contributions
+
+Unless you explicitly state otherwise, any Contribution intentionally
+submitted for inclusion in the Software shall be licensed under the terms
+of this License.
+
+By submitting a Contribution, you grant the Telemt maintainers and all
+recipients of the Software the rights described in this License with
+respect to that Contribution.
+
+#### 7 Network Use Attribution
+
+If the Software is used to provide a publicly accessible network service,
+the operator of such service SHOULD provide attribution to Telemt in at least
+one of the following locations:
+
+- service documentation
+- service description
+- an "About" or similar informational page
+- other user-visible materials reasonably associated with the service
+
+Such attribution MUST NOT imply endorsement by the Telemt project or its
+maintainers.
+
+#### 8 Disclaimer of Warranty and Severability Clause
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE
+
+IF ANY PROVISION OF THIS LICENSE IS HELD TO BE INVALID OR UNENFORCEABLE,
+SUCH PROVISION SHALL BE INTERPRETED TO REFLECT THE ORIGINAL INTENT
+OF THE PARTIES AS CLOSELY AS POSSIBLE, AND THE REMAINING PROVISIONS
+SHALL REMAIN IN FULL FORCE AND EFFECT

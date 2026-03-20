@@ -6,7 +6,7 @@ pub mod beobachten;
 pub mod telemetry;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use lru::LruCache;
@@ -16,8 +16,139 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
 use tracing::debug;
 
-use crate::config::MeTelemetryLevel;
+use crate::config::{MeTelemetryLevel, MeWriterPickMode};
 use self::telemetry::TelemetryPolicy;
+
+const ME_WRITER_TEARDOWN_MODE_COUNT: usize = 2;
+const ME_WRITER_TEARDOWN_REASON_COUNT: usize = 11;
+const ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT: usize = 2;
+const ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT: usize = 12;
+const ME_WRITER_TEARDOWN_DURATION_BUCKET_BOUNDS_MICROS: [u64; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] = [
+    1_000,
+    5_000,
+    10_000,
+    25_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_500_000,
+    5_000_000,
+    10_000_000,
+];
+const ME_WRITER_TEARDOWN_DURATION_BUCKET_LABELS: [&str; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] = [
+    "0.001",
+    "0.005",
+    "0.01",
+    "0.025",
+    "0.05",
+    "0.1",
+    "0.25",
+    "0.5",
+    "1",
+    "2.5",
+    "5",
+    "10",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum MeWriterTeardownMode {
+    Normal = 0,
+    HardDetach = 1,
+}
+
+impl MeWriterTeardownMode {
+    pub const ALL: [Self; ME_WRITER_TEARDOWN_MODE_COUNT] =
+        [Self::Normal, Self::HardDetach];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::HardDetach => "hard_detach",
+        }
+    }
+
+    const fn idx(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum MeWriterTeardownReason {
+    ReaderExit = 0,
+    WriterTaskExit = 1,
+    PingSendFail = 2,
+    SignalSendFail = 3,
+    RouteChannelClosed = 4,
+    CloseRpcChannelClosed = 5,
+    PruneClosedWriter = 6,
+    ReapTimeoutExpired = 7,
+    ReapThresholdForce = 8,
+    ReapEmpty = 9,
+    WatchdogStuckDraining = 10,
+}
+
+impl MeWriterTeardownReason {
+    pub const ALL: [Self; ME_WRITER_TEARDOWN_REASON_COUNT] = [
+        Self::ReaderExit,
+        Self::WriterTaskExit,
+        Self::PingSendFail,
+        Self::SignalSendFail,
+        Self::RouteChannelClosed,
+        Self::CloseRpcChannelClosed,
+        Self::PruneClosedWriter,
+        Self::ReapTimeoutExpired,
+        Self::ReapThresholdForce,
+        Self::ReapEmpty,
+        Self::WatchdogStuckDraining,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReaderExit => "reader_exit",
+            Self::WriterTaskExit => "writer_task_exit",
+            Self::PingSendFail => "ping_send_fail",
+            Self::SignalSendFail => "signal_send_fail",
+            Self::RouteChannelClosed => "route_channel_closed",
+            Self::CloseRpcChannelClosed => "close_rpc_channel_closed",
+            Self::PruneClosedWriter => "prune_closed_writer",
+            Self::ReapTimeoutExpired => "reap_timeout_expired",
+            Self::ReapThresholdForce => "reap_threshold_force",
+            Self::ReapEmpty => "reap_empty",
+            Self::WatchdogStuckDraining => "watchdog_stuck_draining",
+        }
+    }
+
+    const fn idx(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum MeWriterCleanupSideEffectStep {
+    CloseSignalChannelFull = 0,
+    CloseSignalChannelClosed = 1,
+}
+
+impl MeWriterCleanupSideEffectStep {
+    pub const ALL: [Self; ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT] =
+        [Self::CloseSignalChannelFull, Self::CloseSignalChannelClosed];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CloseSignalChannelFull => "close_signal_channel_full",
+            Self::CloseSignalChannelClosed => "close_signal_channel_closed",
+        }
+    }
+
+    const fn idx(self) -> usize {
+        self as usize
+    }
+}
 
 // ============= Stats =============
 
@@ -25,20 +156,88 @@ use self::telemetry::TelemetryPolicy;
 pub struct Stats {
     connects_all: AtomicU64,
     connects_bad: AtomicU64,
+    current_connections_direct: AtomicU64,
+    current_connections_me: AtomicU64,
     handshake_timeouts: AtomicU64,
+    upstream_connect_attempt_total: AtomicU64,
+    upstream_connect_success_total: AtomicU64,
+    upstream_connect_fail_total: AtomicU64,
+    upstream_connect_failfast_hard_error_total: AtomicU64,
+    upstream_connect_attempts_bucket_1: AtomicU64,
+    upstream_connect_attempts_bucket_2: AtomicU64,
+    upstream_connect_attempts_bucket_3_4: AtomicU64,
+    upstream_connect_attempts_bucket_gt_4: AtomicU64,
+    upstream_connect_duration_success_bucket_le_100ms: AtomicU64,
+    upstream_connect_duration_success_bucket_101_500ms: AtomicU64,
+    upstream_connect_duration_success_bucket_501_1000ms: AtomicU64,
+    upstream_connect_duration_success_bucket_gt_1000ms: AtomicU64,
+    upstream_connect_duration_fail_bucket_le_100ms: AtomicU64,
+    upstream_connect_duration_fail_bucket_101_500ms: AtomicU64,
+    upstream_connect_duration_fail_bucket_501_1000ms: AtomicU64,
+    upstream_connect_duration_fail_bucket_gt_1000ms: AtomicU64,
     me_keepalive_sent: AtomicU64,
     me_keepalive_failed: AtomicU64,
     me_keepalive_pong: AtomicU64,
     me_keepalive_timeout: AtomicU64,
+    me_rpc_proxy_req_signal_sent_total: AtomicU64,
+    me_rpc_proxy_req_signal_failed_total: AtomicU64,
+    me_rpc_proxy_req_signal_skipped_no_meta_total: AtomicU64,
+    me_rpc_proxy_req_signal_response_total: AtomicU64,
+    me_rpc_proxy_req_signal_close_sent_total: AtomicU64,
     me_reconnect_attempts: AtomicU64,
     me_reconnect_success: AtomicU64,
+    me_handshake_reject_total: AtomicU64,
+    me_reader_eof_total: AtomicU64,
+    me_idle_close_by_peer_total: AtomicU64,
     me_crc_mismatch: AtomicU64,
     me_seq_mismatch: AtomicU64,
+    me_endpoint_quarantine_total: AtomicU64,
+    me_kdf_drift_total: AtomicU64,
+    me_kdf_port_only_drift_total: AtomicU64,
+    me_hardswap_pending_reuse_total: AtomicU64,
+    me_hardswap_pending_ttl_expired_total: AtomicU64,
+    me_single_endpoint_outage_enter_total: AtomicU64,
+    me_single_endpoint_outage_exit_total: AtomicU64,
+    me_single_endpoint_outage_reconnect_attempt_total: AtomicU64,
+    me_single_endpoint_outage_reconnect_success_total: AtomicU64,
+    me_single_endpoint_quarantine_bypass_total: AtomicU64,
+    me_single_endpoint_shadow_rotate_total: AtomicU64,
+    me_single_endpoint_shadow_rotate_skipped_quarantine_total: AtomicU64,
+    me_floor_mode_switch_total: AtomicU64,
+    me_floor_mode_switch_static_to_adaptive_total: AtomicU64,
+    me_floor_mode_switch_adaptive_to_static_total: AtomicU64,
+    me_floor_cpu_cores_detected_gauge: AtomicU64,
+    me_floor_cpu_cores_effective_gauge: AtomicU64,
+    me_floor_global_cap_raw_gauge: AtomicU64,
+    me_floor_global_cap_effective_gauge: AtomicU64,
+    me_floor_target_writers_total_gauge: AtomicU64,
+    me_floor_active_cap_configured_gauge: AtomicU64,
+    me_floor_active_cap_effective_gauge: AtomicU64,
+    me_floor_warm_cap_configured_gauge: AtomicU64,
+    me_floor_warm_cap_effective_gauge: AtomicU64,
+    me_writers_active_current_gauge: AtomicU64,
+    me_writers_warm_current_gauge: AtomicU64,
+    me_floor_cap_block_total: AtomicU64,
+    me_floor_swap_idle_total: AtomicU64,
+    me_floor_swap_idle_failed_total: AtomicU64,
+    me_handshake_error_codes: DashMap<i32, AtomicU64>,
     me_route_drop_no_conn: AtomicU64,
     me_route_drop_channel_closed: AtomicU64,
     me_route_drop_queue_full: AtomicU64,
     me_route_drop_queue_full_base: AtomicU64,
     me_route_drop_queue_full_high: AtomicU64,
+    me_writer_pick_sorted_rr_success_try_total: AtomicU64,
+    me_writer_pick_sorted_rr_success_fallback_total: AtomicU64,
+    me_writer_pick_sorted_rr_full_total: AtomicU64,
+    me_writer_pick_sorted_rr_closed_total: AtomicU64,
+    me_writer_pick_sorted_rr_no_candidate_total: AtomicU64,
+    me_writer_pick_p2c_success_try_total: AtomicU64,
+    me_writer_pick_p2c_success_fallback_total: AtomicU64,
+    me_writer_pick_p2c_full_total: AtomicU64,
+    me_writer_pick_p2c_closed_total: AtomicU64,
+    me_writer_pick_p2c_no_candidate_total: AtomicU64,
+    me_writer_pick_blocking_fallback_total: AtomicU64,
+    me_writer_pick_mode_switch_total: AtomicU64,
     me_socks_kdf_strict_reject: AtomicU64,
     me_socks_kdf_compat_fallback: AtomicU64,
     secure_padding_invalid: AtomicU64,
@@ -52,18 +251,46 @@ pub struct Stats {
     pool_swap_total: AtomicU64,
     pool_drain_active: AtomicU64,
     pool_force_close_total: AtomicU64,
+    pool_drain_soft_evict_total: AtomicU64,
+    pool_drain_soft_evict_writer_total: AtomicU64,
     pool_stale_pick_total: AtomicU64,
+    me_writer_close_signal_drop_total: AtomicU64,
+    me_writer_close_signal_channel_full_total: AtomicU64,
+    me_draining_writers_reap_progress_total: AtomicU64,
     me_writer_removed_total: AtomicU64,
     me_writer_removed_unexpected_total: AtomicU64,
+    me_writer_teardown_attempt_total:
+        [[AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT]; ME_WRITER_TEARDOWN_REASON_COUNT],
+    me_writer_teardown_success_total: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
+    me_writer_teardown_timeout_total: AtomicU64,
+    me_writer_teardown_escalation_total: AtomicU64,
+    me_writer_teardown_noop_total: AtomicU64,
+    me_writer_cleanup_side_effect_failures_total:
+        [AtomicU64; ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT],
+    me_writer_teardown_duration_bucket_hits:
+        [[AtomicU64; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT + 1]; ME_WRITER_TEARDOWN_MODE_COUNT],
+    me_writer_teardown_duration_sum_micros: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
+    me_writer_teardown_duration_count: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
     me_refill_triggered_total: AtomicU64,
     me_refill_skipped_inflight_total: AtomicU64,
     me_refill_failed_total: AtomicU64,
     me_writer_restored_same_endpoint_total: AtomicU64,
     me_writer_restored_fallback_total: AtomicU64,
+    me_no_writer_failfast_total: AtomicU64,
+    me_async_recovery_trigger_total: AtomicU64,
+    me_inline_recovery_total: AtomicU64,
+    ip_reservation_rollback_tcp_limit_total: AtomicU64,
+    ip_reservation_rollback_quota_limit_total: AtomicU64,
+    relay_adaptive_promotions_total: AtomicU64,
+    relay_adaptive_demotions_total: AtomicU64,
+    relay_adaptive_hard_promotions_total: AtomicU64,
+    reconnect_evict_total: AtomicU64,
+    reconnect_stale_close_total: AtomicU64,
     telemetry_core_enabled: AtomicBool,
     telemetry_user_enabled: AtomicBool,
     telemetry_me_level: AtomicU8,
     user_stats: DashMap<String, UserStats>,
+    user_stats_last_cleanup_epoch_secs: AtomicU64,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
 
@@ -75,6 +302,7 @@ pub struct UserStats {
     pub octets_to_client: AtomicU64,
     pub msgs_from_client: AtomicU64,
     pub msgs_to_client: AtomicU64,
+    pub last_seen_epoch_secs: AtomicU64,
 }
 
 impl Stats {
@@ -105,6 +333,72 @@ impl Stats {
         self.telemetry_me_level().allows_debug()
     }
 
+    fn decrement_atomic_saturating(counter: &AtomicU64) {
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            if current == 0 {
+                break;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn now_epoch_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn touch_user_stats(stats: &UserStats) {
+        stats
+            .last_seen_epoch_secs
+            .store(Self::now_epoch_secs(), Ordering::Relaxed);
+    }
+
+    fn maybe_cleanup_user_stats(&self) {
+        const USER_STATS_CLEANUP_INTERVAL_SECS: u64 = 60;
+        const USER_STATS_IDLE_TTL_SECS: u64 = 24 * 60 * 60;
+
+        let now_epoch_secs = Self::now_epoch_secs();
+        let last_cleanup_epoch_secs = self
+            .user_stats_last_cleanup_epoch_secs
+            .load(Ordering::Relaxed);
+        if now_epoch_secs.saturating_sub(last_cleanup_epoch_secs)
+            < USER_STATS_CLEANUP_INTERVAL_SECS
+        {
+            return;
+        }
+        if self
+            .user_stats_last_cleanup_epoch_secs
+            .compare_exchange(
+                last_cleanup_epoch_secs,
+                now_epoch_secs,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        self.user_stats.retain(|_, stats| {
+            if stats.curr_connects.load(Ordering::Relaxed) > 0 {
+                return true;
+            }
+            let last_seen_epoch_secs = stats.last_seen_epoch_secs.load(Ordering::Relaxed);
+            now_epoch_secs.saturating_sub(last_seen_epoch_secs) <= USER_STATS_IDLE_TTL_SECS
+        });
+    }
+
     pub fn apply_telemetry_policy(&self, policy: TelemetryPolicy) {
         self.telemetry_core_enabled
             .store(policy.core_enabled, Ordering::Relaxed);
@@ -132,9 +426,144 @@ impl Stats {
             self.connects_bad.fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn increment_current_connections_direct(&self) {
+        self.current_connections_direct.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn decrement_current_connections_direct(&self) {
+        Self::decrement_atomic_saturating(&self.current_connections_direct);
+    }
+    pub fn increment_current_connections_me(&self) {
+        self.current_connections_me.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn decrement_current_connections_me(&self) {
+        Self::decrement_atomic_saturating(&self.current_connections_me);
+    }
+    pub fn increment_relay_adaptive_promotions_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.relay_adaptive_promotions_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_adaptive_demotions_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.relay_adaptive_demotions_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_adaptive_hard_promotions_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.relay_adaptive_hard_promotions_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_reconnect_evict_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.reconnect_evict_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_reconnect_stale_close_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.reconnect_stale_close_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_handshake_timeouts(&self) {
         if self.telemetry_core_enabled() {
             self.handshake_timeouts.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_upstream_connect_attempt_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.upstream_connect_attempt_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_upstream_connect_success_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.upstream_connect_success_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_upstream_connect_fail_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.upstream_connect_fail_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_upstream_connect_failfast_hard_error_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.upstream_connect_failfast_hard_error_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn observe_upstream_connect_attempts_per_request(&self, attempts: u32) {
+        if !self.telemetry_core_enabled() {
+            return;
+        }
+        match attempts {
+            0 => {}
+            1 => {
+                self.upstream_connect_attempts_bucket_1
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            2 => {
+                self.upstream_connect_attempts_bucket_2
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            3..=4 => {
+                self.upstream_connect_attempts_bucket_3_4
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.upstream_connect_attempts_bucket_gt_4
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn observe_upstream_connect_duration_ms(&self, duration_ms: u64, success: bool) {
+        if !self.telemetry_core_enabled() {
+            return;
+        }
+        let bucket = match duration_ms {
+            0..=100 => 0u8,
+            101..=500 => 1u8,
+            501..=1000 => 2u8,
+            _ => 3u8,
+        };
+        match (success, bucket) {
+            (true, 0) => {
+                self.upstream_connect_duration_success_bucket_le_100ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            (true, 1) => {
+                self.upstream_connect_duration_success_bucket_101_500ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            (true, 2) => {
+                self.upstream_connect_duration_success_bucket_501_1000ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            (true, _) => {
+                self.upstream_connect_duration_success_bucket_gt_1000ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            (false, 0) => {
+                self.upstream_connect_duration_fail_bucket_le_100ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            (false, 1) => {
+                self.upstream_connect_duration_fail_bucket_101_500ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            (false, 2) => {
+                self.upstream_connect_duration_fail_bucket_501_1000ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            (false, _) => {
+                self.upstream_connect_duration_fail_bucket_gt_1000ms
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
     pub fn increment_me_keepalive_sent(&self) {
@@ -162,6 +591,36 @@ impl Stats {
             self.me_keepalive_timeout.fetch_add(value, Ordering::Relaxed);
         }
     }
+    pub fn increment_me_rpc_proxy_req_signal_sent_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_rpc_proxy_req_signal_sent_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_rpc_proxy_req_signal_failed_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_rpc_proxy_req_signal_failed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_rpc_proxy_req_signal_skipped_no_meta_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_rpc_proxy_req_signal_skipped_no_meta_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_rpc_proxy_req_signal_response_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_rpc_proxy_req_signal_response_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_rpc_proxy_req_signal_close_sent_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_rpc_proxy_req_signal_close_sent_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_reconnect_attempt(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_reconnect_attempts.fetch_add(1, Ordering::Relaxed);
@@ -170,6 +629,32 @@ impl Stats {
     pub fn increment_me_reconnect_success(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_reconnect_success.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_handshake_reject_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_handshake_reject_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_handshake_error_code(&self, code: i32) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        let entry = self
+            .me_handshake_error_codes
+            .entry(code)
+            .or_insert_with(|| AtomicU64::new(0));
+        entry.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn increment_me_reader_eof_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_reader_eof_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_idle_close_by_peer_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_idle_close_by_peer_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_crc_mismatch(&self) {
@@ -205,6 +690,93 @@ impl Stats {
     pub fn increment_me_route_drop_queue_full_high(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_route_drop_queue_full_high.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_pick_success_try_total(&self, mode: MeWriterPickMode) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match mode {
+            MeWriterPickMode::SortedRr => {
+                self.me_writer_pick_sorted_rr_success_try_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeWriterPickMode::P2c => {
+                self.me_writer_pick_p2c_success_try_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_writer_pick_success_fallback_total(&self, mode: MeWriterPickMode) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match mode {
+            MeWriterPickMode::SortedRr => {
+                self.me_writer_pick_sorted_rr_success_fallback_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeWriterPickMode::P2c => {
+                self.me_writer_pick_p2c_success_fallback_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_writer_pick_full_total(&self, mode: MeWriterPickMode) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match mode {
+            MeWriterPickMode::SortedRr => {
+                self.me_writer_pick_sorted_rr_full_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeWriterPickMode::P2c => {
+                self.me_writer_pick_p2c_full_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_writer_pick_closed_total(&self, mode: MeWriterPickMode) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match mode {
+            MeWriterPickMode::SortedRr => {
+                self.me_writer_pick_sorted_rr_closed_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeWriterPickMode::P2c => {
+                self.me_writer_pick_p2c_closed_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_writer_pick_no_candidate_total(&self, mode: MeWriterPickMode) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match mode {
+            MeWriterPickMode::SortedRr => {
+                self.me_writer_pick_sorted_rr_no_candidate_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeWriterPickMode::P2c => {
+                self.me_writer_pick_p2c_no_candidate_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_writer_pick_blocking_fallback_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_pick_blocking_fallback_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_pick_mode_switch_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_pick_mode_switch_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_socks_kdf_strict_reject(&self) {
@@ -257,7 +829,7 @@ impl Stats {
         }
     }
     pub fn increment_pool_swap_total(&self) {
-        if self.telemetry_me_allows_debug() {
+        if self.telemetry_me_allows_normal() {
             self.pool_swap_total.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -291,9 +863,39 @@ impl Stats {
             self.pool_force_close_total.fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn increment_pool_drain_soft_evict_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.pool_drain_soft_evict_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_pool_drain_soft_evict_writer_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.pool_drain_soft_evict_writer_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_pool_stale_pick_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_close_signal_drop_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_close_signal_drop_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_close_signal_channel_full_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_close_signal_channel_full_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_draining_writers_reap_progress_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_draining_writers_reap_progress_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_writer_removed_total(&self) {
@@ -305,6 +907,74 @@ impl Stats {
         if self.telemetry_me_allows_normal() {
             self.me_writer_removed_unexpected_total.fetch_add(1, Ordering::Relaxed);
         }
+    }
+    pub fn increment_me_writer_teardown_attempt_total(
+        &self,
+        reason: MeWriterTeardownReason,
+        mode: MeWriterTeardownMode,
+    ) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_teardown_attempt_total[reason.idx()][mode.idx()]
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_teardown_success_total(&self, mode: MeWriterTeardownMode) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_teardown_success_total[mode.idx()].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_teardown_timeout_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_teardown_timeout_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_teardown_escalation_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_teardown_escalation_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_teardown_noop_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_teardown_noop_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_writer_cleanup_side_effect_failures_total(
+        &self,
+        step: MeWriterCleanupSideEffectStep,
+    ) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_cleanup_side_effect_failures_total[step.idx()]
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn observe_me_writer_teardown_duration(
+        &self,
+        mode: MeWriterTeardownMode,
+        duration: Duration,
+    ) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        let duration_micros = duration.as_micros().min(u64::MAX as u128) as u64;
+        let mut bucket_idx = ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT;
+        for (idx, upper_bound_micros) in ME_WRITER_TEARDOWN_DURATION_BUCKET_BOUNDS_MICROS
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            if duration_micros <= upper_bound_micros {
+                bucket_idx = idx;
+                break;
+            }
+        }
+        self.me_writer_teardown_duration_bucket_hits[mode.idx()][bucket_idx]
+            .fetch_add(1, Ordering::Relaxed);
+        self.me_writer_teardown_duration_sum_micros[mode.idx()]
+            .fetch_add(duration_micros, Ordering::Relaxed);
+        self.me_writer_teardown_duration_count[mode.idx()].fetch_add(1, Ordering::Relaxed);
     }
     pub fn increment_me_refill_triggered_total(&self) {
         if self.telemetry_me_allows_debug() {
@@ -333,16 +1003,387 @@ impl Stats {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn increment_me_no_writer_failfast_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_no_writer_failfast_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_async_recovery_trigger_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_async_recovery_trigger_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_inline_recovery_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_inline_recovery_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_ip_reservation_rollback_tcp_limit_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.ip_reservation_rollback_tcp_limit_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_ip_reservation_rollback_quota_limit_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.ip_reservation_rollback_quota_limit_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_endpoint_quarantine_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_endpoint_quarantine_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_kdf_drift_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_kdf_drift_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_kdf_port_only_drift_total(&self) {
+        if self.telemetry_me_allows_debug() {
+            self.me_kdf_port_only_drift_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_hardswap_pending_reuse_total(&self) {
+        if self.telemetry_me_allows_debug() {
+            self.me_hardswap_pending_reuse_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_hardswap_pending_ttl_expired_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_hardswap_pending_ttl_expired_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_single_endpoint_outage_enter_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_single_endpoint_outage_enter_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_single_endpoint_outage_exit_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_single_endpoint_outage_exit_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_single_endpoint_outage_reconnect_attempt_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_single_endpoint_outage_reconnect_attempt_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_single_endpoint_outage_reconnect_success_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_single_endpoint_outage_reconnect_success_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_single_endpoint_quarantine_bypass_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_single_endpoint_quarantine_bypass_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_single_endpoint_shadow_rotate_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_single_endpoint_shadow_rotate_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_single_endpoint_shadow_rotate_skipped_quarantine_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_single_endpoint_shadow_rotate_skipped_quarantine_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_floor_mode_switch_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_mode_switch_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_floor_mode_switch_static_to_adaptive_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_mode_switch_static_to_adaptive_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_floor_mode_switch_adaptive_to_static_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_mode_switch_adaptive_to_static_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_cpu_cores_detected_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_cpu_cores_detected_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_cpu_cores_effective_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_cpu_cores_effective_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_global_cap_raw_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_global_cap_raw_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_global_cap_effective_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_global_cap_effective_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_target_writers_total_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_target_writers_total_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_active_cap_configured_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_active_cap_configured_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_active_cap_effective_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_active_cap_effective_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_warm_cap_configured_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_warm_cap_configured_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_floor_warm_cap_effective_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_warm_cap_effective_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_writers_active_current_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writers_active_current_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_writers_warm_current_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writers_warm_current_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_floor_cap_block_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_cap_block_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_floor_swap_idle_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_swap_idle_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_floor_swap_idle_failed_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_floor_swap_idle_failed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn get_connects_all(&self) -> u64 { self.connects_all.load(Ordering::Relaxed) }
     pub fn get_connects_bad(&self) -> u64 { self.connects_bad.load(Ordering::Relaxed) }
+    pub fn get_current_connections_direct(&self) -> u64 {
+        self.current_connections_direct.load(Ordering::Relaxed)
+    }
+    pub fn get_current_connections_me(&self) -> u64 {
+        self.current_connections_me.load(Ordering::Relaxed)
+    }
+    pub fn get_current_connections_total(&self) -> u64 {
+        self.get_current_connections_direct()
+            .saturating_add(self.get_current_connections_me())
+    }
+    pub fn get_relay_adaptive_promotions_total(&self) -> u64 {
+        self.relay_adaptive_promotions_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_adaptive_demotions_total(&self) -> u64 {
+        self.relay_adaptive_demotions_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_adaptive_hard_promotions_total(&self) -> u64 {
+        self.relay_adaptive_hard_promotions_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_reconnect_evict_total(&self) -> u64 {
+        self.reconnect_evict_total.load(Ordering::Relaxed)
+    }
+    pub fn get_reconnect_stale_close_total(&self) -> u64 {
+        self.reconnect_stale_close_total.load(Ordering::Relaxed)
+    }
     pub fn get_me_keepalive_sent(&self) -> u64 { self.me_keepalive_sent.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_failed(&self) -> u64 { self.me_keepalive_failed.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_pong(&self) -> u64 { self.me_keepalive_pong.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_timeout(&self) -> u64 { self.me_keepalive_timeout.load(Ordering::Relaxed) }
+    pub fn get_me_rpc_proxy_req_signal_sent_total(&self) -> u64 {
+        self.me_rpc_proxy_req_signal_sent_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_rpc_proxy_req_signal_failed_total(&self) -> u64 {
+        self.me_rpc_proxy_req_signal_failed_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_rpc_proxy_req_signal_skipped_no_meta_total(&self) -> u64 {
+        self.me_rpc_proxy_req_signal_skipped_no_meta_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_rpc_proxy_req_signal_response_total(&self) -> u64 {
+        self.me_rpc_proxy_req_signal_response_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_rpc_proxy_req_signal_close_sent_total(&self) -> u64 {
+        self.me_rpc_proxy_req_signal_close_sent_total
+            .load(Ordering::Relaxed)
+    }
     pub fn get_me_reconnect_attempts(&self) -> u64 { self.me_reconnect_attempts.load(Ordering::Relaxed) }
     pub fn get_me_reconnect_success(&self) -> u64 { self.me_reconnect_success.load(Ordering::Relaxed) }
+    pub fn get_me_handshake_reject_total(&self) -> u64 {
+        self.me_handshake_reject_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_reader_eof_total(&self) -> u64 {
+        self.me_reader_eof_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_idle_close_by_peer_total(&self) -> u64 {
+        self.me_idle_close_by_peer_total.load(Ordering::Relaxed)
+    }
     pub fn get_me_crc_mismatch(&self) -> u64 { self.me_crc_mismatch.load(Ordering::Relaxed) }
     pub fn get_me_seq_mismatch(&self) -> u64 { self.me_seq_mismatch.load(Ordering::Relaxed) }
+    pub fn get_me_endpoint_quarantine_total(&self) -> u64 {
+        self.me_endpoint_quarantine_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_kdf_drift_total(&self) -> u64 {
+        self.me_kdf_drift_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_kdf_port_only_drift_total(&self) -> u64 {
+        self.me_kdf_port_only_drift_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_hardswap_pending_reuse_total(&self) -> u64 {
+        self.me_hardswap_pending_reuse_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_hardswap_pending_ttl_expired_total(&self) -> u64 {
+        self.me_hardswap_pending_ttl_expired_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_single_endpoint_outage_enter_total(&self) -> u64 {
+        self.me_single_endpoint_outage_enter_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_single_endpoint_outage_exit_total(&self) -> u64 {
+        self.me_single_endpoint_outage_exit_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_single_endpoint_outage_reconnect_attempt_total(&self) -> u64 {
+        self.me_single_endpoint_outage_reconnect_attempt_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_single_endpoint_outage_reconnect_success_total(&self) -> u64 {
+        self.me_single_endpoint_outage_reconnect_success_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_single_endpoint_quarantine_bypass_total(&self) -> u64 {
+        self.me_single_endpoint_quarantine_bypass_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_single_endpoint_shadow_rotate_total(&self) -> u64 {
+        self.me_single_endpoint_shadow_rotate_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_single_endpoint_shadow_rotate_skipped_quarantine_total(&self) -> u64 {
+        self.me_single_endpoint_shadow_rotate_skipped_quarantine_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_mode_switch_total(&self) -> u64 {
+        self.me_floor_mode_switch_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_mode_switch_static_to_adaptive_total(&self) -> u64 {
+        self.me_floor_mode_switch_static_to_adaptive_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_mode_switch_adaptive_to_static_total(&self) -> u64 {
+        self.me_floor_mode_switch_adaptive_to_static_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_cpu_cores_detected_gauge(&self) -> u64 {
+        self.me_floor_cpu_cores_detected_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_cpu_cores_effective_gauge(&self) -> u64 {
+        self.me_floor_cpu_cores_effective_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_global_cap_raw_gauge(&self) -> u64 {
+        self.me_floor_global_cap_raw_gauge.load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_global_cap_effective_gauge(&self) -> u64 {
+        self.me_floor_global_cap_effective_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_target_writers_total_gauge(&self) -> u64 {
+        self.me_floor_target_writers_total_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_active_cap_configured_gauge(&self) -> u64 {
+        self.me_floor_active_cap_configured_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_active_cap_effective_gauge(&self) -> u64 {
+        self.me_floor_active_cap_effective_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_warm_cap_configured_gauge(&self) -> u64 {
+        self.me_floor_warm_cap_configured_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_warm_cap_effective_gauge(&self) -> u64 {
+        self.me_floor_warm_cap_effective_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writers_active_current_gauge(&self) -> u64 {
+        self.me_writers_active_current_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writers_warm_current_gauge(&self) -> u64 {
+        self.me_writers_warm_current_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_cap_block_total(&self) -> u64 {
+        self.me_floor_cap_block_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_swap_idle_total(&self) -> u64 {
+        self.me_floor_swap_idle_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_floor_swap_idle_failed_total(&self) -> u64 {
+        self.me_floor_swap_idle_failed_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_handshake_error_code_counts(&self) -> Vec<(i32, u64)> {
+        let mut out: Vec<(i32, u64)> = self
+            .me_handshake_error_codes
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
+            .collect();
+        out.sort_by_key(|(code, _)| *code);
+        out
+    }
     pub fn get_me_route_drop_no_conn(&self) -> u64 { self.me_route_drop_no_conn.load(Ordering::Relaxed) }
     pub fn get_me_route_drop_channel_closed(&self) -> u64 {
         self.me_route_drop_channel_closed.load(Ordering::Relaxed)
@@ -355,6 +1396,52 @@ impl Stats {
     }
     pub fn get_me_route_drop_queue_full_high(&self) -> u64 {
         self.me_route_drop_queue_full_high.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_sorted_rr_success_try_total(&self) -> u64 {
+        self.me_writer_pick_sorted_rr_success_try_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_sorted_rr_success_fallback_total(&self) -> u64 {
+        self.me_writer_pick_sorted_rr_success_fallback_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_sorted_rr_full_total(&self) -> u64 {
+        self.me_writer_pick_sorted_rr_full_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_sorted_rr_closed_total(&self) -> u64 {
+        self.me_writer_pick_sorted_rr_closed_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_sorted_rr_no_candidate_total(&self) -> u64 {
+        self.me_writer_pick_sorted_rr_no_candidate_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_p2c_success_try_total(&self) -> u64 {
+        self.me_writer_pick_p2c_success_try_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_p2c_success_fallback_total(&self) -> u64 {
+        self.me_writer_pick_p2c_success_fallback_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_p2c_full_total(&self) -> u64 {
+        self.me_writer_pick_p2c_full_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_p2c_closed_total(&self) -> u64 {
+        self.me_writer_pick_p2c_closed_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_p2c_no_candidate_total(&self) -> u64 {
+        self.me_writer_pick_p2c_no_candidate_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_blocking_fallback_total(&self) -> u64 {
+        self.me_writer_pick_blocking_fallback_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_pick_mode_switch_total(&self) -> u64 {
+        self.me_writer_pick_mode_switch_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_socks_kdf_strict_reject(&self) -> u64 {
         self.me_socks_kdf_strict_reject.load(Ordering::Relaxed)
@@ -395,14 +1482,104 @@ impl Stats {
     pub fn get_pool_force_close_total(&self) -> u64 {
         self.pool_force_close_total.load(Ordering::Relaxed)
     }
+    pub fn get_pool_drain_soft_evict_total(&self) -> u64 {
+        self.pool_drain_soft_evict_total.load(Ordering::Relaxed)
+    }
+    pub fn get_pool_drain_soft_evict_writer_total(&self) -> u64 {
+        self.pool_drain_soft_evict_writer_total.load(Ordering::Relaxed)
+    }
     pub fn get_pool_stale_pick_total(&self) -> u64 {
         self.pool_stale_pick_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_close_signal_drop_total(&self) -> u64 {
+        self.me_writer_close_signal_drop_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_close_signal_channel_full_total(&self) -> u64 {
+        self.me_writer_close_signal_channel_full_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_draining_writers_reap_progress_total(&self) -> u64 {
+        self.me_draining_writers_reap_progress_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_writer_removed_total(&self) -> u64 {
         self.me_writer_removed_total.load(Ordering::Relaxed)
     }
     pub fn get_me_writer_removed_unexpected_total(&self) -> u64 {
         self.me_writer_removed_unexpected_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_teardown_attempt_total(
+        &self,
+        reason: MeWriterTeardownReason,
+        mode: MeWriterTeardownMode,
+    ) -> u64 {
+        self.me_writer_teardown_attempt_total[reason.idx()][mode.idx()]
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_teardown_attempt_total_by_mode(&self, mode: MeWriterTeardownMode) -> u64 {
+        MeWriterTeardownReason::ALL
+            .iter()
+            .copied()
+            .map(|reason| self.get_me_writer_teardown_attempt_total(reason, mode))
+            .sum()
+    }
+    pub fn get_me_writer_teardown_success_total(&self, mode: MeWriterTeardownMode) -> u64 {
+        self.me_writer_teardown_success_total[mode.idx()].load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_teardown_timeout_total(&self) -> u64 {
+        self.me_writer_teardown_timeout_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_teardown_escalation_total(&self) -> u64 {
+        self.me_writer_teardown_escalation_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_teardown_noop_total(&self) -> u64 {
+        self.me_writer_teardown_noop_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_cleanup_side_effect_failures_total(
+        &self,
+        step: MeWriterCleanupSideEffectStep,
+    ) -> u64 {
+        self.me_writer_cleanup_side_effect_failures_total[step.idx()]
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_cleanup_side_effect_failures_total_all(&self) -> u64 {
+        MeWriterCleanupSideEffectStep::ALL
+            .iter()
+            .copied()
+            .map(|step| self.get_me_writer_cleanup_side_effect_failures_total(step))
+            .sum()
+    }
+    pub fn me_writer_teardown_duration_bucket_labels(
+    ) -> &'static [&'static str; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] {
+        &ME_WRITER_TEARDOWN_DURATION_BUCKET_LABELS
+    }
+    pub fn get_me_writer_teardown_duration_bucket_hits(
+        &self,
+        mode: MeWriterTeardownMode,
+        bucket_idx: usize,
+    ) -> u64 {
+        self.me_writer_teardown_duration_bucket_hits[mode.idx()][bucket_idx]
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_teardown_duration_bucket_total(
+        &self,
+        mode: MeWriterTeardownMode,
+        bucket_idx: usize,
+    ) -> u64 {
+        let capped_idx = bucket_idx.min(ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT);
+        let mut total = 0u64;
+        for idx in 0..=capped_idx {
+            total = total.saturating_add(self.get_me_writer_teardown_duration_bucket_hits(mode, idx));
+        }
+        total
+    }
+    pub fn get_me_writer_teardown_duration_count(&self, mode: MeWriterTeardownMode) -> u64 {
+        self.me_writer_teardown_duration_count[mode.idx()].load(Ordering::Relaxed)
+    }
+    pub fn get_me_writer_teardown_duration_sum_seconds(&self, mode: MeWriterTeardownMode) -> f64 {
+        self.me_writer_teardown_duration_sum_micros[mode.idx()].load(Ordering::Relaxed) as f64
+            / 1_000_000.0
     }
     pub fn get_me_refill_triggered_total(&self) -> u64 {
         self.me_refill_triggered_total.load(Ordering::Relaxed)
@@ -419,25 +1596,61 @@ impl Stats {
     pub fn get_me_writer_restored_fallback_total(&self) -> u64 {
         self.me_writer_restored_fallback_total.load(Ordering::Relaxed)
     }
+    pub fn get_me_no_writer_failfast_total(&self) -> u64 {
+        self.me_no_writer_failfast_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_async_recovery_trigger_total(&self) -> u64 {
+        self.me_async_recovery_trigger_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_inline_recovery_total(&self) -> u64 {
+        self.me_inline_recovery_total.load(Ordering::Relaxed)
+    }
+    pub fn get_ip_reservation_rollback_tcp_limit_total(&self) -> u64 {
+        self.ip_reservation_rollback_tcp_limit_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_ip_reservation_rollback_quota_limit_total(&self) -> u64 {
+        self.ip_reservation_rollback_quota_limit_total
+            .load(Ordering::Relaxed)
+    }
     
     pub fn increment_user_connects(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.user_stats.entry(user.to_string()).or_default()
-            .connects.fetch_add(1, Ordering::Relaxed);
+        self.maybe_cleanup_user_stats();
+        if let Some(stats) = self.user_stats.get(user) {
+            Self::touch_user_stats(stats.value());
+            stats.connects.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+        stats.connects.fetch_add(1, Ordering::Relaxed);
     }
     
     pub fn increment_user_curr_connects(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.user_stats.entry(user.to_string()).or_default()
-            .curr_connects.fetch_add(1, Ordering::Relaxed);
+        self.maybe_cleanup_user_stats();
+        if let Some(stats) = self.user_stats.get(user) {
+            Self::touch_user_stats(stats.value());
+            stats.curr_connects.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+        stats.curr_connects.fetch_add(1, Ordering::Relaxed);
     }
     
     pub fn decrement_user_curr_connects(&self, user: &str) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
+        self.maybe_cleanup_user_stats();
         if let Some(stats) = self.user_stats.get(user) {
+            Self::touch_user_stats(stats.value());
             let counter = &stats.curr_connects;
             let mut current = counter.load(Ordering::Relaxed);
             loop {
@@ -467,32 +1680,60 @@ impl Stats {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.user_stats.entry(user.to_string()).or_default()
-            .octets_from_client.fetch_add(bytes, Ordering::Relaxed);
+        self.maybe_cleanup_user_stats();
+        if let Some(stats) = self.user_stats.get(user) {
+            Self::touch_user_stats(stats.value());
+            stats.octets_from_client.fetch_add(bytes, Ordering::Relaxed);
+            return;
+        }
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+        stats.octets_from_client.fetch_add(bytes, Ordering::Relaxed);
     }
     
     pub fn add_user_octets_to(&self, user: &str, bytes: u64) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.user_stats.entry(user.to_string()).or_default()
-            .octets_to_client.fetch_add(bytes, Ordering::Relaxed);
+        self.maybe_cleanup_user_stats();
+        if let Some(stats) = self.user_stats.get(user) {
+            Self::touch_user_stats(stats.value());
+            stats.octets_to_client.fetch_add(bytes, Ordering::Relaxed);
+            return;
+        }
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+        stats.octets_to_client.fetch_add(bytes, Ordering::Relaxed);
     }
     
     pub fn increment_user_msgs_from(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.user_stats.entry(user.to_string()).or_default()
-            .msgs_from_client.fetch_add(1, Ordering::Relaxed);
+        self.maybe_cleanup_user_stats();
+        if let Some(stats) = self.user_stats.get(user) {
+            Self::touch_user_stats(stats.value());
+            stats.msgs_from_client.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+        stats.msgs_from_client.fetch_add(1, Ordering::Relaxed);
     }
     
     pub fn increment_user_msgs_to(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.user_stats.entry(user.to_string()).or_default()
-            .msgs_to_client.fetch_add(1, Ordering::Relaxed);
+        self.maybe_cleanup_user_stats();
+        if let Some(stats) = self.user_stats.get(user) {
+            Self::touch_user_stats(stats.value());
+            stats.msgs_to_client.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+        stats.msgs_to_client.fetch_add(1, Ordering::Relaxed);
     }
     
     pub fn get_user_total_octets(&self, user: &str) -> u64 {
@@ -505,6 +1746,65 @@ impl Stats {
     }
     
     pub fn get_handshake_timeouts(&self) -> u64 { self.handshake_timeouts.load(Ordering::Relaxed) }
+    pub fn get_upstream_connect_attempt_total(&self) -> u64 {
+        self.upstream_connect_attempt_total.load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_success_total(&self) -> u64 {
+        self.upstream_connect_success_total.load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_fail_total(&self) -> u64 {
+        self.upstream_connect_fail_total.load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_failfast_hard_error_total(&self) -> u64 {
+        self.upstream_connect_failfast_hard_error_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_attempts_bucket_1(&self) -> u64 {
+        self.upstream_connect_attempts_bucket_1.load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_attempts_bucket_2(&self) -> u64 {
+        self.upstream_connect_attempts_bucket_2.load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_attempts_bucket_3_4(&self) -> u64 {
+        self.upstream_connect_attempts_bucket_3_4
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_attempts_bucket_gt_4(&self) -> u64 {
+        self.upstream_connect_attempts_bucket_gt_4
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_success_bucket_le_100ms(&self) -> u64 {
+        self.upstream_connect_duration_success_bucket_le_100ms
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_success_bucket_101_500ms(&self) -> u64 {
+        self.upstream_connect_duration_success_bucket_101_500ms
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_success_bucket_501_1000ms(&self) -> u64 {
+        self.upstream_connect_duration_success_bucket_501_1000ms
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_success_bucket_gt_1000ms(&self) -> u64 {
+        self.upstream_connect_duration_success_bucket_gt_1000ms
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_fail_bucket_le_100ms(&self) -> u64 {
+        self.upstream_connect_duration_fail_bucket_le_100ms
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_fail_bucket_101_500ms(&self) -> u64 {
+        self.upstream_connect_duration_fail_bucket_101_500ms
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_fail_bucket_501_1000ms(&self) -> u64 {
+        self.upstream_connect_duration_fail_bucket_501_1000ms
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_upstream_connect_duration_fail_bucket_gt_1000ms(&self) -> u64 {
+        self.upstream_connect_duration_fail_bucket_gt_1000ms
+            .load(Ordering::Relaxed)
+    }
 
     pub fn iter_user_stats(&self) -> dashmap::iter::Iter<'_, String, UserStats> {
         self.user_stats.iter()
@@ -783,6 +2083,79 @@ mod tests {
         assert_eq!(stats.get_me_crc_mismatch(), 0);
         assert_eq!(stats.get_me_keepalive_sent(), 0);
         assert_eq!(stats.get_me_route_drop_queue_full(), 0);
+    }
+
+    #[test]
+    fn test_teardown_counters_and_duration() {
+        let stats = Stats::new();
+        stats.increment_me_writer_teardown_attempt_total(
+            MeWriterTeardownReason::ReaderExit,
+            MeWriterTeardownMode::Normal,
+        );
+        stats.increment_me_writer_teardown_success_total(MeWriterTeardownMode::Normal);
+        stats.observe_me_writer_teardown_duration(
+            MeWriterTeardownMode::Normal,
+            Duration::from_millis(3),
+        );
+        stats.increment_me_writer_cleanup_side_effect_failures_total(
+            MeWriterCleanupSideEffectStep::CloseSignalChannelFull,
+        );
+
+        assert_eq!(
+            stats.get_me_writer_teardown_attempt_total(
+                MeWriterTeardownReason::ReaderExit,
+                MeWriterTeardownMode::Normal
+            ),
+            1
+        );
+        assert_eq!(
+            stats.get_me_writer_teardown_success_total(MeWriterTeardownMode::Normal),
+            1
+        );
+        assert_eq!(
+            stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal),
+            1
+        );
+        assert!(
+            stats.get_me_writer_teardown_duration_sum_seconds(MeWriterTeardownMode::Normal) > 0.0
+        );
+        assert_eq!(
+            stats.get_me_writer_cleanup_side_effect_failures_total(
+                MeWriterCleanupSideEffectStep::CloseSignalChannelFull
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn test_teardown_counters_respect_me_silent() {
+        let stats = Stats::new();
+        stats.apply_telemetry_policy(TelemetryPolicy {
+            core_enabled: true,
+            user_enabled: true,
+            me_level: MeTelemetryLevel::Silent,
+        });
+        stats.increment_me_writer_teardown_attempt_total(
+            MeWriterTeardownReason::ReaderExit,
+            MeWriterTeardownMode::Normal,
+        );
+        stats.increment_me_writer_teardown_timeout_total();
+        stats.observe_me_writer_teardown_duration(
+            MeWriterTeardownMode::Normal,
+            Duration::from_millis(1),
+        );
+        assert_eq!(
+            stats.get_me_writer_teardown_attempt_total(
+                MeWriterTeardownReason::ReaderExit,
+                MeWriterTeardownMode::Normal
+            ),
+            0
+        );
+        assert_eq!(stats.get_me_writer_teardown_timeout_total(), 0);
+        assert_eq!(
+            stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal),
+            0
+        );
     }
     
     #[test]

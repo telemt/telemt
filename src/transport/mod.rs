@@ -2,6 +2,7 @@
 
 pub mod pool;
 pub mod proxy_protocol;
+pub mod shadowsocks;
 pub mod socket;
 pub mod socks;
 pub mod upstream;
@@ -14,5 +15,8 @@ pub use socket::*;
 #[allow(unused_imports)]
 pub use socks::*;
 #[allow(unused_imports)]
-pub use upstream::{DcPingResult, StartupPingResult, UpstreamEgressInfo, UpstreamManager, UpstreamRouteKind};
+pub use upstream::{
+    DcPingResult, StartupPingResult, UpstreamEgressInfo, UpstreamManager, UpstreamRouteKind,
+    UpstreamStream,
+};
 pub mod middle_proxy;

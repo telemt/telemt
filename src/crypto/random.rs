@@ -21,6 +21,7 @@ struct SecureRandomInner {
     rng: StdRng,
     cipher: AesCtr,
     buffer: Vec<u8>,
+    buffer_start: usize,
 }
 
 impl Drop for SecureRandomInner {
@@ -48,6 +49,7 @@ impl SecureRandom {
                 rng,
                 cipher,
                 buffer: Vec::with_capacity(1024),
+                buffer_start: 0,
             }),
         }
     }
@@ -59,16 +61,29 @@ impl SecureRandom {
 
         let mut written = 0usize;
         while written < out.len() {
+            if inner.buffer_start >= inner.buffer.len() {
+                inner.buffer.clear();
+                inner.buffer_start = 0;
+            }
+
             if inner.buffer.is_empty() {
                 let mut chunk = vec![0u8; CHUNK_SIZE];
                 inner.rng.fill_bytes(&mut chunk);
                 inner.cipher.apply(&mut chunk);
                 inner.buffer.extend_from_slice(&chunk);
+                inner.buffer_start = 0;
             }
 
-            let take = (out.len() - written).min(inner.buffer.len());
-            out[written..written + take].copy_from_slice(&inner.buffer[..take]);
-            inner.buffer.drain(..take);
+            let available = inner.buffer.len().saturating_sub(inner.buffer_start);
+            let take = (out.len() - written).min(available);
+            let start = inner.buffer_start;
+            let end = start + take;
+            out[written..written + take].copy_from_slice(&inner.buffer[start..end]);
+            inner.buffer_start = end;
+            if inner.buffer_start >= inner.buffer.len() {
+                inner.buffer.clear();
+                inner.buffer_start = 0;
+            }
             written += take;
         }
     }

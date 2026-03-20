@@ -1,4 +1,5 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use bytes::Bytes;
 
 use crate::crypto::{AesCbc, crc32, crc32c};
 use crate::error::{ProxyError, Result};
@@ -6,8 +7,8 @@ use crate::protocol::constants::*;
 
 /// Commands sent to dedicated writer tasks to avoid mutex contention on TCP writes.
 pub(crate) enum WriterCommand {
-    Data(Vec<u8>),
-    DataAndFlush(Vec<u8>),
+    Data(Bytes),
+    DataAndFlush(Bytes),
     Close,
 }
 

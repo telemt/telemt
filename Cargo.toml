@@ -1,6 +1,6 @@
 [package]
 name = "telemt"
-version = "3.1.3"
+version = "3.3.28"
 edition = "2024"
 
 [dependencies]
@@ -26,6 +26,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 # Network
 socket2 = { version = "0.5", features = ["all"] }
 nix = { version = "0.28", default-features = false, features = ["net"] }
+shadowsocks = { version = "1.24", features = ["aead-cipher-2022"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -40,6 +41,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 dashmap = "5.5"
+arc-swap = "1.7"
 lru = "0.16"
 rand = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
@@ -73,3 +75,6 @@ futures = "0.3"
 [[bench]]
 name = "crypto_bench"
 harness = false
+
+[profile.release]
+lto = "thin"

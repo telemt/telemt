@@ -48,11 +48,16 @@ python3 -c 'import os; print(os.urandom(16).hex())'
 
 ---
 
-**1. Поместите свою конфигурацию в файл /etc/telemt.toml**
+**1. Поместите свою конфигурацию в файл /etc/telemt/telemt.toml**
+
+Создаём директорию для конфига:
+```bash
+mkdir /etc/telemt
+```
 
 Открываем nano
 ```bash
-nano /etc/telemt.toml
+nano /etc/telemt/telemt.toml
 ```
 Вставьте свою конфигурацию
 
@@ -60,11 +65,21 @@ nano /etc/telemt.toml
 # === General Settings ===
 [general]
 # ad_tag = "00000000000000000000000000000000"
+use_middle_proxy = false
 
 [general.modes]
 classic = false
 secure = false
 tls = true
+
+[server]
+port = 443
+
+[server.api]
+enabled = true
+# listen = "127.0.0.1:9091"
+# whitelist = ["127.0.0.1/32"]
+# read_only = true
 
 # === Anti-Censorship & Masking ===
 [censorship]
@@ -74,6 +89,7 @@ tls_domain = "petrovich.ru"
 # format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
 ```
+
 Затем нажмите Ctrl+S -> Ctrl+X, чтобы сохранить
 
 > [!WARNING]
@@ -82,7 +98,14 @@ hello = "00000000000000000000000000000000"
 
 ---
 
-**2. Создайте службу в /etc/systemd/system/telemt.service**
+**2. Создайте пользователя для telemt**
+
+```bash
+useradd -d /opt/telemt -m -r -U telemt
+chown -R telemt:telemt /etc/telemt
+```
+
+**3. Создайте службу в /etc/systemd/system/telemt.service**
 
 Открываем nano
 ```bash
@@ -93,28 +116,45 @@ nano /etc/systemd/system/telemt.service
 ```bash
 [Unit]
 Description=Telemt
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/bin
-ExecStart=/bin/telemt /etc/telemt.toml
+User=telemt
+Group=telemt
+WorkingDirectory=/opt/telemt
+ExecStart=/bin/telemt /etc/telemt/telemt.toml
 Restart=on-failure
 LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 ```
 Затем нажмите Ctrl+S -> Ctrl+X, чтобы сохранить
 
+перезагрузите конфигурацию systemd
+```bash
+systemctl daemon-reload
+```
 
-**3.** Для запуска введите команду `systemctl start telemt`
+**4.** Для запуска введите команду `systemctl start telemt`
 
-**4.** Для получения информации о статусе введите `systemctl status telemt`
+**5.** Для получения информации о статусе введите `systemctl status telemt`
 
-**5.** Для автоматического запуска при запуске системы в введите `systemctl enable telemt`
+**6.** Для автоматического запуска при запуске системы в введите `systemctl enable telemt`
 
-**6.** Для получите ссылки введите `journalctl -u telemt -n -g "links" --no-pager -o cat | tac`
+**7.** Для получения ссылки/ссылок введите 
+```bash
+curl -s http://127.0.0.1:9091/v1/users | jq
+```
+> Одной ссылкой может пользоваться сколько угодно человек.
+
+> [!WARNING]
+> Рабочую ссылку может выдать только команда из 7 пункта. Не пытайтесь делать ее самостоятельно или копировать откуда-либо если вы не уверены в том, что делаете!
 
 ---
 
@@ -143,6 +183,8 @@ docker compose down
 docker build -t telemt:local .
 docker run --name telemt --restart unless-stopped \
   -p 443:443 \
+  -p 9090:9090 \
+  -p 9091:9091 \
   -e RUST_LOG=info \
   -v "$PWD/config.toml:/app/config.toml:ro" \
   --read-only \

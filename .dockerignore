@@ -1,0 +1,8 @@
+.git
+.github
+target
+.kilocode
+cache
+tlsfront
+*.tar
+*.tar.gz

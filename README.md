@@ -1,6 +1,13 @@
 # Telemt - MTProxy on Rust + Tokio
 
-**Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements such as connection pooling, replay protection, detailed statistics, masking from "prying" eyes
+***Löst Probleme, bevor andere überhaupt wissen, dass sie existieren*** / ***It solves problems before others even realize they exist***
+
+**Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements such as:
+- [ME Pool + Reader/Writer + Registry + Refill + Adaptive Floor + Trio-State + Generation Lifecycle](https://github.com/telemt/telemt/blob/main/docs/model/MODEL.en.md)
+- [Full-covered API w/ management](https://github.com/telemt/telemt/blob/main/docs/API.md)
+- Anti-Replay on Sliding Window
+- Prometheus-format Metrics
+- TLS-Fronting and TCP-Splicing for masking from "prying" eyes
 
 [**Telemt Chat in Telegram**](https://t.me/telemtrs)
 
@@ -12,18 +19,11 @@
 
 ### 🇷🇺 RU
 
-#### Релиз 3.0.15 — 25 февраля
+#### О релизах
 
-25 февраля мы выпустили версию **3.0.15**
+[3.3.27](https://github.com/telemt/telemt/releases/tag/3.3.27) даёт баланс стабильности и передового функционала, а так же последние исправления по безопасности и багам
 
-Мы предполагаем, что она станет завершающей версией поколения 3.0 и уже сейчас мы рассматриваем её как **LTS-кандидата** для версии **3.1.0**!
-
-После нескольких дней детального анализа особенностей работы Middle-End мы спроектировали и реализовали продуманный режим **ротации ME Writer**. Данный режим позволяет поддерживать стабильно высокую производительность в long-run сценариях без возникновения ошибок, связанных с некорректной конфигурацией прокси
-
-Будем рады вашему фидбеку и предложениям по улучшению — особенно в части **статистики** и **UX**
-
-Релиз:  
-[3.0.15](https://github.com/telemt/telemt/releases/tag/3.0.15)
+Будем рады вашему фидбеку и предложениям по улучшению — особенно в части **API**, **статистики**, **UX**
 
 ---
 
@@ -40,18 +40,11 @@
 
 ### 🇬🇧 EN
 
-#### Release 3.0.15 — February 25
+#### About releases
 
-On February 25, we released version **3.0.15**
+[3.3.27](https://github.com/telemt/telemt/releases/tag/3.3.27) provides a balance of stability and advanced functionality, as well as the latest security and bug fixes
 
-We expect this to become the final release of the 3.0 generation and at this point, we already see it as a strong **LTS candidate** for the upcoming **3.1.0** release!
-
-After several days of deep analysis of Middle-End behavior, we designed and implemented a well-engineered **ME Writer rotation mode**. This mode enables sustained high throughput in long-run scenarios while preventing proxy misconfiguration errors
-
-We are looking forward to your feedback and improvement proposals — especially regarding **statistics** and **UX**
-
-Release:  
-[3.0.15](https://github.com/telemt/telemt/releases/tag/3.0.15)
+We are looking forward to your feedback and improvement proposals — especially regarding **API**, **statistics**, **UX**
 
 ---
 
@@ -74,31 +67,6 @@ We welcome ideas, architectural feedback, and pull requests.
 
 ⚓ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared to other implementations of connecting to the Middle-End Proxy: non dramatically, but usual
 
-# GOTO
-- [Features](#features)
-- [Quick Start Guide](#quick-start-guide)
-- [How to use?](#how-to-use)
-  - [Systemd Method](#telemt-via-systemd)
-- [Configuration](#configuration)
-  - [Minimal Configuration](#minimal-configuration-for-first-start)
-  - [Advanced](#advanced)
-    - [Adtag](#adtag)
-    - [Listening and Announce IPs](#listening-and-announce-ips)
-    - [Upstream Manager](#upstream-manager)
-      - [IP](#bind-on-ip)
-      - [SOCKS](#socks45-as-upstream)
-- [FAQ](#faq)
-  - [Recognizability for DPI + crawler](#recognizability-for-dpi-and-crawler)
-  - [Telegram Calls](#telegram-calls-via-mtproxy)
-  - [DPI](#how-does-dpi-see-mtproxy-tls)
-  - [Whitelist on Network Level](#whitelist-on-ip)
-  - [Too many open files](#too-many-open-files)
-- [Build](#build)
-- [Docker](#docker)
-- [Why Rust?](#why-rust)
-
-## Features
-
 - Full support for all official MTProto proxy modes:
   - Classic
   - Secure - with `dd` prefix
@@ -109,156 +77,31 @@ We welcome ideas, architectural feedback, and pull requests.
 - Graceful shutdown on Ctrl+C
 - Extensive logging via `trace` and `debug` with `RUST_LOG` method
 
+# GOTO
+- [Quick Start Guide](#quick-start-guide)
+- [FAQ](#faq)
+  - [Recognizability for DPI and crawler](#recognizability-for-dpi-and-crawler)
+    - [Client WITH secret-key accesses the MTProxy resource:](#client-with-secret-key-accesses-the-mtproxy-resource)
+    - [Client WITHOUT secret-key gets transparent access to the specified resource:](#client-without-secret-key-gets-transparent-access-to-the-specified-resource)
+  - [Telegram Calls via MTProxy](#telegram-calls-via-mtproxy)
+  - [How does DPI see MTProxy TLS?](#how-does-dpi-see-mtproxy-tls)
+  - [Whitelist on IP](#whitelist-on-ip)
+  - [Too many open files](#too-many-open-files)
+- [Build](#build)
+- [Why Rust?](#why-rust)
+- [Issues](#issues)
+- [Roadmap](#roadmap)
+
+
 ## Quick Start Guide
-**This software is designed for Debian-based OS: in addition to Debian, these are Ubuntu, Mint, Kali, MX and many other Linux**
-1. Download release
-```bash
-wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
-```
-2. Move to Bin Folder
-```bash
-mv telemt /bin
-```
-4. Make Executable
-```bash
-chmod +x /bin/telemt
-```
-5. Go to [How to use?](#how-to-use) section for for further steps
-
-## How to use?
-### Telemt via Systemd
-**This instruction "assume" that you:**
-- logged in as root or executed `su -` / `sudo su`
-- you already have an assembled and executable `telemt` in /bin folder as a result of the [Quick Start Guide](#quick-start-guide) or [Build](#build)
-
-**0. Check port and generate secrets**
-
-The port you have selected for use should be MISSING from the list, when:
-```bash
-netstat -lnp
-```
-
-Generate 16 bytes/32 characters HEX with OpenSSL or another way:
-```bash
-openssl rand -hex 16
-```
-OR
-```bash
-xxd -l 16 -p /dev/urandom
-```
-OR
-```bash
-python3 -c 'import os; print(os.urandom(16).hex())'
-```
-
-**1. Place your config to /etc/telemt.toml**
-
-Open nano
-```bash
-nano /etc/telemt.toml
-```
-paste your config from [Configuration](#configuration) section
-
-then Ctrl+X -> Y -> Enter to save
-
-**2. Create service on /etc/systemd/system/telemt.service**
-
-Open nano
-```bash
-nano /etc/systemd/system/telemt.service
-```
-paste this Systemd Module
-```bash
-[Unit]
-Description=Telemt
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/bin
-ExecStart=/bin/telemt /etc/telemt.toml
-Restart=on-failure
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-```
-then Ctrl+X -> Y -> Enter to save
-
-**3.**  In Shell type `systemctl start telemt` - it must start with zero exit-code
-
-**4.** In Shell type `systemctl status telemt` - there you can reach info about current MTProxy status
-
-**5.** In Shell type `systemctl enable telemt` - then telemt will start with system startup, after the network is up
-
-**6.** In Shell type `journalctl -u telemt -n -g "links" --no-pager -o cat | tac` - get the connection links
-
-## Configuration
-### Minimal Configuration for First Start
-```toml
-# === General Settings ===
-[general]
-# ad_tag = "00000000000000000000000000000000"
-
-[general.modes]
-classic = false
-secure = false
-tls = true
-
-# === Anti-Censorship & Masking ===
-[censorship]
-tls_domain = "petrovich.ru"
-
-[access.users]
-# format: "username" = "32_hex_chars_secret"
-hello = "00000000000000000000000000000000"
-
-```
-### Advanced
-#### Adtag
-To use channel advertising and usage statistics from Telegram, get Adtag from [@mtproxybot](https://t.me/mtproxybot), add this parameter to section `[General]`
-```toml
-ad_tag = "00000000000000000000000000000000" # Replace zeros to your adtag from @mtproxybot
-```
-#### Listening and Announce IPs
-To specify listening address and/or address in links, add to section `[[server.listeners]]` of config.toml:
-```toml
-[[server.listeners]]
-ip = "0.0.0.0"          # 0.0.0.0 = all IPs; your IP = specific listening
-announce_ip = "1.2.3.4" # IP in links; comment with # if not used
-```
-#### Upstream Manager
-To specify upstream, add to section `[[upstreams]]` of config.toml:
-##### Bind on IP
-```toml
-[[upstreams]]
-type = "direct"
-weight = 1
-enabled = true
-interface = "192.168.1.100" # Change to your outgoing IP
-```
-##### SOCKS4/5 as Upstream
-- Without Auth:
-```toml
-[[upstreams]]
-type = "socks5"            # Specify SOCKS4 or SOCKS5
-address = "1.2.3.4:1234"   # SOCKS-server Address
-weight = 1                 # Set Weight for Scenarios
-enabled = true
-```
-
-- With Auth:
-```toml
-[[upstreams]]
-type = "socks5"            # Specify SOCKS4 or SOCKS5
-address = "1.2.3.4:1234"   # SOCKS-server Address
-username = "user"          # Username for Auth on SOCKS-server
-password = "pass"          # Password for Auth on SOCKS-server
-weight = 1                 # Set Weight for Scenarios
-enabled = true
-```
+- [Quick Start Guide RU](docs/QUICK_START_GUIDE.ru.md)
+- [Quick Start Guide EN](docs/QUICK_START_GUIDE.en.md)
 
 ## FAQ
+
+- [FAQ RU](docs/FAQ.ru.md)
+- [FAQ EN](docs/FAQ.en.md)
+
 ### Recognizability for DPI and crawler
 Since version 1.1.0.0, we have debugged masking perfectly: for all clients without "presenting" a key, 
 we transparently direct traffic to the target host!
@@ -395,6 +238,11 @@ git clone https://github.com/telemt/telemt
 cd telemt
 # Starting Release Build
 cargo build --release
+
+# Low-RAM devices (1 GB, e.g. NanoPi Neo3 / Raspberry Pi Zero 2):
+# release profile uses lto = "thin" to reduce peak linker memory.
+# If your custom toolchain overrides profiles, avoid enabling fat LTO.
+
 # Move to /bin
 mv ./target/release/telemt /bin
 # Make executable
@@ -403,40 +251,11 @@ chmod +x /bin/telemt
 telemt config.toml
 ```
 
-## Docker
-**Quick start (Docker Compose)**
+### OpenBSD
+- Build and service setup guide: [OpenBSD Guide (EN)](docs/OPENBSD.en.md)
+- Example rc.d script: [contrib/openbsd/telemt.rcd](contrib/openbsd/telemt.rcd)
+- Status: OpenBSD sandbox hardening with `pledge(2)` and `unveil(2)` is not implemented yet.
 
-1. Edit `config.toml` in repo root (at least: port, users secrets, tls_domain)
-2. Start container:
-```bash
-docker compose up -d --build
-```
-3. Check logs:
-```bash
-docker compose logs -f telemt
-```
-4. Stop:
-```bash
-docker compose down
-```
-
-**Notes**
-- `docker-compose.yml` maps `./config.toml` to `/app/config.toml` (read-only)
-- By default it publishes `443:443` and runs with dropped capabilities (only `NET_BIND_SERVICE` is added)
-- If you really need host networking (usually only for some IPv6 setups) uncomment `network_mode: host`
-
-**Run without Compose**
-```bash
-docker build -t telemt:local .
-docker run --name telemt --restart unless-stopped \
-  -p 443:443 \
-  -e RUST_LOG=info \
-  -v "$PWD/config.toml:/app/config.toml:ro" \
-  --read-only \
-  --cap-drop ALL --cap-add NET_BIND_SERVICE \
-  --ulimit nofile=65536:65536 \
-  telemt:local
-```
 
 ## Why Rust?
 - Long-running reliability and idempotent behavior

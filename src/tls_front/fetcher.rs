@@ -7,29 +7,29 @@ use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::time::timeout;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 use tracing::{debug, warn};
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError};
 
-use x509_parser::prelude::FromDer;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 
 use crate::crypto::SecureRandom;
 use crate::network::dns_overrides::resolve_socket_addr;
-use crate::protocol::constants::{TLS_RECORD_APPLICATION, TLS_RECORD_HANDSHAKE};
-use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
-use crate::tls_front::types::{
-    ParsedCertificateInfo,
-    ParsedServerHello,
-    TlsCertPayload,
-    TlsExtension,
-    TlsFetchResult,
+use crate::protocol::constants::{
+    TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
 };
+use crate::tls_front::types::{
+    ParsedCertificateInfo, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsExtension,
+    TlsFetchResult, TlsProfileSource,
+};
+use crate::transport::UpstreamStream;
+use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 
 /// No-op verifier: accept any certificate (we only need lengths and metadata).
 #[derive(Debug)]
@@ -140,21 +140,27 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     exts.extend_from_slice(&0x000au16.to_be_bytes());
     exts.extend_from_slice(&((2 + groups.len() * 2) as u16).to_be_bytes());
     exts.extend_from_slice(&(groups.len() as u16 * 2).to_be_bytes());
-    for g in groups { exts.extend_from_slice(&g.to_be_bytes()); }
+    for g in groups {
+        exts.extend_from_slice(&g.to_be_bytes());
+    }
 
     // signature_algorithms
     let sig_algs: [u16; 4] = [0x0804, 0x0805, 0x0403, 0x0503]; // rsa_pss_rsae_sha256/384, ecdsa_secp256r1_sha256, rsa_pkcs1_sha256
     exts.extend_from_slice(&0x000du16.to_be_bytes());
     exts.extend_from_slice(&((2 + sig_algs.len() * 2) as u16).to_be_bytes());
     exts.extend_from_slice(&(sig_algs.len() as u16 * 2).to_be_bytes());
-    for a in sig_algs { exts.extend_from_slice(&a.to_be_bytes()); }
+    for a in sig_algs {
+        exts.extend_from_slice(&a.to_be_bytes());
+    }
 
     // supported_versions (TLS1.3 + TLS1.2)
     let versions: [u16; 2] = [0x0304, 0x0303];
     exts.extend_from_slice(&0x002bu16.to_be_bytes());
     exts.extend_from_slice(&((1 + versions.len() * 2) as u16).to_be_bytes());
     exts.push((versions.len() * 2) as u8);
-    for v in versions { exts.extend_from_slice(&v.to_be_bytes()); }
+    for v in versions {
+        exts.extend_from_slice(&v.to_be_bytes());
+    }
 
     // key_share (x25519)
     let key = gen_key_share(rng);
@@ -269,7 +275,10 @@ fn parse_server_hello(body: &[u8]) -> Option<ParsedServerHello> {
         pos += 4;
         let data = body.get(pos..pos + elen)?.to_vec();
         pos += elen;
-        extensions.push(TlsExtension { ext_type: etype, data });
+        extensions.push(TlsExtension {
+            ext_type: etype,
+            data,
+        });
     }
 
     Some(ParsedServerHello {
@@ -280,6 +289,41 @@ fn parse_server_hello(body: &[u8]) -> Option<ParsedServerHello> {
         compression,
         extensions,
     })
+}
+
+fn derive_behavior_profile(records: &[(u8, Vec<u8>)]) -> TlsBehaviorProfile {
+    let mut change_cipher_spec_count = 0u8;
+    let mut app_data_record_sizes = Vec::new();
+
+    for (record_type, body) in records {
+        match *record_type {
+            TLS_RECORD_CHANGE_CIPHER => {
+                change_cipher_spec_count = change_cipher_spec_count.saturating_add(1);
+            }
+            TLS_RECORD_APPLICATION => {
+                app_data_record_sizes.push(body.len());
+            }
+            _ => {}
+        }
+    }
+
+    let mut ticket_record_sizes = Vec::new();
+    while app_data_record_sizes
+        .last()
+        .is_some_and(|size| *size <= 256 && ticket_record_sizes.len() < 2)
+    {
+        if let Some(size) = app_data_record_sizes.pop() {
+            ticket_record_sizes.push(size);
+        }
+    }
+    ticket_record_sizes.reverse();
+
+    TlsBehaviorProfile {
+        change_cipher_spec_count: change_cipher_spec_count.max(1),
+        app_data_record_sizes,
+        ticket_record_sizes,
+        source: TlsProfileSource::Raw,
+    }
 }
 
 fn parse_cert_info(certs: &[CertificateDer<'static>]) -> Option<ParsedCertificateInfo> {
@@ -355,37 +399,42 @@ async fn connect_tcp_with_upstream(
     port: u16,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
-) -> Result<TcpStream> {
+    scope: Option<&str>,
+) -> Result<UpstreamStream> {
     if let Some(manager) = upstream {
         if let Some(addr) = resolve_socket_addr(host, port) {
-            match manager.connect(addr, None, None).await {
+            match manager.connect(addr, None, scope).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     warn!(
                         host = %host,
                         port = port,
+                        scope = ?scope,
                         error = %e,
                         "Upstream connect failed, using direct connect"
                     );
                 }
             }
-        } else if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
-            if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
-                match manager.connect(addr, None, None).await {
-                    Ok(stream) => return Ok(stream),
-                    Err(e) => {
-                        warn!(
-                            host = %host,
-                            port = port,
-                            error = %e,
-                            "Upstream connect failed, using direct connect"
-                        );
-                    }
+        } else if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await
+            && let Some(addr) = addrs.find(|a| a.is_ipv4())
+        {
+            match manager.connect(addr, None, scope).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    warn!(
+                        host = %host,
+                        port = port,
+                        scope = ?scope,
+                        error = %e,
+                        "Upstream connect failed, using direct connect"
+                    );
                 }
             }
         }
     }
-    connect_with_dns_override(host, port, connect_timeout).await
+    Ok(UpstreamStream::Tcp(
+        connect_with_dns_override(host, port, connect_timeout).await?,
+    ))
 }
 
 fn encode_tls13_certificate_message(cert_chain_der: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -404,9 +453,7 @@ fn encode_tls13_certificate_message(cert_chain_der: &[Vec<u8>]) -> Option<Vec<u8
     }
 
     // Certificate = context_len(1) + certificate_list_len(3) + entries
-    let body_len = 1usize
-        .checked_add(3)?
-        .checked_add(certificate_list.len())?;
+    let body_len = 1usize.checked_add(3)?.checked_add(certificate_list.len())?;
 
     let mut message = Vec::with_capacity(4 + body_len);
     message.push(0x0b); // HandshakeType::certificate
@@ -443,39 +490,50 @@ where
     .await??;
 
     let mut records = Vec::new();
-    // Read up to 4 records: ServerHello, CCS, and up to two ApplicationData.
-    for _ in 0..4 {
+    let mut app_records_seen = 0usize;
+    // Read a bounded encrypted flight: ServerHello, CCS, certificate-like data,
+    // and a small number of ticket-like tail records.
+    for _ in 0..8 {
         match timeout(connect_timeout, read_tls_record(&mut stream)).await {
-            Ok(Ok(rec)) => records.push(rec),
+            Ok(Ok(rec)) => {
+                if rec.0 == TLS_RECORD_APPLICATION {
+                    app_records_seen += 1;
+                }
+                records.push(rec);
+            }
             Ok(Err(e)) => return Err(e),
             Err(_) => break,
         }
-        if records.len() >= 3 && records.iter().any(|(t, _)| *t == TLS_RECORD_APPLICATION) {
+        if app_records_seen >= 4 {
             break;
         }
     }
 
-    let mut app_sizes = Vec::new();
     let mut server_hello = None;
     for (t, body) in &records {
         if *t == TLS_RECORD_HANDSHAKE && server_hello.is_none() {
             server_hello = parse_server_hello(body);
-        } else if *t == TLS_RECORD_APPLICATION {
-            app_sizes.push(body.len());
         }
     }
 
     let parsed = server_hello.ok_or_else(|| anyhow!("ServerHello not received"))?;
+    let behavior_profile = derive_behavior_profile(&records);
+    let mut app_sizes = behavior_profile.app_data_record_sizes.clone();
+    app_sizes.extend_from_slice(&behavior_profile.ticket_record_sizes);
     let total_app_data_len = app_sizes.iter().sum::<usize>().max(1024);
+    let app_data_records_sizes = behavior_profile
+        .app_data_record_sizes
+        .first()
+        .copied()
+        .or_else(|| behavior_profile.ticket_record_sizes.first().copied())
+        .map(|size| vec![size])
+        .unwrap_or_else(|| vec![total_app_data_len]);
 
     Ok(TlsFetchResult {
         server_hello_parsed: parsed,
-        app_data_records_sizes: if app_sizes.is_empty() {
-            vec![total_app_data_len]
-        } else {
-            app_sizes
-        },
+        app_data_records_sizes,
         total_app_data_len,
+        behavior_profile,
         cert_info: None,
         cert_payload: None,
     })
@@ -487,6 +545,7 @@ async fn fetch_via_raw_tls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
 ) -> Result<TlsFetchResult> {
@@ -499,7 +558,8 @@ async fn fetch_via_raw_tls(
                     sock = %sock_path,
                     "Raw TLS fetch using mask unix socket"
                 );
-                return fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol).await;
+                return fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol)
+                    .await;
             }
             Ok(Err(e)) => {
                 warn!(
@@ -522,7 +582,7 @@ async fn fetch_via_raw_tls(
     #[cfg(not(unix))]
     let _ = unix_sock;
 
-    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream).await?;
+    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope).await?;
     fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol).await
 }
 
@@ -566,12 +626,13 @@ where
         .map(|slice| slice.to_vec())
         .unwrap_or_default();
     let cert_chain_der: Vec<Vec<u8>> = certs.iter().map(|c| c.as_ref().to_vec()).collect();
-    let cert_payload = encode_tls13_certificate_message(&cert_chain_der).map(|certificate_message| {
-        TlsCertPayload {
-            cert_chain_der: cert_chain_der.clone(),
-            certificate_message,
-        }
-    });
+    let cert_payload =
+        encode_tls13_certificate_message(&cert_chain_der).map(|certificate_message| {
+            TlsCertPayload {
+                cert_chain_der: cert_chain_der.clone(),
+                certificate_message,
+            }
+        });
 
     let total_cert_len = cert_payload
         .as_ref()
@@ -608,6 +669,12 @@ where
         server_hello_parsed: parsed,
         app_data_records_sizes: app_data_records_sizes.clone(),
         total_app_data_len: app_data_records_sizes.iter().sum(),
+        behavior_profile: TlsBehaviorProfile {
+            change_cipher_spec_count: 1,
+            app_data_record_sizes: app_data_records_sizes,
+            ticket_record_sizes: Vec::new(),
+            source: TlsProfileSource::Rustls,
+        },
         cert_info,
         cert_payload,
     })
@@ -619,6 +686,7 @@ async fn fetch_via_rustls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
 ) -> Result<TlsFetchResult> {
@@ -654,7 +722,7 @@ async fn fetch_via_rustls(
     #[cfg(not(unix))]
     let _ = unix_sock;
 
-    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream).await?;
+    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope).await?;
     fetch_via_rustls_stream(stream, host, sni, proxy_protocol).await
 }
 
@@ -670,6 +738,7 @@ pub async fn fetch_real_tls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
 ) -> Result<TlsFetchResult> {
@@ -679,6 +748,7 @@ pub async fn fetch_real_tls(
         sni,
         connect_timeout,
         upstream.clone(),
+        scope,
         proxy_protocol,
         unix_sock,
     )
@@ -697,6 +767,7 @@ pub async fn fetch_real_tls(
         sni,
         connect_timeout,
         upstream,
+        scope,
         proxy_protocol,
         unix_sock,
     )
@@ -706,6 +777,7 @@ pub async fn fetch_real_tls(
             if let Some(mut raw) = raw_result {
                 raw.cert_info = rustls_result.cert_info;
                 raw.cert_payload = rustls_result.cert_payload;
+                raw.behavior_profile.source = TlsProfileSource::Merged;
                 debug!(sni = %sni, "Fetched TLS metadata via raw probe + rustls cert chain");
                 Ok(raw)
             } else {
@@ -725,7 +797,11 @@ pub async fn fetch_real_tls(
 
 #[cfg(test)]
 mod tests {
-    use super::encode_tls13_certificate_message;
+    use super::{derive_behavior_profile, encode_tls13_certificate_message};
+    use crate::protocol::constants::{
+        TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
+    };
+    use crate::tls_front::types::TlsProfileSource;
 
     fn read_u24(bytes: &[u8]) -> usize {
         ((bytes[0] as usize) << 16) | ((bytes[1] as usize) << 8) | (bytes[2] as usize)
@@ -752,5 +828,21 @@ mod tests {
     #[test]
     fn test_encode_tls13_certificate_message_empty_chain() {
         assert!(encode_tls13_certificate_message(&[]).is_none());
+    }
+
+    #[test]
+    fn test_derive_behavior_profile_splits_ticket_like_tail_records() {
+        let profile = derive_behavior_profile(&[
+            (TLS_RECORD_HANDSHAKE, vec![0u8; 90]),
+            (TLS_RECORD_CHANGE_CIPHER, vec![0x01]),
+            (TLS_RECORD_APPLICATION, vec![0u8; 1400]),
+            (TLS_RECORD_APPLICATION, vec![0u8; 220]),
+            (TLS_RECORD_APPLICATION, vec![0u8; 180]),
+        ]);
+
+        assert_eq!(profile.change_cipher_spec_count, 1);
+        assert_eq!(profile.app_data_record_sizes, vec![1400]);
+        assert_eq!(profile.ticket_record_sizes, vec![220, 180]);
+        assert_eq!(profile.source, TlsProfileSource::Raw);
     }
 }

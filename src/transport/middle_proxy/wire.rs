@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use bytes::Bytes;
 
 use crate::protocol::constants::*;
 
@@ -48,7 +49,7 @@ pub(crate) fn build_proxy_req_payload(
     data: &[u8],
     proxy_tag: Option<&[u8]>,
     proto_flags: u32,
-) -> Vec<u8> {
+) -> Bytes {
     let mut b = Vec::with_capacity(128 + data.len());
 
     b.extend_from_slice(&RPC_PROXY_REQ_U32.to_le_bytes());
@@ -85,7 +86,7 @@ pub(crate) fn build_proxy_req_payload(
     }
 
     b.extend_from_slice(data);
-    b
+    Bytes::from(b)
 }
 
 pub fn proto_flags_for_tag(tag: crate::protocol::constants::ProtoTag, has_proxy_tag: bool) -> u32 {

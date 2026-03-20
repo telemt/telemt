@@ -82,7 +82,7 @@ Die unten angegebenen `Default`-Werte sind Code-Defaults (bei fehlendem Schlüss
 
 | Feld | Gilt für | Typ | Pflicht | Default | Bedeutung |
 |---|---|---|---|---|---|
-| `[[upstreams]].type` | alle Upstreams | `"direct" \| "socks4" \| "socks5"` | ja | n/a | Upstream-Transporttyp. |
+| `[[upstreams]].type` | alle Upstreams | `"direct" \| "socks4" \| "socks5" \| "shadowsocks"` | ja | n/a | Upstream-Transporttyp. |
 | `[[upstreams]].weight` | alle Upstreams | `u16` | nein | `1` | Basisgewicht für weighted-random Auswahl. |
 | `[[upstreams]].enabled` | alle Upstreams | `bool` | nein | `true` | Deaktivierte Einträge werden beim Start ignoriert. |
 | `[[upstreams]].scopes` | alle Upstreams | `String` | nein | `""` | Komma-separierte Scope-Tags für Request-Routing. |
@@ -95,6 +95,8 @@ Die unten angegebenen `Default`-Werte sind Code-Defaults (bei fehlendem Schlüss
 | `interface` | `socks5` | `Option<String>` | nein | `null` | Wird nur genutzt, wenn `address` als `ip:port` angegeben ist. |
 | `username` | `socks5` | `Option<String>` | nein | `null` | SOCKS5 Benutzername. |
 | `password` | `socks5` | `Option<String>` | nein | `null` | SOCKS5 Passwort. |
+| `url` | `shadowsocks` | `String` | ja | n/a | Shadowsocks-SIP002-URL (`ss://...`). In Runtime-APIs wird nur `host:port` offengelegt. |
+| `interface` | `shadowsocks` | `Option<String>` | nein | `null` | Optionales ausgehendes Bind-Interface oder lokale Literal-IP. |
 
 ### Runtime-Regeln (wichtig)
 
@@ -115,6 +117,7 @@ Die unten angegebenen `Default`-Werte sind Code-Defaults (bei fehlendem Schlüss
 8. Im ME-Modus wird der gewählte Upstream auch für den ME-TCP-Dial-Pfad verwendet.
 9. Im ME-Modus ist bei `direct` mit bind/interface die STUN-Reflection bind-aware für KDF-Adressmaterial.
 10. Im ME-Modus werden bei SOCKS-Upstream `BND.ADDR/BND.PORT` für KDF verwendet, wenn gültig/öffentlich und gleiche IP-Familie.
+11. `shadowsocks`-Upstreams erfordern `general.use_middle_proxy = false`. Mit aktiviertem ME-Modus schlägt das Laden der Config sofort fehl.
 
 ## Upstream-Konfigurationsbeispiele
 
@@ -150,7 +153,20 @@ weight = 2
 enabled = true
 ```
 
-### Beispiel 4: Gemischte Upstreams mit Scopes
+### Beispiel 4: Shadowsocks-Upstream
+
+```toml
+[general]
+use_middle_proxy = false
+
+[[upstreams]]
+type = "shadowsocks"
+url = "ss://2022-blake3-aes-256-gcm:BASE64_KEY@198.51.100.50:8388"
+weight = 2
+enabled = true
+```
+
+### Beispiel 5: Gemischte Upstreams mit Scopes
 
 ```toml
 [[upstreams]]

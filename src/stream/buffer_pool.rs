@@ -14,8 +14,7 @@ use std::sync::Arc;
 // ============= Configuration =============
 
 /// Default buffer size
-/// CHANGED: Reduced from 64KB to 16KB to match TLS record size and prevent bufferbloat.
-pub const DEFAULT_BUFFER_SIZE: usize = 16 * 1024;
+pub const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Default maximum number of pooled buffers
 pub const DEFAULT_MAX_BUFFERS: usize = 1024;

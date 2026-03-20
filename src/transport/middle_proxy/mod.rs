@@ -10,6 +10,7 @@ mod pool_init;
 mod pool_nat;
 mod pool_refill;
 mod pool_reinit;
+mod pool_runtime_api;
 mod pool_writer;
 mod ping;
 mod reader;
@@ -17,11 +18,19 @@ mod registry;
 mod rotation;
 mod send;
 mod secret;
+mod selftest;
 mod wire;
+mod pool_status;
+#[cfg(test)]
+mod health_regression_tests;
+#[cfg(test)]
+mod health_integration_tests;
+#[cfg(test)]
+mod health_adversarial_tests;
 
 use bytes::Bytes;
 
-pub use health::me_health_monitor;
+pub use health::{me_drain_timeout_enforcer, me_health_monitor, me_zombie_writer_watchdog};
 #[allow(unused_imports)]
 pub use ping::{run_me_ping, format_sample_line, format_me_route, MePingReport, MePingSample, MePingFamily};
 pub use pool::MePool;
@@ -29,8 +38,15 @@ pub use pool::MePool;
 pub use pool_nat::{stun_probe, detect_public_ip};
 pub use registry::ConnRegistry;
 pub use secret::fetch_proxy_secret;
-pub use config_updater::{fetch_proxy_config, me_config_updater};
-pub use rotation::me_rotation_task;
+#[allow(unused_imports)]
+pub use config_updater::{
+    ProxyConfigData, fetch_proxy_config, fetch_proxy_config_with_raw, load_proxy_config_cache,
+    me_config_updater, save_proxy_config_cache,
+};
+pub use rotation::{MeReinitTrigger, me_reinit_scheduler, me_rotation_task};
+pub(crate) use selftest::{
+    bnd_snapshot, timeskew_snapshot, upstream_bnd_snapshots,
+};
 pub use wire::proto_flags_for_tag;
 
 #[derive(Debug)]

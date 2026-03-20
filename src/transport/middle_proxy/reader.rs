@@ -1,12 +1,14 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
@@ -33,6 +35,8 @@ pub(crate) async fn reader_loop(
     stats: Arc<Stats>,
     _writer_id: u64,
     degraded: Arc<AtomicBool>,
+    writer_rtt_ema_ms_x10: Arc<AtomicU32>,
+    reader_route_data_wait_ms: Arc<AtomicU64>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut raw = enc_leftover;
@@ -45,23 +49,24 @@ pub(crate) async fn reader_loop(
             _ = cancel.cancelled() => return Ok(()),
         };
         if n == 0 {
-            return Ok(());
+            stats.increment_me_reader_eof_total();
+            return Err(ProxyError::Io(std::io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "ME socket closed by peer",
+            )));
         }
         raw.extend_from_slice(&tmp[..n]);
 
         let blocks = raw.len() / 16 * 16;
         if blocks > 0 {
+            let mut chunk = raw.split_to(blocks);
             let mut new_iv = [0u8; 16];
-            new_iv.copy_from_slice(&raw[blocks - 16..blocks]);
-
-            let mut chunk = vec![0u8; blocks];
-            chunk.copy_from_slice(&raw[..blocks]);
+            new_iv.copy_from_slice(&chunk[blocks - 16..blocks]);
             AesCbc::new(dk, div)
-                .decrypt_in_place(&mut chunk)
+                .decrypt_in_place(&mut chunk[..])
                 .map_err(|e| ProxyError::Crypto(format!("{e}")))?;
             div = new_iv;
             dec.extend_from_slice(&chunk);
-            let _ = raw.split_to(blocks);
         }
 
         while dec.len() >= 12 {
@@ -79,7 +84,7 @@ pub(crate) async fn reader_loop(
                 break;
             }
 
-            let frame = dec.split_to(fl);
+            let frame = dec.split_to(fl).freeze();
             let pe = fl - 4;
             let ec = u32::from_le_bytes(frame[pe..pe + 4].try_into().unwrap());
             let actual_crc = rpc_crc(crc_mode, &frame[..pe]);
@@ -105,21 +110,27 @@ pub(crate) async fn reader_loop(
             }
             expected_seq = expected_seq.wrapping_add(1);
 
-            let payload = &frame[8..pe];
+            let payload = frame.slice(8..pe);
             if payload.len() < 4 {
                 continue;
             }
 
             let pt = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-            let body = &payload[4..];
+            let body = payload.slice(4..);
 
             if pt == RPC_PROXY_ANS_U32 && body.len() >= 12 {
                 let flags = u32::from_le_bytes(body[0..4].try_into().unwrap());
                 let cid = u64::from_le_bytes(body[4..12].try_into().unwrap());
-                let data = Bytes::copy_from_slice(&body[12..]);
+                let data = body.slice(12..);
                 trace!(cid, flags, len = data.len(), "RPC_PROXY_ANS");
 
-                let routed = reg.route(cid, MeResponse::Data { flags, data }).await;
+                let data_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
+                let routed = if data_wait_ms == 0 {
+                    reg.route_nowait(cid, MeResponse::Data { flags, data }).await
+                } else {
+                    reg.route_with_timeout(cid, MeResponse::Data { flags, data }, data_wait_ms)
+                        .await
+                };
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
@@ -142,7 +153,7 @@ pub(crate) async fn reader_loop(
                 let cfm = u32::from_le_bytes(body[8..12].try_into().unwrap());
                 trace!(cid, cfm, "RPC_SIMPLE_ACK");
 
-                let routed = reg.route(cid, MeResponse::Ack(cfm)).await;
+                let routed = reg.route_nowait(cid, MeResponse::Ack(cfm)).await;
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
@@ -163,12 +174,12 @@ pub(crate) async fn reader_loop(
             } else if pt == RPC_CLOSE_EXT_U32 && body.len() >= 8 {
                 let cid = u64::from_le_bytes(body[0..8].try_into().unwrap());
                 debug!(cid, "RPC_CLOSE_EXT from ME");
-                reg.route(cid, MeResponse::Close).await;
+                let _ = reg.route_nowait(cid, MeResponse::Close).await;
                 reg.unregister(cid).await;
             } else if pt == RPC_CLOSE_CONN_U32 && body.len() >= 8 {
                 let cid = u64::from_le_bytes(body[0..8].try_into().unwrap());
                 debug!(cid, "RPC_CLOSE_CONN from ME");
-                reg.route(cid, MeResponse::Close).await;
+                let _ = reg.route_nowait(cid, MeResponse::Close).await;
                 reg.unregister(cid).await;
             } else if pt == RPC_PING_U32 && body.len() >= 8 {
                 let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
@@ -176,9 +187,15 @@ pub(crate) async fn reader_loop(
                 let mut pong = Vec::with_capacity(12);
                 pong.extend_from_slice(&RPC_PONG_U32.to_le_bytes());
                 pong.extend_from_slice(&ping_id.to_le_bytes());
-                if tx.send(WriterCommand::DataAndFlush(pong)).await.is_err() {
-                    warn!("PONG send failed");
-                    break;
+                match tx.try_send(WriterCommand::DataAndFlush(Bytes::from(pong))) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        debug!(ping_id, "PONG dropped: writer command channel is full");
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        warn!("PONG send failed: writer channel closed");
+                        break;
+                    }
                 }
             } else if pt == RPC_PONG_U32 && body.len() >= 8 {
                 let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
@@ -199,6 +216,8 @@ pub(crate) async fn reader_loop(
                     }
                     let degraded_now = entry.1 > entry.0 * 2.0;
                     degraded.store(degraded_now, Ordering::Relaxed);
+                    writer_rtt_ema_ms_x10
+                        .store((entry.1 * 10.0).clamp(0.0, u32::MAX as f64) as u32, Ordering::Relaxed);
                     trace!(writer_id = wid, rtt_ms = rtt, ema_ms = entry.1, base_ms = entry.0, degraded = degraded_now, "ME RTT sample");
                 }
             } else {
@@ -216,6 +235,13 @@ async fn send_close_conn(tx: &mpsc::Sender<WriterCommand>, conn_id: u64) {
     let mut p = Vec::with_capacity(12);
     p.extend_from_slice(&RPC_CLOSE_CONN_U32.to_le_bytes());
     p.extend_from_slice(&conn_id.to_le_bytes());
-
-    let _ = tx.send(WriterCommand::DataAndFlush(p)).await;
+    match tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            debug!(conn_id, "ME close_conn signal skipped: writer command channel is full");
+        }
+        Err(TrySendError::Closed(_)) => {
+            debug!(conn_id, "ME close_conn signal skipped: writer command channel is closed");
+        }
+    }
 }

@@ -1,252 +1,351 @@
-// src/ip_tracker.rs
-// IP address tracking and limiting for users
+// IP address tracking and per-user unique IP limiting.
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
 use tokio::sync::RwLock;
 
-/// Трекер уникальных IP-адресов для каждого пользователя MTProxy
-/// 
-/// Предоставляет thread-safe механизм для:
-/// - Отслеживания активных IP-адресов каждого пользователя
-/// - Ограничения количества уникальных IP на пользователя
-/// - Автоматической очистки при отключении клиентов
+use crate::config::UserMaxUniqueIpsMode;
+
 #[derive(Debug, Clone)]
 pub struct UserIpTracker {
-    /// Маппинг: Имя пользователя -> Множество активных IP-адресов
-    active_ips: Arc<RwLock<HashMap<String, HashSet<IpAddr>>>>,
-    
-    /// Маппинг: Имя пользователя -> Максимально разрешенное количество уникальных IP
+    active_ips: Arc<RwLock<HashMap<String, HashMap<IpAddr, usize>>>>,
+    recent_ips: Arc<RwLock<HashMap<String, HashMap<IpAddr, Instant>>>>,
     max_ips: Arc<RwLock<HashMap<String, usize>>>,
+    default_max_ips: Arc<RwLock<usize>>,
+    limit_mode: Arc<RwLock<UserMaxUniqueIpsMode>>,
+    limit_window: Arc<RwLock<Duration>>,
+    last_compact_epoch_secs: Arc<AtomicU64>,
 }
 
 impl UserIpTracker {
-    /// Создать новый пустой трекер
     pub fn new() -> Self {
         Self {
             active_ips: Arc::new(RwLock::new(HashMap::new())),
+            recent_ips: Arc::new(RwLock::new(HashMap::new())),
             max_ips: Arc::new(RwLock::new(HashMap::new())),
+            default_max_ips: Arc::new(RwLock::new(0)),
+            limit_mode: Arc::new(RwLock::new(UserMaxUniqueIpsMode::ActiveWindow)),
+            limit_window: Arc::new(RwLock::new(Duration::from_secs(30))),
+            last_compact_epoch_secs: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    /// Установить лимит уникальных IP для конкретного пользователя
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
-    /// * `max_ips` - Максимальное количество одновременно активных IP-адресов
+    fn now_epoch_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    async fn maybe_compact_empty_users(&self) {
+        const COMPACT_INTERVAL_SECS: u64 = 60;
+        let now_epoch_secs = Self::now_epoch_secs();
+        let last_compact_epoch_secs = self.last_compact_epoch_secs.load(Ordering::Relaxed);
+        if now_epoch_secs.saturating_sub(last_compact_epoch_secs) < COMPACT_INTERVAL_SECS {
+            return;
+        }
+        if self
+            .last_compact_epoch_secs
+            .compare_exchange(
+                last_compact_epoch_secs,
+                now_epoch_secs,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return;
+        }
+
+        let mut active_ips = self.active_ips.write().await;
+        let mut recent_ips = self.recent_ips.write().await;
+        let mut users = Vec::<String>::with_capacity(active_ips.len().saturating_add(recent_ips.len()));
+        users.extend(active_ips.keys().cloned());
+        for user in recent_ips.keys() {
+            if !active_ips.contains_key(user) {
+                users.push(user.clone());
+            }
+        }
+
+        for user in users {
+            let active_empty = active_ips.get(&user).map(|ips| ips.is_empty()).unwrap_or(true);
+            let recent_empty = recent_ips.get(&user).map(|ips| ips.is_empty()).unwrap_or(true);
+            if active_empty && recent_empty {
+                active_ips.remove(&user);
+                recent_ips.remove(&user);
+            }
+        }
+    }
+
+    pub async fn set_limit_policy(&self, mode: UserMaxUniqueIpsMode, window_secs: u64) {
+        {
+            let mut current_mode = self.limit_mode.write().await;
+            *current_mode = mode;
+        }
+        let mut current_window = self.limit_window.write().await;
+        *current_window = Duration::from_secs(window_secs.max(1));
+    }
+
     pub async fn set_user_limit(&self, username: &str, max_ips: usize) {
         let mut limits = self.max_ips.write().await;
         limits.insert(username.to_string(), max_ips);
     }
 
-    /// Загрузить лимиты из конфигурации
-    /// 
-    /// # Arguments
-    /// * `limits` - HashMap с лимитами из config.toml
-    pub async fn load_limits(&self, limits: &HashMap<String, usize>) {
-        let mut max_ips = self.max_ips.write().await;
-        for (user, limit) in limits {
-            max_ips.insert(user.clone(), *limit);
-        }
+    pub async fn remove_user_limit(&self, username: &str) {
+        let mut limits = self.max_ips.write().await;
+        limits.remove(username);
     }
 
-    /// Проверить, может ли пользователь подключиться с данного IP-адреса
-    /// и добавить IP в список активных, если проверка успешна
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
-    /// * `ip` - IP-адрес клиента
-    /// 
-    /// # Returns
-    /// * `Ok(())` - Подключение разрешено, IP добавлен в активные
-    /// * `Err(String)` - Подключение отклонено с описанием причины
+    pub async fn load_limits(&self, default_limit: usize, limits: &HashMap<String, usize>) {
+        let mut default_max_ips = self.default_max_ips.write().await;
+        *default_max_ips = default_limit;
+        drop(default_max_ips);
+        let mut max_ips = self.max_ips.write().await;
+        max_ips.clone_from(limits);
+    }
+
+    fn prune_recent(user_recent: &mut HashMap<IpAddr, Instant>, now: Instant, window: Duration) {
+        if user_recent.is_empty() {
+            return;
+        }
+        user_recent.retain(|_, seen_at| now.duration_since(*seen_at) <= window);
+    }
+
     pub async fn check_and_add(&self, username: &str, ip: IpAddr) -> Result<(), String> {
-        // Получаем лимит для пользователя
-        let max_ips = self.max_ips.read().await;
-        let limit = match max_ips.get(username) {
-            Some(limit) => *limit,
-            None => {
-                // Если лимит не задан - разрешаем безлимитный доступ
-                drop(max_ips);
-                let mut active_ips = self.active_ips.write().await;
-                let user_ips = active_ips
-                    .entry(username.to_string())
-                    .or_insert_with(HashSet::new);
-                user_ips.insert(ip);
-                return Ok(());
-            }
+        self.maybe_compact_empty_users().await;
+        let default_max_ips = *self.default_max_ips.read().await;
+        let limit = {
+            let max_ips = self.max_ips.read().await;
+            max_ips
+                .get(username)
+                .copied()
+                .filter(|limit| *limit > 0)
+                .or((default_max_ips > 0).then_some(default_max_ips))
         };
-        drop(max_ips);
+        let mode = *self.limit_mode.read().await;
+        let window = *self.limit_window.read().await;
+        let now = Instant::now();
 
-        // Проверяем и обновляем активные IP
         let mut active_ips = self.active_ips.write().await;
-        let user_ips = active_ips
+        let user_active = active_ips
             .entry(username.to_string())
-            .or_insert_with(HashSet::new);
+            .or_insert_with(HashMap::new);
 
-        // Если IP уже есть в списке - это повторное подключение, разрешаем
-        if user_ips.contains(&ip) {
+        let mut recent_ips = self.recent_ips.write().await;
+        let user_recent = recent_ips
+            .entry(username.to_string())
+            .or_insert_with(HashMap::new);
+        Self::prune_recent(user_recent, now, window);
+
+        if let Some(count) = user_active.get_mut(&ip) {
+            *count = count.saturating_add(1);
+            user_recent.insert(ip, now);
             return Ok(());
         }
 
-        // Проверяем, не превышен ли лимит
-        if user_ips.len() >= limit {
-            return Err(format!(
-                "IP limit reached for user '{}': {}/{} unique IPs already connected",
-                username,
-                user_ips.len(),
-                limit
-            ));
+        if let Some(limit) = limit {
+            let active_limit_reached = user_active.len() >= limit;
+            let recent_limit_reached = user_recent.len() >= limit;
+            let deny = match mode {
+                UserMaxUniqueIpsMode::ActiveWindow => active_limit_reached,
+                UserMaxUniqueIpsMode::TimeWindow => recent_limit_reached,
+                UserMaxUniqueIpsMode::Combined => active_limit_reached || recent_limit_reached,
+            };
+
+            if deny {
+                return Err(format!(
+                    "IP limit reached for user '{}': active={}/{} recent={}/{} mode={:?}",
+                    username,
+                    user_active.len(),
+                    limit,
+                    user_recent.len(),
+                    limit,
+                    mode
+                ));
+            }
         }
 
-        // Лимит не превышен - добавляем новый IP
-        user_ips.insert(ip);
+        user_active.insert(ip, 1);
+        user_recent.insert(ip, now);
         Ok(())
     }
 
-    /// Удалить IP-адрес из списка активных при отключении клиента
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
-    /// * `ip` - IP-адрес отключившегося клиента
     pub async fn remove_ip(&self, username: &str, ip: IpAddr) {
+        self.maybe_compact_empty_users().await;
         let mut active_ips = self.active_ips.write().await;
-        
         if let Some(user_ips) = active_ips.get_mut(username) {
-            user_ips.remove(&ip);
-            
-            // Если у пользователя не осталось активных IP - удаляем запись
-            // для экономии памяти
+            if let Some(count) = user_ips.get_mut(&ip) {
+                if *count > 1 {
+                    *count -= 1;
+                } else {
+                    user_ips.remove(&ip);
+                }
+            }
             if user_ips.is_empty() {
                 active_ips.remove(username);
             }
         }
     }
 
-    /// Получить текущее количество активных IP-адресов для пользователя
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
-    /// 
-    /// # Returns
-    /// Количество уникальных активных IP-адресов
-    pub async fn get_active_ip_count(&self, username: &str) -> usize {
-        let active_ips = self.active_ips.read().await;
-        active_ips
-            .get(username)
-            .map(|ips| ips.len())
-            .unwrap_or(0)
+    pub async fn get_recent_counts_for_users(&self, users: &[String]) -> HashMap<String, usize> {
+        let window = *self.limit_window.read().await;
+        let now = Instant::now();
+        let recent_ips = self.recent_ips.read().await;
+
+        let mut counts = HashMap::with_capacity(users.len());
+        for user in users {
+            let count = if let Some(user_recent) = recent_ips.get(user) {
+                user_recent
+                    .values()
+                    .filter(|seen_at| now.duration_since(**seen_at) <= window)
+                    .count()
+            } else {
+                0
+            };
+            counts.insert(user.clone(), count);
+        }
+        counts
     }
 
-    /// Получить список всех активных IP-адресов для пользователя
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
-    /// 
-    /// # Returns
-    /// Вектор с активными IP-адресами
+    pub async fn get_active_ips_for_users(&self, users: &[String]) -> HashMap<String, Vec<IpAddr>> {
+        let active_ips = self.active_ips.read().await;
+        let mut out = HashMap::with_capacity(users.len());
+        for user in users {
+            let mut ips = active_ips
+                .get(user)
+                .map(|per_ip| per_ip.keys().copied().collect::<Vec<_>>())
+                .unwrap_or_else(Vec::new);
+            ips.sort();
+            out.insert(user.clone(), ips);
+        }
+        out
+    }
+
+    pub async fn get_recent_ips_for_users(&self, users: &[String]) -> HashMap<String, Vec<IpAddr>> {
+        let window = *self.limit_window.read().await;
+        let now = Instant::now();
+        let recent_ips = self.recent_ips.read().await;
+
+        let mut out = HashMap::with_capacity(users.len());
+        for user in users {
+            let mut ips = if let Some(user_recent) = recent_ips.get(user) {
+                user_recent
+                    .iter()
+                    .filter(|(_, seen_at)| now.duration_since(**seen_at) <= window)
+                    .map(|(ip, _)| *ip)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            ips.sort();
+            out.insert(user.clone(), ips);
+        }
+        out
+    }
+
+    pub async fn get_active_ip_count(&self, username: &str) -> usize {
+        let active_ips = self.active_ips.read().await;
+        active_ips.get(username).map(|ips| ips.len()).unwrap_or(0)
+    }
+
     pub async fn get_active_ips(&self, username: &str) -> Vec<IpAddr> {
         let active_ips = self.active_ips.read().await;
         active_ips
             .get(username)
-            .map(|ips| ips.iter().copied().collect())
+            .map(|ips| ips.keys().copied().collect())
             .unwrap_or_else(Vec::new)
     }
 
-    /// Получить статистику по всем пользователям
-    /// 
-    /// # Returns
-    /// Вектор кортежей: (имя_пользователя, количество_активных_IP, лимит)
     pub async fn get_stats(&self) -> Vec<(String, usize, usize)> {
         let active_ips = self.active_ips.read().await;
         let max_ips = self.max_ips.read().await;
+        let default_max_ips = *self.default_max_ips.read().await;
 
         let mut stats = Vec::new();
-        
-        // Собираем статистику по пользователям с активными подключениями
         for (username, user_ips) in active_ips.iter() {
-            let limit = max_ips.get(username).copied().unwrap_or(0);
+            let limit = max_ips
+                .get(username)
+                .copied()
+                .filter(|limit| *limit > 0)
+                .or((default_max_ips > 0).then_some(default_max_ips))
+                .unwrap_or(0);
             stats.push((username.clone(), user_ips.len(), limit));
         }
-        
-        stats.sort_by(|a, b| a.0.cmp(&b.0)); // Сортируем по имени пользователя
+
+        stats.sort_by(|a, b| a.0.cmp(&b.0));
         stats
     }
 
-    /// Очистить все активные IP для пользователя (при необходимости)
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
     pub async fn clear_user_ips(&self, username: &str) {
         let mut active_ips = self.active_ips.write().await;
         active_ips.remove(username);
+        drop(active_ips);
+
+        let mut recent_ips = self.recent_ips.write().await;
+        recent_ips.remove(username);
     }
 
-    /// Очистить всю статистику (использовать с осторожностью!)
     pub async fn clear_all(&self) {
         let mut active_ips = self.active_ips.write().await;
         active_ips.clear();
+        drop(active_ips);
+
+        let mut recent_ips = self.recent_ips.write().await;
+        recent_ips.clear();
     }
 
-    /// Проверить, подключен ли пользователь с данного IP
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
-    /// * `ip` - IP-адрес для проверки
-    /// 
-    /// # Returns
-    /// `true` если IP активен, `false` если нет
     pub async fn is_ip_active(&self, username: &str, ip: IpAddr) -> bool {
         let active_ips = self.active_ips.read().await;
         active_ips
             .get(username)
-            .map(|ips| ips.contains(&ip))
+            .map(|ips| ips.contains_key(&ip))
             .unwrap_or(false)
     }
 
-    /// Получить лимит для пользователя
-    /// 
-    /// # Arguments
-    /// * `username` - Имя пользователя
-    /// 
-    /// # Returns
-    /// Лимит IP-адресов или None, если лимит не установлен
     pub async fn get_user_limit(&self, username: &str) -> Option<usize> {
+        let default_max_ips = *self.default_max_ips.read().await;
         let max_ips = self.max_ips.read().await;
-        max_ips.get(username).copied()
+        max_ips
+            .get(username)
+            .copied()
+            .filter(|limit| *limit > 0)
+            .or((default_max_ips > 0).then_some(default_max_ips))
     }
 
-    /// Форматировать статистику в читаемый текст
-    /// 
-    /// # Returns
-    /// Строка со статистикой для логов или мониторинга
     pub async fn format_stats(&self) -> String {
         let stats = self.get_stats().await;
-        
+
         if stats.is_empty() {
             return String::from("No active users");
         }
-        
+
         let mut output = String::from("User IP Statistics:\n");
         output.push_str("==================\n");
-        
+
         for (username, active_count, limit) in stats {
             output.push_str(&format!(
                 "User: {:<20} Active IPs: {}/{}\n",
                 username,
                 active_count,
-                if limit > 0 { limit.to_string() } else { "unlimited".to_string() }
+                if limit > 0 {
+                    limit.to_string()
+                } else {
+                    "unlimited".to_string()
+                }
             ));
-            
+
             let ips = self.get_active_ips(&username).await;
             for ip in ips {
-                output.push_str(&format!("  └─ {}\n", ip));
+                output.push_str(&format!("  - {}\n", ip));
             }
         }
-        
+
         output
     }
 }
@@ -256,10 +355,6 @@ impl Default for UserIpTracker {
         Self::new()
     }
 }
-
-// ============================================================================
-// ТЕСТЫ
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -283,15 +378,31 @@ mod tests {
         let ip2 = test_ipv4(192, 168, 1, 2);
         let ip3 = test_ipv4(192, 168, 1, 3);
 
-        // Первые два IP должны быть приняты
         assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
         assert!(tracker.check_and_add("test_user", ip2).await.is_ok());
-
-        // Третий IP должен быть отклонен
         assert!(tracker.check_and_add("test_user", ip3).await.is_err());
 
-        // Проверяем счетчик
         assert_eq!(tracker.get_active_ip_count("test_user").await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_active_window_rejects_new_ip_and_keeps_existing_session() {
+        let tracker = UserIpTracker::new();
+        tracker.set_user_limit("test_user", 1).await;
+        tracker
+            .set_limit_policy(UserMaxUniqueIpsMode::ActiveWindow, 30)
+            .await;
+
+        let ip1 = test_ipv4(10, 10, 10, 1);
+        let ip2 = test_ipv4(10, 10, 10, 2);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        assert!(tracker.is_ip_active("test_user", ip1).await);
+        assert!(tracker.check_and_add("test_user", ip2).await.is_err());
+
+        // Existing session remains active; only new unique IP is denied.
+        assert!(tracker.is_ip_active("test_user", ip1).await);
+        assert_eq!(tracker.get_active_ip_count("test_user").await, 1);
     }
 
     #[tokio::test]
@@ -301,14 +412,27 @@ mod tests {
 
         let ip1 = test_ipv4(192, 168, 1, 1);
 
-        // Первое подключение
         assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
-        
-        // Повторное подключение с того же IP должно пройти
         assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
-        
-        // Счетчик не должен увеличиться
         assert_eq!(tracker.get_active_ip_count("test_user").await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_same_ip_disconnect_keeps_active_while_other_session_alive() {
+        let tracker = UserIpTracker::new();
+        tracker.set_user_limit("test_user", 2).await;
+
+        let ip1 = test_ipv4(192, 168, 1, 1);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        assert_eq!(tracker.get_active_ip_count("test_user").await, 1);
+
+        tracker.remove_ip("test_user", ip1).await;
+        assert_eq!(tracker.get_active_ip_count("test_user").await, 1);
+
+        tracker.remove_ip("test_user", ip1).await;
+        assert_eq!(tracker.get_active_ip_count("test_user").await, 0);
     }
 
     #[tokio::test]
@@ -320,36 +444,28 @@ mod tests {
         let ip2 = test_ipv4(192, 168, 1, 2);
         let ip3 = test_ipv4(192, 168, 1, 3);
 
-        // Добавляем два IP
         assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
         assert!(tracker.check_and_add("test_user", ip2).await.is_ok());
-        
-        // Третий не должен пройти
         assert!(tracker.check_and_add("test_user", ip3).await.is_err());
 
-        // Удаляем первый IP
         tracker.remove_ip("test_user", ip1).await;
-        
-        // Теперь третий должен пройти
+
         assert!(tracker.check_and_add("test_user", ip3).await.is_ok());
-        
         assert_eq!(tracker.get_active_ip_count("test_user").await, 2);
     }
 
     #[tokio::test]
     async fn test_no_limit() {
         let tracker = UserIpTracker::new();
-        // Не устанавливаем лимит для test_user
 
         let ip1 = test_ipv4(192, 168, 1, 1);
         let ip2 = test_ipv4(192, 168, 1, 2);
         let ip3 = test_ipv4(192, 168, 1, 3);
 
-        // Без лимита все IP должны проходить
         assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
         assert!(tracker.check_and_add("test_user", ip2).await.is_ok());
         assert!(tracker.check_and_add("test_user", ip3).await.is_ok());
-        
+
         assert_eq!(tracker.get_active_ip_count("test_user").await, 3);
     }
 
@@ -362,11 +478,9 @@ mod tests {
         let ip1 = test_ipv4(192, 168, 1, 1);
         let ip2 = test_ipv4(192, 168, 1, 2);
 
-        // user1 может использовать 2 IP
         assert!(tracker.check_and_add("user1", ip1).await.is_ok());
         assert!(tracker.check_and_add("user1", ip2).await.is_ok());
 
-        // user2 может использовать только 1 IP
         assert!(tracker.check_and_add("user2", ip1).await.is_ok());
         assert!(tracker.check_and_add("user2", ip2).await.is_err());
     }
@@ -379,10 +493,9 @@ mod tests {
         let ipv4 = test_ipv4(192, 168, 1, 1);
         let ipv6 = test_ipv6();
 
-        // Должны работать оба типа адресов
         assert!(tracker.check_and_add("test_user", ipv4).await.is_ok());
         assert!(tracker.check_and_add("test_user", ipv6).await.is_ok());
-        
+
         assert_eq!(tracker.get_active_ip_count("test_user").await, 2);
     }
 
@@ -417,8 +530,7 @@ mod tests {
 
         let stats = tracker.get_stats().await;
         assert_eq!(stats.len(), 2);
-        
-        // Проверяем наличие обоих пользователей в статистике
+
         assert!(stats.iter().any(|(name, _, _)| name == "user1"));
         assert!(stats.iter().any(|(name, _, _)| name == "user2"));
     }
@@ -427,10 +539,10 @@ mod tests {
     async fn test_clear_user_ips() {
         let tracker = UserIpTracker::new();
         let ip1 = test_ipv4(192, 168, 1, 1);
-        
+
         tracker.check_and_add("test_user", ip1).await.unwrap();
         assert_eq!(tracker.get_active_ip_count("test_user").await, 1);
-        
+
         tracker.clear_user_ips("test_user").await;
         assert_eq!(tracker.get_active_ip_count("test_user").await, 0);
     }
@@ -440,9 +552,9 @@ mod tests {
         let tracker = UserIpTracker::new();
         let ip1 = test_ipv4(192, 168, 1, 1);
         let ip2 = test_ipv4(192, 168, 1, 2);
-        
+
         tracker.check_and_add("test_user", ip1).await.unwrap();
-        
+
         assert!(tracker.is_ip_active("test_user", ip1).await);
         assert!(!tracker.is_ip_active("test_user", ip2).await);
     }
@@ -450,15 +562,115 @@ mod tests {
     #[tokio::test]
     async fn test_load_limits_from_config() {
         let tracker = UserIpTracker::new();
-        
+
         let mut config_limits = HashMap::new();
         config_limits.insert("user1".to_string(), 5);
         config_limits.insert("user2".to_string(), 3);
-        
-        tracker.load_limits(&config_limits).await;
-        
+
+        tracker.load_limits(0, &config_limits).await;
+
         assert_eq!(tracker.get_user_limit("user1").await, Some(5));
         assert_eq!(tracker.get_user_limit("user2").await, Some(3));
         assert_eq!(tracker.get_user_limit("user3").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_load_limits_replaces_previous_map() {
+        let tracker = UserIpTracker::new();
+
+        let mut first = HashMap::new();
+        first.insert("user1".to_string(), 2);
+        first.insert("user2".to_string(), 3);
+        tracker.load_limits(0, &first).await;
+
+        let mut second = HashMap::new();
+        second.insert("user2".to_string(), 5);
+        tracker.load_limits(0, &second).await;
+
+        assert_eq!(tracker.get_user_limit("user1").await, None);
+        assert_eq!(tracker.get_user_limit("user2").await, Some(5));
+    }
+
+    #[tokio::test]
+    async fn test_global_each_limit_applies_without_user_override() {
+        let tracker = UserIpTracker::new();
+        tracker.load_limits(2, &HashMap::new()).await;
+
+        let ip1 = test_ipv4(172, 16, 0, 1);
+        let ip2 = test_ipv4(172, 16, 0, 2);
+        let ip3 = test_ipv4(172, 16, 0, 3);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        assert!(tracker.check_and_add("test_user", ip2).await.is_ok());
+        assert!(tracker.check_and_add("test_user", ip3).await.is_err());
+        assert_eq!(tracker.get_user_limit("test_user").await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_user_override_wins_over_global_each_limit() {
+        let tracker = UserIpTracker::new();
+        let mut limits = HashMap::new();
+        limits.insert("test_user".to_string(), 1);
+        tracker.load_limits(3, &limits).await;
+
+        let ip1 = test_ipv4(172, 17, 0, 1);
+        let ip2 = test_ipv4(172, 17, 0, 2);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        assert!(tracker.check_and_add("test_user", ip2).await.is_err());
+        assert_eq!(tracker.get_user_limit("test_user").await, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_time_window_mode_blocks_recent_ip_churn() {
+        let tracker = UserIpTracker::new();
+        tracker.set_user_limit("test_user", 1).await;
+        tracker
+            .set_limit_policy(UserMaxUniqueIpsMode::TimeWindow, 30)
+            .await;
+
+        let ip1 = test_ipv4(10, 0, 0, 1);
+        let ip2 = test_ipv4(10, 0, 0, 2);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        tracker.remove_ip("test_user", ip1).await;
+        assert!(tracker.check_and_add("test_user", ip2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_combined_mode_enforces_active_and_recent_limits() {
+        let tracker = UserIpTracker::new();
+        tracker.set_user_limit("test_user", 1).await;
+        tracker
+            .set_limit_policy(UserMaxUniqueIpsMode::Combined, 30)
+            .await;
+
+        let ip1 = test_ipv4(10, 0, 1, 1);
+        let ip2 = test_ipv4(10, 0, 1, 2);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        assert!(tracker.check_and_add("test_user", ip2).await.is_err());
+
+        tracker.remove_ip("test_user", ip1).await;
+        assert!(tracker.check_and_add("test_user", ip2).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_time_window_expires() {
+        let tracker = UserIpTracker::new();
+        tracker.set_user_limit("test_user", 1).await;
+        tracker
+            .set_limit_policy(UserMaxUniqueIpsMode::TimeWindow, 1)
+            .await;
+
+        let ip1 = test_ipv4(10, 1, 0, 1);
+        let ip2 = test_ipv4(10, 1, 0, 2);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        tracker.remove_ip("test_user", ip1).await;
+        assert!(tracker.check_and_add("test_user", ip2).await.is_err());
+
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(tracker.check_and_add("test_user", ip2).await.is_ok());
     }
 }

@@ -3,6 +3,7 @@ use std::time::SystemTime;
 use httpdate;
 
 use crate::error::{ProxyError, Result};
+use super::selftest::record_timeskew_sample;
 
 pub const PROXY_SECRET_MIN_LEN: usize = 32;
 
@@ -98,6 +99,7 @@ pub async fn download_proxy_secret_with_max_len(max_len: usize) -> Result<Vec<u8
         })
     {
         let skew_secs = skew.as_secs();
+        record_timeskew_sample("proxy_secret_date_header", skew_secs);
         if skew_secs > 60 {
             warn!(skew_secs, "Time skew >60s detected from proxy-secret Date header");
         } else if skew_secs > 30 {

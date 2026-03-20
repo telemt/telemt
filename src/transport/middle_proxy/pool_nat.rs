@@ -159,7 +159,13 @@ impl MePool {
         addr: std::net::SocketAddr,
         reflected: Option<std::net::SocketAddr>,
     ) -> std::net::SocketAddr {
-        let ip = if let Some(r) = reflected {
+        let ip = if let Some(nat_ip) = self.nat_ip_cfg {
+            match (addr.ip(), nat_ip) {
+                (IpAddr::V4(_), IpAddr::V4(dst)) => IpAddr::V4(dst),
+                (IpAddr::V6(_), IpAddr::V6(dst)) => IpAddr::V6(dst),
+                _ => addr.ip(),
+            }
+        } else if let Some(r) = reflected {
             // Use reflected IP (not port) only when local address is non-public.
             if is_bogon(addr.ip()) || addr.ip().is_loopback() || addr.ip().is_unspecified() {
                 r.ip()
@@ -220,6 +226,43 @@ impl MePool {
             }
         }
         // Backoff window
+        if use_shared_cache
+            && let Some(until) = *self.stun_backoff_until.read().await
+            && Instant::now() < until
+        {
+            if let Ok(cache) = self.nat_reflection_cache.try_lock() {
+                let slot = match family {
+                    IpFamily::V4 => cache.v4,
+                    IpFamily::V6 => cache.v6,
+                };
+                return slot.map(|(_, addr)| addr);
+            }
+            return None;
+        }
+
+        if use_shared_cache
+            && let Ok(mut cache) = self.nat_reflection_cache.try_lock()
+        {
+            let slot = match family {
+                IpFamily::V4 => &mut cache.v4,
+                IpFamily::V6 => &mut cache.v6,
+            };
+            if let Some((ts, addr)) = slot
+                && ts.elapsed() < STUN_CACHE_TTL
+            {
+                return Some(*addr);
+            }
+        }
+
+        let _singleflight_guard = if use_shared_cache {
+            Some(match family {
+                IpFamily::V4 => self.nat_reflection_singleflight_v4.lock().await,
+                IpFamily::V6 => self.nat_reflection_singleflight_v6.lock().await,
+            })
+        } else {
+            None
+        };
+
         if use_shared_cache
             && let Some(until) = *self.stun_backoff_until.read().await
             && Instant::now() < until

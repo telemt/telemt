@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tracing::{debug, warn, trace, info};
+use tracing::{debug, warn, trace};
 use zeroize::Zeroize;
 
 use crate::crypto::{sha256, AesCtr, SecureRandom};
@@ -18,6 +18,31 @@ use crate::error::{ProxyError, HandshakeResult};
 use crate::stats::ReplayChecker;
 use crate::config::ProxyConfig;
 use crate::tls_front::{TlsFrontCache, emulator};
+
+fn decode_user_secrets(
+    config: &ProxyConfig,
+    preferred_user: Option<&str>,
+) -> Vec<(String, Vec<u8>)> {
+    let mut secrets = Vec::with_capacity(config.access.users.len());
+
+    if let Some(preferred) = preferred_user
+        && let Some(secret_hex) = config.access.users.get(preferred)
+        && let Ok(bytes) = hex::decode(secret_hex)
+    {
+        secrets.push((preferred.to_string(), bytes));
+    }
+
+    for (name, secret_hex) in &config.access.users {
+        if preferred_user.is_some_and(|preferred| preferred == name.as_str()) {
+            continue;
+        }
+        if let Ok(bytes) = hex::decode(secret_hex) {
+            secrets.push((name.clone(), bytes));
+        }
+    }
+
+    secrets
+}
 
 /// Result of successful handshake
 ///
@@ -82,11 +107,7 @@ where
         return HandshakeResult::BadClient { reader, writer };
     }
 
-    let secrets: Vec<(String, Vec<u8>)> = config.access.users.iter()
-        .filter_map(|(name, hex)| {
-            hex::decode(hex).ok().map(|bytes| (name.clone(), bytes))
-        })
-        .collect();
+    let secrets = decode_user_secrets(config, None);
 
     let validation = match tls::validate_tls_handshake(
         handshake,
@@ -201,7 +222,7 @@ where
         return HandshakeResult::Error(ProxyError::Io(e));
     }
 
-    info!(
+    debug!(
         peer = %peer,
         user = %validation.user,
         "TLS handshake successful"
@@ -223,6 +244,7 @@ pub async fn handle_mtproto_handshake<R, W>(
     config: &ProxyConfig,
     replay_checker: &ReplayChecker,
     is_tls: bool,
+    preferred_user: Option<&str>,
 ) -> HandshakeResult<(CryptoReader<R>, CryptoWriter<W>, HandshakeSuccess), R, W>
 where
     R: AsyncRead + Unpin + Send,
@@ -239,11 +261,9 @@ where
 
     let enc_prekey_iv: Vec<u8> = dec_prekey_iv.iter().rev().copied().collect();
 
-    for (user, secret_hex) in &config.access.users {
-        let secret = match hex::decode(secret_hex) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+    let decoded_users = decode_user_secrets(config, preferred_user);
+
+    for (user, secret) in decoded_users {
 
         let dec_prekey = &dec_prekey_iv[..PREKEY_LEN];
         let dec_iv_bytes = &dec_prekey_iv[PREKEY_LEN..];
@@ -311,7 +331,7 @@ where
             is_tls,
         };
 
-        info!(
+        debug!(
             peer = %peer,
             user = %user,
             dc = dc_idx,

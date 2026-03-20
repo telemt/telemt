@@ -1,3 +1,8 @@
+# Issues - Rules
+## What it is not
+- NOT Question and Answer
+- NOT Helpdesk
+
 # Pull Requests - Rules
 ## General
 - ONLY signed and verified commits

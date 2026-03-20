@@ -6,7 +6,8 @@ services:
     restart: unless-stopped
     ports:
       - "443:443"
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:9091:9091"
     # Allow caching 'proxy-secret' in read-only container
     working_dir: /run/telemt
     volumes:

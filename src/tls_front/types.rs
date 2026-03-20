@@ -39,6 +39,53 @@ pub struct TlsCertPayload {
     pub certificate_message: Vec<u8>,
 }
 
+/// Provenance of the cached TLS behavior profile.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsProfileSource {
+    /// Built from hardcoded defaults or legacy cache entries.
+    #[default]
+    Default,
+    /// Derived from raw TLS record capture only.
+    Raw,
+    /// Derived from rustls-only metadata fallback.
+    Rustls,
+    /// Merged from raw TLS capture and rustls certificate metadata.
+    Merged,
+}
+
+/// Coarse-grained TLS response behavior captured per SNI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsBehaviorProfile {
+    /// Number of ChangeCipherSpec records observed before encrypted flight.
+    #[serde(default = "default_change_cipher_spec_count")]
+    pub change_cipher_spec_count: u8,
+    /// Sizes of the primary encrypted flight records carrying cert-like payload.
+    #[serde(default)]
+    pub app_data_record_sizes: Vec<usize>,
+    /// Sizes of small tail ApplicationData records that look like tickets.
+    #[serde(default)]
+    pub ticket_record_sizes: Vec<usize>,
+    /// Source of this behavior profile.
+    #[serde(default)]
+    pub source: TlsProfileSource,
+}
+
+fn default_change_cipher_spec_count() -> u8 {
+    1
+}
+
+impl Default for TlsBehaviorProfile {
+    fn default() -> Self {
+        Self {
+            change_cipher_spec_count: default_change_cipher_spec_count(),
+            app_data_record_sizes: Vec::new(),
+            ticket_record_sizes: Vec::new(),
+            source: TlsProfileSource::Default,
+        }
+    }
+}
+
 /// Cached data per SNI used by the emulator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedTlsData {
@@ -48,6 +95,8 @@ pub struct CachedTlsData {
     pub cert_payload: Option<TlsCertPayload>,
     pub app_data_records_sizes: Vec<usize>,
     pub total_app_data_len: usize,
+    #[serde(default)]
+    pub behavior_profile: TlsBehaviorProfile,
     #[serde(default = "now_system_time", skip_serializing, skip_deserializing)]
     pub fetched_at: SystemTime,
     pub domain: String,
@@ -63,6 +112,40 @@ pub struct TlsFetchResult {
     pub server_hello_parsed: ParsedServerHello,
     pub app_data_records_sizes: Vec<usize>,
     pub total_app_data_len: usize,
+    #[serde(default)]
+    pub behavior_profile: TlsBehaviorProfile,
     pub cert_info: Option<ParsedCertificateInfo>,
     pub cert_payload: Option<TlsCertPayload>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_tls_data_deserializes_without_behavior_profile() {
+        let json = r#"
+        {
+            "server_hello_template": {
+                "version": [3, 3],
+                "random": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "session_id": [],
+                "cipher_suite": [19, 1],
+                "compression": 0,
+                "extensions": []
+            },
+            "cert_info": null,
+            "cert_payload": null,
+            "app_data_records_sizes": [1024],
+            "total_app_data_len": 1024,
+            "domain": "example.com"
+        }
+        "#;
+
+        let cached: CachedTlsData = serde_json::from_str(json).unwrap();
+        assert_eq!(cached.behavior_profile.change_cipher_spec_count, 1);
+        assert!(cached.behavior_profile.app_data_record_sizes.is_empty());
+        assert!(cached.behavior_profile.ticket_record_sizes.is_empty());
+        assert_eq!(cached.behavior_profile.source, TlsProfileSource::Default);
+    }
 }

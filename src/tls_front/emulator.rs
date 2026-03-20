@@ -3,7 +3,7 @@ use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE, TLS_VERSION,
 };
 use crate::protocol::tls::{TLS_DIGEST_LEN, TLS_DIGEST_POS, gen_fake_x25519_key};
-use crate::tls_front::types::{CachedTlsData, ParsedCertificateInfo};
+use crate::tls_front::types::{CachedTlsData, ParsedCertificateInfo, TlsProfileSource};
 
 const MIN_APP_DATA: usize = 64;
 const MAX_APP_DATA: usize = 16640; // RFC 8446 §5.2 allows up to 2^14 + 256
@@ -108,14 +108,12 @@ pub fn build_emulated_server_hello(
 ) -> Vec<u8> {
     // --- ServerHello ---
     let mut extensions = Vec::new();
-    // KeyShare (x25519)
     let key = gen_fake_x25519_key(rng);
-    extensions.extend_from_slice(&0x0033u16.to_be_bytes()); // key_share
-    extensions.extend_from_slice(&(2 + 2 + 32u16).to_be_bytes()); // len
-    extensions.extend_from_slice(&0x001du16.to_be_bytes()); // X25519
+    extensions.extend_from_slice(&0x0033u16.to_be_bytes());
+    extensions.extend_from_slice(&(2 + 2 + 32u16).to_be_bytes());
+    extensions.extend_from_slice(&0x001du16.to_be_bytes());
     extensions.extend_from_slice(&(32u16).to_be_bytes());
     extensions.extend_from_slice(&key);
-    // supported_versions (TLS1.3)
     extensions.extend_from_slice(&0x002bu16.to_be_bytes());
     extensions.extend_from_slice(&(2u16).to_be_bytes());
     extensions.extend_from_slice(&0x0304u16.to_be_bytes());
@@ -128,7 +126,6 @@ pub fn build_emulated_server_hello(
         extensions.push(alpn_proto.len() as u8);
         extensions.extend_from_slice(alpn_proto);
     }
-
     let extensions_len = extensions.len() as u16;
 
     let body_len = 2 + // version
@@ -173,11 +170,22 @@ pub fn build_emulated_server_hello(
     ];
 
     // --- ApplicationData (fake encrypted records) ---
-    // Use the same number and sizes of ApplicationData records as the cached server.
-    let mut sizes = cached.app_data_records_sizes.clone();
-    if sizes.is_empty() {
-        sizes.push(cached.total_app_data_len.max(1024));
-    }
+    let sizes = match cached.behavior_profile.source {
+        TlsProfileSource::Raw | TlsProfileSource::Merged => cached
+            .app_data_records_sizes
+            .first()
+            .copied()
+            .or_else(|| cached.behavior_profile.app_data_record_sizes.first().copied())
+            .map(|size| vec![size])
+            .unwrap_or_else(|| vec![cached.total_app_data_len.max(1024)]),
+        _ => {
+            let mut sizes = cached.app_data_records_sizes.clone();
+            if sizes.is_empty() {
+                sizes.push(cached.total_app_data_len.max(1024));
+            }
+            sizes
+        }
+    };
     let mut sizes = jitter_and_clamp_sizes(&sizes, rng);
     let compact_payload = cached
         .cert_info
@@ -269,7 +277,9 @@ pub fn build_emulated_server_hello(
 mod tests {
     use std::time::SystemTime;
 
-    use crate::tls_front::types::{CachedTlsData, ParsedServerHello, TlsCertPayload};
+    use crate::tls_front::types::{
+        CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsProfileSource,
+    };
 
     use super::build_emulated_server_hello;
     use crate::crypto::SecureRandom;
@@ -300,6 +310,7 @@ mod tests {
             cert_payload,
             app_data_records_sizes: vec![64],
             total_app_data_len: 64,
+            behavior_profile: TlsBehaviorProfile::default(),
             fetched_at: SystemTime::now(),
             domain: "example.com".to_string(),
         }
@@ -384,5 +395,35 @@ mod tests {
 
         let payload = first_app_data_payload(&response);
         assert!(payload.starts_with(b"CN=example.com"));
+    }
+
+    #[test]
+    fn test_build_emulated_server_hello_ignores_tail_records_for_raw_profile() {
+        let mut cached = make_cached(None);
+        cached.app_data_records_sizes = vec![27, 3905, 537, 69];
+        cached.total_app_data_len = 4538;
+        cached.behavior_profile.source = TlsProfileSource::Merged;
+        cached.behavior_profile.app_data_record_sizes = vec![27, 3905, 537];
+        cached.behavior_profile.ticket_record_sizes = vec![69];
+
+        let rng = SecureRandom::new();
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0x12; 32],
+            &[0x34; 16],
+            &cached,
+            false,
+            &rng,
+            None,
+            0,
+        );
+
+        let hello_len = u16::from_be_bytes([response[3], response[4]]) as usize;
+        let ccs_start = 5 + hello_len;
+        let app_start = ccs_start + 6;
+        let app_len = u16::from_be_bytes([response[app_start + 3], response[app_start + 4]]) as usize;
+
+        assert_eq!(response[app_start], TLS_RECORD_APPLICATION);
+        assert_eq!(app_start + 5 + app_len, response.len());
     }
 }

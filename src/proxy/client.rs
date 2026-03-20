@@ -39,6 +39,8 @@ use crate::proxy::direct_relay::handle_via_direct;
 use crate::proxy::handshake::{HandshakeSuccess, handle_mtproto_handshake, handle_tls_handshake};
 use crate::proxy::masking::handle_bad_client;
 use crate::proxy::middle_relay::handle_via_middle_proxy;
+use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
+use crate::proxy::session_eviction::register_session;
 
 fn beobachten_ttl(config: &ProxyConfig) -> Duration {
     Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60))
@@ -80,6 +82,7 @@ pub async fn handle_client_stream<S>(
     buffer_pool: Arc<BufferPool>,
     rng: Arc<SecureRandom>,
     me_pool: Option<Arc<MePool>>,
+    route_runtime: Arc<RouteRuntimeController>,
     tls_cache: Option<Arc<TlsFrontCache>>,
     ip_tracker: Arc<UserIpTracker>,
     beobachten: Arc<BeobachtenStore>,
@@ -97,8 +100,11 @@ where
         .unwrap_or_else(|_| "0.0.0.0:443".parse().unwrap());
 
     if proxy_protocol_enabled {
-        match parse_proxy_protocol(&mut stream, peer).await {
-            Ok(info) => {
+        let proxy_header_timeout = Duration::from_millis(
+            config.server.proxy_protocol_header_timeout_ms.max(1),
+        );
+        match timeout(proxy_header_timeout, parse_proxy_protocol(&mut stream, peer)).await {
+            Ok(Ok(info)) => {
                 debug!(
                     peer = %peer,
                     client = %info.src_addr,
@@ -110,11 +116,17 @@ where
                     local_addr = dst;
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 stats.increment_connects_bad();
                 warn!(peer = %peer, error = %e, "Invalid PROXY protocol header");
                 record_beobachten_class(&beobachten, &config, peer.ip(), "other");
                 return Err(e);
+            }
+            Err(_) => {
+                stats.increment_connects_bad();
+                warn!(peer = %peer, timeout_ms = proxy_header_timeout.as_millis(), "PROXY protocol header timeout");
+                record_beobachten_class(&beobachten, &config, peer.ip(), "other");
+                return Err(ProxyError::InvalidProxyProtocol);
             }
         }
     }
@@ -161,7 +173,7 @@ where
 
             let (read_half, write_half) = tokio::io::split(stream);
 
-            let (mut tls_reader, tls_writer, _tls_user) = match handle_tls_handshake(
+            let (mut tls_reader, tls_writer, tls_user) = match handle_tls_handshake(
                 &handshake, read_half, write_half, real_peer,
                 &config, &replay_checker, &rng, tls_cache.clone(),
             ).await {
@@ -190,7 +202,7 @@ where
 
             let (crypto_reader, crypto_writer, success) = match handle_mtproto_handshake(
                 &mtproto_handshake, tls_reader, tls_writer, real_peer,
-                &config, &replay_checker, true,
+                &config, &replay_checker, true, Some(tls_user.as_str()),
             ).await {
                 HandshakeResult::Success(result) => result,
                 HandshakeResult::BadClient { reader: _, writer: _ } => {
@@ -205,6 +217,7 @@ where
                 RunningClientHandler::handle_authenticated_static(
                     crypto_reader, crypto_writer, success,
                     upstream_manager, stats, config, buffer_pool, rng, me_pool,
+                    route_runtime.clone(),
                     local_addr, real_peer, ip_tracker.clone(),
                 ),
             )))
@@ -234,7 +247,7 @@ where
 
             let (crypto_reader, crypto_writer, success) = match handle_mtproto_handshake(
                 &handshake, read_half, write_half, real_peer,
-                &config, &replay_checker, false,
+                &config, &replay_checker, false, None,
             ).await {
                 HandshakeResult::Success(result) => result,
                 HandshakeResult::BadClient { reader, writer } => {
@@ -265,6 +278,7 @@ where
                     buffer_pool,
                     rng,
                     me_pool,
+                    route_runtime.clone(),
                     local_addr,
                     real_peer,
                     ip_tracker.clone(),
@@ -308,6 +322,8 @@ pub struct ClientHandler;
 pub struct RunningClientHandler {
     stream: TcpStream,
     peer: SocketAddr,
+    real_peer_from_proxy: Option<SocketAddr>,
+    real_peer_report: Arc<std::sync::Mutex<Option<SocketAddr>>>,
     config: Arc<ProxyConfig>,
     stats: Arc<Stats>,
     replay_checker: Arc<ReplayChecker>,
@@ -315,6 +331,7 @@ pub struct RunningClientHandler {
     buffer_pool: Arc<BufferPool>,
     rng: Arc<SecureRandom>,
     me_pool: Option<Arc<MePool>>,
+    route_runtime: Arc<RouteRuntimeController>,
     tls_cache: Option<Arc<TlsFrontCache>>,
     ip_tracker: Arc<UserIpTracker>,
     beobachten: Arc<BeobachtenStore>,
@@ -332,14 +349,19 @@ impl ClientHandler {
         buffer_pool: Arc<BufferPool>,
         rng: Arc<SecureRandom>,
         me_pool: Option<Arc<MePool>>,
+        route_runtime: Arc<RouteRuntimeController>,
         tls_cache: Option<Arc<TlsFrontCache>>,
         ip_tracker: Arc<UserIpTracker>,
         beobachten: Arc<BeobachtenStore>,
         proxy_protocol_enabled: bool,
+        real_peer_report: Arc<std::sync::Mutex<Option<SocketAddr>>>,
     ) -> RunningClientHandler {
+        let normalized_peer = normalize_ip(peer);
         RunningClientHandler {
             stream,
-            peer,
+            peer: normalized_peer,
+            real_peer_from_proxy: None,
+            real_peer_report,
             config,
             stats,
             replay_checker,
@@ -347,6 +369,7 @@ impl ClientHandler {
             buffer_pool,
             rng,
             me_pool,
+            route_runtime,
             tls_cache,
             ip_tracker,
             beobachten,
@@ -356,10 +379,8 @@ impl ClientHandler {
 }
 
 impl RunningClientHandler {
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         self.stats.increment_connects_all();
-
-        self.peer = normalize_ip(self.peer);
         let peer = self.peer;
         let _ip_tracker = self.ip_tracker.clone();
         debug!(peer = %peer, "New connection");
@@ -415,8 +436,16 @@ impl RunningClientHandler {
         let mut local_addr = self.stream.local_addr().map_err(ProxyError::Io)?;
 
         if self.proxy_protocol_enabled {
-            match parse_proxy_protocol(&mut self.stream, self.peer).await {
-                Ok(info) => {
+            let proxy_header_timeout = Duration::from_millis(
+                self.config.server.proxy_protocol_header_timeout_ms.max(1),
+            );
+            match timeout(
+                proxy_header_timeout,
+                parse_proxy_protocol(&mut self.stream, self.peer),
+            )
+            .await
+            {
+                Ok(Ok(info)) => {
                     debug!(
                         peer = %self.peer,
                         client = %info.src_addr,
@@ -424,11 +453,15 @@ impl RunningClientHandler {
                         "PROXY protocol header parsed"
                     );
                     self.peer = normalize_ip(info.src_addr);
+                    self.real_peer_from_proxy = Some(self.peer);
+                    if let Ok(mut slot) = self.real_peer_report.lock() {
+                        *slot = Some(self.peer);
+                    }
                     if let Some(dst) = info.dst_addr {
                         local_addr = dst;
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     self.stats.increment_connects_bad();
                     warn!(peer = %self.peer, error = %e, "Invalid PROXY protocol header");
                     record_beobachten_class(
@@ -438,6 +471,21 @@ impl RunningClientHandler {
                         "other",
                     );
                     return Err(e);
+                }
+                Err(_) => {
+                    self.stats.increment_connects_bad();
+                    warn!(
+                        peer = %self.peer,
+                        timeout_ms = proxy_header_timeout.as_millis(),
+                        "PROXY protocol header timeout"
+                    );
+                    record_beobachten_class(
+                        &self.beobachten,
+                        &self.config,
+                        self.peer.ip(),
+                        "other",
+                    );
+                    return Err(ProxyError::InvalidProxyProtocol);
                 }
             }
         }
@@ -494,7 +542,7 @@ impl RunningClientHandler {
 
         let (read_half, write_half) = self.stream.into_split();
 
-        let (mut tls_reader, tls_writer, _tls_user) = match handle_tls_handshake(
+        let (mut tls_reader, tls_writer, tls_user) = match handle_tls_handshake(
             &handshake,
             read_half,
             write_half,
@@ -538,6 +586,7 @@ impl RunningClientHandler {
             &config,
             &replay_checker,
             true,
+            Some(tls_user.as_str()),
         )
         .await
         {
@@ -564,6 +613,7 @@ impl RunningClientHandler {
                 buffer_pool,
                 self.rng,
                 self.me_pool,
+                self.route_runtime.clone(),
                 local_addr,
                 peer,
                 self.ip_tracker,
@@ -611,6 +661,7 @@ impl RunningClientHandler {
             &config,
             &replay_checker,
             false,
+            None,
         )
         .await
         {
@@ -643,6 +694,7 @@ impl RunningClientHandler {
                 buffer_pool,
                 self.rng,
                 self.me_pool,
+                self.route_runtime.clone(),
                 local_addr,
                 peer,
                 self.ip_tracker,
@@ -664,6 +716,7 @@ impl RunningClientHandler {
         buffer_pool: Arc<BufferPool>,
         rng: Arc<SecureRandom>,
         me_pool: Option<Arc<MePool>>,
+        route_runtime: Arc<RouteRuntimeController>,
         local_addr: SocketAddr,
         peer_addr: SocketAddr,
         ip_tracker: Arc<UserIpTracker>,
@@ -672,42 +725,31 @@ impl RunningClientHandler {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        let user = &success.user;
+        let user = success.user.clone();
 
-        if let Err(e) = Self::check_user_limits_static(user, &config, &stats, peer_addr, &ip_tracker).await {
+        if let Err(e) = Self::check_user_limits_static(&user, &config, &stats, peer_addr, &ip_tracker).await {
             warn!(user = %user, error = %e, "User limit exceeded");
             return Err(e);
         }
 
-        // IP Cleanup Guard: автоматически удаляет IP при выходе из scope
-        struct IpCleanupGuard {
-            tracker: Arc<UserIpTracker>,
-            user: String,
-            ip: std::net::IpAddr,
+        let registration = register_session(&user, success.dc_idx);
+        if registration.replaced_existing {
+            stats.increment_reconnect_evict_total();
+            warn!(
+                user = %user,
+                dc = success.dc_idx,
+                "Reconnect detected: replacing active session for user+dc"
+            );
         }
-        
-        impl Drop for IpCleanupGuard {
-            fn drop(&mut self) {
-                let tracker = self.tracker.clone();
-                let user = self.user.clone();
-                let ip = self.ip;
-                tokio::spawn(async move {
-                    tracker.remove_ip(&user, ip).await;
-                    debug!(user = %user, ip = %ip, "IP cleaned up on disconnect");
-                });
-            }
-        }
-        
-        let _cleanup = IpCleanupGuard {
-            tracker: ip_tracker,
-            user: user.clone(),
-            ip: peer_addr.ip(),
-        };
+        let session_lease = registration.lease;
 
-        // Decide: middle proxy or direct
-        if config.general.use_middle_proxy {
+        let route_snapshot = route_runtime.snapshot();
+        let session_id = rng.u64();
+        let relay_result = if config.general.use_middle_proxy
+            && matches!(route_snapshot.mode, RelayRouteMode::Middle)
+        {
             if let Some(ref pool) = me_pool {
-                return handle_via_middle_proxy(
+                handle_via_middle_proxy(
                     client_reader,
                     client_writer,
                     success,
@@ -717,24 +759,51 @@ impl RunningClientHandler {
                     buffer_pool,
                     local_addr,
                     rng,
+                    route_runtime.subscribe(),
+                    route_snapshot,
+                    session_id,
+                    session_lease.clone(),
                 )
-                .await;
+                .await
+            } else {
+                warn!("use_middle_proxy=true but MePool not initialized, falling back to direct");
+                handle_via_direct(
+                    client_reader,
+                    client_writer,
+                    success,
+                    upstream_manager,
+                    stats,
+                    config,
+                    buffer_pool,
+                    rng,
+                    route_runtime.subscribe(),
+                    route_snapshot,
+                    session_id,
+                    session_lease.clone(),
+                )
+                .await
             }
-            warn!("use_middle_proxy=true but MePool not initialized, falling back to direct");
-        }
+        } else {
+            // Direct mode (original behavior)
+            handle_via_direct(
+                client_reader,
+                client_writer,
+                success,
+                upstream_manager,
+                stats,
+                config,
+                buffer_pool,
+                rng,
+                route_runtime.subscribe(),
+                route_snapshot,
+                session_id,
+                session_lease.clone(),
+            )
+            .await
+        };
 
-        // Direct mode (original behavior)
-        handle_via_direct(
-            client_reader,
-            client_writer,
-            success,
-            upstream_manager,
-            stats,
-            config,
-            buffer_pool,
-            rng,
-        )
-        .await
+        ip_tracker.remove_ip(&user, peer_addr.ip()).await;
+        relay_result
     }
 
     async fn check_user_limits_static(
@@ -752,22 +821,29 @@ impl RunningClientHandler {
             });
         }
 
+        let ip_reserved = match ip_tracker.check_and_add(user, peer_addr.ip()).await {
+            Ok(()) => true,
+            Err(reason) => {
+                warn!(
+                    user = %user,
+                    ip = %peer_addr.ip(),
+                    reason = %reason,
+                    "IP limit exceeded"
+                );
+                return Err(ProxyError::ConnectionLimitExceeded {
+                    user: user.to_string(),
+                });
+            }
+        };
         // IP limit check
-        if let Err(reason) = ip_tracker.check_and_add(user, peer_addr.ip()).await {
-            warn!(
-                user = %user,
-                ip = %peer_addr.ip(),
-                reason = %reason,
-                "IP limit exceeded"
-            );
-            return Err(ProxyError::ConnectionLimitExceeded {
-                user: user.to_string(),
-            });
-        }
 
         if let Some(limit) = config.access.user_max_tcp_conns.get(user)
             && stats.get_user_curr_connects(user) >= *limit as u64
         {
+            if ip_reserved {
+                ip_tracker.remove_ip(user, peer_addr.ip()).await;
+                stats.increment_ip_reservation_rollback_tcp_limit_total();
+            }
             return Err(ProxyError::ConnectionLimitExceeded {
                 user: user.to_string(),
             });
@@ -776,6 +852,10 @@ impl RunningClientHandler {
         if let Some(quota) = config.access.user_data_quota.get(user)
             && stats.get_user_total_octets(user) >= *quota
         {
+            if ip_reserved {
+                ip_tracker.remove_ip(user, peer_addr.ip()).await;
+                stats.increment_ip_reservation_rollback_quota_limit_total();
+            }
             return Err(ProxyError::DataQuotaExceeded {
                 user: user.to_string(),
             });

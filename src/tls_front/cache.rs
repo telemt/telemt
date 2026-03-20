@@ -8,7 +8,9 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, warn, info};
 
-use crate::tls_front::types::{CachedTlsData, ParsedServerHello, TlsFetchResult};
+use crate::tls_front::types::{
+    CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsFetchResult,
+};
 
 /// Lightweight in-memory + optional on-disk cache for TLS fronting data.
 #[derive(Debug)]
@@ -37,6 +39,7 @@ impl TlsFrontCache {
             cert_payload: None,
             app_data_records_sizes: vec![default_len],
             total_app_data_len: default_len,
+            behavior_profile: TlsBehaviorProfile::default(),
             fetched_at: SystemTime::now(),
             domain: "default".to_string(),
         });
@@ -189,6 +192,7 @@ impl TlsFrontCache {
             cert_payload: fetched.cert_payload,
             app_data_records_sizes: fetched.app_data_records_sizes.clone(),
             total_app_data_len: fetched.total_app_data_len,
+            behavior_profile: fetched.behavior_profile,
             fetched_at: SystemTime::now(),
             domain: domain.to_string(),
         };

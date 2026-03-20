@@ -47,6 +47,54 @@ zabbix_export:
           tags:
             - tag: Application
               value: 'Server connections'
+        - uuid: 2af8ff0f27e4408db3f9798dc3141457
+          name: 'Full forensic desync logs emitted'
+          type: DEPENDENT
+          key: telemt.desync_full_logged_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_desync_full_logged_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: f4439948a49f4b1d85c3eeee963259bc
+          name: 'Suppressed desync forensic events'
+          type: DEPENDENT
+          key: telemt.desync_suppressed_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_desync_suppressed_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 721627b8c10a414a82be1e08873604c1
+          name: 'Total crypto-desync detections'
+          type: DEPENDENT
+          key: telemt.desync_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_desync_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
         - uuid: 1618272cf68e44509425f5fab029db7b
           name: 'Handshake timeouts total'
           type: DEPENDENT
@@ -64,6 +112,152 @@ zabbix_export:
           tags:
             - tag: Application
               value: 'Server connections'
+        - uuid: 4e5c0d10a4494c959445b4cd7a2e696e
+          name: 'ME CRC mismatches'
+          type: DEPENDENT
+          key: telemt.me_crc_mismatch_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_crc_mismatch_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: 21a4a48b6e98457d87c56c3ae7b56c55
+          name: 'ME endpoint quarantines due to rapid flaps'
+          type: DEPENDENT
+          key: telemt.me_endpoint_quarantine_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_endpoint_quarantine_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: c8ffc30dc3d94a6d9085ac79413fbdd6
+          name: 'Runtime ME writer floor policy mode'
+          type: DEPENDENT
+          key: telemt.me_floor_mode
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'telemt_me_floor_mode == 1'
+                - label
+                - mode
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 4814b52d5d184f63b64654e7635bdf6a
+          name: 'ME handshake rejects from upstream'
+          type: DEPENDENT
+          key: telemt.me_handshake_reject_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_handshake_reject_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 72d11caecefb4472b6c3e07f1ee90053
+          name: 'Hardswap cycles that reused an existing pending generation'
+          type: DEPENDENT
+          key: telemt.me_hardswap_pending_reuse_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_hardswap_pending_reuse_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 447030854e8840a393874f54e25861d5
+          name: 'Pending hardswap generations reset by TTL expiration'
+          type: DEPENDENT
+          key: telemt.me_hardswap_pending_ttl_expired_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_hardswap_pending_ttl_expired_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 47f55dd7d9394405b1c0eba6e6eb3e5c
+          name: 'ME idle writers closed by peer'
+          type: DEPENDENT
+          key: telemt.me_idle_close_by_peer_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_idle_close_by_peer_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 9e4598efbfe246fab9360270002b0cfa
+          name: 'ME KDF input drift detections'
+          type: DEPENDENT
+          key: telemt.me_kdf_drift_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_kdf_drift_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 565cc9780c5541bfb7acbb1f4973b5fc
+          name: 'ME KDF client-port changes with stable non-port material'
+          type: DEPENDENT
+          key: telemt.me_kdf_port_only_drift_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_kdf_port_only_drift_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
         - uuid: fb95391c7f894e3eb6984b92885813d2
           name: 'ME keepalive send failures'
           type: DEPENDENT
@@ -74,6 +268,22 @@ zabbix_export:
             - type: PROMETHEUS_PATTERN
               parameters:
                 - telemt_me_keepalive_failed_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: 7b5995401195430e9f9e02e5dd8c3313
+          name: 'ME keepalive pong replies'
+          type: DEPENDENT
+          key: telemt.me_keepalive_pong_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_keepalive_pong_total
                 - value
                 - ''
           master_item:
@@ -98,6 +308,38 @@ zabbix_export:
           tags:
             - tag: Application
               value: 'Middle-End connections'
+        - uuid: da5af5fd691d4f40bc6cad78b4758eac
+          name: 'ME keepalive ping timeouts'
+          type: DEPENDENT
+          key: telemt.me_keepalive_timeout_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_keepalive_timeout_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: 50b45e494d584a7b86fca8b80c727411
+          name: 'ME reader EOF terminations'
+          type: DEPENDENT
+          key: telemt.me_reader_eof_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_reader_eof_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
         - uuid: fb95391c7f894e3eb6984b92885811a2
           name: 'ME reconnect attempts'
           type: DEPENDENT
@@ -132,6 +374,470 @@ zabbix_export:
           tags:
             - tag: Application
               value: 'Middle-End connections'
+        - uuid: 6288b537b7964aadb8a483abd716855a
+          name: 'Immediate ME refill failures'
+          type: DEPENDENT
+          key: telemt.me_refill_failed_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_refill_failed_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 8450bdb48f9b4505beb8fdfc665b37c5
+          name: 'Immediate ME refill skips due to inflight dedup'
+          type: DEPENDENT
+          key: telemt.me_refill_skipped_inflight_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_refill_skipped_inflight_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: cb192264c03a40578140863970333515
+          name: 'Immediate ME refill runs started'
+          type: DEPENDENT
+          key: telemt.me_refill_triggered_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_refill_triggered_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 8f46b374332848fba0daba72e17eaad0
+          name: 'ME route drops: channel closed'
+          type: DEPENDENT
+          key: telemt.me_route_drop_channel_closed_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_route_drop_channel_closed_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: de5fa7a316554d099bcf5e000b33bfed
+          name: 'ME route drops: no conn'
+          type: DEPENDENT
+          key: telemt.me_route_drop_no_conn_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_route_drop_no_conn_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Middle-End connections'
+        - uuid: d9e1630ce38946f7a8d179187793f12c
+          name: 'ME route drops: queue full by adaptive profile'
+          type: DEPENDENT
+          key: telemt.me_route_drop_queue_full_profile_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'telemt_me_route_drop_queue_full_profile_total == 1'
+                - label
+                - profile
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: d5caefb8978e4f3eac4dcdecd4655c46
+          name: 'ME route drops: queue full'
+          type: DEPENDENT
+          key: telemt.me_route_drop_queue_full_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_route_drop_queue_full_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: f682298c2dfc46dda45771a58faa9ffa
+          name: 'Service RPC_CLOSE_EXT sent after activity signals'
+          type: DEPENDENT
+          key: telemt.me_rpc_proxy_req_signal_close_sent_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_rpc_proxy_req_signal_close_sent_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 5db4bdc93959473eade9281c221e34b6
+          name: 'Service RPC_PROXY_REQ activity signal failures'
+          type: DEPENDENT
+          key: telemt.me_rpc_proxy_req_signal_failed_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_rpc_proxy_req_signal_failed_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 4e75611bc3854415b63a1863e9bf176f
+          name: 'Service RPC_PROXY_REQ responses observed'
+          type: DEPENDENT
+          key: telemt.me_rpc_proxy_req_signal_response_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_rpc_proxy_req_signal_response_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: ecbffb29f2784839bea0ce2a38393438
+          name: 'Service RPC_PROXY_REQ activity signals sent'
+          type: DEPENDENT
+          key: telemt.me_rpc_proxy_req_signal_sent_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_rpc_proxy_req_signal_sent_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 078eff3deeec435597f0c531457bb906
+          name: 'Service RPC_PROXY_REQ skipped due to missing writer metadata'
+          type: DEPENDENT
+          key: telemt.me_rpc_proxy_req_signal_skipped_no_meta_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_rpc_proxy_req_signal_skipped_no_meta_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 7429ffbd94a340d7a600bc1690eb57e7
+          name: 'ME sequence mismatches'
+          type: DEPENDENT
+          key: telemt.me_seq_mismatch_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_seq_mismatch_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 0f1f77ae34df4a48b36ad263359b5ad3
+          name: 'Single-endpoint DC outage transitions to active state'
+          type: DEPENDENT
+          key: telemt.me_single_endpoint_outage_enter_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_single_endpoint_outage_enter_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 63d44ef672ff4df288914eb98f6fa72c
+          name: 'Single-endpoint DC outage recovery transitions'
+          type: DEPENDENT
+          key: telemt.me_single_endpoint_outage_exit_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_single_endpoint_outage_exit_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 1b72ff95f1ba4fb2924aa3a129b22f4d
+          name: 'Reconnect attempts performed during single-endpoint outages'
+          type: DEPENDENT
+          key: telemt.me_single_endpoint_outage_reconnect_attempt_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_single_endpoint_outage_reconnect_attempt_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 466bb352d55946a0bb78efc63e1ed71e
+          name: 'Successful reconnect attempts during single-endpoint outages'
+          type: DEPENDENT
+          key: telemt.me_single_endpoint_outage_reconnect_success_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_single_endpoint_outage_reconnect_success_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 295b4a519a4d46f7b1ddbdf5b5268751
+          name: 'Outage reconnect attempts that bypassed quarantine'
+          type: DEPENDENT
+          key: telemt.me_single_endpoint_quarantine_bypass_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_single_endpoint_quarantine_bypass_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: bffa4861f83f4445bb0b2259e100e04c
+          name: 'Shadow rotations skipped because endpoint is quarantined'
+          type: DEPENDENT
+          key: telemt.me_single_endpoint_shadow_rotate_skipped_quarantine_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_single_endpoint_shadow_rotate_skipped_quarantine_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: f80ce02b50824f8ea0ddabac9ff97757
+          name: 'Successful periodic shadow rotations for single-endpoint DC groups'
+          type: DEPENDENT
+          key: telemt.me_single_endpoint_shadow_rotate_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_single_endpoint_shadow_rotate_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: bf2a0ff89c314f78904aa43351601111
+          name: 'Total ME writer removals'
+          type: DEPENDENT
+          key: telemt.me_writer_removed_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_writer_removed_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 0d12ea02187745eba55498dfb16daa5c
+          name: 'Unexpected writer removals not yet compensated by restore'
+          type: DEPENDENT
+          key: telemt.me_writer_removed_unexpected_minus_restored_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_writer_removed_unexpected_minus_restored_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 644278e7f87947e1a49483ba4487e32b
+          name: 'Unexpected ME writer removals that triggered refill'
+          type: DEPENDENT
+          key: telemt.me_writer_removed_unexpected_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_writer_removed_unexpected_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: a6c24dfc85d643dab1c81fc1e63fe3cc
+          name: 'Refilled ME writer restored via fallback endpoint'
+          type: DEPENDENT
+          key: telemt.me_writer_restored_fallback_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_writer_restored_fallback_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: d7d0a78ca6da4bb9b4a0991fd83149cf
+          name: 'Refilled ME writer restored on the same endpoint'
+          type: DEPENDENT
+          key: telemt.me_writer_restored_same_endpoint_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_me_writer_restored_same_endpoint_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: beb906ab89564cf9adfbb7b1d4553c44
+          name: 'Active draining ME writers'
+          type: DEPENDENT
+          key: telemt.pool_drain_active
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_pool_drain_active
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 2f0926e00d7a4e5aa1783cb33b1192ea
+          name: 'Forced close events for draining writers'
+          type: DEPENDENT
+          key: telemt.pool_force_close_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_pool_force_close_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 70d0b4da6079435ebe978e99bda8f1d3
+          name: 'Stale writer fallback picks for new binds'
+          type: DEPENDENT
+          key: telemt.pool_stale_pick_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_pool_stale_pick_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 8a1d240b9b554905a8add9bf730bf1f4
+          name: 'Successful ME pool swaps'
+          type: DEPENDENT
+          key: telemt.pool_swap_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_pool_swap_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
         - uuid: 991b1858e3f94b3098ff0f84859efc41
           name: 'Prometheus metrics'
           type: HTTP_AGENT
@@ -139,11 +845,158 @@ zabbix_export:
           value_type: TEXT
           trends: '0'
           url: '{$TELEMT_URL}'
+        - uuid: cef2547bb9464d10b11b6c19beac089d
+          name: 'Invalid secure frame lengths'
+          type: DEPENDENT
+          key: telemt.secure_padding_invalid_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_secure_padding_invalid_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: c164d7b59bdc4429a23b908558de8cf4
+          name: 'Runtime core telemetry switch'
+          type: DEPENDENT
+          key: telemt.telemetry_core_enabled
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_telemetry_core_enabled
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: ff16438417d842178d26033d13520833
+          name: 'Runtime ME telemetry level flag'
+          type: DEPENDENT
+          key: telemt.telemetry_me_level
+          delay: '0'
+          value_type: TEXT
+          trends: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'telemt_telemetry_me_level == 1'
+                - label
+                - level
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 9fec0bb7c3c84ada96668b74d5849556
+          name: 'Runtime per-user telemetry switch'
+          type: DEPENDENT
+          key: telemt.telemetry_user_enabled
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_telemetry_user_enabled
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 378b765aa7bc4a4ea87d3bc876c50d12
+          name: 'User-labeled metric series suppression flag'
+          type: DEPENDENT
+          key: telemt.telemetry_user_series_suppressed
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_telemetry_user_series_suppressed
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 17972d992fa84fc1b53fdefed123ccd8
+          name: 'Upstream connect attempts across all requests'
+          type: DEPENDENT
+          key: telemt.upstream_connect_attempt_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_upstream_connect_attempt_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 38627dd1cb7145e180d111bdee1d2c23
+          name: 'Hard errors that triggered upstream connect failfast'
+          type: DEPENDENT
+          key: telemt.upstream_connect_failfast_hard_error_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_upstream_connect_failfast_hard_error_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 0ffd4c35b6734c83bd77c59f30bf3246
+          name: 'Failed upstream connect request cycles'
+          type: DEPENDENT
+          key: telemt.upstream_connect_fail_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_upstream_connect_fail_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
+        - uuid: 7da255f4f38c4095921bc876d16d3586
+          name: 'Successful upstream connect request cycles'
+          type: DEPENDENT
+          key: telemt.upstream_connect_success_total
+          delay: '0'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - telemt_upstream_connect_success_total
+                - value
+                - ''
+          master_item:
+            key: telemt.prom_metrics
+          tags:
+            - tag: Application
+              value: 'Telemt other'
         - uuid: fb95391c7f894e3eb6984b92885813b2
           name: 'Telemt Uptime'
           type: DEPENDENT
           key: telemt.uptime
           delay: '0'
+          value_type: FLOAT
           trends: '0'
           units: s
           preprocessing:
@@ -180,6 +1033,56 @@ zabbix_export:
               tags:
                 - tag: Application
                   value: 'Users connections'
+            - uuid: f7ad02d1635542b584bba5941375ae41
+              name: 'Current number of unique active IPs by {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.ips_current_[{#TELEMT_USER}]'
+              delay: '0'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_unique_ips_current{user="{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users IPs'
+            - uuid: 100b09bf1cff420495c5c105bdb0af6c
+              name: 'Configured unique IP limit to {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.ips_limit_[{#TELEMT_USER}]'
+              delay: '0'
+              description: '0 means unlimited'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_unique_ips_limit{user="{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users IPs'
+            - uuid: ef3ac8f5c5d746bbaa4b0b698ba0d9f6
+              name: 'Unique IP usage ratio by {#TELEMT_USER}'
+              type: DEPENDENT
+              key: 'telemt.ips_utilization_[{#TELEMT_USER}]'
+              delay: '0'
+              value_type: FLOAT
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'telemt_user_unique_ips_utilization{user="{#TELEMT_USER}"}'
+                    - value
+                    - ''
+              master_item:
+                key: telemt.prom_metrics
+              tags:
+                - tag: Application
+                  value: 'Users IPs'
             - uuid: 3ccce91ab5d54b4d972280c7b7bda910
               name: 'Messages received from {#TELEMT_USER}'
               type: DEPENDENT
@@ -262,6 +1165,60 @@ zabbix_export:
               tags:
                 - tag: Application
                   value: 'Users connections'
+          graph_prototypes:
+            - uuid: 4199de3dcea943d8a1ec62dc297b2e9f
+              name: 'User {#TELEMT_USER}: Connections'
+              graph_items:
+                - color: 1A7C11
+                  item:
+                    host: Telemt
+                    key: 'telemt.active_conn_[{#TELEMT_USER}]'
+                - color: F63100
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.total_conn_[{#TELEMT_USER}]'
+            - uuid: 84b8f22d891e49768891f497cac12fb3
+              name: 'User {#TELEMT_USER}: IPs'
+              graph_items:
+                - color: 0080FF
+                  item:
+                    host: Telemt
+                    key: 'telemt.ips_current_[{#TELEMT_USER}]'
+                - color: FF8000
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.ips_limit_[{#TELEMT_USER}]'
+                - color: AA00FF
+                  sortorder: '2'
+                  item:
+                    host: Telemt
+                    key: 'telemt.ips_utilization_[{#TELEMT_USER}]'
+            - uuid: 09dabe7125114e36a6ce40788a7cb888
+              name: 'User {#TELEMT_USER}: Traffic'
+              graph_items:
+                - color: 00AA00
+                  item:
+                    host: Telemt
+                    key: 'telemt.octets_from_[{#TELEMT_USER}]'
+                - color: AA0000
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.octets_to_[{#TELEMT_USER}]'
+            - uuid: 367f458962574b0ab3c02278a4cd7ecb
+              name: 'User {#TELEMT_USER}: Messages'
+              graph_items:
+                - color: 00AAFF
+                  item:
+                    host: Telemt
+                    key: 'telemt.msgs_from_[{#TELEMT_USER}]'
+                - color: FF5500
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.msgs_to_[{#TELEMT_USER}]'
           master_item:
             key: telemt.prom_metrics
           lld_macro_paths:
@@ -274,3 +1231,206 @@ zabbix_export:
       tags:
         - tag: target
           value: Telemt
+  graphs:
+    - uuid: f162658049ca4f50893c5cc02515ff10
+      name: 'Telemt: Server Connections Overview'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: Telemt
+            key: telemt.conn_total
+        - color: F63100
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.conn_bad_total
+        - color: FC6EA3
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.handshake_timeouts_total
+    - uuid: 759eca5e687142f19248f9d9343e1adf
+      name: 'Telemt: Uptime'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.uptime
+    - uuid: 0a27dbd0490d4a508c03ed39fa18545d
+      name: 'Telemt: ME Keepalive'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_sent_total
+        - color: 00AA00
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_pong_total
+        - color: F63100
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_failed_total
+        - color: FF8000
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_timeout_total
+    - uuid: 4015e24ff70b49f484e884d1dde687c0
+      name: 'Telemt: ME Reconnects'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.me_reconnect_attempts_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_reconnect_success_total
+    - uuid: f3e3eeb0663c471aa26cf4b6872b0c50
+      name: 'Telemt: ME Route Drops'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.me_route_drop_channel_closed_total
+        - color: FF8000
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_route_drop_no_conn_total
+        - color: AA00FF
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_route_drop_queue_full_total
+    - uuid: 49b51ed78a5943bdbd6d1d34fe28bf61
+      name: 'Telemt: ME Writer Pool'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.pool_drain_active
+        - color: F63100
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.pool_force_close_total
+        - color: FF8000
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.pool_stale_pick_total
+        - color: 1A7C11
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.pool_swap_total
+    - uuid: a0779e6c979f4c1ab7ac4da7123a5ecb
+      name: 'Telemt: ME Writer Removals and Restores'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.me_writer_removed_total
+        - color: FF8000
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_writer_removed_unexpected_total
+        - color: FFAA00
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_writer_removed_unexpected_minus_restored_total
+        - color: 1A7C11
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.me_writer_restored_same_endpoint_total
+        - color: 00AA00
+          sortorder: '4'
+          item:
+            host: Telemt
+            key: telemt.me_writer_restored_fallback_total
+    - uuid: 4fead70290664953b026a228108bee0e
+      name: 'Telemt: Desync Detections'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.desync_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.desync_full_logged_total
+        - color: FF8000
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.desync_suppressed_total
+    - uuid: 9f8c9f48cb534a66ac21b1bba1acb602
+      name: 'Telemt: Upstream Connect Cycles'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_attempt_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_success_total
+        - color: F63100
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_fail_total
+        - color: FF8000
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_failfast_hard_error_total
+    - uuid: 05182057727547f8b8884b7e71e34f19
+      name: 'Telemt: ME Single-Endpoint Outages'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_enter_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_exit_total
+        - color: 0080FF
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_reconnect_attempt_total
+        - color: 00AA00
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_reconnect_success_total
+    - uuid: 6892e8b7fbd2445d9ccc0574af58a354
+      name: 'Telemt: ME Refill Activity'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.me_refill_triggered_total
+        - color: F63100
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_refill_failed_total
+        - color: FF8000
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_refill_skipped_inflight_total

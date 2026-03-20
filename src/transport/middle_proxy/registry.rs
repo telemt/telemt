@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, RwLock};
 use tokio::sync::mpsc::error::TrySendError;
@@ -9,7 +9,6 @@ use tokio::sync::mpsc::error::TrySendError;
 use super::codec::WriterCommand;
 use super::MeResponse;
 
-const ROUTE_CHANNEL_CAPACITY: usize = 4096;
 const ROUTE_BACKPRESSURE_BASE_TIMEOUT_MS: u64 = 25;
 const ROUTE_BACKPRESSURE_HIGH_TIMEOUT_MS: u64 = 120;
 const ROUTE_BACKPRESSURE_HIGH_WATERMARK_PCT: u8 = 80;
@@ -45,12 +44,20 @@ pub struct ConnWriter {
     pub tx: mpsc::Sender<WriterCommand>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(super) struct WriterActivitySnapshot {
+    pub bound_clients_by_writer: HashMap<u64, usize>,
+    pub active_sessions_by_target_dc: HashMap<i16, usize>,
+}
+
 struct RegistryInner {
     map: HashMap<u64, mpsc::Sender<MeResponse>>,
     writers: HashMap<u64, mpsc::Sender<WriterCommand>>,
     writer_for_conn: HashMap<u64, u64>,
     conns_for_writer: HashMap<u64, HashSet<u64>>,
     meta: HashMap<u64, ConnMeta>,
+    last_meta_for_writer: HashMap<u64, ConnMeta>,
+    writer_idle_since_epoch_secs: HashMap<u64, u64>,
 }
 
 impl RegistryInner {
@@ -61,6 +68,8 @@ impl RegistryInner {
             writer_for_conn: HashMap::new(),
             conns_for_writer: HashMap::new(),
             meta: HashMap::new(),
+            last_meta_for_writer: HashMap::new(),
+            writer_idle_since_epoch_secs: HashMap::new(),
         }
     }
 }
@@ -68,17 +77,26 @@ impl RegistryInner {
 pub struct ConnRegistry {
     inner: RwLock<RegistryInner>,
     next_id: AtomicU64,
+    route_channel_capacity: usize,
     route_backpressure_base_timeout_ms: AtomicU64,
     route_backpressure_high_timeout_ms: AtomicU64,
     route_backpressure_high_watermark_pct: AtomicU8,
 }
 
 impl ConnRegistry {
-    pub fn new() -> Self {
+    fn now_epoch_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    pub fn with_route_channel_capacity(route_channel_capacity: usize) -> Self {
         let start = rand::random::<u64>() | 1;
         Self {
             inner: RwLock::new(RegistryInner::new()),
             next_id: AtomicU64::new(start),
+            route_channel_capacity: route_channel_capacity.max(1),
             route_backpressure_base_timeout_ms: AtomicU64::new(
                 ROUTE_BACKPRESSURE_BASE_TIMEOUT_MS,
             ),
@@ -89,6 +107,11 @@ impl ConnRegistry {
                 ROUTE_BACKPRESSURE_HIGH_WATERMARK_PCT,
             ),
         }
+    }
+
+    #[cfg(test)]
+    pub fn new() -> Self {
+        Self::with_route_channel_capacity(4096)
     }
 
     pub fn update_route_backpressure_policy(
@@ -110,9 +133,18 @@ impl ConnRegistry {
 
     pub async fn register(&self) -> (u64, mpsc::Receiver<MeResponse>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(ROUTE_CHANNEL_CAPACITY);
+        let (tx, rx) = mpsc::channel(self.route_channel_capacity);
         self.inner.write().await.map.insert(id, tx);
         (id, rx)
+    }
+
+    pub async fn register_writer(&self, writer_id: u64, tx: mpsc::Sender<WriterCommand>) {
+        let mut inner = self.inner.write().await;
+        inner.writers.insert(writer_id, tx);
+        inner
+            .conns_for_writer
+            .entry(writer_id)
+            .or_insert_with(HashSet::new);
     }
 
     /// Unregister connection, returning associated writer_id if any.
@@ -121,14 +153,23 @@ impl ConnRegistry {
         inner.map.remove(&id);
         inner.meta.remove(&id);
         if let Some(writer_id) = inner.writer_for_conn.remove(&id) {
-            if let Some(set) = inner.conns_for_writer.get_mut(&writer_id) {
+            let became_empty = if let Some(set) = inner.conns_for_writer.get_mut(&writer_id) {
                 set.remove(&id);
+                set.is_empty()
+            } else {
+                false
+            };
+            if became_empty {
+                inner
+                    .writer_idle_since_epoch_secs
+                    .insert(writer_id, Self::now_epoch_secs());
             }
             return Some(writer_id);
         }
         None
     }
 
+    #[allow(dead_code)]
     pub async fn route(&self, id: u64, resp: MeResponse) -> RouteResult {
         let tx = {
             let inner = self.inner.read().await;
@@ -154,11 +195,11 @@ impl ConnRegistry {
                     .route_backpressure_high_watermark_pct
                     .load(Ordering::Relaxed)
                     .clamp(1, 100);
-                let used = ROUTE_CHANNEL_CAPACITY.saturating_sub(tx.capacity());
-                let used_pct = if ROUTE_CHANNEL_CAPACITY == 0 {
+                let used = self.route_channel_capacity.saturating_sub(tx.capacity());
+                let used_pct = if self.route_channel_capacity == 0 {
                     100
                 } else {
-                    (used.saturating_mul(100) / ROUTE_CHANNEL_CAPACITY) as u8
+                    (used.saturating_mul(100) / self.route_channel_capacity) as u8
                 };
                 let high_profile = used_pct >= high_watermark_pct;
                 let timeout_ms = if high_profile {
@@ -183,22 +224,163 @@ impl ConnRegistry {
         }
     }
 
-    pub async fn bind_writer(
+    pub async fn route_nowait(&self, id: u64, resp: MeResponse) -> RouteResult {
+        let tx = {
+            let inner = self.inner.read().await;
+            inner.map.get(&id).cloned()
+        };
+
+        let Some(tx) = tx else {
+            return RouteResult::NoConn;
+        };
+
+        match tx.try_send(resp) {
+            Ok(()) => RouteResult::Routed,
+            Err(TrySendError::Closed(_)) => RouteResult::ChannelClosed,
+            Err(TrySendError::Full(_)) => RouteResult::QueueFullBase,
+        }
+    }
+
+    pub async fn route_with_timeout(
         &self,
-        conn_id: u64,
-        writer_id: u64,
-        tx: mpsc::Sender<WriterCommand>,
-        meta: ConnMeta,
-    ) {
+        id: u64,
+        resp: MeResponse,
+        timeout_ms: u64,
+    ) -> RouteResult {
+        if timeout_ms == 0 {
+            return self.route_nowait(id, resp).await;
+        }
+
+        let tx = {
+            let inner = self.inner.read().await;
+            inner.map.get(&id).cloned()
+        };
+
+        let Some(tx) = tx else {
+            return RouteResult::NoConn;
+        };
+
+        match tx.try_send(resp) {
+            Ok(()) => RouteResult::Routed,
+            Err(TrySendError::Closed(_)) => RouteResult::ChannelClosed,
+            Err(TrySendError::Full(resp)) => {
+                let high_watermark_pct = self
+                    .route_backpressure_high_watermark_pct
+                    .load(Ordering::Relaxed)
+                    .clamp(1, 100);
+                let used = self.route_channel_capacity.saturating_sub(tx.capacity());
+                let used_pct = if self.route_channel_capacity == 0 {
+                    100
+                } else {
+                    (used.saturating_mul(100) / self.route_channel_capacity) as u8
+                };
+                let high_profile = used_pct >= high_watermark_pct;
+                let timeout_dur = Duration::from_millis(timeout_ms.max(1));
+
+                match tokio::time::timeout(timeout_dur, tx.send(resp)).await {
+                    Ok(Ok(())) => RouteResult::Routed,
+                    Ok(Err(_)) => RouteResult::ChannelClosed,
+                    Err(_) => {
+                        if high_profile {
+                            RouteResult::QueueFullHigh
+                        } else {
+                            RouteResult::QueueFullBase
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn bind_writer(&self, conn_id: u64, writer_id: u64, meta: ConnMeta) -> bool {
         let mut inner = self.inner.write().await;
-        inner.meta.entry(conn_id).or_insert(meta);
-        inner.writer_for_conn.insert(conn_id, writer_id);
-        inner.writers.entry(writer_id).or_insert_with(|| tx.clone());
+        if !inner.writers.contains_key(&writer_id) {
+            return false;
+        }
+
+        let previous_writer_id = inner.writer_for_conn.insert(conn_id, writer_id);
+        if let Some(previous_writer_id) = previous_writer_id
+            && previous_writer_id != writer_id
+        {
+            let became_empty = if let Some(set) = inner.conns_for_writer.get_mut(&previous_writer_id)
+            {
+                set.remove(&conn_id);
+                set.is_empty()
+            } else {
+                false
+            };
+            if became_empty {
+                inner
+                    .writer_idle_since_epoch_secs
+                    .insert(previous_writer_id, Self::now_epoch_secs());
+            }
+        }
+
+        inner.meta.insert(conn_id, meta.clone());
+        inner.last_meta_for_writer.insert(writer_id, meta);
+        inner.writer_idle_since_epoch_secs.remove(&writer_id);
         inner
             .conns_for_writer
             .entry(writer_id)
             .or_insert_with(HashSet::new)
             .insert(conn_id);
+        true
+    }
+
+    pub async fn mark_writer_idle(&self, writer_id: u64) {
+        let mut inner = self.inner.write().await;
+        inner.conns_for_writer.entry(writer_id).or_insert_with(HashSet::new);
+        inner
+            .writer_idle_since_epoch_secs
+            .entry(writer_id)
+            .or_insert(Self::now_epoch_secs());
+    }
+
+    pub async fn get_last_writer_meta(&self, writer_id: u64) -> Option<ConnMeta> {
+        let inner = self.inner.read().await;
+        inner.last_meta_for_writer.get(&writer_id).cloned()
+    }
+
+    pub async fn writer_idle_since_snapshot(&self) -> HashMap<u64, u64> {
+        let inner = self.inner.read().await;
+        inner.writer_idle_since_epoch_secs.clone()
+    }
+
+    pub async fn writer_idle_since_for_writer_ids(
+        &self,
+        writer_ids: &[u64],
+    ) -> HashMap<u64, u64> {
+        let inner = self.inner.read().await;
+        let mut out = HashMap::<u64, u64>::with_capacity(writer_ids.len());
+        for writer_id in writer_ids {
+            if let Some(idle_since) = inner.writer_idle_since_epoch_secs.get(writer_id).copied() {
+                out.insert(*writer_id, idle_since);
+            }
+        }
+        out
+    }
+
+    pub(super) async fn writer_activity_snapshot(&self) -> WriterActivitySnapshot {
+        let inner = self.inner.read().await;
+        let mut bound_clients_by_writer = HashMap::<u64, usize>::new();
+        let mut active_sessions_by_target_dc = HashMap::<i16, usize>::new();
+
+        for (writer_id, conn_ids) in &inner.conns_for_writer {
+            bound_clients_by_writer.insert(*writer_id, conn_ids.len());
+        }
+        for conn_meta in inner.meta.values() {
+            if conn_meta.target_dc == 0 {
+                continue;
+            }
+            *active_sessions_by_target_dc
+                .entry(conn_meta.target_dc)
+                .or_insert(0) += 1;
+        }
+
+        WriterActivitySnapshot {
+            bound_clients_by_writer,
+            active_sessions_by_target_dc,
+        }
     }
 
     pub async fn get_writer(&self, conn_id: u64) -> Option<ConnWriter> {
@@ -208,26 +390,94 @@ impl ConnRegistry {
         Some(ConnWriter { writer_id, tx: writer })
     }
 
-    pub async fn writer_lost(&self, writer_id: u64) -> Vec<BoundConn> {
-        let mut inner = self.inner.write().await;
-        inner.writers.remove(&writer_id);
-        let conns = inner
-            .conns_for_writer
-            .remove(&writer_id)
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<Vec<_>>();
+    pub async fn active_conn_ids(&self) -> Vec<u64> {
+        let inner = self.inner.read().await;
+        inner.writer_for_conn.keys().copied().collect()
+    }
 
-        let mut out = Vec::new();
-        for conn_id in conns {
+    pub(super) async fn bound_conn_ids_for_writer_limited(
+        &self,
+        writer_id: u64,
+        limit: usize,
+    ) -> Vec<u64> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let inner = self.inner.read().await;
+        let Some(conn_ids) = inner.conns_for_writer.get(&writer_id) else {
+            return Vec::new();
+        };
+        let mut out = conn_ids.iter().copied().collect::<Vec<_>>();
+        out.sort_unstable();
+        out.truncate(limit);
+        out
+    }
+
+    pub(super) async fn evict_bound_conn_if_writer(&self, conn_id: u64, writer_id: u64) -> bool {
+        let maybe_client_tx = {
+            let mut inner = self.inner.write().await;
+            if inner.writer_for_conn.get(&conn_id).copied() != Some(writer_id) {
+                return false;
+            }
+
+            let client_tx = inner.map.get(&conn_id).cloned();
+            inner.map.remove(&conn_id);
+            inner.meta.remove(&conn_id);
             inner.writer_for_conn.remove(&conn_id);
-            if let Some(m) = inner.meta.get(&conn_id) {
-                out.push(BoundConn {
-                    conn_id,
-                    meta: m.clone(),
-                });
+
+            let became_empty = if let Some(set) = inner.conns_for_writer.get_mut(&writer_id) {
+                set.remove(&conn_id);
+                set.is_empty()
+            } else {
+                false
+            };
+            if became_empty {
+                inner
+                    .writer_idle_since_epoch_secs
+                    .insert(writer_id, Self::now_epoch_secs());
+            }
+            client_tx
+        };
+
+        if let Some(client_tx) = maybe_client_tx {
+            let _ = client_tx.try_send(MeResponse::Close);
+        }
+        true
+    }
+
+    pub async fn writer_lost(&self, writer_id: u64) -> Vec<BoundConn> {
+        let mut close_txs = Vec::<mpsc::Sender<MeResponse>>::new();
+        let mut out = Vec::new();
+        {
+            let mut inner = self.inner.write().await;
+            inner.writers.remove(&writer_id);
+            inner.last_meta_for_writer.remove(&writer_id);
+            inner.writer_idle_since_epoch_secs.remove(&writer_id);
+            let conns = inner
+                .conns_for_writer
+                .remove(&writer_id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            for conn_id in conns {
+                if inner.writer_for_conn.get(&conn_id).copied() != Some(writer_id) {
+                    continue;
+                }
+                inner.writer_for_conn.remove(&conn_id);
+                if let Some(client_tx) = inner.map.remove(&conn_id) {
+                    close_txs.push(client_tx);
+                }
+                if let Some(meta) = inner.meta.remove(&conn_id) {
+                    out.push(BoundConn { conn_id, meta });
+                }
             }
         }
+
+        for client_tx in close_txs {
+            let _ = client_tx.try_send(MeResponse::Close);
+        }
+
         out
     }
 
@@ -244,5 +494,320 @@ impl ConnRegistry {
             .get(&writer_id)
             .map(|s| s.is_empty())
             .unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Duration;
+
+    use super::ConnMeta;
+    use super::ConnRegistry;
+    use super::MeResponse;
+
+    #[tokio::test]
+    async fn writer_activity_snapshot_tracks_writer_and_dc_load() {
+        let registry = ConnRegistry::new();
+
+        let (conn_a, _rx_a) = registry.register().await;
+        let (conn_b, _rx_b) = registry.register().await;
+        let (conn_c, _rx_c) = registry.register().await;
+        let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
+        let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx_a.clone()).await;
+        registry.register_writer(20, writer_tx_b.clone()).await;
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        assert!(
+            registry
+                .bind_writer(
+                    conn_a,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+        assert!(
+            registry
+                .bind_writer(
+                    conn_b,
+                    10,
+                    ConnMeta {
+                        target_dc: -2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+        assert!(
+            registry
+                .bind_writer(
+                    conn_c,
+                    20,
+                    ConnMeta {
+                        target_dc: 4,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+
+        let snapshot = registry.writer_activity_snapshot().await;
+        assert_eq!(snapshot.bound_clients_by_writer.get(&10), Some(&2));
+        assert_eq!(snapshot.bound_clients_by_writer.get(&20), Some(&1));
+        assert_eq!(snapshot.active_sessions_by_target_dc.get(&2), Some(&1));
+        assert_eq!(snapshot.active_sessions_by_target_dc.get(&-2), Some(&1));
+        assert_eq!(snapshot.active_sessions_by_target_dc.get(&4), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn bind_writer_rebinds_conn_atomically() {
+        let registry = ConnRegistry::new();
+        let (conn_id, _rx) = registry.register().await;
+        let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
+        let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx_a).await;
+        registry.register_writer(20, writer_tx_b).await;
+
+        let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        let first_our_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
+        let second_our_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)), 443);
+
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr,
+                        our_addr: first_our_addr,
+                        proto_flags: 1,
+                    },
+                )
+                .await
+        );
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    20,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr,
+                        our_addr: second_our_addr,
+                        proto_flags: 2,
+                    },
+                )
+                .await
+        );
+
+        let writer = registry.get_writer(conn_id).await.expect("writer binding");
+        assert_eq!(writer.writer_id, 20);
+
+        let meta = registry.get_meta(conn_id).await.expect("conn meta");
+        assert_eq!(meta.our_addr, second_our_addr);
+        assert_eq!(meta.proto_flags, 2);
+
+        let snapshot = registry.writer_activity_snapshot().await;
+        assert_eq!(snapshot.bound_clients_by_writer.get(&10), Some(&0));
+        assert_eq!(snapshot.bound_clients_by_writer.get(&20), Some(&1));
+        assert!(registry.writer_idle_since_snapshot().await.contains_key(&10));
+    }
+
+    #[tokio::test]
+    async fn writer_lost_does_not_drop_rebound_conn() {
+        let registry = ConnRegistry::new();
+        let (conn_id, _rx) = registry.register().await;
+        let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
+        let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx_a).await;
+        registry.register_writer(20, writer_tx_b).await;
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    20,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 1,
+                    },
+                )
+                .await
+        );
+
+        let lost = registry.writer_lost(10).await;
+        assert!(lost.is_empty());
+        assert_eq!(registry.get_writer(conn_id).await.expect("writer").writer_id, 20);
+
+        let removed_writer = registry.unregister(conn_id).await;
+        assert_eq!(removed_writer, Some(20));
+        assert!(registry.is_writer_empty(20).await);
+    }
+
+    #[tokio::test]
+    async fn writer_lost_removes_bound_conn_from_registry_and_signals_close() {
+        let registry = ConnRegistry::new();
+        let (conn_id, mut rx) = registry.register().await;
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx).await;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+
+        let lost = registry.writer_lost(10).await;
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].conn_id, conn_id);
+        assert!(registry.get_writer(conn_id).await.is_none());
+        assert!(registry.get_meta(conn_id).await.is_none());
+        assert_eq!(registry.unregister(conn_id).await, None);
+        let close = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+        assert!(matches!(close, Ok(Some(MeResponse::Close))));
+    }
+
+    #[tokio::test]
+    async fn bind_writer_rejects_unregistered_writer() {
+        let registry = ConnRegistry::new();
+        let (conn_id, _rx) = registry.register().await;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+
+        assert!(
+            !registry
+                .bind_writer(
+                    conn_id,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+        assert!(registry.get_writer(conn_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn bound_conn_ids_for_writer_limited_is_sorted_and_bounded() {
+        let registry = ConnRegistry::new();
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx).await;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        let mut conn_ids = Vec::new();
+        for _ in 0..5 {
+            let (conn_id, _rx) = registry.register().await;
+            assert!(
+                registry
+                    .bind_writer(
+                        conn_id,
+                        10,
+                        ConnMeta {
+                            target_dc: 2,
+                            client_addr: addr,
+                            our_addr: addr,
+                            proto_flags: 0,
+                        },
+                    )
+                    .await
+            );
+            conn_ids.push(conn_id);
+        }
+        conn_ids.sort_unstable();
+
+        let limited = registry.bound_conn_ids_for_writer_limited(10, 3).await;
+        assert_eq!(limited.len(), 3);
+        assert_eq!(limited, conn_ids.into_iter().take(3).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn evict_bound_conn_if_writer_does_not_touch_rebound_conn() {
+        let registry = ConnRegistry::new();
+        let (conn_id, mut rx) = registry.register().await;
+        let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
+        let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
+        registry.register_writer(10, writer_tx_a).await;
+        registry.register_writer(20, writer_tx_b).await;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    10,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 0,
+                    },
+                )
+                .await
+        );
+        assert!(
+            registry
+                .bind_writer(
+                    conn_id,
+                    20,
+                    ConnMeta {
+                        target_dc: 2,
+                        client_addr: addr,
+                        our_addr: addr,
+                        proto_flags: 1,
+                    },
+                )
+                .await
+        );
+
+        let evicted = registry.evict_bound_conn_if_writer(conn_id, 10).await;
+        assert!(!evicted);
+        assert_eq!(registry.get_writer(conn_id).await.expect("writer").writer_id, 20);
+        assert!(rx.try_recv().is_err());
+
+        let evicted = registry.evict_bound_conn_if_writer(conn_id, 20).await;
+        assert!(evicted);
+        assert!(registry.get_writer(conn_id).await.is_none());
+        assert!(matches!(rx.try_recv(), Ok(MeResponse::Close)));
     }
 }

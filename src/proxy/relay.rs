@@ -57,10 +57,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
+use tokio::io::{
+    AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional_with_sizes,
+};
 use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 use crate::error::Result;
+use crate::proxy::adaptive_buffers::{
+    self, AdaptiveTier, RelaySignalSample, SessionAdaptiveController, TierTransitionReason,
+};
+use crate::proxy::session_eviction::SessionLease;
 use crate::stats::Stats;
 use crate::stream::BufferPool;
 
@@ -77,6 +83,7 @@ const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(1800);
 /// 10 seconds gives responsive timeout detection (±10s accuracy)
 /// without measurable overhead from atomic reads.
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
+const ADAPTIVE_TICK: Duration = Duration::from_millis(250);
 
 // ============= CombinedStream =============
 
@@ -153,6 +160,16 @@ struct SharedCounters {
     s2c_ops: AtomicU64,
     /// Milliseconds since relay epoch of last I/O activity
     last_activity_ms: AtomicU64,
+    /// Bytes requested to write to client (S→C direction).
+    s2c_requested_bytes: AtomicU64,
+    /// Total write operations for S→C direction.
+    s2c_write_ops: AtomicU64,
+    /// Number of partial writes to client.
+    s2c_partial_writes: AtomicU64,
+    /// Number of times S→C poll_write returned Pending.
+    s2c_pending_writes: AtomicU64,
+    /// Consecutive pending writes in S→C direction.
+    s2c_consecutive_pending_writes: AtomicU64,
 }
 
 impl SharedCounters {
@@ -163,6 +180,11 @@ impl SharedCounters {
             c2s_ops: AtomicU64::new(0),
             s2c_ops: AtomicU64::new(0),
             last_activity_ms: AtomicU64::new(0),
+            s2c_requested_bytes: AtomicU64::new(0),
+            s2c_write_ops: AtomicU64::new(0),
+            s2c_partial_writes: AtomicU64::new(0),
+            s2c_pending_writes: AtomicU64::new(0),
+            s2c_consecutive_pending_writes: AtomicU64::new(0),
         }
     }
 
@@ -257,9 +279,21 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+        this.counters
+            .s2c_requested_bytes
+            .fetch_add(buf.len() as u64, Ordering::Relaxed);
 
         match Pin::new(&mut this.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => {
+                this.counters.s2c_write_ops.fetch_add(1, Ordering::Relaxed);
+                this.counters
+                    .s2c_consecutive_pending_writes
+                    .store(0, Ordering::Relaxed);
+                if n < buf.len() {
+                    this.counters
+                        .s2c_partial_writes
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 if n > 0 {
                     // S→C: data written to client
                     this.counters.s2c_bytes.fetch_add(n as u64, Ordering::Relaxed);
@@ -272,6 +306,15 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                     trace!(user = %this.user, bytes = n, "S->C");
                 }
                 Poll::Ready(Ok(n))
+            }
+            Poll::Pending => {
+                this.counters
+                    .s2c_pending_writes
+                    .fetch_add(1, Ordering::Relaxed);
+                this.counters
+                    .s2c_consecutive_pending_writes
+                    .fetch_add(1, Ordering::Relaxed);
+                Poll::Pending
             }
             other => other,
         }
@@ -296,9 +339,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
 ///
 /// ## API compatibility
 ///
-/// Signature is identical to the previous implementation. The `_buffer_pool`
-/// parameter is retained for call-site compatibility — `copy_bidirectional`
-/// manages its own internal buffers (8 KB per direction).
+/// The `_buffer_pool` parameter is retained for call-site compatibility.
+/// Effective relay copy buffers are configured by `c2s_buf_size` / `s2c_buf_size`.
 ///
 /// ## Guarantees preserved
 ///
@@ -312,9 +354,14 @@ pub async fn relay_bidirectional<CR, CW, SR, SW>(
     client_writer: CW,
     server_reader: SR,
     server_writer: SW,
+    c2s_buf_size: usize,
+    s2c_buf_size: usize,
     user: &str,
+    dc_idx: i16,
     stats: Arc<Stats>,
     _buffer_pool: Arc<BufferPool>,
+    session_lease: SessionLease,
+    seed_tier: AdaptiveTier,
 ) -> Result<()>
 where
     CR: AsyncRead + Unpin + Send + 'static,
@@ -342,13 +389,33 @@ where
     // ── Watchdog: activity timeout + periodic rate logging ──────────
     let wd_counters = Arc::clone(&counters);
     let wd_user = user_owned.clone();
+    let wd_dc = dc_idx;
+    let wd_stats = Arc::clone(&stats);
+    let wd_session = session_lease.clone();
 
     let watchdog = async {
-        let mut prev_c2s: u64 = 0;
-        let mut prev_s2c: u64 = 0;
+        let mut prev_c2s_log: u64 = 0;
+        let mut prev_s2c_log: u64 = 0;
+        let mut prev_c2s_sample: u64 = 0;
+        let mut prev_s2c_requested_sample: u64 = 0;
+        let mut prev_s2c_written_sample: u64 = 0;
+        let mut prev_s2c_write_ops_sample: u64 = 0;
+        let mut prev_s2c_partial_sample: u64 = 0;
+        let mut accumulated_log = Duration::ZERO;
+        let mut adaptive = SessionAdaptiveController::new(seed_tier);
 
         loop {
-            tokio::time::sleep(WATCHDOG_INTERVAL).await;
+            tokio::time::sleep(ADAPTIVE_TICK).await;
+
+            if wd_session.is_stale() {
+                wd_stats.increment_reconnect_stale_close_total();
+                warn!(
+                    user = %wd_user,
+                    dc = wd_dc,
+                    "Session evicted by reconnect"
+                );
+                return;
+            }
 
             let now = Instant::now();
             let idle = wd_counters.idle_duration(now, epoch);
@@ -367,11 +434,80 @@ where
                 return; // Causes select! to cancel copy_bidirectional
             }
 
+            let c2s_total = wd_counters.c2s_bytes.load(Ordering::Relaxed);
+            let s2c_requested_total = wd_counters
+                .s2c_requested_bytes
+                .load(Ordering::Relaxed);
+            let s2c_written_total = wd_counters.s2c_bytes.load(Ordering::Relaxed);
+            let s2c_write_ops_total = wd_counters
+                .s2c_write_ops
+                .load(Ordering::Relaxed);
+            let s2c_partial_total = wd_counters
+                .s2c_partial_writes
+                .load(Ordering::Relaxed);
+            let consecutive_pending = wd_counters
+                .s2c_consecutive_pending_writes
+                .load(Ordering::Relaxed) as u32;
+
+            let sample = RelaySignalSample {
+                c2s_bytes: c2s_total.saturating_sub(prev_c2s_sample),
+                s2c_requested_bytes: s2c_requested_total
+                    .saturating_sub(prev_s2c_requested_sample),
+                s2c_written_bytes: s2c_written_total
+                    .saturating_sub(prev_s2c_written_sample),
+                s2c_write_ops: s2c_write_ops_total
+                    .saturating_sub(prev_s2c_write_ops_sample),
+                s2c_partial_writes: s2c_partial_total
+                    .saturating_sub(prev_s2c_partial_sample),
+                s2c_consecutive_pending_writes: consecutive_pending,
+            };
+
+            if let Some(transition) = adaptive.observe(sample, ADAPTIVE_TICK.as_secs_f64()) {
+                match transition.reason {
+                    TierTransitionReason::SoftConfirmed => {
+                        wd_stats.increment_relay_adaptive_promotions_total();
+                    }
+                    TierTransitionReason::HardPressure => {
+                        wd_stats.increment_relay_adaptive_promotions_total();
+                        wd_stats.increment_relay_adaptive_hard_promotions_total();
+                    }
+                    TierTransitionReason::QuietDemotion => {
+                        wd_stats.increment_relay_adaptive_demotions_total();
+                    }
+                }
+                adaptive_buffers::record_user_tier(&wd_user, adaptive.max_tier_seen());
+                debug!(
+                    user = %wd_user,
+                    dc = wd_dc,
+                    from_tier = transition.from.as_u8(),
+                    to_tier = transition.to.as_u8(),
+                    reason = ?transition.reason,
+                    throughput_ema_bps = sample
+                        .c2s_bytes
+                        .max(sample.s2c_written_bytes)
+                        .saturating_mul(8)
+                        .saturating_mul(4),
+                    "Adaptive relay tier transition"
+                );
+            }
+
+            prev_c2s_sample = c2s_total;
+            prev_s2c_requested_sample = s2c_requested_total;
+            prev_s2c_written_sample = s2c_written_total;
+            prev_s2c_write_ops_sample = s2c_write_ops_total;
+            prev_s2c_partial_sample = s2c_partial_total;
+
+            accumulated_log = accumulated_log.saturating_add(ADAPTIVE_TICK);
+            if accumulated_log < WATCHDOG_INTERVAL {
+                continue;
+            }
+            accumulated_log = Duration::ZERO;
+
             // ── Periodic rate logging ───────────────────────────────
             let c2s = wd_counters.c2s_bytes.load(Ordering::Relaxed);
             let s2c = wd_counters.s2c_bytes.load(Ordering::Relaxed);
-            let c2s_delta = c2s - prev_c2s;
-            let s2c_delta = s2c - prev_s2c;
+            let c2s_delta = c2s.saturating_sub(prev_c2s_log);
+            let s2c_delta = s2c.saturating_sub(prev_s2c_log);
 
             if c2s_delta > 0 || s2c_delta > 0 {
                 let secs = WATCHDOG_INTERVAL.as_secs_f64();
@@ -385,8 +521,8 @@ where
                 );
             }
 
-            prev_c2s = c2s;
-            prev_s2c = s2c;
+            prev_c2s_log = c2s;
+            prev_s2c_log = s2c;
         }
     };
 
@@ -402,7 +538,12 @@ where
     // When the watchdog fires, select! drops the copy future,
     // releasing the &mut borrows on client and server.
     let copy_result = tokio::select! {
-        result = copy_bidirectional(&mut client, &mut server) => Some(result),
+        result = copy_bidirectional_with_sizes(
+            &mut client,
+            &mut server,
+            c2s_buf_size.max(1),
+            s2c_buf_size.max(1),
+        ) => Some(result),
         _ = watchdog => None, // Activity timeout — cancel relay
     };
 
@@ -416,6 +557,7 @@ where
     let c2s_ops = counters.c2s_ops.load(Ordering::Relaxed);
     let s2c_ops = counters.s2c_ops.load(Ordering::Relaxed);
     let duration = epoch.elapsed();
+    adaptive_buffers::record_user_tier(&user_owned, seed_tier);
 
     match copy_result {
         Some(Ok((c2s, s2c))) => {
