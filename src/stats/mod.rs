@@ -1745,6 +1745,29 @@ impl Stats {
             .unwrap_or(0)
     }
     
+
+    /// Reset per-user octet counters to zero (both from_client and to_client).
+    /// Used by the API to implement periodic quota resets without restarting the proxy.
+    pub fn reset_user_octets(&self, user: &str) -> bool {
+        if let Some(entry) = self.user_stats.get(user) {
+            entry.octets_from_client.store(0, Ordering::Relaxed);
+            entry.octets_to_client.store(0, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reset octet counters for all tracked users.
+    pub fn reset_all_user_octets(&self) -> usize {
+        let mut count = 0;
+        for entry in self.user_stats.iter() {
+            entry.octets_from_client.store(0, Ordering::Relaxed);
+            entry.octets_to_client.store(0, Ordering::Relaxed);
+            count += 1;
+        }
+        count
+    }
     pub fn get_handshake_timeouts(&self) -> u64 { self.handshake_timeouts.load(Ordering::Relaxed) }
     pub fn get_upstream_connect_attempt_total(&self) -> u64 {
         self.upstream_connect_attempt_total.load(Ordering::Relaxed)

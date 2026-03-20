@@ -458,6 +458,17 @@ pub(super) struct CreateUserRequest {
     pub(super) max_unique_ips: Option<usize>,
 }
 
+#[derive(Serialize)]
+pub(super) struct ResetOctetsResponse {
+    pub(super) username: String,
+    pub(super) octets_reset: bool,
+}
+
+#[derive(Serialize)]
+pub(super) struct ResetAllOctetsResponse {
+    pub(super) users_reset: usize,
+}
+
 #[derive(Deserialize)]
 pub(super) struct PatchUserRequest {
     pub(super) secret: Option<String>,

@@ -372,6 +372,19 @@ async fn handle(
                 .await;
                 Ok(success_response(StatusCode::OK, users, revision))
             }
+            ("POST", "/v1/users/reset-octets") => {
+                let count = shared.stats.reset_all_user_octets();
+                shared.runtime_events.record(
+                    "api.users.reset_octets.ok",
+                    format!("users_reset={}", count),
+                );
+                let revision = current_revision(&shared.config_path).await?;
+                Ok(success_response(
+                    StatusCode::OK,
+                    model::ResetAllOctetsResponse { users_reset: count },
+                    revision,
+                ))
+            }
             ("POST", "/v1/users") => {
                 if api_cfg.read_only {
                     return Ok(error_response(
@@ -522,6 +535,37 @@ async fn handle(
                             format!("username={}", base_user),
                         );
                         return Ok(success_response(StatusCode::OK, data, revision));
+                    }
+                    // POST /v1/users/{username}/reset-octets
+                    if method == Method::POST
+                        && let Some(base_user) = user.strip_suffix("/reset-octets")
+                        && !base_user.is_empty()
+                        && !base_user.contains('/')
+                    {
+                        let found = shared.stats.reset_user_octets(base_user);
+                        shared.runtime_events.record(
+                            if found { "api.user.reset_octets.ok" } else { "api.user.reset_octets.not_found" },
+                            format!("username={}", base_user),
+                        );
+                        if !found {
+                            return Ok(error_response(
+                                request_id,
+                                ApiFailure::new(
+                                    StatusCode::NOT_FOUND,
+                                    "user_not_found",
+                                    &format!("No stats entry for user '{}'", base_user),
+                                ),
+                            ));
+                        }
+                        let revision = current_revision(&shared.config_path).await?;
+                        return Ok(success_response(
+                            StatusCode::OK,
+                            model::ResetOctetsResponse {
+                                username: base_user.to_string(),
+                                octets_reset: true,
+                            },
+                            revision,
+                        ));
                     }
                     if method == Method::POST {
                         return Ok(error_response(
