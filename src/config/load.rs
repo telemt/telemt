@@ -328,6 +328,42 @@ impl ProxyConfig {
             ));
         }
 
+        if config.timeouts.client_handshake == 0 {
+            return Err(ProxyError::Config(
+                "timeouts.client_handshake must be > 0".to_string(),
+            ));
+        }
+
+        if config.timeouts.relay_client_idle_soft_secs == 0 {
+            return Err(ProxyError::Config(
+                "timeouts.relay_client_idle_soft_secs must be > 0".to_string(),
+            ));
+        }
+
+        if config.timeouts.relay_client_idle_hard_secs == 0 {
+            return Err(ProxyError::Config(
+                "timeouts.relay_client_idle_hard_secs must be > 0".to_string(),
+            ));
+        }
+
+        if config.timeouts.relay_client_idle_hard_secs
+            < config.timeouts.relay_client_idle_soft_secs
+        {
+            return Err(ProxyError::Config(
+                "timeouts.relay_client_idle_hard_secs must be >= timeouts.relay_client_idle_soft_secs"
+                    .to_string(),
+            ));
+        }
+
+        if config.timeouts.relay_idle_grace_after_downstream_activity_secs
+            > config.timeouts.relay_client_idle_hard_secs
+        {
+            return Err(ProxyError::Config(
+                "timeouts.relay_idle_grace_after_downstream_activity_secs must be <= timeouts.relay_client_idle_hard_secs"
+                    .to_string(),
+            ));
+        }
+
         if config.general.me_writer_cmd_channel_capacity == 0 {
             return Err(ProxyError::Config(
                 "general.me_writer_cmd_channel_capacity must be > 0".to_string(),
@@ -933,6 +969,10 @@ impl ProxyConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "load_idle_policy_tests.rs"]
+mod load_idle_policy_tests;
 
 #[cfg(test)]
 mod tests {

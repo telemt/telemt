@@ -705,6 +705,69 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_idle_soft_mark_total Middle-relay sessions marked as soft-idle candidates"
+    );
+    let _ = writeln!(out, "# TYPE telemt_relay_idle_soft_mark_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_relay_idle_soft_mark_total {}",
+        if me_allows_normal {
+            stats.get_relay_idle_soft_mark_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_idle_hard_close_total Middle-relay sessions closed by hard-idle policy"
+    );
+    let _ = writeln!(out, "# TYPE telemt_relay_idle_hard_close_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_relay_idle_hard_close_total {}",
+        if me_allows_normal {
+            stats.get_relay_idle_hard_close_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_pressure_evict_total Middle-relay sessions evicted under resource pressure"
+    );
+    let _ = writeln!(out, "# TYPE telemt_relay_pressure_evict_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_relay_pressure_evict_total {}",
+        if me_allows_normal {
+            stats.get_relay_pressure_evict_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_protocol_desync_close_total Middle-relay sessions closed due to protocol desync"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_relay_protocol_desync_close_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_relay_protocol_desync_close_total {}",
+        if me_allows_normal {
+            stats.get_relay_protocol_desync_close_total()
+        } else {
+            0
+        }
+    );
+
     let _ = writeln!(out, "# HELP telemt_me_crc_mismatch_total ME CRC mismatches");
     let _ = writeln!(out, "# TYPE telemt_me_crc_mismatch_total counter");
     let _ = writeln!(
@@ -1879,6 +1942,10 @@ mod tests {
         stats.increment_me_rpc_proxy_req_signal_response_total();
         stats.increment_me_rpc_proxy_req_signal_close_sent_total();
         stats.increment_me_idle_close_by_peer_total();
+        stats.increment_relay_idle_soft_mark_total();
+        stats.increment_relay_idle_hard_close_total();
+        stats.increment_relay_pressure_evict_total();
+        stats.increment_relay_protocol_desync_close_total();
         stats.increment_user_connects("alice");
         stats.increment_user_curr_connects("alice");
         stats.add_user_octets_from("alice", 1024);
@@ -1917,6 +1984,10 @@ mod tests {
         assert!(output.contains("telemt_me_rpc_proxy_req_signal_response_total 1"));
         assert!(output.contains("telemt_me_rpc_proxy_req_signal_close_sent_total 1"));
         assert!(output.contains("telemt_me_idle_close_by_peer_total 1"));
+        assert!(output.contains("telemt_relay_idle_soft_mark_total 1"));
+        assert!(output.contains("telemt_relay_idle_hard_close_total 1"));
+        assert!(output.contains("telemt_relay_pressure_evict_total 1"));
+        assert!(output.contains("telemt_relay_protocol_desync_close_total 1"));
         assert!(output.contains("telemt_user_connections_total{user=\"alice\"} 1"));
         assert!(output.contains("telemt_user_connections_current{user=\"alice\"} 1"));
         assert!(output.contains("telemt_user_octets_from_client{user=\"alice\"} 1024"));
@@ -1974,6 +2045,10 @@ mod tests {
         assert!(output.contains("# TYPE telemt_upstream_connect_attempt_total counter"));
         assert!(output.contains("# TYPE telemt_me_rpc_proxy_req_signal_sent_total counter"));
         assert!(output.contains("# TYPE telemt_me_idle_close_by_peer_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_idle_soft_mark_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_idle_hard_close_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_pressure_evict_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_protocol_desync_close_total counter"));
         assert!(output.contains("# TYPE telemt_me_writer_removed_total counter"));
         assert!(output.contains(
             "# TYPE telemt_me_writer_removed_unexpected_minus_restored_total gauge"

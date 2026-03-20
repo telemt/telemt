@@ -1276,6 +1276,24 @@ pub struct TimeoutsConfig {
     #[serde(default = "default_handshake_timeout")]
     pub client_handshake: u64,
 
+    /// Enables soft/hard relay client idle policy for middle-relay sessions.
+    #[serde(default = "default_relay_idle_policy_v2_enabled")]
+    pub relay_idle_policy_v2_enabled: bool,
+
+    /// Soft idle threshold for middle-relay client uplink activity in seconds.
+    /// Hitting this threshold marks the session as idle-candidate, but does not close it.
+    #[serde(default = "default_relay_client_idle_soft_secs")]
+    pub relay_client_idle_soft_secs: u64,
+
+    /// Hard idle threshold for middle-relay client uplink activity in seconds.
+    /// Hitting this threshold closes the session.
+    #[serde(default = "default_relay_client_idle_hard_secs")]
+    pub relay_client_idle_hard_secs: u64,
+
+    /// Additional grace in seconds added to hard idle window after recent downstream activity.
+    #[serde(default = "default_relay_idle_grace_after_downstream_activity_secs")]
+    pub relay_idle_grace_after_downstream_activity_secs: u64,
+
     #[serde(default = "default_connect_timeout")]
     pub tg_connect: u64,
 
@@ -1298,6 +1316,11 @@ impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
             client_handshake: default_handshake_timeout(),
+            relay_idle_policy_v2_enabled: default_relay_idle_policy_v2_enabled(),
+            relay_client_idle_soft_secs: default_relay_client_idle_soft_secs(),
+            relay_client_idle_hard_secs: default_relay_client_idle_hard_secs(),
+            relay_idle_grace_after_downstream_activity_secs:
+                default_relay_idle_grace_after_downstream_activity_secs(),
             tg_connect: default_connect_timeout(),
             client_keepalive: default_keepalive(),
             client_ack: default_ack_timeout(),

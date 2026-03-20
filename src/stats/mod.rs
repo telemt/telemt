@@ -99,6 +99,10 @@ pub struct Stats {
     me_handshake_reject_total: AtomicU64,
     me_reader_eof_total: AtomicU64,
     me_idle_close_by_peer_total: AtomicU64,
+    relay_idle_soft_mark_total: AtomicU64,
+    relay_idle_hard_close_total: AtomicU64,
+    relay_pressure_evict_total: AtomicU64,
+    relay_protocol_desync_close_total: AtomicU64,
     me_crc_mismatch: AtomicU64,
     me_seq_mismatch: AtomicU64,
     me_endpoint_quarantine_total: AtomicU64,
@@ -522,6 +526,30 @@ impl Stats {
     pub fn increment_me_idle_close_by_peer_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_idle_close_by_peer_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_idle_soft_mark_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_idle_soft_mark_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_idle_hard_close_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_idle_hard_close_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_pressure_evict_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_pressure_evict_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_protocol_desync_close_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_protocol_desync_close_total
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1018,6 +1046,18 @@ impl Stats {
     }
     pub fn get_me_idle_close_by_peer_total(&self) -> u64 {
         self.me_idle_close_by_peer_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_idle_soft_mark_total(&self) -> u64 {
+        self.relay_idle_soft_mark_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_idle_hard_close_total(&self) -> u64 {
+        self.relay_idle_hard_close_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_pressure_evict_total(&self) -> u64 {
+        self.relay_pressure_evict_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_protocol_desync_close_total(&self) -> u64 {
+        self.relay_protocol_desync_close_total.load(Ordering::Relaxed)
     }
     pub fn get_me_crc_mismatch(&self) -> u64 { self.me_crc_mismatch.load(Ordering::Relaxed) }
     pub fn get_me_seq_mismatch(&self) -> u64 { self.me_seq_mismatch.load(Ordering::Relaxed) }
