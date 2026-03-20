@@ -110,6 +110,35 @@ fn wrap_tls_application_record(payload: &[u8]) -> Vec<u8> {
     record
 }
 
+fn tls_clienthello_len_in_bounds(tls_len: usize) -> bool {
+    (MIN_TLS_CLIENT_HELLO_SIZE..=MAX_TLS_RECORD_SIZE).contains(&tls_len)
+}
+
+async fn read_with_progress<R: AsyncRead + Unpin>(reader: &mut R, mut buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0usize;
+    while !buf.is_empty() {
+        match reader.read(buf).await {
+            Ok(0) => return Ok(total),
+            Ok(n) => {
+                total += n;
+                let (_, rest) = buf.split_at_mut(n);
+                buf = rest;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}
+
+fn handshake_timeout_with_mask_grace(config: &ProxyConfig) -> Duration {
+    let base = Duration::from_secs(config.timeouts.client_handshake);
+    if config.censorship.mask {
+        base.saturating_add(Duration::from_millis(750))
+    } else {
+        base
+    }
+}
+
 fn record_beobachten_class(
     beobachten: &BeobachtenStore,
     config: &ProxyConfig,
@@ -226,7 +255,7 @@ where
 
     debug!(peer = %real_peer, "New connection (generic stream)");
 
-    let handshake_timeout = Duration::from_secs(config.timeouts.client_handshake);
+    let handshake_timeout = handshake_timeout_with_mask_grace(&config);
     let stats_for_timeout = stats.clone();
     let config_for_timeout = config.clone();
     let beobachten_for_timeout = beobachten.clone();
@@ -243,12 +272,15 @@ where
         if is_tls {
             let tls_len = u16::from_be_bytes([first_bytes[3], first_bytes[4]]) as usize;
 
-// RFC 8446 §5.1 mandates that TLSPlaintext records must not exceed 2^14
-        // bytes (16_384). A client claiming a larger record is non-compliant and
-        // may be an active probe attempting to force large allocations.
-        //
-        // Also enforce a minimum record size to avoid trivial/garbage probes.
-        if !(512..=MAX_TLS_RECORD_SIZE).contains(&tls_len) {
+            // RFC 8446 §5.1: TLS record payload MUST NOT exceed 2^14 (16_384) bytes.
+            // Lower bound is a structural minimum for a valid TLS 1.3 ClientHello
+            // (record header + handshake header + random + session_id + cipher_suites
+            // + compression + at least one extension with SNI). The previous value of
+            // 512 was implicitly coupled to TLS_REQUEST_LENGTH=517 from the official
+            // Telegram MTProxy reference server, leaving only a 5-byte margin and
+            // incorrectly rejecting compact but spec-compliant ClientHellos from
+            // third-party clients or future Telegram versions.
+            if !tls_clienthello_len_in_bounds(tls_len) {
                 debug!(peer = %real_peer, tls_len = tls_len, max_tls_len = MAX_TLS_RECORD_SIZE, "TLS handshake length out of bounds");
                 stats.increment_connects_bad();
                 let (reader, writer) = tokio::io::split(stream);
@@ -267,7 +299,44 @@ where
 
             let mut handshake = vec![0u8; 5 + tls_len];
             handshake[..5].copy_from_slice(&first_bytes);
-            stream.read_exact(&mut handshake[5..]).await?;
+            let body_read = match read_with_progress(&mut stream, &mut handshake[5..]).await {
+                Ok(n) => n,
+                Err(e) => {
+                    debug!(peer = %real_peer, error = %e, tls_len = tls_len, "TLS ClientHello body read failed; engaging masking fallback");
+                    stats.increment_connects_bad();
+                    let initial_len = 5;
+                    let (reader, writer) = tokio::io::split(stream);
+                    handle_bad_client(
+                        reader,
+                        writer,
+                        &handshake[..initial_len],
+                        real_peer,
+                        local_addr,
+                        &config,
+                        &beobachten,
+                    )
+                    .await;
+                    return Ok(HandshakeOutcome::Handled);
+                }
+            };
+
+            if body_read < tls_len {
+                debug!(peer = %real_peer, got = body_read, expected = tls_len, "Truncated in-range TLS ClientHello; engaging masking fallback");
+                stats.increment_connects_bad();
+                let initial_len = 5 + body_read;
+                let (reader, writer) = tokio::io::split(stream);
+                handle_bad_client(
+                    reader,
+                    writer,
+                    &handshake[..initial_len],
+                    real_peer,
+                    local_addr,
+                    &config,
+                    &beobachten,
+                )
+                .await;
+                return Ok(HandshakeOutcome::Handled);
+            }
 
             let (read_half, write_half) = tokio::io::split(stream);
 
@@ -514,7 +583,7 @@ impl RunningClientHandler {
             debug!(peer = %peer, error = %e, "Failed to configure client socket");
         }
 
-        let handshake_timeout = Duration::from_secs(self.config.timeouts.client_handshake);
+        let handshake_timeout = handshake_timeout_with_mask_grace(&self.config);
         let stats = self.stats.clone();
         let config_for_timeout = self.config.clone();
         let beobachten_for_timeout = self.beobachten.clone();
@@ -651,9 +720,15 @@ impl RunningClientHandler {
 
         debug!(peer = %peer, tls_len = tls_len, "Reading TLS handshake");
 
-        // See RFC 8446 §5.1: TLSPlaintext records must not exceed 16_384 bytes.
-        // Treat too-small or too-large lengths as active probes and mask them.
-        if !(512..=MAX_TLS_RECORD_SIZE).contains(&tls_len) {
+        // RFC 8446 §5.1: TLS record payload MUST NOT exceed 2^14 (16_384) bytes.
+        // Lower bound is a structural minimum for a valid TLS 1.3 ClientHello
+        // (record header + handshake header + random + session_id + cipher_suites
+        // + compression + at least one extension with SNI). The previous value of
+        // 512 was implicitly coupled to TLS_REQUEST_LENGTH=517 from the official
+        // Telegram MTProxy reference server, leaving only a 5-byte margin and
+        // incorrectly rejecting compact but spec-compliant ClientHellos from
+        // third-party clients or future Telegram versions.
+        if !tls_clienthello_len_in_bounds(tls_len) {
             debug!(peer = %peer, tls_len = tls_len, max_tls_len = MAX_TLS_RECORD_SIZE, "TLS handshake length out of bounds");
             self.stats.increment_connects_bad();
             let (reader, writer) = self.stream.into_split();
@@ -672,7 +747,43 @@ impl RunningClientHandler {
 
         let mut handshake = vec![0u8; 5 + tls_len];
         handshake[..5].copy_from_slice(&first_bytes);
-        self.stream.read_exact(&mut handshake[5..]).await?;
+        let body_read = match read_with_progress(&mut self.stream, &mut handshake[5..]).await {
+            Ok(n) => n,
+            Err(e) => {
+                debug!(peer = %peer, error = %e, tls_len = tls_len, "TLS ClientHello body read failed; engaging masking fallback");
+                self.stats.increment_connects_bad();
+                let (reader, writer) = self.stream.into_split();
+                handle_bad_client(
+                    reader,
+                    writer,
+                    &handshake[..5],
+                    peer,
+                    local_addr,
+                    &self.config,
+                    &self.beobachten,
+                )
+                .await;
+                return Ok(HandshakeOutcome::Handled);
+            }
+        };
+
+        if body_read < tls_len {
+            debug!(peer = %peer, got = body_read, expected = tls_len, "Truncated in-range TLS ClientHello; engaging masking fallback");
+            self.stats.increment_connects_bad();
+            let initial_len = 5 + body_read;
+            let (reader, writer) = self.stream.into_split();
+            handle_bad_client(
+                reader,
+                writer,
+                &handshake[..initial_len],
+                peer,
+                local_addr,
+                &self.config,
+                &self.beobachten,
+            )
+            .await;
+            return Ok(HandshakeOutcome::Handled);
+        }
 
         let config = self.config.clone();
         let replay_checker = self.replay_checker.clone();
@@ -1085,3 +1196,15 @@ mod adversarial_tests;
 #[cfg(test)]
 #[path = "client_tls_mtproto_fallback_security_tests.rs"]
 mod tls_mtproto_fallback_security_tests;
+
+#[cfg(test)]
+#[path = "client_tls_clienthello_size_security_tests.rs"]
+mod tls_clienthello_size_security_tests;
+
+#[cfg(test)]
+#[path = "client_tls_clienthello_truncation_adversarial_tests.rs"]
+mod tls_clienthello_truncation_adversarial_tests;
+
+#[cfg(test)]
+#[path = "client_timing_profile_adversarial_tests.rs"]
+mod timing_profile_adversarial_tests;

@@ -152,8 +152,14 @@ pub const TLS_RECORD_CHANGE_CIPHER: u8 = 0x14;
 pub const TLS_RECORD_APPLICATION: u8 = 0x17;
 /// TLS record type: Alert
 pub const TLS_RECORD_ALERT: u8 = 0x15;
-/// Maximum TLS record size
-pub const MAX_TLS_RECORD_SIZE: usize = 16384;
+/// Maximum TLS record size (RFC 8446 §5.1: MUST NOT exceed 2^14 = 16_384 bytes)
+pub const MAX_TLS_RECORD_SIZE: usize = 16_384;
+
+/// Structural minimum for a valid TLS 1.3 ClientHello with SNI.
+/// Derived from RFC 8446 §4.1.2 field layout + Appendix D.4 compat mode.
+/// Deliberately conservative (below any real client) to avoid false
+/// positives on legitimate connections with compact extension sets.
+pub const MIN_TLS_CLIENT_HELLO_SIZE: usize = 100;
 /// Maximum TLS chunk size (with overhead)
 /// RFC 8446 §5.2 allows up to 16384 + 256 bytes of ciphertext
 pub const MAX_TLS_CHUNK_SIZE: usize = 16384 + 256;

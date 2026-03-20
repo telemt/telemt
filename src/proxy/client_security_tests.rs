@@ -3546,10 +3546,16 @@ async fn oversized_tls_record_is_masked_in_client_handler_pipeline() {
 }
 
 #[tokio::test]
-async fn tls_record_len_511_is_rejected_in_generic_stream_pipeline() {
+async fn tls_record_len_min_minus_1_is_rejected_in_generic_stream_pipeline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = listener.local_addr().unwrap();
-    let probe = [0x16, 0x03, 0x01, 0x01, 0xff];
+    let probe = [
+        0x16,
+        0x03,
+        0x01,
+        (((MIN_TLS_CLIENT_HELLO_SIZE - 1) >> 8) & 0xff) as u8,
+        ((MIN_TLS_CLIENT_HELLO_SIZE - 1) & 0xff) as u8,
+    ];
     let backend_reply = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n".to_vec();
 
     let accept_task = tokio::spawn({
@@ -3634,19 +3640,25 @@ async fn tls_record_len_511_is_rejected_in_generic_stream_pipeline() {
     assert_eq!(
         stats.get_connects_bad(),
         bad_before + 1,
-        "TLS record length 511 must be rejected"
+        "TLS record length below minimum structural ClientHello size must be rejected"
     );
 }
 
 #[tokio::test]
-async fn tls_record_len_511_is_rejected_in_client_handler_pipeline() {
+async fn tls_record_len_min_minus_1_is_rejected_in_client_handler_pipeline() {
     let mask_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = mask_listener.local_addr().unwrap();
 
     let front_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let front_addr = front_listener.local_addr().unwrap();
 
-    let probe = [0x16, 0x03, 0x01, 0x01, 0xff];
+    let probe = [
+        0x16,
+        0x03,
+        0x01,
+        (((MIN_TLS_CLIENT_HELLO_SIZE - 1) >> 8) & 0xff) as u8,
+        ((MIN_TLS_CLIENT_HELLO_SIZE - 1) & 0xff) as u8,
+    ];
     let backend_reply = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".to_vec();
 
     let mask_accept_task = tokio::spawn({
