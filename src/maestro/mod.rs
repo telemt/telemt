@@ -668,6 +668,9 @@ async fn run_inner(
 
     runtime_tasks::mark_runtime_ready(&startup_tracker).await;
 
+    // Spawn signal handlers for SIGUSR1/SIGUSR2 (non-shutdown signals)
+    shutdown::spawn_signal_handlers(stats.clone(), process_started_at);
+
     listeners::spawn_tcp_accept_loops(
         listeners,
         config_rx.clone(),
@@ -685,7 +688,7 @@ async fn run_inner(
         max_connections.clone(),
     );
 
-    shutdown::wait_for_shutdown(process_started_at, me_pool).await;
+    shutdown::wait_for_shutdown(process_started_at, me_pool, stats).await;
 
     Ok(())
 }
