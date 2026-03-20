@@ -19,9 +19,11 @@
 
 ### 🇷🇺 RU
 
-#### Релиз 3.3.15 Semistable
+#### О релизах
 
 [3.3.15](https://github.com/telemt/telemt/releases/tag/3.3.15) по итогам работы в продакшн признан одним из самых стабильных и рекомендуется к использованию, когда cutting-edge фичи некритичны!
+
+[3.3.24](https://github.com/telemt/telemt/releases/tag/3.3.24) даёт баланс стабильности и передового функционала, а так же последние исправления по безопасности и багам
 
 Будем рады вашему фидбеку и предложениям по улучшению — особенно в части **API**, **статистики**, **UX**
 
@@ -40,9 +42,11 @@
 
 ### 🇬🇧 EN
 
-#### Release 3.3.15 Semistable
+#### About releases
 
 [3.3.15](https://github.com/telemt/telemt/releases/tag/3.3.15) is, based on the results of his work in production, recognized as one of the most stable and recommended for use when cutting-edge features are not so necessary!
+
+[3.3.24](https://github.com/telemt/telemt/releases/tag/3.3.24) provides a balance of stability and advanced functionality, as well as the latest security and bug fixes
 
 We are looking forward to your feedback and improvement proposals — especially regarding **API**, **statistics**, **UX**
 
