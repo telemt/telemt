@@ -197,7 +197,9 @@ async fn reap_draining_writers_drops_warn_state_for_removed_writer() {
     reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
     assert!(warn_next_allowed.contains_key(&7));
 
-    let _ = pool.remove_writer_and_close_clients(7).await;
+    let _ = pool
+        .remove_writer_and_close_clients(7, crate::stats::MeWriterTeardownReason::ReapEmpty)
+        .await;
     assert!(pool.registry.get_writer(conn_ids[0]).await.is_none());
 
     reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
@@ -527,7 +529,12 @@ async fn reap_draining_writers_warn_state_never_exceeds_live_draining_population
 
         let existing_writer_ids = current_writer_ids(&pool).await;
         for writer_id in existing_writer_ids.into_iter().take(4) {
-            let _ = pool.remove_writer_and_close_clients(writer_id).await;
+            let _ = pool
+                .remove_writer_and_close_clients(
+                    writer_id,
+                    crate::stats::MeWriterTeardownReason::ReapEmpty,
+                )
+                .await;
         }
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
         assert!(warn_next_allowed.len() <= pool.writers.read().await.len());

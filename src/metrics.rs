@@ -16,7 +16,9 @@ use tracing::{info, warn, debug};
 use crate::config::ProxyConfig;
 use crate::ip_tracker::UserIpTracker;
 use crate::stats::beobachten::BeobachtenStore;
-use crate::stats::Stats;
+use crate::stats::{
+    MeWriterCleanupSideEffectStep, MeWriterTeardownMode, MeWriterTeardownReason, Stats,
+};
 use crate::transport::{ListenOptions, create_listener};
 
 pub async fn serve(
@@ -1770,6 +1772,169 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_teardown_attempt_total ME writer teardown attempts by reason and mode"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_teardown_attempt_total counter");
+    for reason in MeWriterTeardownReason::ALL {
+        for mode in MeWriterTeardownMode::ALL {
+            let _ = writeln!(
+                out,
+                "telemt_me_writer_teardown_attempt_total{{reason=\"{}\",mode=\"{}\"}} {}",
+                reason.as_str(),
+                mode.as_str(),
+                if me_allows_normal {
+                    stats.get_me_writer_teardown_attempt_total(reason, mode)
+                } else {
+                    0
+                }
+            );
+        }
+    }
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_teardown_success_total ME writer teardown successes by mode"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_teardown_success_total counter");
+    for mode in MeWriterTeardownMode::ALL {
+        let _ = writeln!(
+            out,
+            "telemt_me_writer_teardown_success_total{{mode=\"{}\"}} {}",
+            mode.as_str(),
+            if me_allows_normal {
+                stats.get_me_writer_teardown_success_total(mode)
+            } else {
+                0
+            }
+        );
+    }
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_teardown_timeout_total Teardown operations that timed out"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_teardown_timeout_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_teardown_timeout_total {}",
+        if me_allows_normal {
+            stats.get_me_writer_teardown_timeout_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_teardown_escalation_total Watchdog teardown escalations to hard detach"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_teardown_escalation_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_teardown_escalation_total {}",
+        if me_allows_normal {
+            stats.get_me_writer_teardown_escalation_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_teardown_noop_total Teardown operations that became no-op"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_teardown_noop_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_teardown_noop_total {}",
+        if me_allows_normal {
+            stats.get_me_writer_teardown_noop_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_teardown_duration_seconds ME writer teardown latency histogram by mode"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_teardown_duration_seconds histogram"
+    );
+    let bucket_labels = Stats::me_writer_teardown_duration_bucket_labels();
+    for mode in MeWriterTeardownMode::ALL {
+        for (bucket_idx, label) in bucket_labels.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "telemt_me_writer_teardown_duration_seconds_bucket{{mode=\"{}\",le=\"{}\"}} {}",
+                mode.as_str(),
+                label,
+                if me_allows_normal {
+                    stats.get_me_writer_teardown_duration_bucket_total(mode, bucket_idx)
+                } else {
+                    0
+                }
+            );
+        }
+        let _ = writeln!(
+            out,
+            "telemt_me_writer_teardown_duration_seconds_bucket{{mode=\"{}\",le=\"+Inf\"}} {}",
+            mode.as_str(),
+            if me_allows_normal {
+                stats.get_me_writer_teardown_duration_count(mode)
+            } else {
+                0
+            }
+        );
+        let _ = writeln!(
+            out,
+            "telemt_me_writer_teardown_duration_seconds_sum{{mode=\"{}\"}} {:.6}",
+            mode.as_str(),
+            if me_allows_normal {
+                stats.get_me_writer_teardown_duration_sum_seconds(mode)
+            } else {
+                0.0
+            }
+        );
+        let _ = writeln!(
+            out,
+            "telemt_me_writer_teardown_duration_seconds_count{{mode=\"{}\"}} {}",
+            mode.as_str(),
+            if me_allows_normal {
+                stats.get_me_writer_teardown_duration_count(mode)
+            } else {
+                0
+            }
+        );
+    }
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_cleanup_side_effect_failures_total Failed cleanup side effects by step"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_cleanup_side_effect_failures_total counter"
+    );
+    for step in MeWriterCleanupSideEffectStep::ALL {
+        let _ = writeln!(
+            out,
+            "telemt_me_writer_cleanup_side_effect_failures_total{{step=\"{}\"}} {}",
+            step.as_str(),
+            if me_allows_normal {
+                stats.get_me_writer_cleanup_side_effect_failures_total(step)
+            } else {
+                0
+            }
+        );
+    }
+
     let _ = writeln!(out, "# HELP telemt_me_refill_triggered_total Immediate ME refill runs started");
     let _ = writeln!(out, "# TYPE telemt_me_refill_triggered_total counter");
     let _ = writeln!(
@@ -2175,6 +2340,17 @@ mod tests {
         assert!(output.contains("# TYPE telemt_me_rpc_proxy_req_signal_sent_total counter"));
         assert!(output.contains("# TYPE telemt_me_idle_close_by_peer_total counter"));
         assert!(output.contains("# TYPE telemt_me_writer_removed_total counter"));
+        assert!(output.contains("# TYPE telemt_me_writer_teardown_attempt_total counter"));
+        assert!(output.contains("# TYPE telemt_me_writer_teardown_success_total counter"));
+        assert!(output.contains("# TYPE telemt_me_writer_teardown_timeout_total counter"));
+        assert!(output.contains("# TYPE telemt_me_writer_teardown_escalation_total counter"));
+        assert!(output.contains("# TYPE telemt_me_writer_teardown_noop_total counter"));
+        assert!(output.contains(
+            "# TYPE telemt_me_writer_teardown_duration_seconds histogram"
+        ));
+        assert!(output.contains(
+            "# TYPE telemt_me_writer_cleanup_side_effect_failures_total counter"
+        ));
         assert!(output.contains("# TYPE telemt_me_writer_close_signal_drop_total counter"));
         assert!(output.contains(
             "# TYPE telemt_me_writer_close_signal_channel_full_total counter"

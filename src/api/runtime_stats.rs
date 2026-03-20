@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::ApiConfig;
-use crate::stats::Stats;
+use crate::stats::{MeWriterTeardownMode, Stats};
 use crate::transport::upstream::IpPreference;
 use crate::transport::UpstreamRouteKind;
 
@@ -106,6 +106,29 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             refill_failed_total: stats.get_me_refill_failed_total(),
             writer_restored_same_endpoint_total: stats.get_me_writer_restored_same_endpoint_total(),
             writer_restored_fallback_total: stats.get_me_writer_restored_fallback_total(),
+            teardown_attempt_total_normal: stats
+                .get_me_writer_teardown_attempt_total_by_mode(MeWriterTeardownMode::Normal),
+            teardown_attempt_total_hard_detach: stats
+                .get_me_writer_teardown_attempt_total_by_mode(MeWriterTeardownMode::HardDetach),
+            teardown_success_total_normal: stats
+                .get_me_writer_teardown_success_total(MeWriterTeardownMode::Normal),
+            teardown_success_total_hard_detach: stats
+                .get_me_writer_teardown_success_total(MeWriterTeardownMode::HardDetach),
+            teardown_timeout_total: stats.get_me_writer_teardown_timeout_total(),
+            teardown_escalation_total: stats.get_me_writer_teardown_escalation_total(),
+            teardown_noop_total: stats.get_me_writer_teardown_noop_total(),
+            teardown_cleanup_side_effect_failures_total: stats
+                .get_me_writer_cleanup_side_effect_failures_total_all(),
+            teardown_duration_count_total: stats
+                .get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal)
+                .saturating_add(
+                    stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::HardDetach),
+                ),
+            teardown_duration_sum_seconds_total: stats
+                .get_me_writer_teardown_duration_sum_seconds(MeWriterTeardownMode::Normal)
+                + stats.get_me_writer_teardown_duration_sum_seconds(
+                    MeWriterTeardownMode::HardDetach,
+                ),
         },
         desync: ZeroDesyncData {
             secure_padding_invalid_total: stats.get_secure_padding_invalid(),

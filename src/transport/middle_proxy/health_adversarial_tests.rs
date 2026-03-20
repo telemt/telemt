@@ -316,7 +316,12 @@ async fn reap_draining_writers_maintains_warn_state_subset_property_under_bulk_c
 
         let ids = sorted_writer_ids(&pool).await;
         for writer_id in ids.into_iter().take(3) {
-            let _ = pool.remove_writer_and_close_clients(writer_id).await;
+            let _ = pool
+                .remove_writer_and_close_clients(
+                    writer_id,
+                    crate::stats::MeWriterTeardownReason::ReapEmpty,
+                )
+                .await;
         }
 
         reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;

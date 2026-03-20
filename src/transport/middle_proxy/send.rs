@@ -14,6 +14,7 @@ use crate::config::{MeRouteNoWriterMode, MeWriterPickMode};
 use crate::error::{ProxyError, Result};
 use crate::network::IpFamily;
 use crate::protocol::constants::{RPC_CLOSE_CONN_U32, RPC_CLOSE_EXT_U32};
+use crate::stats::MeWriterTeardownReason;
 
 use super::MePool;
 use super::codec::WriterCommand;
@@ -134,7 +135,11 @@ impl MePool {
                             Ok(()) => return Ok(()),
                             Err(TimedSendError::Closed(_)) => {
                                 warn!(writer_id = current.writer_id, "ME writer channel closed");
-                                self.remove_writer_and_close_clients(current.writer_id).await;
+                                self.remove_writer_and_close_clients(
+                                    current.writer_id,
+                                    MeWriterTeardownReason::RouteChannelClosed,
+                                )
+                                .await;
                                 continue;
                             }
                             Err(TimedSendError::Timeout(_)) => {
@@ -151,7 +156,11 @@ impl MePool {
                     }
                     Err(TrySendError::Closed(_)) => {
                         warn!(writer_id = current.writer_id, "ME writer channel closed");
-                        self.remove_writer_and_close_clients(current.writer_id).await;
+                        self.remove_writer_and_close_clients(
+                            current.writer_id,
+                            MeWriterTeardownReason::RouteChannelClosed,
+                        )
+                        .await;
                         continue;
                     }
                 }
@@ -458,7 +467,11 @@ impl MePool {
                     Err(TrySendError::Closed(_)) => {
                         self.stats.increment_me_writer_pick_closed_total(pick_mode);
                         warn!(writer_id = w.id, "ME writer channel closed");
-                        self.remove_writer_and_close_clients(w.id).await;
+                        self.remove_writer_and_close_clients(
+                            w.id,
+                            MeWriterTeardownReason::RouteChannelClosed,
+                        )
+                        .await;
                         continue;
                     }
                 }
@@ -503,7 +516,11 @@ impl MePool {
                 Err(TimedSendError::Closed(_)) => {
                     self.stats.increment_me_writer_pick_closed_total(pick_mode);
                     warn!(writer_id = w.id, "ME writer channel closed (blocking)");
-                    self.remove_writer_and_close_clients(w.id).await;
+                    self.remove_writer_and_close_clients(
+                        w.id,
+                        MeWriterTeardownReason::RouteChannelClosed,
+                    )
+                    .await;
                 }
                 Err(TimedSendError::Timeout(_)) => {
                     self.stats.increment_me_writer_pick_full_total(pick_mode);
@@ -654,7 +671,11 @@ impl MePool {
                 }
                 Err(TrySendError::Closed(_)) => {
                     debug!("ME close write failed");
-                    self.remove_writer_and_close_clients(w.writer_id).await;
+                    self.remove_writer_and_close_clients(
+                        w.writer_id,
+                        MeWriterTeardownReason::CloseRpcChannelClosed,
+                    )
+                    .await;
                 }
             }
         } else {

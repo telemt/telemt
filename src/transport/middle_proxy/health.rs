@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use crate::config::MeFloorMode;
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
+use crate::stats::MeWriterTeardownReason;
 
 use super::MePool;
 use super::pool::MeWriter;
@@ -358,7 +359,8 @@ pub(super) async fn reap_draining_writers(
             continue;
         }
         pool.stats.increment_pool_force_close_total();
-        pool.remove_writer_and_close_clients(writer_id).await;
+        pool.remove_writer_and_close_clients(writer_id, MeWriterTeardownReason::ReapTimeoutExpired)
+            .await;
         pool.stats
             .increment_me_draining_writers_reap_progress_total();
     }
@@ -376,7 +378,8 @@ pub(super) async fn reap_draining_writers(
             continue;
         }
         pool.stats.increment_pool_force_close_total();
-        pool.remove_writer_and_close_clients(writer_id).await;
+        pool.remove_writer_and_close_clients(writer_id, MeWriterTeardownReason::ReapThresholdForce)
+            .await;
         pool.stats
             .increment_me_draining_writers_reap_progress_total();
         closed_total = closed_total.saturating_add(1);
@@ -388,7 +391,8 @@ pub(super) async fn reap_draining_writers(
         if !closed_writer_ids.insert(writer_id) {
             continue;
         }
-        pool.remove_writer_and_close_clients(writer_id).await;
+        pool.remove_writer_and_close_clients(writer_id, MeWriterTeardownReason::ReapEmpty)
+            .await;
         pool.stats
             .increment_me_draining_writers_reap_progress_total();
         closed_total = closed_total.saturating_add(1);
@@ -1646,11 +1650,14 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
         for (writer_id, had_clients) in &zombie_ids_with_meta {
             let result = tokio::time::timeout(
                 Duration::from_secs(REMOVE_TIMEOUT_SECS),
-                pool.remove_writer_and_close_clients(*writer_id),
+                pool.remove_writer_and_close_clients(
+                    *writer_id,
+                    MeWriterTeardownReason::WatchdogStuckDraining,
+                ),
             )
             .await;
             match result {
-                Ok(()) => {
+                Ok(true) => {
                     removal_timeout_streak.remove(writer_id);
                     pool.stats.increment_pool_force_close_total();
                     pool.stats
@@ -1661,7 +1668,16 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
                         "Zombie writer removed by watchdog"
                     );
                 }
+                Ok(false) => {
+                    removal_timeout_streak.remove(writer_id);
+                    debug!(
+                        writer_id,
+                        had_clients,
+                        "Zombie writer watchdog removal became no-op"
+                    );
+                }
                 Err(_) => {
+                    pool.stats.increment_me_writer_teardown_timeout_total();
                     let streak = removal_timeout_streak
                         .entry(*writer_id)
                         .and_modify(|value| *value = value.saturating_add(1))
@@ -1675,10 +1691,14 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
                     if *streak < HARD_DETACH_TIMEOUT_STREAK {
                         continue;
                     }
+                    pool.stats.increment_me_writer_teardown_escalation_total();
 
                     let hard_detach = tokio::time::timeout(
                         Duration::from_secs(REMOVE_TIMEOUT_SECS),
-                        pool.remove_draining_writer_hard_detach(*writer_id),
+                        pool.remove_draining_writer_hard_detach(
+                            *writer_id,
+                            MeWriterTeardownReason::WatchdogStuckDraining,
+                        ),
                     )
                     .await;
                     match hard_detach {
@@ -1702,6 +1722,7 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
                             );
                         }
                         Err(_) => {
+                            pool.stats.increment_me_writer_teardown_timeout_total();
                             warn!(
                                 writer_id,
                                 had_clients,

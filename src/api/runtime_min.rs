@@ -4,6 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::config::ProxyConfig;
+use crate::stats::{
+    MeWriterCleanupSideEffectStep, MeWriterTeardownMode, MeWriterTeardownReason, Stats,
+};
 
 use super::ApiShared;
 
@@ -99,6 +102,50 @@ pub(super) struct RuntimeMeQualityCountersData {
 }
 
 #[derive(Serialize)]
+pub(super) struct RuntimeMeQualityTeardownAttemptData {
+    pub(super) reason: &'static str,
+    pub(super) mode: &'static str,
+    pub(super) total: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeMeQualityTeardownSuccessData {
+    pub(super) mode: &'static str,
+    pub(super) total: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeMeQualityTeardownSideEffectData {
+    pub(super) step: &'static str,
+    pub(super) total: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeMeQualityTeardownDurationBucketData {
+    pub(super) le_seconds: &'static str,
+    pub(super) total: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeMeQualityTeardownDurationData {
+    pub(super) mode: &'static str,
+    pub(super) count: u64,
+    pub(super) sum_seconds: f64,
+    pub(super) buckets: Vec<RuntimeMeQualityTeardownDurationBucketData>,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeMeQualityTeardownData {
+    pub(super) attempts: Vec<RuntimeMeQualityTeardownAttemptData>,
+    pub(super) success: Vec<RuntimeMeQualityTeardownSuccessData>,
+    pub(super) timeout_total: u64,
+    pub(super) escalation_total: u64,
+    pub(super) noop_total: u64,
+    pub(super) cleanup_side_effect_failures: Vec<RuntimeMeQualityTeardownSideEffectData>,
+    pub(super) duration: Vec<RuntimeMeQualityTeardownDurationData>,
+}
+
+#[derive(Serialize)]
 pub(super) struct RuntimeMeQualityRouteDropData {
     pub(super) no_conn_total: u64,
     pub(super) channel_closed_total: u64,
@@ -120,6 +167,7 @@ pub(super) struct RuntimeMeQualityDcRttData {
 #[derive(Serialize)]
 pub(super) struct RuntimeMeQualityPayload {
     pub(super) counters: RuntimeMeQualityCountersData,
+    pub(super) teardown: RuntimeMeQualityTeardownData,
     pub(super) route_drops: RuntimeMeQualityRouteDropData,
     pub(super) dc_rtt: Vec<RuntimeMeQualityDcRttData>,
 }
@@ -374,6 +422,7 @@ pub(super) async fn build_runtime_me_quality_data(shared: &ApiShared) -> Runtime
                 reconnect_attempt_total: shared.stats.get_me_reconnect_attempts(),
                 reconnect_success_total: shared.stats.get_me_reconnect_success(),
             },
+            teardown: build_runtime_me_teardown_data(shared),
             route_drops: RuntimeMeQualityRouteDropData {
                 no_conn_total: shared.stats.get_me_route_drop_no_conn(),
                 channel_closed_total: shared.stats.get_me_route_drop_channel_closed(),
@@ -394,6 +443,81 @@ pub(super) async fn build_runtime_me_quality_data(shared: &ApiShared) -> Runtime
                 })
                 .collect(),
         }),
+    }
+}
+
+fn build_runtime_me_teardown_data(shared: &ApiShared) -> RuntimeMeQualityTeardownData {
+    let attempts = MeWriterTeardownReason::ALL
+        .iter()
+        .copied()
+        .flat_map(|reason| {
+            MeWriterTeardownMode::ALL
+                .iter()
+                .copied()
+                .map(move |mode| RuntimeMeQualityTeardownAttemptData {
+                    reason: reason.as_str(),
+                    mode: mode.as_str(),
+                    total: shared.stats.get_me_writer_teardown_attempt_total(reason, mode),
+                })
+        })
+        .collect();
+
+    let success = MeWriterTeardownMode::ALL
+        .iter()
+        .copied()
+        .map(|mode| RuntimeMeQualityTeardownSuccessData {
+            mode: mode.as_str(),
+            total: shared.stats.get_me_writer_teardown_success_total(mode),
+        })
+        .collect();
+
+    let cleanup_side_effect_failures = MeWriterCleanupSideEffectStep::ALL
+        .iter()
+        .copied()
+        .map(|step| RuntimeMeQualityTeardownSideEffectData {
+            step: step.as_str(),
+            total: shared
+                .stats
+                .get_me_writer_cleanup_side_effect_failures_total(step),
+        })
+        .collect();
+
+    let duration = MeWriterTeardownMode::ALL
+        .iter()
+        .copied()
+        .map(|mode| {
+            let count = shared.stats.get_me_writer_teardown_duration_count(mode);
+            let mut buckets: Vec<RuntimeMeQualityTeardownDurationBucketData> = Stats::me_writer_teardown_duration_bucket_labels()
+                .iter()
+                .enumerate()
+                .map(|(bucket_idx, label)| RuntimeMeQualityTeardownDurationBucketData {
+                    le_seconds: label,
+                    total: shared
+                        .stats
+                        .get_me_writer_teardown_duration_bucket_total(mode, bucket_idx),
+                })
+                .collect();
+            buckets.push(RuntimeMeQualityTeardownDurationBucketData {
+                le_seconds: "+Inf",
+                total: count,
+            });
+            RuntimeMeQualityTeardownDurationData {
+                mode: mode.as_str(),
+                count,
+                sum_seconds: shared.stats.get_me_writer_teardown_duration_sum_seconds(mode),
+                buckets,
+            }
+        })
+        .collect();
+
+    RuntimeMeQualityTeardownData {
+        attempts,
+        success,
+        timeout_total: shared.stats.get_me_writer_teardown_timeout_total(),
+        escalation_total: shared.stats.get_me_writer_teardown_escalation_total(),
+        noop_total: shared.stats.get_me_writer_teardown_noop_total(),
+        cleanup_side_effect_failures,
+        duration,
     }
 }
 

@@ -205,6 +205,16 @@ pub(super) struct ZeroPoolData {
     pub(super) refill_failed_total: u64,
     pub(super) writer_restored_same_endpoint_total: u64,
     pub(super) writer_restored_fallback_total: u64,
+    pub(super) teardown_attempt_total_normal: u64,
+    pub(super) teardown_attempt_total_hard_detach: u64,
+    pub(super) teardown_success_total_normal: u64,
+    pub(super) teardown_success_total_hard_detach: u64,
+    pub(super) teardown_timeout_total: u64,
+    pub(super) teardown_escalation_total: u64,
+    pub(super) teardown_noop_total: u64,
+    pub(super) teardown_cleanup_side_effect_failures_total: u64,
+    pub(super) teardown_duration_count_total: u64,
+    pub(super) teardown_duration_sum_seconds_total: f64,
 }
 
 #[derive(Serialize, Clone)]
