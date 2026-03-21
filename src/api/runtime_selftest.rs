@@ -1,5 +1,5 @@
-use std::net::IpAddr;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use crate::config::{ProxyConfig, UpstreamType};
 use crate::network::probe::{detect_interface_ipv4, detect_interface_ipv6, is_bogon};
-use crate::transport::middle_proxy::{bnd_snapshot, timeskew_snapshot, upstream_bnd_snapshots};
 use crate::transport::UpstreamRouteKind;
+use crate::transport::middle_proxy::{bnd_snapshot, timeskew_snapshot, upstream_bnd_snapshots};
 
 use super::ApiShared;
 
@@ -262,8 +262,8 @@ fn update_kdf_ewma(now_epoch_secs: u64, total_errors: u64) -> f64 {
     let delta_errors = total_errors.saturating_sub(guard.last_total_errors);
     let instant_rate_per_min = (delta_errors as f64) * 60.0 / (dt_secs as f64);
     let alpha = 1.0 - f64::exp(-(dt_secs as f64) / KDF_EWMA_TAU_SECS);
-    guard.ewma_errors_per_min = guard.ewma_errors_per_min
-        + alpha * (instant_rate_per_min - guard.ewma_errors_per_min);
+    guard.ewma_errors_per_min =
+        guard.ewma_errors_per_min + alpha * (instant_rate_per_min - guard.ewma_errors_per_min);
     guard.last_epoch_secs = now_epoch_secs;
     guard.last_total_errors = total_errors;
     guard.ewma_errors_per_min
@@ -284,6 +284,7 @@ fn map_route_kind(value: UpstreamRouteKind) -> &'static str {
         UpstreamRouteKind::Direct => "direct",
         UpstreamRouteKind::Socks4 => "socks4",
         UpstreamRouteKind::Socks5 => "socks5",
+        UpstreamRouteKind::Shadowsocks => "shadowsocks",
     }
 }
 

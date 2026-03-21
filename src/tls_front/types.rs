@@ -1,5 +1,5 @@
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
-use serde::{Serialize, Deserialize};
 
 /// Parsed representation of an unencrypted TLS ServerHello.
 #[derive(Debug, Clone, Serialize, Deserialize)]

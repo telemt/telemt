@@ -10,7 +10,9 @@ use tracing::{debug, info, warn};
 
 use crate::config::{NetworkConfig, UpstreamConfig, UpstreamType};
 use crate::error::Result;
-use crate::network::stun::{stun_probe_family_with_bind, DualStunResult, IpFamily, StunProbeResult};
+use crate::network::stun::{
+    DualStunResult, IpFamily, StunProbeResult, stun_probe_family_with_bind,
+};
 use crate::transport::UpstreamManager;
 
 #[derive(Debug, Clone, Default)]
@@ -78,13 +80,8 @@ pub async fn run_probe(
             warn!("STUN probe is enabled but network.stun_servers is empty");
             DualStunResult::default()
         } else {
-            probe_stun_servers_parallel(
-                &servers,
-                stun_nat_probe_concurrency.max(1),
-                None,
-                None,
-            )
-            .await
+            probe_stun_servers_parallel(&servers, stun_nat_probe_concurrency.max(1), None, None)
+                .await
         }
     } else if nat_probe {
         info!("STUN probe is disabled by network.stun_use=false");
@@ -99,7 +96,8 @@ pub async fn run_probe(
         let UpstreamType::Direct {
             interface,
             bind_addresses,
-        } = &upstream.upstream_type else {
+        } = &upstream.upstream_type
+        else {
             continue;
         };
         if let Some(addrs) = bind_addresses.as_ref().filter(|v| !v.is_empty()) {
@@ -217,12 +215,20 @@ pub async fn run_probe(
 
     probe.ipv4_usable = config.ipv4
         && probe.detected_ipv4.is_some()
-        && (!probe.ipv4_is_bogon || probe.reflected_ipv4.map(|r| !is_bogon(r.ip())).unwrap_or(false));
+        && (!probe.ipv4_is_bogon
+            || probe
+                .reflected_ipv4
+                .map(|r| !is_bogon(r.ip()))
+                .unwrap_or(false));
 
     let ipv6_enabled = config.ipv6.unwrap_or(probe.detected_ipv6.is_some());
     probe.ipv6_usable = ipv6_enabled
         && probe.detected_ipv6.is_some()
-        && (!probe.ipv6_is_bogon || probe.reflected_ipv6.map(|r| !is_bogon(r.ip())).unwrap_or(false));
+        && (!probe.ipv6_is_bogon
+            || probe
+                .reflected_ipv6
+                .map(|r| !is_bogon(r.ip()))
+                .unwrap_or(false));
 
     Ok(probe)
 }
@@ -300,11 +306,15 @@ async fn probe_stun_servers_parallel(
         match task {
             Ok((stun_addr, Ok(Ok(result)))) => {
                 if let Some(v4) = result.v4 {
-                    let entry = best_v4_by_ip.entry(v4.reflected_addr.ip()).or_insert((0, v4));
+                    let entry = best_v4_by_ip
+                        .entry(v4.reflected_addr.ip())
+                        .or_insert((0, v4));
                     entry.0 += 1;
                 }
                 if let Some(v6) = result.v6 {
-                    let entry = best_v6_by_ip.entry(v6.reflected_addr.ip()).or_insert((0, v6));
+                    let entry = best_v6_by_ip
+                        .entry(v6.reflected_addr.ip())
+                        .or_insert((0, v6));
                     entry.0 += 1;
                 }
                 if result.v4.is_some() || result.v6.is_some() {
@@ -324,17 +334,11 @@ async fn probe_stun_servers_parallel(
     }
 
     let mut out = DualStunResult::default();
-    if let Some((_, best)) = best_v4_by_ip
-        .into_values()
-        .max_by_key(|(count, _)| *count)
-    {
+    if let Some((_, best)) = best_v4_by_ip.into_values().max_by_key(|(count, _)| *count) {
         info!("STUN-Quorum reached, IP: {}", best.reflected_addr.ip());
         out.v4 = Some(best);
     }
-    if let Some((_, best)) = best_v6_by_ip
-        .into_values()
-        .max_by_key(|(count, _)| *count)
-    {
+    if let Some((_, best)) = best_v6_by_ip.into_values().max_by_key(|(count, _)| *count) {
         info!("STUN-Quorum reached, IP: {}", best.reflected_addr.ip());
         out.v6 = Some(best);
     }
@@ -347,7 +351,8 @@ pub fn decide_network_capabilities(
     middle_proxy_nat_ip: Option<IpAddr>,
 ) -> NetworkDecision {
     let ipv4_dc = config.ipv4 && probe.detected_ipv4.is_some();
-    let ipv6_dc = config.ipv6.unwrap_or(probe.detected_ipv6.is_some()) && probe.detected_ipv6.is_some();
+    let ipv6_dc =
+        config.ipv6.unwrap_or(probe.detected_ipv6.is_some()) && probe.detected_ipv6.is_some();
     let nat_ip_v4 = matches!(middle_proxy_nat_ip, Some(IpAddr::V4(_)));
     let nat_ip_v6 = matches!(middle_proxy_nat_ip, Some(IpAddr::V6(_)));
 
@@ -534,10 +539,26 @@ pub fn is_bogon_v6(ip: Ipv6Addr) -> bool {
 
 pub fn log_probe_result(probe: &NetworkProbe, decision: &NetworkDecision) {
     info!(
-        ipv4 = probe.detected_ipv4.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
-        ipv6 = probe.detected_ipv6.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
-        reflected_v4 = probe.reflected_ipv4.as_ref().map(|v| v.ip().to_string()).unwrap_or_else(|| "-".into()),
-        reflected_v6 = probe.reflected_ipv6.as_ref().map(|v| v.ip().to_string()).unwrap_or_else(|| "-".into()),
+        ipv4 = probe
+            .detected_ipv4
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+        ipv6 = probe
+            .detected_ipv6
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".into()),
+        reflected_v4 = probe
+            .reflected_ipv4
+            .as_ref()
+            .map(|v| v.ip().to_string())
+            .unwrap_or_else(|| "-".into()),
+        reflected_v6 = probe
+            .reflected_ipv6
+            .as_ref()
+            .map(|v| v.ip().to_string())
+            .unwrap_or_else(|| "-".into()),
         ipv4_bogon = probe.ipv4_is_bogon,
         ipv6_bogon = probe.ipv6_is_bogon,
         ipv4_me = decision.ipv4_me,

@@ -37,7 +37,7 @@
 //!
 //! Backpressure
 //! - pending ciphertext buffer is bounded (configurable per connection)
-//! - pending is full and upstream is pending 
+//! - pending is full and upstream is pending
 //!   -> poll_write returns Poll::Pending
 //!   -> do not accept any plaintext
 //!
@@ -59,8 +59,8 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::{debug, trace};
 
-use crate::crypto::AesCtr;
 use super::state::{StreamState, YieldBuffer};
+use crate::crypto::AesCtr;
 
 // ============= Constants =============
 
@@ -152,9 +152,9 @@ impl<R> CryptoReader<R> {
 
     fn take_poison_error(&mut self) -> io::Error {
         match &mut self.state {
-            CryptoReaderState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::other("stream previously poisoned")
-            }),
+            CryptoReaderState::Poisoned { error } => error
+                .take()
+                .unwrap_or_else(|| io::Error::other("stream previously poisoned")),
             _ => io::Error::other("stream not poisoned"),
         }
     }
@@ -221,7 +221,11 @@ impl<R: AsyncRead + Unpin> AsyncRead for CryptoReader<R> {
                             let filled = buf.filled_mut();
                             this.decryptor.apply(&mut filled[before..after]);
 
-                            trace!(bytes_read, state = this.state_name(), "CryptoReader decrypted chunk");
+                            trace!(
+                                bytes_read,
+                                state = this.state_name(),
+                                "CryptoReader decrypted chunk"
+                            );
 
                             return Poll::Ready(Ok(()));
                         }
@@ -503,9 +507,9 @@ impl<W> CryptoWriter<W> {
 
     fn take_poison_error(&mut self) -> io::Error {
         match &mut self.state {
-            CryptoWriterState::Poisoned { error } => error.take().unwrap_or_else(|| {
-                io::Error::other("stream previously poisoned")
-            }),
+            CryptoWriterState::Poisoned { error } => error
+                .take()
+                .unwrap_or_else(|| io::Error::other("stream previously poisoned")),
             _ => io::Error::other("stream not poisoned"),
         }
     }
@@ -525,7 +529,11 @@ impl<W> CryptoWriter<W> {
     }
 
     /// Select how many plaintext bytes can be accepted in buffering path
-    fn select_to_accept_for_buffering(state: &CryptoWriterState, buf_len: usize, max_pending: usize) -> usize {
+    fn select_to_accept_for_buffering(
+        state: &CryptoWriterState,
+        buf_len: usize,
+        max_pending: usize,
+    ) -> usize {
         if buf_len == 0 {
             return 0;
         }
@@ -602,11 +610,7 @@ impl<W: AsyncWrite + Unpin> CryptoWriter<W> {
 }
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for CryptoWriter<W> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize>> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         let this = self.get_mut();
 
         // Poisoned?
@@ -629,8 +633,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CryptoWriter<W> {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {
                     // Upstream blocked. Apply ideal backpressure
-                    let to_accept =
-                        Self::select_to_accept_for_buffering(&this.state, buf.len(), this.max_pending_write);
+                    let to_accept = Self::select_to_accept_for_buffering(
+                        &this.state,
+                        buf.len(),
+                        this.max_pending_write,
+                    );
 
                     if to_accept == 0 {
                         trace!(

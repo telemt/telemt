@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use tracing::warn;
 
 use crate::config::ProxyConfig;
@@ -38,12 +38,15 @@ pub(crate) async fn bootstrap_tls_front(
             .clone()
             .unwrap_or_else(|| config.censorship.tls_domain.clone());
         let mask_unix_sock = config.censorship.mask_unix_sock.clone();
+        let tls_fetch_scope = (!config.censorship.tls_fetch_scope.is_empty())
+            .then(|| config.censorship.tls_fetch_scope.clone());
         let fetch_timeout = Duration::from_secs(5);
 
         let cache_initial = cache.clone();
         let domains_initial = tls_domains.to_vec();
         let host_initial = mask_host.clone();
         let unix_sock_initial = mask_unix_sock.clone();
+        let scope_initial = tls_fetch_scope.clone();
         let upstream_initial = upstream_manager.clone();
         tokio::spawn(async move {
             let mut join = tokio::task::JoinSet::new();
@@ -51,6 +54,7 @@ pub(crate) async fn bootstrap_tls_front(
                 let cache_domain = cache_initial.clone();
                 let host_domain = host_initial.clone();
                 let unix_sock_domain = unix_sock_initial.clone();
+                let scope_domain = scope_initial.clone();
                 let upstream_domain = upstream_initial.clone();
                 join.spawn(async move {
                     match crate::tls_front::fetcher::fetch_real_tls(
@@ -59,6 +63,7 @@ pub(crate) async fn bootstrap_tls_front(
                         &domain,
                         fetch_timeout,
                         Some(upstream_domain),
+                        scope_domain.as_deref(),
                         proxy_protocol,
                         unix_sock_domain.as_deref(),
                     )
@@ -100,6 +105,7 @@ pub(crate) async fn bootstrap_tls_front(
         let domains_refresh = tls_domains.to_vec();
         let host_refresh = mask_host.clone();
         let unix_sock_refresh = mask_unix_sock.clone();
+        let scope_refresh = tls_fetch_scope.clone();
         let upstream_refresh = upstream_manager.clone();
         tokio::spawn(async move {
             loop {
@@ -112,6 +118,7 @@ pub(crate) async fn bootstrap_tls_front(
                     let cache_domain = cache_refresh.clone();
                     let host_domain = host_refresh.clone();
                     let unix_sock_domain = unix_sock_refresh.clone();
+                    let scope_domain = scope_refresh.clone();
                     let upstream_domain = upstream_refresh.clone();
                     join.spawn(async move {
                         match crate::tls_front::fetcher::fetch_real_tls(
@@ -120,6 +127,7 @@ pub(crate) async fn bootstrap_tls_front(
                             &domain,
                             fetch_timeout,
                             Some(upstream_domain),
+                            scope_domain.as_deref(),
                             proxy_protocol,
                             unix_sock_domain.as_deref(),
                         )

@@ -83,7 +83,10 @@ impl MePool {
 
     pub async fn update_secret(self: &Arc<Self>, new_secret: Vec<u8>) -> bool {
         if new_secret.len() < 32 {
-            warn!(len = new_secret.len(), "proxy-secret update ignored (too short)");
+            warn!(
+                len = new_secret.len(),
+                "proxy-secret update ignored (too short)"
+            );
             return false;
         }
         let mut guard = self.proxy_secret.write().await;

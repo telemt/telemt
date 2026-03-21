@@ -1,9 +1,9 @@
-use tracing::{debug, info, warn};
-use std::time::SystemTime;
 use httpdate;
+use std::time::SystemTime;
+use tracing::{debug, info, warn};
 
-use crate::error::{ProxyError, Result};
 use super::selftest::record_timeskew_sample;
+use crate::error::{ProxyError, Result};
 
 pub const PROXY_SECRET_MIN_LEN: usize = 32;
 
@@ -11,24 +11,21 @@ pub(super) fn validate_proxy_secret_len(data_len: usize, max_len: usize) -> Resu
     if max_len < PROXY_SECRET_MIN_LEN {
         return Err(ProxyError::Proxy(format!(
             "proxy-secret max length is invalid: {} bytes (must be >= {})",
-            max_len,
-            PROXY_SECRET_MIN_LEN
+            max_len, PROXY_SECRET_MIN_LEN
         )));
     }
 
     if data_len < PROXY_SECRET_MIN_LEN {
         return Err(ProxyError::Proxy(format!(
             "proxy-secret too short: {} bytes (need >= {})",
-            data_len,
-            PROXY_SECRET_MIN_LEN
+            data_len, PROXY_SECRET_MIN_LEN
         )));
     }
 
     if data_len > max_len {
         return Err(ProxyError::Proxy(format!(
             "proxy-secret too long: {} bytes (limit = {})",
-            data_len,
-            max_len
+            data_len, max_len
         )));
     }
 
@@ -94,16 +91,22 @@ pub async fn download_proxy_secret_with_max_len(max_len: usize) -> Result<Vec<u8
     if let Some(date) = resp.headers().get(reqwest::header::DATE)
         && let Ok(date_str) = date.to_str()
         && let Ok(server_time) = httpdate::parse_http_date(date_str)
-        && let Ok(skew) = SystemTime::now().duration_since(server_time).or_else(|e| {
-            server_time.duration_since(SystemTime::now()).map_err(|_| e)
-        })
+        && let Ok(skew) = SystemTime::now()
+            .duration_since(server_time)
+            .or_else(|e| server_time.duration_since(SystemTime::now()).map_err(|_| e))
     {
         let skew_secs = skew.as_secs();
         record_timeskew_sample("proxy_secret_date_header", skew_secs);
         if skew_secs > 60 {
-            warn!(skew_secs, "Time skew >60s detected from proxy-secret Date header");
+            warn!(
+                skew_secs,
+                "Time skew >60s detected from proxy-secret Date header"
+            );
         } else if skew_secs > 30 {
-            warn!(skew_secs, "Time skew >30s detected from proxy-secret Date header");
+            warn!(
+                skew_secs,
+                "Time skew >30s detected from proxy-secret Date header"
+            );
         }
     }
 

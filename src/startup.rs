@@ -175,7 +175,11 @@ impl StartupTracker {
     pub async fn start_component(&self, id: &'static str, details: Option<String>) {
         let mut guard = self.state.write().await;
         guard.current_stage = id.to_string();
-        if let Some(component) = guard.components.iter_mut().find(|component| component.id == id) {
+        if let Some(component) = guard
+            .components
+            .iter_mut()
+            .find(|component| component.id == id)
+        {
             if component.started_at_epoch_ms.is_none() {
                 component.started_at_epoch_ms = Some(now_epoch_ms());
             }
@@ -208,7 +212,11 @@ impl StartupTracker {
     ) {
         let mut guard = self.state.write().await;
         let finished_at = now_epoch_ms();
-        if let Some(component) = guard.components.iter_mut().find(|component| component.id == id) {
+        if let Some(component) = guard
+            .components
+            .iter_mut()
+            .find(|component| component.id == id)
+        {
             if component.started_at_epoch_ms.is_none() {
                 component.started_at_epoch_ms = Some(finished_at);
                 component.attempts = component.attempts.saturating_add(1);

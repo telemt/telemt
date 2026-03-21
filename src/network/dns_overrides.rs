@@ -26,9 +26,7 @@ fn parse_ip_spec(ip_spec: &str) -> Result<IpAddr> {
     }
 
     let ip = ip_spec.parse::<IpAddr>().map_err(|_| {
-        ProxyError::Config(format!(
-            "network.dns_overrides IP is invalid: '{ip_spec}'"
-        ))
+        ProxyError::Config(format!("network.dns_overrides IP is invalid: '{ip_spec}'"))
     })?;
     if matches!(ip, IpAddr::V6(_)) {
         return Err(ProxyError::Config(format!(
@@ -103,9 +101,9 @@ pub fn validate_entries(entries: &[String]) -> Result<()> {
 /// Replace runtime DNS overrides with a new validated snapshot.
 pub fn install_entries(entries: &[String]) -> Result<()> {
     let parsed = parse_entries(entries)?;
-    let mut guard = overrides_store()
-        .write()
-        .map_err(|_| ProxyError::Config("network.dns_overrides runtime lock is poisoned".to_string()))?;
+    let mut guard = overrides_store().write().map_err(|_| {
+        ProxyError::Config("network.dns_overrides runtime lock is poisoned".to_string())
+    })?;
     *guard = parsed;
     Ok(())
 }

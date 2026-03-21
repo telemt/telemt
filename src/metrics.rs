@@ -1,5 +1,5 @@
-use std::convert::Infallible;
 use std::collections::{BTreeSet, HashMap};
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,16 +11,17 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use ipnetwork::IpNetwork;
 use tokio::net::TcpListener;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 use crate::config::ProxyConfig;
 use crate::ip_tracker::UserIpTracker;
-use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::Stats;
+use crate::stats::beobachten::BeobachtenStore;
 use crate::transport::{ListenOptions, create_listener};
 
 pub async fn serve(
     port: u16,
+    listen: Option<String>,
     stats: Arc<Stats>,
     beobachten: Arc<BeobachtenStore>,
     ip_tracker: Arc<UserIpTracker>,
@@ -28,13 +29,43 @@ pub async fn serve(
     whitelist: Vec<IpNetwork>,
 ) {
     let whitelist = Arc::new(whitelist);
+
+    // If `metrics_listen` is set, bind on that single address only.
+    if let Some(ref listen_addr) = listen {
+        let addr: SocketAddr = match listen_addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(error = %e, "Invalid metrics_listen address: {}", listen_addr);
+                return;
+            }
+        };
+        let is_ipv6 = addr.is_ipv6();
+        match bind_metrics_listener(addr, is_ipv6) {
+            Ok(listener) => {
+                info!("Metrics endpoint: http://{}/metrics and /beobachten", addr);
+                serve_listener(
+                    listener, stats, beobachten, ip_tracker, config_rx, whitelist,
+                )
+                .await;
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to bind metrics on {}", addr);
+            }
+        }
+        return;
+    }
+
+    // Fallback: bind on 0.0.0.0 and [::] using metrics_port.
     let mut listener_v4 = None;
     let mut listener_v6 = None;
 
     let addr_v4 = SocketAddr::from(([0, 0, 0, 0], port));
     match bind_metrics_listener(addr_v4, false) {
         Ok(listener) => {
-            info!("Metrics endpoint: http://{}/metrics and /beobachten", addr_v4);
+            info!(
+                "Metrics endpoint: http://{}/metrics and /beobachten",
+                addr_v4
+            );
             listener_v4 = Some(listener);
         }
         Err(e) => {
@@ -45,7 +76,10 @@ pub async fn serve(
     let addr_v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], port));
     match bind_metrics_listener(addr_v6, true) {
         Ok(listener) => {
-            info!("Metrics endpoint: http://[::]:{}/metrics and /beobachten", port);
+            info!(
+                "Metrics endpoint: http://[::]:{}/metrics and /beobachten",
+                port
+            );
             listener_v6 = Some(listener);
         }
         Err(e) => {
@@ -81,12 +115,7 @@ pub async fn serve(
                 .await;
             });
             serve_listener(
-                listener4,
-                stats,
-                beobachten,
-                ip_tracker,
-                config_rx,
-                whitelist,
+                listener4, stats, beobachten, ip_tracker, config_rx, whitelist,
             )
             .await;
         }
@@ -203,7 +232,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     let _ = writeln!(out, "# TYPE telemt_uptime_seconds gauge");
     let _ = writeln!(out, "telemt_uptime_seconds {:.1}", stats.uptime_secs());
 
-    let _ = writeln!(out, "# HELP telemt_telemetry_core_enabled Runtime core telemetry switch");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_core_enabled Runtime core telemetry switch"
+    );
     let _ = writeln!(out, "# TYPE telemt_telemetry_core_enabled gauge");
     let _ = writeln!(
         out,
@@ -211,7 +243,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         if core_enabled { 1 } else { 0 }
     );
 
-    let _ = writeln!(out, "# HELP telemt_telemetry_user_enabled Runtime per-user telemetry switch");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_user_enabled Runtime per-user telemetry switch"
+    );
     let _ = writeln!(out, "# TYPE telemt_telemetry_user_enabled gauge");
     let _ = writeln!(
         out,
@@ -219,7 +254,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         if user_enabled { 1 } else { 0 }
     );
 
-    let _ = writeln!(out, "# HELP telemt_telemetry_me_level Runtime ME telemetry level flag");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_me_level Runtime ME telemetry level flag"
+    );
     let _ = writeln!(out, "# TYPE telemt_telemetry_me_level gauge");
     let _ = writeln!(
         out,
@@ -249,23 +287,40 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_connections_total Total accepted connections");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_connections_total Total accepted connections"
+    );
     let _ = writeln!(out, "# TYPE telemt_connections_total counter");
     let _ = writeln!(
         out,
         "telemt_connections_total {}",
-        if core_enabled { stats.get_connects_all() } else { 0 }
+        if core_enabled {
+            stats.get_connects_all()
+        } else {
+            0
+        }
     );
 
-    let _ = writeln!(out, "# HELP telemt_connections_bad_total Bad/rejected connections");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_connections_bad_total Bad/rejected connections"
+    );
     let _ = writeln!(out, "# TYPE telemt_connections_bad_total counter");
     let _ = writeln!(
         out,
         "telemt_connections_bad_total {}",
-        if core_enabled { stats.get_connects_bad() } else { 0 }
+        if core_enabled {
+            stats.get_connects_bad()
+        } else {
+            0
+        }
     );
 
-    let _ = writeln!(out, "# HELP telemt_handshake_timeouts_total Handshake timeouts");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_handshake_timeouts_total Handshake timeouts"
+    );
     let _ = writeln!(out, "# TYPE telemt_handshake_timeouts_total counter");
     let _ = writeln!(
         out,
@@ -344,7 +399,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_upstream_connect_attempts_per_request Histogram-like buckets for attempts per upstream connect request cycle"
     );
-    let _ = writeln!(out, "# TYPE telemt_upstream_connect_attempts_per_request counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_upstream_connect_attempts_per_request counter"
+    );
     let _ = writeln!(
         out,
         "telemt_upstream_connect_attempts_per_request{{bucket=\"1\"}} {}",
@@ -386,7 +444,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_upstream_connect_duration_success_total Histogram-like buckets of successful upstream connect cycle duration"
     );
-    let _ = writeln!(out, "# TYPE telemt_upstream_connect_duration_success_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_upstream_connect_duration_success_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_upstream_connect_duration_success_total{{bucket=\"le_100ms\"}} {}",
@@ -428,7 +489,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_upstream_connect_duration_fail_total Histogram-like buckets of failed upstream connect cycle duration"
     );
-    let _ = writeln!(out, "# TYPE telemt_upstream_connect_duration_fail_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_upstream_connect_duration_fail_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_upstream_connect_duration_fail_total{{bucket=\"le_100ms\"}} {}",
@@ -466,7 +530,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_keepalive_sent_total ME keepalive frames sent");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_keepalive_sent_total ME keepalive frames sent"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_sent_total counter");
     let _ = writeln!(
         out,
@@ -478,7 +545,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_keepalive_failed_total ME keepalive send failures");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_keepalive_failed_total ME keepalive send failures"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_failed_total counter");
     let _ = writeln!(
         out,
@@ -490,7 +560,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_keepalive_pong_total ME keepalive pong replies");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_keepalive_pong_total ME keepalive pong replies"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_pong_total counter");
     let _ = writeln!(
         out,
@@ -502,7 +575,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_keepalive_timeout_total ME keepalive ping timeouts");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_keepalive_timeout_total ME keepalive ping timeouts"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_keepalive_timeout_total counter");
     let _ = writeln!(
         out,
@@ -518,7 +594,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_rpc_proxy_req_signal_sent_total Service RPC_PROXY_REQ activity signals sent"
     );
-    let _ = writeln!(out, "# TYPE telemt_me_rpc_proxy_req_signal_sent_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_rpc_proxy_req_signal_sent_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_rpc_proxy_req_signal_sent_total {}",
@@ -601,7 +680,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_reconnect_attempts_total ME reconnect attempts");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_reconnect_attempts_total ME reconnect attempts"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_reconnect_attempts_total counter");
     let _ = writeln!(
         out,
@@ -613,7 +695,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_reconnect_success_total ME reconnect successes");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_reconnect_success_total ME reconnect successes"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_reconnect_success_total counter");
     let _ = writeln!(
         out,
@@ -625,7 +710,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_handshake_reject_total ME handshake rejects from upstream");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_handshake_reject_total ME handshake rejects from upstream"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_handshake_reject_total counter");
     let _ = writeln!(
         out,
@@ -637,20 +725,25 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_handshake_error_code_total ME handshake reject errors by code");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_handshake_error_code_total ME handshake reject errors by code"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_handshake_error_code_total counter");
     if me_allows_normal {
         for (error_code, count) in stats.get_me_handshake_error_code_counts() {
             let _ = writeln!(
                 out,
                 "telemt_me_handshake_error_code_total{{error_code=\"{}\"}} {}",
-                error_code,
-                count
+                error_code, count
             );
         }
     }
 
-    let _ = writeln!(out, "# HELP telemt_me_reader_eof_total ME reader EOF terminations");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_reader_eof_total ME reader EOF terminations"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_reader_eof_total counter");
     let _ = writeln!(
         out,
@@ -677,6 +770,69 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_idle_soft_mark_total Middle-relay sessions marked as soft-idle candidates"
+    );
+    let _ = writeln!(out, "# TYPE telemt_relay_idle_soft_mark_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_relay_idle_soft_mark_total {}",
+        if me_allows_normal {
+            stats.get_relay_idle_soft_mark_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_idle_hard_close_total Middle-relay sessions closed by hard-idle policy"
+    );
+    let _ = writeln!(out, "# TYPE telemt_relay_idle_hard_close_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_relay_idle_hard_close_total {}",
+        if me_allows_normal {
+            stats.get_relay_idle_hard_close_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_pressure_evict_total Middle-relay sessions evicted under resource pressure"
+    );
+    let _ = writeln!(out, "# TYPE telemt_relay_pressure_evict_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_relay_pressure_evict_total {}",
+        if me_allows_normal {
+            stats.get_relay_pressure_evict_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_relay_protocol_desync_close_total Middle-relay sessions closed due to protocol desync"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_relay_protocol_desync_close_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_relay_protocol_desync_close_total {}",
+        if me_allows_normal {
+            stats.get_relay_protocol_desync_close_total()
+        } else {
+            0
+        }
+    );
+
     let _ = writeln!(out, "# HELP telemt_me_crc_mismatch_total ME CRC mismatches");
     let _ = writeln!(out, "# TYPE telemt_me_crc_mismatch_total counter");
     let _ = writeln!(
@@ -689,7 +845,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_seq_mismatch_total ME sequence mismatches");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_seq_mismatch_total ME sequence mismatches"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_seq_mismatch_total counter");
     let _ = writeln!(
         out,
@@ -701,7 +860,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_route_drop_no_conn_total ME route drops: no conn");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_route_drop_no_conn_total ME route drops: no conn"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_route_drop_no_conn_total counter");
     let _ = writeln!(
         out,
@@ -713,8 +875,14 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_route_drop_channel_closed_total ME route drops: channel closed");
-    let _ = writeln!(out, "# TYPE telemt_me_route_drop_channel_closed_total counter");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_route_drop_channel_closed_total ME route drops: channel closed"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_route_drop_channel_closed_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_route_drop_channel_closed_total {}",
@@ -725,7 +893,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_route_drop_queue_full_total ME route drops: queue full");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_route_drop_queue_full_total ME route drops: queue full"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_route_drop_queue_full_total counter");
     let _ = writeln!(
         out,
@@ -882,7 +1053,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_writer_pick_mode_switch_total Writer-pick mode switches via runtime updates"
     );
-    let _ = writeln!(out, "# TYPE telemt_me_writer_pick_mode_switch_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_pick_mode_switch_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_writer_pick_mode_switch_total {}",
@@ -932,7 +1106,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_kdf_drift_total ME KDF input drift detections");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_kdf_drift_total ME KDF input drift detections"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_kdf_drift_total counter");
     let _ = writeln!(
         out,
@@ -978,7 +1155,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_hardswap_pending_ttl_expired_total Pending hardswap generations reset by TTL expiration"
     );
-    let _ = writeln!(out, "# TYPE telemt_me_hardswap_pending_ttl_expired_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_hardswap_pending_ttl_expired_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_hardswap_pending_ttl_expired_total {}",
@@ -1210,10 +1390,7 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_adaptive_floor_global_cap_raw Runtime raw global adaptive floor cap"
     );
-    let _ = writeln!(
-        out,
-        "# TYPE telemt_me_adaptive_floor_global_cap_raw gauge"
-    );
+    let _ = writeln!(out, "# TYPE telemt_me_adaptive_floor_global_cap_raw gauge");
     let _ = writeln!(
         out,
         "telemt_me_adaptive_floor_global_cap_raw {}",
@@ -1396,7 +1573,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_secure_padding_invalid_total Invalid secure frame lengths");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_secure_padding_invalid_total Invalid secure frame lengths"
+    );
     let _ = writeln!(out, "# TYPE telemt_secure_padding_invalid_total counter");
     let _ = writeln!(
         out,
@@ -1408,7 +1588,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_desync_total Total crypto-desync detections");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_desync_total Total crypto-desync detections"
+    );
     let _ = writeln!(out, "# TYPE telemt_desync_total counter");
     let _ = writeln!(
         out,
@@ -1420,7 +1603,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_desync_full_logged_total Full forensic desync logs emitted");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_desync_full_logged_total Full forensic desync logs emitted"
+    );
     let _ = writeln!(out, "# TYPE telemt_desync_full_logged_total counter");
     let _ = writeln!(
         out,
@@ -1432,7 +1618,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_desync_suppressed_total Suppressed desync forensic events");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_desync_suppressed_total Suppressed desync forensic events"
+    );
     let _ = writeln!(out, "# TYPE telemt_desync_suppressed_total counter");
     let _ = writeln!(
         out,
@@ -1444,7 +1633,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_desync_frames_bucket_total Desync count by frames_ok bucket");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_desync_frames_bucket_total Desync count by frames_ok bucket"
+    );
     let _ = writeln!(out, "# TYPE telemt_desync_frames_bucket_total counter");
     let _ = writeln!(
         out,
@@ -1483,7 +1675,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_pool_swap_total Successful ME pool swaps");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_pool_swap_total Successful ME pool swaps"
+    );
     let _ = writeln!(out, "# TYPE telemt_pool_swap_total counter");
     let _ = writeln!(
         out,
@@ -1495,7 +1690,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_pool_drain_active Active draining ME writers");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_pool_drain_active Active draining ME writers"
+    );
     let _ = writeln!(out, "# TYPE telemt_pool_drain_active gauge");
     let _ = writeln!(
         out,
@@ -1507,7 +1705,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_pool_force_close_total Forced close events for draining writers");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_pool_force_close_total Forced close events for draining writers"
+    );
     let _ = writeln!(out, "# TYPE telemt_pool_force_close_total counter");
     let _ = writeln!(
         out,
@@ -1519,7 +1720,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_pool_stale_pick_total Stale writer fallback picks for new binds");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_pool_stale_pick_total Stale writer fallback picks for new binds"
+    );
     let _ = writeln!(out, "# TYPE telemt_pool_stale_pick_total counter");
     let _ = writeln!(
         out,
@@ -1531,7 +1735,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_writer_removed_total Total ME writer removals");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_removed_total Total ME writer removals"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_writer_removed_total counter");
     let _ = writeln!(
         out,
@@ -1547,7 +1754,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_writer_removed_unexpected_total Unexpected ME writer removals that triggered refill"
     );
-    let _ = writeln!(out, "# TYPE telemt_me_writer_removed_unexpected_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_removed_unexpected_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_writer_removed_unexpected_total {}",
@@ -1558,7 +1768,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_refill_triggered_total Immediate ME refill runs started");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_refill_triggered_total Immediate ME refill runs started"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_refill_triggered_total counter");
     let _ = writeln!(
         out,
@@ -1574,7 +1787,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_refill_skipped_inflight_total Immediate ME refill skips due to inflight dedup"
     );
-    let _ = writeln!(out, "# TYPE telemt_me_refill_skipped_inflight_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_refill_skipped_inflight_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_refill_skipped_inflight_total {}",
@@ -1585,7 +1801,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         }
     );
 
-    let _ = writeln!(out, "# HELP telemt_me_refill_failed_total Immediate ME refill failures");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_refill_failed_total Immediate ME refill failures"
+    );
     let _ = writeln!(out, "# TYPE telemt_me_refill_failed_total counter");
     let _ = writeln!(
         out,
@@ -1601,7 +1820,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_writer_restored_same_endpoint_total Refilled ME writer restored on the same endpoint"
     );
-    let _ = writeln!(out, "# TYPE telemt_me_writer_restored_same_endpoint_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_restored_same_endpoint_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_writer_restored_same_endpoint_total {}",
@@ -1616,7 +1838,10 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         out,
         "# HELP telemt_me_writer_restored_fallback_total Refilled ME writer restored via fallback endpoint"
     );
-    let _ = writeln!(out, "# TYPE telemt_me_writer_restored_fallback_total counter");
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_restored_fallback_total counter"
+    );
     let _ = writeln!(
         out,
         "telemt_me_writer_restored_fallback_total {}",
@@ -1694,17 +1919,35 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         unresolved_writer_losses
     );
 
-    let _ = writeln!(out, "# HELP telemt_user_connections_total Per-user total connections");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_user_connections_total Per-user total connections"
+    );
     let _ = writeln!(out, "# TYPE telemt_user_connections_total counter");
-    let _ = writeln!(out, "# HELP telemt_user_connections_current Per-user active connections");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_user_connections_current Per-user active connections"
+    );
     let _ = writeln!(out, "# TYPE telemt_user_connections_current gauge");
-    let _ = writeln!(out, "# HELP telemt_user_octets_from_client Per-user bytes received");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_user_octets_from_client Per-user bytes received"
+    );
     let _ = writeln!(out, "# TYPE telemt_user_octets_from_client counter");
-    let _ = writeln!(out, "# HELP telemt_user_octets_to_client Per-user bytes sent");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_user_octets_to_client Per-user bytes sent"
+    );
     let _ = writeln!(out, "# TYPE telemt_user_octets_to_client counter");
-    let _ = writeln!(out, "# HELP telemt_user_msgs_from_client Per-user messages received");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_user_msgs_from_client Per-user messages received"
+    );
     let _ = writeln!(out, "# TYPE telemt_user_msgs_from_client counter");
-    let _ = writeln!(out, "# HELP telemt_user_msgs_to_client Per-user messages sent");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_user_msgs_to_client Per-user messages sent"
+    );
     let _ = writeln!(out, "# TYPE telemt_user_msgs_to_client counter");
     let _ = writeln!(
         out,
@@ -1744,12 +1987,45 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
         for entry in stats.iter_user_stats() {
             let user = entry.key();
             let s = entry.value();
-            let _ = writeln!(out, "telemt_user_connections_total{{user=\"{}\"}} {}", user, s.connects.load(std::sync::atomic::Ordering::Relaxed));
-            let _ = writeln!(out, "telemt_user_connections_current{{user=\"{}\"}} {}", user, s.curr_connects.load(std::sync::atomic::Ordering::Relaxed));
-            let _ = writeln!(out, "telemt_user_octets_from_client{{user=\"{}\"}} {}", user, s.octets_from_client.load(std::sync::atomic::Ordering::Relaxed));
-            let _ = writeln!(out, "telemt_user_octets_to_client{{user=\"{}\"}} {}", user, s.octets_to_client.load(std::sync::atomic::Ordering::Relaxed));
-            let _ = writeln!(out, "telemt_user_msgs_from_client{{user=\"{}\"}} {}", user, s.msgs_from_client.load(std::sync::atomic::Ordering::Relaxed));
-            let _ = writeln!(out, "telemt_user_msgs_to_client{{user=\"{}\"}} {}", user, s.msgs_to_client.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = writeln!(
+                out,
+                "telemt_user_connections_total{{user=\"{}\"}} {}",
+                user,
+                s.connects.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                out,
+                "telemt_user_connections_current{{user=\"{}\"}} {}",
+                user,
+                s.curr_connects.load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                out,
+                "telemt_user_octets_from_client{{user=\"{}\"}} {}",
+                user,
+                s.octets_from_client
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                out,
+                "telemt_user_octets_to_client{{user=\"{}\"}} {}",
+                user,
+                s.octets_to_client
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                out,
+                "telemt_user_msgs_from_client{{user=\"{}\"}} {}",
+                user,
+                s.msgs_from_client
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                out,
+                "telemt_user_msgs_to_client{{user=\"{}\"}} {}",
+                user,
+                s.msgs_to_client.load(std::sync::atomic::Ordering::Relaxed)
+            );
         }
 
         let ip_stats = ip_tracker.get_stats().await;
@@ -1767,16 +2043,25 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
             .get_recent_counts_for_users(&unique_users_vec)
             .await;
 
-        let _ = writeln!(out, "# HELP telemt_user_unique_ips_current Per-user current number of unique active IPs");
+        let _ = writeln!(
+            out,
+            "# HELP telemt_user_unique_ips_current Per-user current number of unique active IPs"
+        );
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_current gauge");
         let _ = writeln!(
             out,
             "# HELP telemt_user_unique_ips_recent_window Per-user unique IPs seen in configured observation window"
         );
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_recent_window gauge");
-        let _ = writeln!(out, "# HELP telemt_user_unique_ips_limit Effective per-user unique IP limit (0 means unlimited)");
+        let _ = writeln!(
+            out,
+            "# HELP telemt_user_unique_ips_limit Effective per-user unique IP limit (0 means unlimited)"
+        );
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_limit gauge");
-        let _ = writeln!(out, "# HELP telemt_user_unique_ips_utilization Per-user unique IP usage ratio (0 for unlimited)");
+        let _ = writeln!(
+            out,
+            "# HELP telemt_user_unique_ips_utilization Per-user unique IP usage ratio (0 for unlimited)"
+        );
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_utilization gauge");
 
         for user in unique_users {
@@ -1787,29 +2072,34 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
                 .get(&user)
                 .copied()
                 .filter(|limit| *limit > 0)
-                .or(
-                    (config.access.user_max_unique_ips_global_each > 0)
-                        .then_some(config.access.user_max_unique_ips_global_each),
-                )
+                .or((config.access.user_max_unique_ips_global_each > 0)
+                    .then_some(config.access.user_max_unique_ips_global_each))
                 .unwrap_or(0);
             let utilization = if limit > 0 {
                 current as f64 / limit as f64
             } else {
                 0.0
             };
-            let _ = writeln!(out, "telemt_user_unique_ips_current{{user=\"{}\"}} {}", user, current);
+            let _ = writeln!(
+                out,
+                "telemt_user_unique_ips_current{{user=\"{}\"}} {}",
+                user, current
+            );
             let _ = writeln!(
                 out,
                 "telemt_user_unique_ips_recent_window{{user=\"{}\"}} {}",
                 user,
                 recent_counts.get(&user).copied().unwrap_or(0)
             );
-            let _ = writeln!(out, "telemt_user_unique_ips_limit{{user=\"{}\"}} {}", user, limit);
+            let _ = writeln!(
+                out,
+                "telemt_user_unique_ips_limit{{user=\"{}\"}} {}",
+                user, limit
+            );
             let _ = writeln!(
                 out,
                 "telemt_user_unique_ips_utilization{{user=\"{}\"}} {:.6}",
-                user,
-                utilization
+                user, utilization
             );
         }
     }
@@ -1820,8 +2110,8 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
     use http_body_util::BodyExt;
+    use std::net::IpAddr;
 
     #[tokio::test]
     async fn test_render_metrics_format() {
@@ -1851,6 +2141,10 @@ mod tests {
         stats.increment_me_rpc_proxy_req_signal_response_total();
         stats.increment_me_rpc_proxy_req_signal_close_sent_total();
         stats.increment_me_idle_close_by_peer_total();
+        stats.increment_relay_idle_soft_mark_total();
+        stats.increment_relay_idle_hard_close_total();
+        stats.increment_relay_pressure_evict_total();
+        stats.increment_relay_protocol_desync_close_total();
         stats.increment_user_connects("alice");
         stats.increment_user_curr_connects("alice");
         stats.add_user_octets_from("alice", 1024);
@@ -1872,13 +2166,10 @@ mod tests {
         assert!(output.contains("telemt_upstream_connect_success_total 1"));
         assert!(output.contains("telemt_upstream_connect_fail_total 1"));
         assert!(output.contains("telemt_upstream_connect_failfast_hard_error_total 1"));
+        assert!(output.contains("telemt_upstream_connect_attempts_per_request{bucket=\"2\"} 1"));
         assert!(
-            output.contains("telemt_upstream_connect_attempts_per_request{bucket=\"2\"} 1")
-        );
-        assert!(
-            output.contains(
-                "telemt_upstream_connect_duration_success_total{bucket=\"101_500ms\"} 1"
-            )
+            output
+                .contains("telemt_upstream_connect_duration_success_total{bucket=\"101_500ms\"} 1")
         );
         assert!(
             output.contains("telemt_upstream_connect_duration_fail_total{bucket=\"gt_1000ms\"} 1")
@@ -1889,6 +2180,10 @@ mod tests {
         assert!(output.contains("telemt_me_rpc_proxy_req_signal_response_total 1"));
         assert!(output.contains("telemt_me_rpc_proxy_req_signal_close_sent_total 1"));
         assert!(output.contains("telemt_me_idle_close_by_peer_total 1"));
+        assert!(output.contains("telemt_relay_idle_soft_mark_total 1"));
+        assert!(output.contains("telemt_relay_idle_hard_close_total 1"));
+        assert!(output.contains("telemt_relay_pressure_evict_total 1"));
+        assert!(output.contains("telemt_relay_protocol_desync_close_total 1"));
         assert!(output.contains("telemt_user_connections_total{user=\"alice\"} 1"));
         assert!(output.contains("telemt_user_connections_current{user=\"alice\"} 1"));
         assert!(output.contains("telemt_user_octets_from_client{user=\"alice\"} 1024"));
@@ -1946,10 +2241,15 @@ mod tests {
         assert!(output.contains("# TYPE telemt_upstream_connect_attempt_total counter"));
         assert!(output.contains("# TYPE telemt_me_rpc_proxy_req_signal_sent_total counter"));
         assert!(output.contains("# TYPE telemt_me_idle_close_by_peer_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_idle_soft_mark_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_idle_hard_close_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_pressure_evict_total counter"));
+        assert!(output.contains("# TYPE telemt_relay_protocol_desync_close_total counter"));
         assert!(output.contains("# TYPE telemt_me_writer_removed_total counter"));
-        assert!(output.contains(
-            "# TYPE telemt_me_writer_removed_unexpected_minus_restored_total gauge"
-        ));
+        assert!(
+            output
+                .contains("# TYPE telemt_me_writer_removed_unexpected_minus_restored_total gauge")
+        );
         assert!(output.contains("# TYPE telemt_user_unique_ips_current gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_recent_window gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_limit gauge"));
@@ -1966,14 +2266,17 @@ mod tests {
         stats.increment_connects_all();
         stats.increment_connects_all();
 
-        let req = Request::builder()
-            .uri("/metrics")
-            .body(())
+        let req = Request::builder().uri("/metrics").body(()).unwrap();
+        let resp = handle(req, &stats, &beobachten, &tracker, &config)
+            .await
             .unwrap();
-        let resp = handle(req, &stats, &beobachten, &tracker, &config).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert!(std::str::from_utf8(body.as_ref()).unwrap().contains("telemt_connections_total 3"));
+        assert!(
+            std::str::from_utf8(body.as_ref())
+                .unwrap()
+                .contains("telemt_connections_total 3")
+        );
 
         config.general.beobachten = true;
         config.general.beobachten_minutes = 10;
@@ -1982,10 +2285,7 @@ mod tests {
             "203.0.113.10".parse::<IpAddr>().unwrap(),
             Duration::from_secs(600),
         );
-        let req_beob = Request::builder()
-            .uri("/beobachten")
-            .body(())
-            .unwrap();
+        let req_beob = Request::builder().uri("/beobachten").body(()).unwrap();
         let resp_beob = handle(req_beob, &stats, &beobachten, &tracker, &config)
             .await
             .unwrap();
@@ -1995,10 +2295,7 @@ mod tests {
         assert!(beob_text.contains("[TLS-scanner]"));
         assert!(beob_text.contains("203.0.113.10-1"));
 
-        let req404 = Request::builder()
-            .uri("/other")
-            .body(())
-            .unwrap();
+        let req404 = Request::builder().uri("/other").body(()).unwrap();
         let resp404 = handle(req404, &stats, &beobachten, &tracker, &config)
             .await
             .unwrap();

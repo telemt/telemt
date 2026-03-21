@@ -2,8 +2,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::ApiConfig;
 use crate::stats::Stats;
-use crate::transport::upstream::IpPreference;
 use crate::transport::UpstreamRouteKind;
+use crate::transport::upstream::IpPreference;
 
 use super::ApiShared;
 use super::model::{
@@ -136,7 +136,8 @@ fn build_zero_upstream_data(stats: &Stats) -> ZeroUpstreamData {
             .get_upstream_connect_duration_success_bucket_501_1000ms(),
         connect_duration_success_bucket_gt_1000ms: stats
             .get_upstream_connect_duration_success_bucket_gt_1000ms(),
-        connect_duration_fail_bucket_le_100ms: stats.get_upstream_connect_duration_fail_bucket_le_100ms(),
+        connect_duration_fail_bucket_le_100ms: stats
+            .get_upstream_connect_duration_fail_bucket_le_100ms(),
         connect_duration_fail_bucket_101_500ms: stats
             .get_upstream_connect_duration_fail_bucket_101_500ms(),
         connect_duration_fail_bucket_501_1000ms: stats
@@ -178,6 +179,7 @@ pub(super) fn build_upstreams_data(shared: &ApiShared, api_cfg: &ApiConfig) -> U
         direct_total: snapshot.summary.direct_total,
         socks4_total: snapshot.summary.socks4_total,
         socks5_total: snapshot.summary.socks5_total,
+        shadowsocks_total: snapshot.summary.shadowsocks_total,
     };
     let upstreams = snapshot
         .upstreams
@@ -391,8 +393,7 @@ async fn get_minimal_payload_cached(
         adaptive_floor_min_writers_multi_endpoint: runtime
             .adaptive_floor_min_writers_multi_endpoint,
         adaptive_floor_recover_grace_secs: runtime.adaptive_floor_recover_grace_secs,
-        adaptive_floor_writers_per_core_total: runtime
-            .adaptive_floor_writers_per_core_total,
+        adaptive_floor_writers_per_core_total: runtime.adaptive_floor_writers_per_core_total,
         adaptive_floor_cpu_cores_override: runtime.adaptive_floor_cpu_cores_override,
         adaptive_floor_max_extra_writers_single_per_core: runtime
             .adaptive_floor_max_extra_writers_single_per_core,
@@ -400,12 +401,9 @@ async fn get_minimal_payload_cached(
             .adaptive_floor_max_extra_writers_multi_per_core,
         adaptive_floor_max_active_writers_per_core: runtime
             .adaptive_floor_max_active_writers_per_core,
-        adaptive_floor_max_warm_writers_per_core: runtime
-            .adaptive_floor_max_warm_writers_per_core,
-        adaptive_floor_max_active_writers_global: runtime
-            .adaptive_floor_max_active_writers_global,
-        adaptive_floor_max_warm_writers_global: runtime
-            .adaptive_floor_max_warm_writers_global,
+        adaptive_floor_max_warm_writers_per_core: runtime.adaptive_floor_max_warm_writers_per_core,
+        adaptive_floor_max_active_writers_global: runtime.adaptive_floor_max_active_writers_global,
+        adaptive_floor_max_warm_writers_global: runtime.adaptive_floor_max_warm_writers_global,
         adaptive_floor_cpu_cores_detected: runtime.adaptive_floor_cpu_cores_detected,
         adaptive_floor_cpu_cores_effective: runtime.adaptive_floor_cpu_cores_effective,
         adaptive_floor_global_cap_raw: runtime.adaptive_floor_global_cap_raw,
@@ -517,6 +515,7 @@ fn map_route_kind(value: UpstreamRouteKind) -> &'static str {
         UpstreamRouteKind::Direct => "direct",
         UpstreamRouteKind::Socks4 => "socks4",
         UpstreamRouteKind::Socks5 => "socks5",
+        UpstreamRouteKind::Shadowsocks => "shadowsocks",
     }
 }
 

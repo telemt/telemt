@@ -4,22 +4,28 @@
 
 #![allow(deprecated)]
 
+use rand::RngExt;
 use std::collections::{BTreeSet, HashMap};
-use std::net::{SocketAddr, IpAddr};
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
-use rand::Rng;
-use tracing::{debug, warn, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::config::{UpstreamConfig, UpstreamType};
-use crate::error::{Result, ProxyError};
+use crate::error::{ProxyError, Result};
 use crate::network::dns_overrides::{resolve_socket_addr, split_host_port};
-use crate::protocol::constants::{TG_DATACENTERS_V4, TG_DATACENTERS_V6, TG_DATACENTER_PORT};
+use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4, TG_DATACENTERS_V6};
 use crate::stats::Stats;
+use crate::transport::shadowsocks::{
+    ShadowsocksStream, connect_shadowsocks, sanitize_shadowsocks_url,
+};
 use crate::transport::socket::{create_outgoing_socket_bound, resolve_interface_ip};
 use crate::transport::socks::{connect_socks4, connect_socks5};
 
@@ -47,7 +53,10 @@ struct LatencyEma {
 
 impl LatencyEma {
     const fn new(alpha: f64) -> Self {
-        Self { value_ms: None, alpha }
+        Self {
+            value_ms: None,
+            alpha,
+        }
     }
 
     fn update(&mut self, sample_ms: f64) {
@@ -131,11 +140,17 @@ impl UpstreamState {
             return Some(ms);
         }
 
-        let (sum, count) = self.dc_latency.iter()
+        let (sum, count) = self
+            .dc_latency
+            .iter()
             .filter_map(|l| l.get())
             .fold((0.0, 0u32), |(s, c), v| (s + v, c + 1));
 
-        if count > 0 { Some(sum / count as f64) } else { None }
+        if count > 0 {
+            Some(sum / count as f64)
+        } else {
+            None
+        }
     }
 }
 
@@ -158,11 +173,78 @@ pub struct StartupPingResult {
     pub both_available: bool,
 }
 
+pub enum UpstreamStream {
+    Tcp(TcpStream),
+    Shadowsocks(Box<ShadowsocksStream>),
+}
+
+impl std::fmt::Debug for UpstreamStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(_) => f.write_str("UpstreamStream::Tcp(..)"),
+            Self::Shadowsocks(_) => f.write_str("UpstreamStream::Shadowsocks(..)"),
+        }
+    }
+}
+
+impl UpstreamStream {
+    pub fn into_tcp(self) -> Result<TcpStream> {
+        match self {
+            Self::Tcp(stream) => Ok(stream),
+            Self::Shadowsocks(_) => Err(ProxyError::Config(
+                "shadowsocks upstreams are not supported when general.use_middle_proxy = true"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+impl AsyncRead for UpstreamStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Shadowsocks(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for UpstreamStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Shadowsocks(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Shadowsocks(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Shadowsocks(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamRouteKind {
     Direct,
     Socks4,
     Socks5,
+    Shadowsocks,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +276,7 @@ pub struct UpstreamApiSummarySnapshot {
     pub direct_total: usize,
     pub socks4_total: usize,
     pub socks5_total: usize,
+    pub shadowsocks_total: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -253,7 +336,8 @@ impl UpstreamManager {
         connect_failfast_hard_errors: bool,
         stats: Arc<Stats>,
     ) -> Self {
-        let states = configs.into_iter()
+        let states = configs
+            .into_iter()
             .filter(|c| c.enabled)
             .map(UpstreamState::new)
             .collect();
@@ -311,20 +395,13 @@ impl UpstreamManager {
                 summary.unhealthy_total += 1;
             }
 
-            let (route_kind, address) = match &upstream.config.upstream_type {
-                UpstreamType::Direct { .. } => {
-                    summary.direct_total += 1;
-                    (UpstreamRouteKind::Direct, "direct".to_string())
-                }
-                UpstreamType::Socks4 { address, .. } => {
-                    summary.socks4_total += 1;
-                    (UpstreamRouteKind::Socks4, address.clone())
-                }
-                UpstreamType::Socks5 { address, .. } => {
-                    summary.socks5_total += 1;
-                    (UpstreamRouteKind::Socks5, address.clone())
-                }
-            };
+            let (route_kind, address) = Self::describe_upstream(&upstream.config.upstream_type);
+            match route_kind {
+                UpstreamRouteKind::Direct => summary.direct_total += 1,
+                UpstreamRouteKind::Socks4 => summary.socks4_total += 1,
+                UpstreamRouteKind::Socks5 => summary.socks5_total += 1,
+                UpstreamRouteKind::Shadowsocks => summary.shadowsocks_total += 1,
+            }
 
             let mut dc = Vec::with_capacity(NUM_DCS);
             for dc_idx in 0..NUM_DCS {
@@ -350,6 +427,18 @@ impl UpstreamManager {
         }
 
         Some(UpstreamApiSnapshot { summary, upstreams })
+    }
+
+    fn describe_upstream(upstream_type: &UpstreamType) -> (UpstreamRouteKind, String) {
+        match upstream_type {
+            UpstreamType::Direct { .. } => (UpstreamRouteKind::Direct, "direct".to_string()),
+            UpstreamType::Socks4 { address, .. } => (UpstreamRouteKind::Socks4, address.clone()),
+            UpstreamType::Socks5 { address, .. } => (UpstreamRouteKind::Socks5, address.clone()),
+            UpstreamType::Shadowsocks { url, .. } => (
+                UpstreamRouteKind::Shadowsocks,
+                sanitize_shadowsocks_url(url).unwrap_or_else(|_| "invalid".to_string()),
+            ),
+        }
     }
 
     pub fn api_policy_snapshot(&self) -> UpstreamApiPolicySnapshot {
@@ -511,7 +600,7 @@ impl UpstreamManager {
             return self.connect_retry_backoff;
         }
         let jitter_cap_ms = (base_ms / 2).max(1);
-        let jitter_ms = rand::rng().gen_range(0..=jitter_cap_ms);
+        let jitter_ms = rand::rng().random_range(0..=jitter_cap_ms);
         Duration::from_millis(base_ms.saturating_add(jitter_ms))
     }
 
@@ -539,68 +628,72 @@ impl UpstreamManager {
         // Scope filter:
         //   If scope is set: only scoped and matched items
         //   If scope is not set: only unscoped items
-        let filtered_upstreams : Vec<usize> = upstreams.iter()
+        let filtered_upstreams: Vec<usize> = upstreams
+            .iter()
             .enumerate()
             .filter(|(_, u)| {
-                scope.map_or(
-                    u.config.scopes.is_empty(),
-                    |req_scope| {
-                        u.config.scopes
-                            .split(',')
-                            .map(str::trim)
-                            .any(|s| s == req_scope)
-                    }
-                )
+                scope.map_or(u.config.scopes.is_empty(), |req_scope| {
+                    u.config
+                        .scopes
+                        .split(',')
+                        .map(str::trim)
+                        .any(|s| s == req_scope)
+                })
             })
             .map(|(i, _)| i)
             .collect();
 
         // Healthy filter
-        let healthy: Vec<usize> = filtered_upstreams.iter()
+        let healthy: Vec<usize> = filtered_upstreams
+            .iter()
             .filter(|&&i| upstreams[i].healthy)
             .copied()
             .collect();
 
         if filtered_upstreams.is_empty() {
-            if Self::should_emit_warn(
-                self.no_upstreams_warn_epoch_ms.as_ref(),
-                5_000,
-            ) {
-                warn!(scope = scope, "No upstreams available! Using first (direct?)");
+            if Self::should_emit_warn(self.no_upstreams_warn_epoch_ms.as_ref(), 5_000) {
+                warn!(
+                    scope = scope,
+                    "No upstreams available! Using first (direct?)"
+                );
             }
             return None;
         }
 
         if healthy.is_empty() {
-            if Self::should_emit_warn(
-                self.no_healthy_warn_epoch_ms.as_ref(),
-                5_000,
-            ) {
-                warn!(scope = scope, "No healthy upstreams available! Using random.");
+            if Self::should_emit_warn(self.no_healthy_warn_epoch_ms.as_ref(), 5_000) {
+                warn!(
+                    scope = scope,
+                    "No healthy upstreams available! Using random."
+                );
             }
-            return Some(filtered_upstreams[rand::rng().gen_range(0..filtered_upstreams.len())]);
+            return Some(filtered_upstreams[rand::rng().random_range(0..filtered_upstreams.len())]);
         }
 
         if healthy.len() == 1 {
             return Some(healthy[0]);
         }
 
-        let weights: Vec<(usize, f64)> = healthy.iter().map(|&i| {
-            let base = upstreams[i].config.weight as f64;
-            let latency_factor = upstreams[i].effective_latency(dc_idx)
-                .map(|ms| if ms > 1.0 { 1000.0 / ms } else { 1000.0 })
-                .unwrap_or(1.0);
+        let weights: Vec<(usize, f64)> = healthy
+            .iter()
+            .map(|&i| {
+                let base = upstreams[i].config.weight as f64;
+                let latency_factor = upstreams[i]
+                    .effective_latency(dc_idx)
+                    .map(|ms| if ms > 1.0 { 1000.0 / ms } else { 1000.0 })
+                    .unwrap_or(1.0);
 
-            (i, base * latency_factor)
-        }).collect();
+                (i, base * latency_factor)
+            })
+            .collect();
 
         let total: f64 = weights.iter().map(|(_, w)| w).sum();
 
         if total <= 0.0 {
-            return Some(healthy[rand::rng().gen_range(0..healthy.len())]);
+            return Some(healthy[rand::rng().random_range(0..healthy.len())]);
         }
 
-        let mut choice: f64 = rand::rng().gen_range(0.0..total);
+        let mut choice: f64 = rand::rng().random_range(0.0..total);
 
         for &(idx, weight) in &weights {
             if choice < weight {
@@ -620,8 +713,34 @@ impl UpstreamManager {
     }
 
     /// Connect to target through a selected upstream.
-    pub async fn connect(&self, target: SocketAddr, dc_idx: Option<i16>, scope: Option<&str>) -> Result<TcpStream> {
-        let (stream, _) = self.connect_with_details(target, dc_idx, scope).await?;
+    pub async fn connect(
+        &self,
+        target: SocketAddr,
+        dc_idx: Option<i16>,
+        scope: Option<&str>,
+    ) -> Result<UpstreamStream> {
+        let idx = self
+            .select_upstream(dc_idx, scope)
+            .await
+            .ok_or_else(|| ProxyError::Config("No upstreams available".to_string()))?;
+
+        let mut upstream = {
+            let guard = self.upstreams.read().await;
+            guard[idx].config.clone()
+        };
+
+        if let Some(s) = scope {
+            upstream.selected_scope = s.to_string();
+        }
+
+        let bind_rr = {
+            let guard = self.upstreams.read().await;
+            guard.get(idx).map(|u| u.bind_rr.clone())
+        };
+
+        let (stream, _) = self
+            .connect_selected_upstream(idx, upstream, target, dc_idx, bind_rr)
+            .await?;
         Ok(stream)
     }
 
@@ -632,7 +751,9 @@ impl UpstreamManager {
         dc_idx: Option<i16>,
         scope: Option<&str>,
     ) -> Result<(TcpStream, UpstreamEgressInfo)> {
-        let idx = self.select_upstream(dc_idx, scope).await
+        let idx = self
+            .select_upstream(dc_idx, scope)
+            .await
             .ok_or_else(|| ProxyError::Config("No upstreams available".to_string()))?;
 
         let mut upstream = {
@@ -650,6 +771,20 @@ impl UpstreamManager {
             guard.get(idx).map(|u| u.bind_rr.clone())
         };
 
+        let (stream, egress) = self
+            .connect_selected_upstream(idx, upstream, target, dc_idx, bind_rr)
+            .await?;
+        Ok((stream.into_tcp()?, egress))
+    }
+
+    async fn connect_selected_upstream(
+        &self,
+        idx: usize,
+        upstream: UpstreamConfig,
+        target: SocketAddr,
+        dc_idx: Option<i16>,
+        bind_rr: Option<Arc<AtomicUsize>>,
+    ) -> Result<(UpstreamStream, UpstreamEgressInfo)> {
         let connect_started_at = Instant::now();
         let mut last_error: Option<ProxyError> = None;
         let mut attempts_used = 0u32;
@@ -662,8 +797,8 @@ impl UpstreamManager {
                 break;
             }
             let remaining_budget = self.connect_budget.saturating_sub(elapsed);
-            let attempt_timeout = Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS)
-                .min(remaining_budget);
+            let attempt_timeout =
+                Duration::from_secs(DIRECT_CONNECT_TIMEOUT_SECS).min(remaining_budget);
             if attempt_timeout.is_zero() {
                 last_error = Some(ProxyError::ConnectionTimeout {
                     addr: target.to_string(),
@@ -786,9 +921,12 @@ impl UpstreamManager {
         target: SocketAddr,
         bind_rr: Option<Arc<AtomicUsize>>,
         connect_timeout: Duration,
-    ) -> Result<(TcpStream, UpstreamEgressInfo)> {
+    ) -> Result<(UpstreamStream, UpstreamEgressInfo)> {
         match &config.upstream_type {
-            UpstreamType::Direct { interface, bind_addresses } => {
+            UpstreamType::Direct {
+                interface,
+                bind_addresses,
+            } => {
                 let bind_ip = Self::resolve_bind_address(
                     interface,
                     bind_addresses,
@@ -796,9 +934,7 @@ impl UpstreamManager {
                     bind_rr.as_deref(),
                     true,
                 );
-                if bind_ip.is_none()
-                    && bind_addresses.as_ref().is_some_and(|v| !v.is_empty())
-                {
+                if bind_ip.is_none() && bind_addresses.as_ref().is_some_and(|v| !v.is_empty()) {
                     return Err(ProxyError::Config(format!(
                         "No valid bind_addresses for target family {target}"
                     )));
@@ -813,8 +949,10 @@ impl UpstreamManager {
 
                 socket.set_nonblocking(true)?;
                 match socket.connect(&target.into()) {
-                    Ok(()) => {},
-                    Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) || err.kind() == std::io::ErrorKind::WouldBlock => {},
+                    Ok(()) => {}
+                    Err(err)
+                        if err.raw_os_error() == Some(libc::EINPROGRESS)
+                            || err.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(err) => return Err(ProxyError::Io(err)),
                 }
 
@@ -836,7 +974,7 @@ impl UpstreamManager {
 
                 let local_addr = stream.local_addr().ok();
                 Ok((
-                    stream,
+                    UpstreamStream::Tcp(stream),
                     UpstreamEgressInfo {
                         upstream_id,
                         route_kind: UpstreamRouteKind::Direct,
@@ -846,8 +984,12 @@ impl UpstreamManager {
                         socks_proxy_addr: None,
                     },
                 ))
-            },
-            UpstreamType::Socks4 { address, interface, user_id } => {
+            }
+            UpstreamType::Socks4 {
+                address,
+                interface,
+                user_id,
+            } => {
                 // Try to parse as SocketAddr first (IP:port), otherwise treat as hostname:port
                 let mut stream = if let Ok(proxy_addr) = address.parse::<SocketAddr>() {
                     // IP:port format - use socket with optional interface binding
@@ -863,8 +1005,10 @@ impl UpstreamManager {
 
                     socket.set_nonblocking(true)?;
                     match socket.connect(&proxy_addr.into()) {
-                        Ok(()) => {},
-                        Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) || err.kind() == std::io::ErrorKind::WouldBlock => {},
+                        Ok(()) => {}
+                        Err(err)
+                            if err.raw_os_error() == Some(libc::EINPROGRESS)
+                                || err.kind() == std::io::ErrorKind::WouldBlock => {}
                         Err(err) => return Err(ProxyError::Io(err)),
                     }
 
@@ -888,14 +1032,16 @@ impl UpstreamManager {
                     // Hostname:port format - use tokio DNS resolution
                     // Note: interface binding is not supported for hostnames
                     if interface.is_some() {
-                        warn!("SOCKS4 interface binding is not supported for hostname addresses, ignoring");
+                        warn!(
+                            "SOCKS4 interface binding is not supported for hostname addresses, ignoring"
+                        );
                     }
                     Self::connect_hostname_with_dns_override(address, connect_timeout).await?
                 };
 
                 // replace socks user_id with config.selected_scope, if set
-                let scope: Option<&str> = Some(config.selected_scope.as_str())
-                    .filter(|s| !s.is_empty());
+                let scope: Option<&str> =
+                    Some(config.selected_scope.as_str()).filter(|s| !s.is_empty());
                 let _user_id: Option<&str> = scope.or(user_id.as_deref());
 
                 let bound = match tokio::time::timeout(
@@ -915,7 +1061,7 @@ impl UpstreamManager {
                 let local_addr = stream.local_addr().ok();
                 let socks_proxy_addr = stream.peer_addr().ok();
                 Ok((
-                    stream,
+                    UpstreamStream::Tcp(stream),
                     UpstreamEgressInfo {
                         upstream_id,
                         route_kind: UpstreamRouteKind::Socks4,
@@ -925,8 +1071,13 @@ impl UpstreamManager {
                         socks_proxy_addr,
                     },
                 ))
-            },
-            UpstreamType::Socks5 { address, interface, username, password } => {
+            }
+            UpstreamType::Socks5 {
+                address,
+                interface,
+                username,
+                password,
+            } => {
                 // Try to parse as SocketAddr first (IP:port), otherwise treat as hostname:port
                 let mut stream = if let Ok(proxy_addr) = address.parse::<SocketAddr>() {
                     // IP:port format - use socket with optional interface binding
@@ -942,8 +1093,10 @@ impl UpstreamManager {
 
                     socket.set_nonblocking(true)?;
                     match socket.connect(&proxy_addr.into()) {
-                        Ok(()) => {},
-                        Err(err) if err.raw_os_error() == Some(libc::EINPROGRESS) || err.kind() == std::io::ErrorKind::WouldBlock => {},
+                        Ok(()) => {}
+                        Err(err)
+                            if err.raw_os_error() == Some(libc::EINPROGRESS)
+                                || err.kind() == std::io::ErrorKind::WouldBlock => {}
                         Err(err) => return Err(ProxyError::Io(err)),
                     }
 
@@ -967,15 +1120,17 @@ impl UpstreamManager {
                     // Hostname:port format - use tokio DNS resolution
                     // Note: interface binding is not supported for hostnames
                     if interface.is_some() {
-                        warn!("SOCKS5 interface binding is not supported for hostname addresses, ignoring");
+                        warn!(
+                            "SOCKS5 interface binding is not supported for hostname addresses, ignoring"
+                        );
                     }
                     Self::connect_hostname_with_dns_override(address, connect_timeout).await?
                 };
 
                 debug!(config = ?config, "Socks5 connection");
                 // replace socks user:pass with config.selected_scope, if set
-                let scope: Option<&str> = Some(config.selected_scope.as_str())
-                    .filter(|s| !s.is_empty());
+                let scope: Option<&str> =
+                    Some(config.selected_scope.as_str()).filter(|s| !s.is_empty());
                 let _username: Option<&str> = scope.or(username.as_deref());
                 let _password: Option<&str> = scope.or(password.as_deref());
 
@@ -996,7 +1151,7 @@ impl UpstreamManager {
                 let local_addr = stream.local_addr().ok();
                 let socks_proxy_addr = stream.peer_addr().ok();
                 Ok((
-                    stream,
+                    UpstreamStream::Tcp(stream),
                     UpstreamEgressInfo {
                         upstream_id,
                         route_kind: UpstreamRouteKind::Socks5,
@@ -1006,7 +1161,22 @@ impl UpstreamManager {
                         socks_proxy_addr,
                     },
                 ))
-            },
+            }
+            UpstreamType::Shadowsocks { url, interface } => {
+                let stream = connect_shadowsocks(url, interface, target, connect_timeout).await?;
+                let local_addr = stream.get_ref().local_addr().ok();
+                Ok((
+                    UpstreamStream::Shadowsocks(Box::new(stream)),
+                    UpstreamEgressInfo {
+                        upstream_id,
+                        route_kind: UpstreamRouteKind::Shadowsocks,
+                        local_addr,
+                        direct_bind_ip: None,
+                        socks_bound_addr: None,
+                        socks_proxy_addr: None,
+                    },
+                ))
+            }
         }
     }
 
@@ -1023,7 +1193,9 @@ impl UpstreamManager {
     ) -> Vec<StartupPingResult> {
         let upstreams: Vec<(usize, UpstreamConfig, Arc<AtomicUsize>)> = {
             let guard = self.upstreams.read().await;
-            guard.iter().enumerate()
+            guard
+                .iter()
+                .enumerate()
                 .map(|(i, u)| (i, u.config.clone(), u.bind_rr.clone()))
                 .collect()
         };
@@ -1051,6 +1223,11 @@ impl UpstreamManager {
                 }
                 UpstreamType::Socks4 { address, .. } => format!("socks4://{}", address),
                 UpstreamType::Socks5 { address, .. } => format!("socks5://{}", address),
+                UpstreamType::Shadowsocks { url, .. } => {
+                    let address =
+                        sanitize_shadowsocks_url(url).unwrap_or_else(|_| "invalid".to_string());
+                    format!("shadowsocks://{address}")
+                }
             };
 
             let mut v6_results = Vec::with_capacity(NUM_DCS);
@@ -1061,8 +1238,14 @@ impl UpstreamManager {
 
                     let result = tokio::time::timeout(
                         Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                        self.ping_single_dc(*upstream_idx, upstream_config, Some(bind_rr.clone()), addr_v6)
-                    ).await;
+                        self.ping_single_dc(
+                            *upstream_idx,
+                            upstream_config,
+                            Some(bind_rr.clone()),
+                            addr_v6,
+                        ),
+                    )
+                    .await;
 
                     let ping_result = match result {
                         Ok(Ok(rtt_ms)) => {
@@ -1112,8 +1295,14 @@ impl UpstreamManager {
 
                     let result = tokio::time::timeout(
                         Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                        self.ping_single_dc(*upstream_idx, upstream_config, Some(bind_rr.clone()), addr_v4)
-                    ).await;
+                        self.ping_single_dc(
+                            *upstream_idx,
+                            upstream_config,
+                            Some(bind_rr.clone()),
+                            addr_v4,
+                        ),
+                    )
+                    .await;
 
                     let ping_result = match result {
                         Ok(Ok(rtt_ms)) => {
@@ -1162,7 +1351,7 @@ impl UpstreamManager {
                     Err(_) => {
                         warn!(dc = %dc_key, "Invalid dc_overrides key, skipping");
                         continue;
-                    },
+                    }
                     _ => continue,
                 };
                 let dc_idx = dc_num as usize;
@@ -1175,8 +1364,14 @@ impl UpstreamManager {
                             }
                             let result = tokio::time::timeout(
                                 Duration::from_secs(DC_PING_TIMEOUT_SECS),
-                                self.ping_single_dc(*upstream_idx, upstream_config, Some(bind_rr.clone()), addr)
-                            ).await;
+                                self.ping_single_dc(
+                                    *upstream_idx,
+                                    upstream_config,
+                                    Some(bind_rr.clone()),
+                                    addr,
+                                ),
+                            )
+                            .await;
 
                             let ping_result = match result {
                                 Ok(Ok(rtt_ms)) => DcPingResult {
@@ -1205,7 +1400,9 @@ impl UpstreamManager {
                                 v4_results.push(ping_result);
                             }
                         }
-                        Err(_) => warn!(dc = %dc_idx, addr = %addr_str, "Invalid dc_overrides address, skipping"),
+                        Err(_) => {
+                            warn!(dc = %dc_idx, addr = %addr_str, "Invalid dc_overrides address, skipping")
+                        }
                     }
                 }
             }
@@ -1381,12 +1578,8 @@ impl UpstreamManager {
         ipv6_enabled: bool,
         dc_overrides: HashMap<String, Vec<String>>,
     ) {
-        let groups = Self::build_health_check_groups(
-            prefer_ipv6,
-            ipv4_enabled,
-            ipv6_enabled,
-            &dc_overrides,
-        );
+        let groups =
+            Self::build_health_check_groups(prefer_ipv6, ipv4_enabled, ipv6_enabled, &dc_overrides);
         let required_healthy_groups = Self::required_healthy_group_count(groups.len());
         let mut endpoint_rotation: HashMap<(usize, i16, bool), usize> = HashMap::new();
 
@@ -1416,13 +1609,16 @@ impl UpstreamManager {
                     let mut group_ok = false;
                     let mut group_rtt_ms = None;
 
-                    for (is_primary, endpoints) in [(true, &group.primary), (false, &group.fallback)] {
+                    for (is_primary, endpoints) in
+                        [(true, &group.primary), (false, &group.fallback)]
+                    {
                         if endpoints.is_empty() {
                             continue;
                         }
 
                         let rotation_key = (i, group.dc_idx, is_primary);
-                        let start_idx = *endpoint_rotation.entry(rotation_key).or_insert(0) % endpoints.len();
+                        let start_idx =
+                            *endpoint_rotation.entry(rotation_key).or_insert(0) % endpoints.len();
                         let mut next_idx = (start_idx + 1) % endpoints.len();
 
                         for step in 0..endpoints.len() {
@@ -1544,8 +1740,7 @@ impl UpstreamManager {
             return None;
         }
 
-        UpstreamState::dc_array_idx(dc_idx)
-            .map(|idx| guard[0].dc_ip_pref[idx])
+        UpstreamState::dc_array_idx(dc_idx).map(|idx| guard[0].dc_ip_pref[idx])
     }
 
     /// Get preferred DC address based on config preference
@@ -1566,6 +1761,12 @@ impl UpstreamManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::stats::Stats;
+
+    const TEST_SHADOWSOCKS_URL: &str =
+        "ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=@127.0.0.1:8388";
 
     #[test]
     fn required_healthy_group_count_applies_three_group_threshold() {
@@ -1596,15 +1797,18 @@ mod tests {
 
         assert!(dc2.primary.iter().all(|addr| addr.is_ipv6()));
         assert!(dc2.fallback.iter().all(|addr| addr.is_ipv4()));
-        assert!(dc2
-            .primary
-            .contains(&"[2001:db8::10]:443".parse::<SocketAddr>().unwrap()));
-        assert!(dc2
-            .fallback
-            .contains(&"203.0.113.10:443".parse::<SocketAddr>().unwrap()));
-        assert!(dc2
-            .fallback
-            .contains(&"203.0.113.11:443".parse::<SocketAddr>().unwrap()));
+        assert!(
+            dc2.primary
+                .contains(&"[2001:db8::10]:443".parse::<SocketAddr>().unwrap())
+        );
+        assert!(
+            dc2.fallback
+                .contains(&"203.0.113.10:443".parse::<SocketAddr>().unwrap())
+        );
+        assert!(
+            dc2.fallback
+                .contains(&"203.0.113.11:443".parse::<SocketAddr>().unwrap())
+        );
     }
 
     #[test]
@@ -1626,12 +1830,14 @@ mod tests {
             .expect("override-only dc group must be present");
 
         assert_eq!(dc9.primary.len(), 2);
-        assert!(dc9
-            .primary
-            .contains(&"198.51.100.1:443".parse::<SocketAddr>().unwrap()));
-        assert!(dc9
-            .primary
-            .contains(&"198.51.100.2:443".parse::<SocketAddr>().unwrap()));
+        assert!(
+            dc9.primary
+                .contains(&"198.51.100.1:443".parse::<SocketAddr>().unwrap())
+        );
+        assert!(
+            dc9.primary
+                .contains(&"198.51.100.2:443".parse::<SocketAddr>().unwrap())
+        );
         assert!(dc9.fallback.is_empty());
     }
 
@@ -1677,5 +1883,37 @@ mod tests {
         );
 
         assert_eq!(bind, None);
+    }
+
+    #[test]
+    fn api_snapshot_reports_shadowsocks_as_sanitized_route() {
+        let manager = UpstreamManager::new(
+            vec![UpstreamConfig {
+                upstream_type: UpstreamType::Shadowsocks {
+                    url: TEST_SHADOWSOCKS_URL.to_string(),
+                    interface: None,
+                },
+                weight: 2,
+                enabled: true,
+                scopes: String::new(),
+                selected_scope: String::new(),
+            }],
+            1,
+            100,
+            1000,
+            1,
+            false,
+            Arc::new(Stats::new()),
+        );
+
+        let snapshot = manager.try_api_snapshot().expect("snapshot");
+        assert_eq!(snapshot.summary.configured_total, 1);
+        assert_eq!(snapshot.summary.shadowsocks_total, 1);
+        assert_eq!(snapshot.upstreams.len(), 1);
+        assert_eq!(
+            snapshot.upstreams[0].route_kind,
+            UpstreamRouteKind::Shadowsocks
+        );
+        assert_eq!(snapshot.upstreams[0].address, "127.0.0.1:8388");
     }
 }

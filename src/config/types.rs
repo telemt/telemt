@@ -135,8 +135,8 @@ impl MeSocksKdfPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MeBindStaleMode {
-    Never,
     #[default]
+    Never,
     Ttl,
     Always,
 }
@@ -462,6 +462,11 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_c2me_channel_capacity")]
     pub me_c2me_channel_capacity: usize,
 
+    /// Maximum wait in milliseconds for enqueueing C2ME commands when the queue is full.
+    /// `0` keeps legacy unbounded wait behavior.
+    #[serde(default = "default_me_c2me_send_timeout_ms")]
+    pub me_c2me_send_timeout_ms: u64,
+
     /// Bounded wait in milliseconds for routing ME DATA to per-connection queue.
     /// `0` keeps legacy no-wait behavior.
     #[serde(default = "default_me_reader_route_data_wait_ms")]
@@ -716,6 +721,15 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_route_no_writer_wait_ms")]
     pub me_route_no_writer_wait_ms: u64,
 
+    /// Maximum cumulative wait in milliseconds for hybrid no-writer mode before failfast.
+    #[serde(default = "default_me_route_hybrid_max_wait_ms")]
+    pub me_route_hybrid_max_wait_ms: u64,
+
+    /// Maximum wait in milliseconds for blocking ME writer channel send fallback.
+    /// `0` keeps legacy unbounded wait behavior.
+    #[serde(default = "default_me_route_blocking_send_timeout_ms")]
+    pub me_route_blocking_send_timeout_ms: u64,
+
     /// Number of inline recovery attempts in legacy mode.
     #[serde(default = "default_me_route_inline_recovery_attempts")]
     pub me_route_inline_recovery_attempts: u32,
@@ -798,10 +812,34 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_pool_drain_ttl_secs")]
     pub me_pool_drain_ttl_secs: u64,
 
+    /// Force-remove any draining writer on the next cleanup tick, regardless of age/deadline.
+    #[serde(default = "default_me_instadrain")]
+    pub me_instadrain: bool,
+
     /// Maximum allowed number of draining ME writers before oldest ones are force-closed in batches.
     /// Set to 0 to disable threshold-based draining cleanup and keep timeout-only behavior.
     #[serde(default = "default_me_pool_drain_threshold")]
     pub me_pool_drain_threshold: u64,
+
+    /// Enable staged client eviction for draining ME writers that remain non-empty past TTL.
+    #[serde(default = "default_me_pool_drain_soft_evict_enabled")]
+    pub me_pool_drain_soft_evict_enabled: bool,
+
+    /// Extra grace in seconds after drain TTL before soft-eviction stage starts.
+    #[serde(default = "default_me_pool_drain_soft_evict_grace_secs")]
+    pub me_pool_drain_soft_evict_grace_secs: u64,
+
+    /// Maximum number of client sessions to evict from one draining writer per health tick.
+    #[serde(default = "default_me_pool_drain_soft_evict_per_writer")]
+    pub me_pool_drain_soft_evict_per_writer: u8,
+
+    /// Soft-eviction budget per CPU core for one health tick.
+    #[serde(default = "default_me_pool_drain_soft_evict_budget_per_core")]
+    pub me_pool_drain_soft_evict_budget_per_core: u16,
+
+    /// Cooldown for repetitive soft-eviction on the same writer in milliseconds.
+    #[serde(default = "default_me_pool_drain_soft_evict_cooldown_ms")]
+    pub me_pool_drain_soft_evict_cooldown_ms: u64,
 
     /// Policy for new binds on stale draining writers.
     #[serde(default)]
@@ -817,7 +855,7 @@ pub struct GeneralConfig {
     pub me_pool_min_fresh_ratio: f32,
 
     /// Drain timeout in seconds for stale ME writers after endpoint map changes.
-    /// Set to 0 to keep stale writers draining indefinitely (no force-close).
+    /// Set to 0 to use the runtime safety fallback timeout.
     #[serde(default = "default_me_reinit_drain_timeout_secs")]
     pub me_reinit_drain_timeout_secs: u64,
 
@@ -901,6 +939,7 @@ impl Default for GeneralConfig {
             me_writer_cmd_channel_capacity: default_me_writer_cmd_channel_capacity(),
             me_route_channel_capacity: default_me_route_channel_capacity(),
             me_c2me_channel_capacity: default_me_c2me_channel_capacity(),
+            me_c2me_send_timeout_ms: default_me_c2me_send_timeout_ms(),
             me_reader_route_data_wait_ms: default_me_reader_route_data_wait_ms(),
             me_d2c_flush_batch_max_frames: default_me_d2c_flush_batch_max_frames(),
             me_d2c_flush_batch_max_bytes: default_me_d2c_flush_batch_max_bytes(),
@@ -916,24 +955,38 @@ impl Default for GeneralConfig {
             me_reconnect_backoff_cap_ms: default_reconnect_backoff_cap_ms(),
             me_reconnect_fast_retry_count: default_me_reconnect_fast_retry_count(),
             me_single_endpoint_shadow_writers: default_me_single_endpoint_shadow_writers(),
-            me_single_endpoint_outage_mode_enabled: default_me_single_endpoint_outage_mode_enabled(),
-            me_single_endpoint_outage_disable_quarantine: default_me_single_endpoint_outage_disable_quarantine(),
-            me_single_endpoint_outage_backoff_min_ms: default_me_single_endpoint_outage_backoff_min_ms(),
-            me_single_endpoint_outage_backoff_max_ms: default_me_single_endpoint_outage_backoff_max_ms(),
-            me_single_endpoint_shadow_rotate_every_secs: default_me_single_endpoint_shadow_rotate_every_secs(),
+            me_single_endpoint_outage_mode_enabled: default_me_single_endpoint_outage_mode_enabled(
+            ),
+            me_single_endpoint_outage_disable_quarantine:
+                default_me_single_endpoint_outage_disable_quarantine(),
+            me_single_endpoint_outage_backoff_min_ms:
+                default_me_single_endpoint_outage_backoff_min_ms(),
+            me_single_endpoint_outage_backoff_max_ms:
+                default_me_single_endpoint_outage_backoff_max_ms(),
+            me_single_endpoint_shadow_rotate_every_secs:
+                default_me_single_endpoint_shadow_rotate_every_secs(),
             me_floor_mode: MeFloorMode::default(),
             me_adaptive_floor_idle_secs: default_me_adaptive_floor_idle_secs(),
-            me_adaptive_floor_min_writers_single_endpoint: default_me_adaptive_floor_min_writers_single_endpoint(),
-            me_adaptive_floor_min_writers_multi_endpoint: default_me_adaptive_floor_min_writers_multi_endpoint(),
+            me_adaptive_floor_min_writers_single_endpoint:
+                default_me_adaptive_floor_min_writers_single_endpoint(),
+            me_adaptive_floor_min_writers_multi_endpoint:
+                default_me_adaptive_floor_min_writers_multi_endpoint(),
             me_adaptive_floor_recover_grace_secs: default_me_adaptive_floor_recover_grace_secs(),
-            me_adaptive_floor_writers_per_core_total: default_me_adaptive_floor_writers_per_core_total(),
+            me_adaptive_floor_writers_per_core_total:
+                default_me_adaptive_floor_writers_per_core_total(),
             me_adaptive_floor_cpu_cores_override: default_me_adaptive_floor_cpu_cores_override(),
-            me_adaptive_floor_max_extra_writers_single_per_core: default_me_adaptive_floor_max_extra_writers_single_per_core(),
-            me_adaptive_floor_max_extra_writers_multi_per_core: default_me_adaptive_floor_max_extra_writers_multi_per_core(),
-            me_adaptive_floor_max_active_writers_per_core: default_me_adaptive_floor_max_active_writers_per_core(),
-            me_adaptive_floor_max_warm_writers_per_core: default_me_adaptive_floor_max_warm_writers_per_core(),
-            me_adaptive_floor_max_active_writers_global: default_me_adaptive_floor_max_active_writers_global(),
-            me_adaptive_floor_max_warm_writers_global: default_me_adaptive_floor_max_warm_writers_global(),
+            me_adaptive_floor_max_extra_writers_single_per_core:
+                default_me_adaptive_floor_max_extra_writers_single_per_core(),
+            me_adaptive_floor_max_extra_writers_multi_per_core:
+                default_me_adaptive_floor_max_extra_writers_multi_per_core(),
+            me_adaptive_floor_max_active_writers_per_core:
+                default_me_adaptive_floor_max_active_writers_per_core(),
+            me_adaptive_floor_max_warm_writers_per_core:
+                default_me_adaptive_floor_max_warm_writers_per_core(),
+            me_adaptive_floor_max_active_writers_global:
+                default_me_adaptive_floor_max_active_writers_global(),
+            me_adaptive_floor_max_warm_writers_global:
+                default_me_adaptive_floor_max_warm_writers_global(),
             upstream_connect_retry_attempts: default_upstream_connect_retry_attempts(),
             upstream_connect_retry_backoff_ms: default_upstream_connect_retry_backoff_ms(),
             upstream_connect_budget_ms: default_upstream_connect_budget_ms(),
@@ -948,13 +1001,16 @@ impl Default for GeneralConfig {
             me_socks_kdf_policy: MeSocksKdfPolicy::Strict,
             me_route_backpressure_base_timeout_ms: default_me_route_backpressure_base_timeout_ms(),
             me_route_backpressure_high_timeout_ms: default_me_route_backpressure_high_timeout_ms(),
-            me_route_backpressure_high_watermark_pct: default_me_route_backpressure_high_watermark_pct(),
+            me_route_backpressure_high_watermark_pct:
+                default_me_route_backpressure_high_watermark_pct(),
             me_health_interval_ms_unhealthy: default_me_health_interval_ms_unhealthy(),
             me_health_interval_ms_healthy: default_me_health_interval_ms_healthy(),
             me_admission_poll_ms: default_me_admission_poll_ms(),
             me_warn_rate_limit_ms: default_me_warn_rate_limit_ms(),
             me_route_no_writer_mode: MeRouteNoWriterMode::default(),
             me_route_no_writer_wait_ms: default_me_route_no_writer_wait_ms(),
+            me_route_hybrid_max_wait_ms: default_me_route_hybrid_max_wait_ms(),
+            me_route_blocking_send_timeout_ms: default_me_route_blocking_send_timeout_ms(),
             me_route_inline_recovery_attempts: default_me_route_inline_recovery_attempts(),
             me_route_inline_recovery_wait_ms: default_me_route_inline_recovery_wait_ms(),
             links: LinksConfig::default(),
@@ -972,7 +1028,8 @@ impl Default for GeneralConfig {
             me_hardswap_warmup_delay_min_ms: default_me_hardswap_warmup_delay_min_ms(),
             me_hardswap_warmup_delay_max_ms: default_me_hardswap_warmup_delay_max_ms(),
             me_hardswap_warmup_extra_passes: default_me_hardswap_warmup_extra_passes(),
-            me_hardswap_warmup_pass_backoff_base_ms: default_me_hardswap_warmup_pass_backoff_base_ms(),
+            me_hardswap_warmup_pass_backoff_base_ms:
+                default_me_hardswap_warmup_pass_backoff_base_ms(),
             me_config_stable_snapshots: default_me_config_stable_snapshots(),
             me_config_apply_cooldown_secs: default_me_config_apply_cooldown_secs(),
             me_snapshot_require_http_2xx: default_me_snapshot_require_http_2xx(),
@@ -983,7 +1040,14 @@ impl Default for GeneralConfig {
             me_secret_atomic_snapshot: default_me_secret_atomic_snapshot(),
             proxy_secret_len_max: default_proxy_secret_len_max(),
             me_pool_drain_ttl_secs: default_me_pool_drain_ttl_secs(),
+            me_instadrain: default_me_instadrain(),
             me_pool_drain_threshold: default_me_pool_drain_threshold(),
+            me_pool_drain_soft_evict_enabled: default_me_pool_drain_soft_evict_enabled(),
+            me_pool_drain_soft_evict_grace_secs: default_me_pool_drain_soft_evict_grace_secs(),
+            me_pool_drain_soft_evict_per_writer: default_me_pool_drain_soft_evict_per_writer(),
+            me_pool_drain_soft_evict_budget_per_core:
+                default_me_pool_drain_soft_evict_budget_per_core(),
+            me_pool_drain_soft_evict_cooldown_ms: default_me_pool_drain_soft_evict_cooldown_ms(),
             me_bind_stale_mode: MeBindStaleMode::default(),
             me_bind_stale_ttl_secs: default_me_bind_stale_ttl_secs(),
             me_pool_min_fresh_ratio: default_me_pool_min_fresh_ratio(),
@@ -1008,8 +1072,10 @@ impl GeneralConfig {
     /// Resolve the active updater interval for ME infrastructure refresh tasks.
     /// `update_every` has priority, otherwise legacy proxy_*_auto_reload_secs are used.
     pub fn effective_update_every_secs(&self) -> u64 {
-        self.update_every
-            .unwrap_or_else(|| self.proxy_secret_auto_reload_secs.min(self.proxy_config_auto_reload_secs))
+        self.update_every.unwrap_or_else(|| {
+            self.proxy_secret_auto_reload_secs
+                .min(self.proxy_config_auto_reload_secs)
+        })
     }
 
     /// Resolve periodic zero-downtime reinit interval for ME writers.
@@ -1019,8 +1085,13 @@ impl GeneralConfig {
 
     /// Resolve force-close timeout for stale writers.
     /// `me_reinit_drain_timeout_secs` remains backward-compatible alias.
+    /// A configured `0` uses the runtime safety fallback (300s).
     pub fn effective_me_pool_force_close_secs(&self) -> u64 {
-        self.me_reinit_drain_timeout_secs
+        if self.me_reinit_drain_timeout_secs == 0 {
+            300
+        } else {
+            self.me_reinit_drain_timeout_secs
+        }
     }
 }
 
@@ -1163,9 +1234,17 @@ pub struct ServerConfig {
     #[serde(default)]
     pub proxy_protocol_trusted_cidrs: Vec<IpNetwork>,
 
+    /// Port for the Prometheus-compatible metrics endpoint.
+    /// Enables metrics when set; binds on all interfaces (dual-stack) by default.
     #[serde(default)]
     pub metrics_port: Option<u16>,
 
+    /// Listen address for metrics in `IP:PORT` format (e.g. `"127.0.0.1:9090"`).
+    /// When set, takes precedence over `metrics_port` and binds on the specified address only.
+    #[serde(default)]
+    pub metrics_listen: Option<String>,
+
+    /// CIDR whitelist for the metrics endpoint.
     #[serde(default = "default_metrics_whitelist")]
     pub metrics_whitelist: Vec<IpNetwork>,
 
@@ -1179,6 +1258,11 @@ pub struct ServerConfig {
     /// 0 means unlimited.
     #[serde(default = "default_server_max_connections")]
     pub max_connections: u32,
+
+    /// Maximum wait in milliseconds while acquiring a connection slot permit.
+    /// `0` keeps legacy unbounded wait behavior.
+    #[serde(default = "default_accept_permit_timeout_ms")]
+    pub accept_permit_timeout_ms: u64,
 }
 
 impl Default for ServerConfig {
@@ -1194,10 +1278,12 @@ impl Default for ServerConfig {
             proxy_protocol_header_timeout_ms: default_proxy_protocol_header_timeout_ms(),
             proxy_protocol_trusted_cidrs: Vec::new(),
             metrics_port: None,
+            metrics_listen: None,
             metrics_whitelist: default_metrics_whitelist(),
             api: ApiConfig::default(),
             listeners: Vec::new(),
             max_connections: default_server_max_connections(),
+            accept_permit_timeout_ms: default_accept_permit_timeout_ms(),
         }
     }
 }
@@ -1206,6 +1292,24 @@ impl Default for ServerConfig {
 pub struct TimeoutsConfig {
     #[serde(default = "default_handshake_timeout")]
     pub client_handshake: u64,
+
+    /// Enables soft/hard relay client idle policy for middle-relay sessions.
+    #[serde(default = "default_relay_idle_policy_v2_enabled")]
+    pub relay_idle_policy_v2_enabled: bool,
+
+    /// Soft idle threshold for middle-relay client uplink activity in seconds.
+    /// Hitting this threshold marks the session as idle-candidate, but does not close it.
+    #[serde(default = "default_relay_client_idle_soft_secs")]
+    pub relay_client_idle_soft_secs: u64,
+
+    /// Hard idle threshold for middle-relay client uplink activity in seconds.
+    /// Hitting this threshold closes the session.
+    #[serde(default = "default_relay_client_idle_hard_secs")]
+    pub relay_client_idle_hard_secs: u64,
+
+    /// Additional grace in seconds added to hard idle window after recent downstream activity.
+    #[serde(default = "default_relay_idle_grace_after_downstream_activity_secs")]
+    pub relay_idle_grace_after_downstream_activity_secs: u64,
 
     #[serde(default = "default_connect_timeout")]
     pub tg_connect: u64,
@@ -1229,6 +1333,11 @@ impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
             client_handshake: default_handshake_timeout(),
+            relay_idle_policy_v2_enabled: default_relay_idle_policy_v2_enabled(),
+            relay_client_idle_soft_secs: default_relay_client_idle_soft_secs(),
+            relay_client_idle_hard_secs: default_relay_client_idle_hard_secs(),
+            relay_idle_grace_after_downstream_activity_secs:
+                default_relay_idle_grace_after_downstream_activity_secs(),
             tg_connect: default_connect_timeout(),
             client_keepalive: default_keepalive(),
             client_ack: default_ack_timeout(),
@@ -1246,6 +1355,11 @@ pub struct AntiCensorshipConfig {
     /// Additional TLS domains for generating multiple proxy links.
     #[serde(default)]
     pub tls_domains: Vec<String>,
+
+    /// Upstream scope used for TLS front metadata fetches.
+    /// Empty value keeps default upstream routing behavior.
+    #[serde(default = "default_tls_fetch_scope")]
+    pub tls_fetch_scope: String,
 
     #[serde(default = "default_true")]
     pub mask: bool,
@@ -1297,6 +1411,40 @@ pub struct AntiCensorshipConfig {
     /// Allows the backend to see the real client IP.
     #[serde(default)]
     pub mask_proxy_protocol: u8,
+
+    /// Enable shape-channel hardening on mask backend path by padding
+    /// client->mask stream tail to configured buckets on stream end.
+    #[serde(default = "default_mask_shape_hardening")]
+    pub mask_shape_hardening: bool,
+
+    /// Minimum bucket size for mask shape hardening padding.
+    #[serde(default = "default_mask_shape_bucket_floor_bytes")]
+    pub mask_shape_bucket_floor_bytes: usize,
+
+    /// Maximum bucket size for mask shape hardening padding.
+    #[serde(default = "default_mask_shape_bucket_cap_bytes")]
+    pub mask_shape_bucket_cap_bytes: usize,
+
+    /// Add bounded random tail bytes even when total bytes already exceed
+    /// mask_shape_bucket_cap_bytes.
+    #[serde(default = "default_mask_shape_above_cap_blur")]
+    pub mask_shape_above_cap_blur: bool,
+
+    /// Maximum random bytes appended above cap when above-cap blur is enabled.
+    #[serde(default = "default_mask_shape_above_cap_blur_max_bytes")]
+    pub mask_shape_above_cap_blur_max_bytes: usize,
+
+    /// Enable outcome-time normalization envelope for masking fallback.
+    #[serde(default = "default_mask_timing_normalization_enabled")]
+    pub mask_timing_normalization_enabled: bool,
+
+    /// Lower bound (ms) for masking outcome timing envelope.
+    #[serde(default = "default_mask_timing_normalization_floor_ms")]
+    pub mask_timing_normalization_floor_ms: u64,
+
+    /// Upper bound (ms) for masking outcome timing envelope.
+    #[serde(default = "default_mask_timing_normalization_ceiling_ms")]
+    pub mask_timing_normalization_ceiling_ms: u64,
 }
 
 impl Default for AntiCensorshipConfig {
@@ -1304,6 +1452,7 @@ impl Default for AntiCensorshipConfig {
         Self {
             tls_domain: default_tls_domain(),
             tls_domains: Vec::new(),
+            tls_fetch_scope: default_tls_fetch_scope(),
             mask: default_true(),
             mask_host: None,
             mask_port: default_mask_port(),
@@ -1317,6 +1466,14 @@ impl Default for AntiCensorshipConfig {
             tls_full_cert_ttl_secs: default_tls_full_cert_ttl_secs(),
             alpn_enforce: default_alpn_enforce(),
             mask_proxy_protocol: 0,
+            mask_shape_hardening: default_mask_shape_hardening(),
+            mask_shape_bucket_floor_bytes: default_mask_shape_bucket_floor_bytes(),
+            mask_shape_bucket_cap_bytes: default_mask_shape_bucket_cap_bytes(),
+            mask_shape_above_cap_blur: default_mask_shape_above_cap_blur(),
+            mask_shape_above_cap_blur_max_bytes: default_mask_shape_above_cap_blur_max_bytes(),
+            mask_timing_normalization_enabled: default_mask_timing_normalization_enabled(),
+            mask_timing_normalization_floor_ms: default_mask_timing_normalization_floor_ms(),
+            mask_timing_normalization_ceiling_ms: default_mask_timing_normalization_ceiling_ms(),
         }
     }
 }
@@ -1409,6 +1566,11 @@ pub enum UpstreamType {
         #[serde(default)]
         password: Option<String>,
     },
+    Shadowsocks {
+        url: String,
+        #[serde(default)]
+        interface: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1489,7 +1651,10 @@ impl ShowLink {
 }
 
 impl Serialize for ShowLink {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         match self {
             ShowLink::None => Vec::<String>::new().serialize(serializer),
             ShowLink::All => serializer.serialize_str("*"),
@@ -1499,7 +1664,9 @@ impl Serialize for ShowLink {
 }
 
 impl<'de> Deserialize<'de> for ShowLink {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         use serde::de;
 
         struct ShowLinkVisitor;
@@ -1515,14 +1682,14 @@ impl<'de> Deserialize<'de> for ShowLink {
                 if v == "*" {
                     Ok(ShowLink::All)
                 } else {
-                    Err(de::Error::invalid_value(
-                        de::Unexpected::Str(v),
-                        &r#""*""#,
-                    ))
+                    Err(de::Error::invalid_value(de::Unexpected::Str(v), &r#""*""#))
                 }
             }
 
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<ShowLink, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<ShowLink, A::Error> {
                 let mut names = Vec::new();
                 while let Some(name) = seq.next_element::<String>()? {
                     names.push(name);

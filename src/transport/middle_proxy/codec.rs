@@ -1,5 +1,5 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use bytes::Bytes;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::crypto::{AesCbc, crc32, crc32c};
 use crate::error::{ProxyError, Result};

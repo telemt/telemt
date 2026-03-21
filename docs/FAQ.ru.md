@@ -121,3 +121,16 @@ weight = 1                 # Set Weight for Scenarios
 enabled = true
 ```
 
+#### Shadowsocks как Upstream
+Требует `use_middle_proxy = false`.
+
+```toml
+[general]
+use_middle_proxy = false
+
+[[upstreams]]
+type = "shadowsocks"
+url = "ss://2022-blake3-aes-256-gcm:BASE64_KEY@1.2.3.4:8388"
+weight = 1
+enabled = true
+```

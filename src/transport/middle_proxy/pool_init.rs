@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use rand::Rng;
+use rand::RngExt;
 use rand::seq::SliceRandom;
 use tracing::{debug, info, warn};
 
@@ -84,7 +84,11 @@ impl MePool {
                     .iter()
                     .map(|(ip, port)| SocketAddr::new(*ip, *port))
                     .collect();
-                if self.active_writer_count_for_dc_endpoints(*dc, &endpoints).await == 0 {
+                if self
+                    .active_writer_count_for_dc_endpoints(*dc, &endpoints)
+                    .await
+                    == 0
+                {
                     missing_dcs.push(*dc);
                 }
             }
@@ -104,7 +108,8 @@ impl MePool {
                     if addrs.len() <= 1 {
                         continue;
                     }
-                    let target_writers = pool.required_writers_for_dc_with_floor_mode(addrs.len(), false);
+                    let target_writers =
+                        pool.required_writers_for_dc_with_floor_mode(addrs.len(), false);
                     let pool_clone = Arc::clone(&pool);
                     let rng_clone_local = Arc::clone(&rng_clone);
                     join_bg.spawn(async move {
@@ -246,8 +251,8 @@ impl MePool {
             }
 
             if self.me_warmup_stagger_enabled {
-                let jitter = rand::rng()
-                    .random_range(0..=self.me_warmup_step_jitter.as_millis() as u64);
+                let jitter =
+                    rand::rng().random_range(0..=self.me_warmup_step_jitter.as_millis() as u64);
                 let delay_ms = self.me_warmup_step_delay.as_millis() as u64 + jitter;
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }

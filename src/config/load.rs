@@ -5,9 +5,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use rand::Rng;
+use rand::RngExt;
+use serde::{Deserialize, Serialize};
+use shadowsocks::config::ServerConfig as ShadowsocksServerConfig;
 use tracing::warn;
-use serde::{Serialize, Deserialize};
 
 use crate::error::{ProxyError, Result};
 
@@ -122,11 +123,35 @@ fn sanitize_ad_tag(ad_tag: &mut Option<String>) {
     };
 
     if !is_valid_ad_tag(tag) {
-        warn!(
-            "Invalid general.ad_tag value, expected exactly 32 hex chars; ad_tag is disabled"
-        );
+        warn!("Invalid general.ad_tag value, expected exactly 32 hex chars; ad_tag is disabled");
         *ad_tag = None;
     }
+}
+
+fn validate_upstreams(config: &ProxyConfig) -> Result<()> {
+    let has_enabled_shadowsocks = config.upstreams.iter().any(|upstream| {
+        upstream.enabled && matches!(upstream.upstream_type, UpstreamType::Shadowsocks { .. })
+    });
+
+    if has_enabled_shadowsocks && config.general.use_middle_proxy {
+        return Err(ProxyError::Config(
+            "shadowsocks upstreams require general.use_middle_proxy = false".to_string(),
+        ));
+    }
+
+    for upstream in &config.upstreams {
+        if let UpstreamType::Shadowsocks { url, .. } = &upstream.upstream_type {
+            let parsed = ShadowsocksServerConfig::from_url(url)
+                .map_err(|error| ProxyError::Config(format!("invalid shadowsocks url: {error}")))?;
+            if parsed.plugin().is_some() {
+                return Err(ProxyError::Config(
+                    "shadowsocks plugins are not supported".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ============= Main Config =============
@@ -180,7 +205,8 @@ impl ProxyConfig {
 
     pub(crate) fn load_with_metadata<P: AsRef<Path>>(path: P) -> Result<LoadedConfig> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|e| ProxyError::Config(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| ProxyError::Config(e.to_string()))?;
         let base_dir = path.parent().unwrap_or(Path::new("."));
         let mut source_files = BTreeSet::new();
         source_files.insert(normalize_config_path(path));
@@ -207,15 +233,17 @@ impl ProxyConfig {
             .map(|table| table.contains_key("stun_servers"))
             .unwrap_or(false);
 
-        let mut config: ProxyConfig =
-            parsed_toml.try_into().map_err(|e| ProxyError::Config(e.to_string()))?;
+        let mut config: ProxyConfig = parsed_toml
+            .try_into()
+            .map_err(|e| ProxyError::Config(e.to_string()))?;
 
         if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
             config.general.update_every = None;
         }
 
         let legacy_nat_stun = config.general.middle_proxy_nat_stun.take();
-        let legacy_nat_stun_servers = std::mem::take(&mut config.general.middle_proxy_nat_stun_servers);
+        let legacy_nat_stun_servers =
+            std::mem::take(&mut config.general.middle_proxy_nat_stun_servers);
         let legacy_nat_stun_used = legacy_nat_stun.is_some() || !legacy_nat_stun_servers.is_empty();
         if stun_servers_is_explicit {
             let mut explicit_stun_servers = Vec::new();
@@ -225,7 +253,9 @@ impl ProxyConfig {
             config.network.stun_servers = explicit_stun_servers;
 
             if legacy_nat_stun_used {
-                warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are ignored because network.stun_servers is explicitly set");
+                warn!(
+                    "general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are ignored because network.stun_servers is explicitly set"
+                );
             }
         } else {
             // Keep the default STUN pool unless network.stun_servers is explicitly overridden.
@@ -240,7 +270,9 @@ impl ProxyConfig {
             config.network.stun_servers = unified_stun_servers;
 
             if legacy_nat_stun_used {
-                warn!("general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are deprecated; use network.stun_servers");
+                warn!(
+                    "general.middle_proxy_nat_stun and general.middle_proxy_nat_stun_servers are deprecated; use network.stun_servers"
+                );
             }
         }
 
@@ -328,6 +360,122 @@ impl ProxyConfig {
             ));
         }
 
+        if config.timeouts.client_handshake == 0 {
+            return Err(ProxyError::Config(
+                "timeouts.client_handshake must be > 0".to_string(),
+            ));
+        }
+
+        let handshake_timeout_ms = config
+            .timeouts
+            .client_handshake
+            .checked_mul(1000)
+            .ok_or_else(|| {
+                ProxyError::Config(
+                    "timeouts.client_handshake is too large to validate milliseconds budget"
+                        .to_string(),
+                )
+            })?;
+
+        if config.censorship.server_hello_delay_max_ms >= handshake_timeout_ms {
+            return Err(ProxyError::Config(
+                "censorship.server_hello_delay_max_ms must be < timeouts.client_handshake * 1000"
+                    .to_string(),
+            ));
+        }
+
+        if config.censorship.mask_shape_bucket_floor_bytes == 0 {
+            return Err(ProxyError::Config(
+                "censorship.mask_shape_bucket_floor_bytes must be > 0".to_string(),
+            ));
+        }
+
+        if config.censorship.mask_shape_bucket_cap_bytes
+            < config.censorship.mask_shape_bucket_floor_bytes
+        {
+            return Err(ProxyError::Config(
+                "censorship.mask_shape_bucket_cap_bytes must be >= censorship.mask_shape_bucket_floor_bytes"
+                    .to_string(),
+            ));
+        }
+
+        if config.censorship.mask_shape_above_cap_blur && !config.censorship.mask_shape_hardening {
+            return Err(ProxyError::Config(
+                "censorship.mask_shape_above_cap_blur requires censorship.mask_shape_hardening = true"
+                    .to_string(),
+            ));
+        }
+
+        if config.censorship.mask_shape_above_cap_blur
+            && config.censorship.mask_shape_above_cap_blur_max_bytes == 0
+        {
+            return Err(ProxyError::Config(
+                "censorship.mask_shape_above_cap_blur_max_bytes must be > 0 when censorship.mask_shape_above_cap_blur is enabled"
+                    .to_string(),
+            ));
+        }
+
+        if config.censorship.mask_shape_above_cap_blur_max_bytes > 1_048_576 {
+            return Err(ProxyError::Config(
+                "censorship.mask_shape_above_cap_blur_max_bytes must be <= 1048576".to_string(),
+            ));
+        }
+
+        if config.censorship.mask_timing_normalization_ceiling_ms
+            < config.censorship.mask_timing_normalization_floor_ms
+        {
+            return Err(ProxyError::Config(
+                "censorship.mask_timing_normalization_ceiling_ms must be >= censorship.mask_timing_normalization_floor_ms"
+                    .to_string(),
+            ));
+        }
+
+        if config.censorship.mask_timing_normalization_enabled
+            && config.censorship.mask_timing_normalization_floor_ms == 0
+        {
+            return Err(ProxyError::Config(
+                "censorship.mask_timing_normalization_floor_ms must be > 0 when censorship.mask_timing_normalization_enabled is true"
+                    .to_string(),
+            ));
+        }
+
+        if config.censorship.mask_timing_normalization_ceiling_ms > 60_000 {
+            return Err(ProxyError::Config(
+                "censorship.mask_timing_normalization_ceiling_ms must be <= 60000".to_string(),
+            ));
+        }
+
+        if config.timeouts.relay_client_idle_soft_secs == 0 {
+            return Err(ProxyError::Config(
+                "timeouts.relay_client_idle_soft_secs must be > 0".to_string(),
+            ));
+        }
+
+        if config.timeouts.relay_client_idle_hard_secs == 0 {
+            return Err(ProxyError::Config(
+                "timeouts.relay_client_idle_hard_secs must be > 0".to_string(),
+            ));
+        }
+
+        if config.timeouts.relay_client_idle_hard_secs < config.timeouts.relay_client_idle_soft_secs
+        {
+            return Err(ProxyError::Config(
+                "timeouts.relay_client_idle_hard_secs must be >= timeouts.relay_client_idle_soft_secs"
+                    .to_string(),
+            ));
+        }
+
+        if config
+            .timeouts
+            .relay_idle_grace_after_downstream_activity_secs
+            > config.timeouts.relay_client_idle_hard_secs
+        {
+            return Err(ProxyError::Config(
+                "timeouts.relay_idle_grace_after_downstream_activity_secs must be <= timeouts.relay_client_idle_hard_secs"
+                    .to_string(),
+            ));
+        }
+
         if config.general.me_writer_cmd_channel_capacity == 0 {
             return Err(ProxyError::Config(
                 "general.me_writer_cmd_channel_capacity must be > 0".to_string(),
@@ -343,6 +491,12 @@ impl ProxyConfig {
         if config.general.me_c2me_channel_capacity == 0 {
             return Err(ProxyError::Config(
                 "general.me_c2me_channel_capacity must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_c2me_send_timeout_ms > 60_000 {
+            return Err(ProxyError::Config(
+                "general.me_c2me_send_timeout_ms must be within [0, 60000]".to_string(),
             ));
         }
 
@@ -372,13 +526,15 @@ impl ProxyConfig {
 
         if !(4096..=1024 * 1024).contains(&config.general.direct_relay_copy_buf_c2s_bytes) {
             return Err(ProxyError::Config(
-                "general.direct_relay_copy_buf_c2s_bytes must be within [4096, 1048576]".to_string(),
+                "general.direct_relay_copy_buf_c2s_bytes must be within [4096, 1048576]"
+                    .to_string(),
             ));
         }
 
         if !(8192..=2 * 1024 * 1024).contains(&config.general.direct_relay_copy_buf_s2c_bytes) {
             return Err(ProxyError::Config(
-                "general.direct_relay_copy_buf_s2c_bytes must be within [8192, 2097152]".to_string(),
+                "general.direct_relay_copy_buf_s2c_bytes must be within [8192, 2097152]"
+                    .to_string(),
             ));
         }
 
@@ -403,6 +559,35 @@ impl ProxyConfig {
         if config.general.me_warn_rate_limit_ms == 0 {
             return Err(ProxyError::Config(
                 "general.me_warn_rate_limit_ms must be > 0".to_string(),
+            ));
+        }
+
+        if config.general.me_pool_drain_soft_evict_grace_secs > 3600 {
+            return Err(ProxyError::Config(
+                "general.me_pool_drain_soft_evict_grace_secs must be within [0, 3600]".to_string(),
+            ));
+        }
+
+        if config.general.me_pool_drain_soft_evict_per_writer == 0
+            || config.general.me_pool_drain_soft_evict_per_writer > 16
+        {
+            return Err(ProxyError::Config(
+                "general.me_pool_drain_soft_evict_per_writer must be within [1, 16]".to_string(),
+            ));
+        }
+
+        if config.general.me_pool_drain_soft_evict_budget_per_core == 0
+            || config.general.me_pool_drain_soft_evict_budget_per_core > 64
+        {
+            return Err(ProxyError::Config(
+                "general.me_pool_drain_soft_evict_budget_per_core must be within [1, 64]"
+                    .to_string(),
+            ));
+        }
+
+        if config.general.me_pool_drain_soft_evict_cooldown_ms == 0 {
+            return Err(ProxyError::Config(
+                "general.me_pool_drain_soft_evict_cooldown_ms must be > 0".to_string(),
             ));
         }
 
@@ -577,6 +762,12 @@ impl ProxyConfig {
                 "general.me_route_backpressure_base_timeout_ms must be > 0".to_string(),
             ));
         }
+        if config.general.me_route_backpressure_base_timeout_ms > 5000 {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_base_timeout_ms must be within [1, 5000]"
+                    .to_string(),
+            ));
+        }
 
         if config.general.me_route_backpressure_high_timeout_ms
             < config.general.me_route_backpressure_base_timeout_ms
@@ -585,16 +776,35 @@ impl ProxyConfig {
                 "general.me_route_backpressure_high_timeout_ms must be >= general.me_route_backpressure_base_timeout_ms".to_string(),
             ));
         }
+        if config.general.me_route_backpressure_high_timeout_ms > 5000 {
+            return Err(ProxyError::Config(
+                "general.me_route_backpressure_high_timeout_ms must be within [1, 5000]"
+                    .to_string(),
+            ));
+        }
 
         if !(1..=100).contains(&config.general.me_route_backpressure_high_watermark_pct) {
             return Err(ProxyError::Config(
-                "general.me_route_backpressure_high_watermark_pct must be within [1, 100]".to_string(),
+                "general.me_route_backpressure_high_watermark_pct must be within [1, 100]"
+                    .to_string(),
             ));
         }
 
         if !(10..=5000).contains(&config.general.me_route_no_writer_wait_ms) {
             return Err(ProxyError::Config(
                 "general.me_route_no_writer_wait_ms must be within [10, 5000]".to_string(),
+            ));
+        }
+
+        if !(50..=60_000).contains(&config.general.me_route_hybrid_max_wait_ms) {
+            return Err(ProxyError::Config(
+                "general.me_route_hybrid_max_wait_ms must be within [50, 60000]".to_string(),
+            ));
+        }
+
+        if config.general.me_route_blocking_send_timeout_ms > 5000 {
+            return Err(ProxyError::Config(
+                "general.me_route_blocking_send_timeout_ms must be within [0, 5000]".to_string(),
             ));
         }
 
@@ -658,6 +868,12 @@ impl ProxyConfig {
             ));
         }
 
+        if config.server.accept_permit_timeout_ms > 60_000 {
+            return Err(ProxyError::Config(
+                "server.accept_permit_timeout_ms must be within [0, 60000]".to_string(),
+            ));
+        }
+
         if config.general.effective_me_pool_force_close_secs() > 0
             && config.general.effective_me_pool_force_close_secs()
                 < config.general.me_pool_drain_ttl_secs
@@ -716,6 +932,9 @@ impl ProxyConfig {
             config.censorship.mask_host = Some(config.censorship.tls_domain.clone());
         }
 
+        // Normalize optional TLS fetch scope: whitespace-only values disable scoped routing.
+        config.censorship.tls_fetch_scope = config.censorship.tls_fetch_scope.trim().to_string();
+
         // Merge primary + extra TLS domains, deduplicate (primary always first).
         if !config.censorship.tls_domains.is_empty() {
             let mut all = Vec::with_capacity(1 + config.censorship.tls_domains.len());
@@ -750,12 +969,16 @@ impl ProxyConfig {
         crate::network::dns_overrides::validate_entries(&config.network.dns_overrides)?;
 
         if config.general.use_middle_proxy && config.network.ipv6 == Some(true) {
-            warn!("IPv6 with Middle Proxy is experimental and may cause KDF address mismatch; consider disabling IPv6 or ME");
+            warn!(
+                "IPv6 with Middle Proxy is experimental and may cause KDF address mismatch; consider disabling IPv6 or ME"
+            );
         }
 
         // Random fake_cert_len only when default is in use.
-        if !config.censorship.tls_emulation && config.censorship.fake_cert_len == default_fake_cert_len() {
-            config.censorship.fake_cert_len = rand::rng().gen_range(1024..4096);
+        if !config.censorship.tls_emulation
+            && config.censorship.fake_cert_len == default_fake_cert_len()
+        {
+            config.censorship.fake_cert_len = rand::rng().random_range(1024..4096);
         }
 
         // Resolve listen_tcp: explicit value wins, otherwise auto-detect.
@@ -764,8 +987,7 @@ impl ProxyConfig {
         let listen_tcp = config.server.listen_tcp.unwrap_or_else(|| {
             if config.server.listen_unix_sock.is_some() {
                 // Unix socket present: TCP only if user explicitly set addresses or listeners.
-                config.server.listen_addr_ipv4.is_some()
-                    || !config.server.listeners.is_empty()
+                config.server.listen_addr_ipv4.is_some() || !config.server.listeners.is_empty()
             } else {
                 true
             }
@@ -773,7 +995,9 @@ impl ProxyConfig {
 
         // Migration: Populate listeners if empty (skip when listen_tcp = false).
         if config.server.listeners.is_empty() && listen_tcp {
-            let ipv4_str = config.server.listen_addr_ipv4
+            let ipv4_str = config
+                .server
+                .listen_addr_ipv4
                 .as_deref()
                 .unwrap_or("0.0.0.0");
             if let Ok(ipv4) = ipv4_str.parse::<IpAddr>() {
@@ -815,7 +1039,10 @@ impl ProxyConfig {
         // Migration: Populate upstreams if empty (Default Direct).
         if config.upstreams.is_empty() {
             config.upstreams.push(UpstreamConfig {
-                upstream_type: UpstreamType::Direct { interface: None, bind_addresses: None },
+                upstream_type: UpstreamType::Direct {
+                    interface: None,
+                    bind_addresses: None,
+                },
                 weight: 1,
                 enabled: true,
                 scopes: String::new(),
@@ -828,6 +1055,8 @@ impl ProxyConfig {
             .dc_overrides
             .entry("203".to_string())
             .or_insert_with(|| vec!["91.105.192.100:443".to_string()]);
+
+        validate_upstreams(&config)?;
 
         Ok(LoadedConfig {
             config,
@@ -872,8 +1101,23 @@ impl ProxyConfig {
 }
 
 #[cfg(test)]
+#[path = "tests/load_idle_policy_tests.rs"]
+mod load_idle_policy_tests;
+
+#[cfg(test)]
+#[path = "tests/load_security_tests.rs"]
+mod load_security_tests;
+
+#[cfg(test)]
+#[path = "tests/load_mask_shape_security_tests.rs"]
+mod load_mask_shape_security_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_SHADOWSOCKS_URL: &str =
+        "ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=@127.0.0.1:8388";
 
     #[test]
     fn serde_defaults_remain_unchanged_for_present_sections() {
@@ -904,10 +1148,7 @@ mod tests {
             cfg.general.me_init_retry_attempts,
             default_me_init_retry_attempts()
         );
-        assert_eq!(
-            cfg.general.me2dc_fallback,
-            default_me2dc_fallback()
-        );
+        assert_eq!(cfg.general.me2dc_fallback, default_me2dc_fallback());
         assert_eq!(
             cfg.general.proxy_config_v4_cache_path,
             default_proxy_config_v4_cache_path()
@@ -1216,11 +1457,12 @@ mod tests {
         let path = dir.join("telemt_dc_override_test.toml");
         std::fs::write(&path, toml).unwrap();
         let cfg = ProxyConfig::load(&path).unwrap();
-        assert!(cfg
-            .dc_overrides
-            .get("203")
-            .map(|v| v.contains(&"91.105.192.100:443".to_string()))
-            .unwrap_or(false));
+        assert!(
+            cfg.dc_overrides
+                .get("203")
+                .map(|v| v.contains(&"91.105.192.100:443".to_string()))
+                .unwrap_or(false)
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1407,11 +1649,9 @@ mod tests {
         let path = dir.join("telemt_me_adaptive_floor_min_writers_out_of_range_test.toml");
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
-        assert!(
-            err.contains(
-                "general.me_adaptive_floor_min_writers_single_endpoint must be within [1, 32]"
-            )
-        );
+        assert!(err.contains(
+            "general.me_adaptive_floor_min_writers_single_endpoint must be within [1, 32]"
+        ));
         let _ = std::fs::remove_file(path);
     }
 
@@ -1569,6 +1809,51 @@ mod tests {
         let cfg_valid = ProxyConfig::load(&path_valid).unwrap();
         assert_eq!(cfg_valid.general.rpc_proxy_req_every, 40);
         let _ = std::fs::remove_file(path_valid);
+    }
+
+    #[test]
+    fn me_route_backpressure_base_timeout_ms_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            me_route_backpressure_base_timeout_ms = 5001
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_route_backpressure_base_timeout_ms_out_of_range_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("general.me_route_backpressure_base_timeout_ms must be within [1, 5000]")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_route_backpressure_high_timeout_ms_out_of_range_is_rejected() {
+        let toml = r#"
+            [general]
+            me_route_backpressure_base_timeout_ms = 100
+            me_route_backpressure_high_timeout_ms = 5001
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_route_backpressure_high_timeout_ms_out_of_range_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("general.me_route_backpressure_high_timeout_ms must be within [1, 5000]")
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1934,6 +2219,45 @@ mod tests {
     }
 
     #[test]
+    fn force_close_default_matches_drain_ttl() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_force_close_default_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.me_reinit_drain_timeout_secs, 90);
+        assert_eq!(cfg.general.effective_me_pool_force_close_secs(), 90);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn force_close_zero_uses_runtime_safety_fallback() {
+        let toml = r#"
+            [general]
+            me_reinit_drain_timeout_secs = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_force_close_zero_fallback_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.general.me_reinit_drain_timeout_secs, 0);
+        assert_eq!(cfg.general.effective_me_pool_force_close_secs(), 300);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn force_close_bumped_when_below_drain_ttl() {
         let toml = r#"
             [general]
@@ -1951,6 +2275,59 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let cfg = ProxyConfig::load(&path).unwrap();
         assert_eq!(cfg.general.me_reinit_drain_timeout_secs, 90);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tls_fetch_scope_default_is_empty() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_tls_fetch_scope_default_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert!(cfg.censorship.tls_fetch_scope.is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tls_fetch_scope_is_trimmed_during_load() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+            tls_fetch_scope = "  me  "
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_tls_fetch_scope_trim_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(cfg.censorship.tls_fetch_scope, "me");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tls_fetch_scope_whitespace_becomes_empty() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+            tls_fetch_scope = "   "
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_tls_fetch_scope_blank_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert!(cfg.censorship.tls_fetch_scope.is_empty());
         let _ = std::fs::remove_file(path);
     }
 
@@ -1994,6 +2371,124 @@ mod tests {
             cfg.general.ad_tag.as_deref(),
             Some("00112233445566778899aabbccddeeff")
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn shadowsocks_upstream_url_loads_successfully() {
+        let toml = format!(
+            r#"
+            [general]
+            use_middle_proxy = false
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[upstreams]]
+            type = "shadowsocks"
+            url = "{url}"
+            interface = "127.0.0.2"
+            "#,
+            url = TEST_SHADOWSOCKS_URL,
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_shadowsocks_valid_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+
+        assert!(matches!(
+            &cfg.upstreams[0].upstream_type,
+            UpstreamType::Shadowsocks { url, interface }
+                if url == TEST_SHADOWSOCKS_URL && interface.as_deref() == Some("127.0.0.2")
+        ));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn shadowsocks_requires_direct_mode() {
+        let toml = format!(
+            r#"
+            [general]
+            use_middle_proxy = true
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[upstreams]]
+            type = "shadowsocks"
+            url = "{url}"
+            "#,
+            url = TEST_SHADOWSOCKS_URL,
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_shadowsocks_me_reject_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains("shadowsocks upstreams require general.use_middle_proxy = false"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_shadowsocks_url_is_rejected() {
+        let toml = r#"
+            [general]
+            use_middle_proxy = false
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[upstreams]]
+            type = "shadowsocks"
+            url = "not-a-valid-ss-url"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_shadowsocks_invalid_url_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains("invalid shadowsocks url"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn shadowsocks_plugins_are_rejected() {
+        let toml = format!(
+            r#"
+            [general]
+            use_middle_proxy = false
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[upstreams]]
+            type = "shadowsocks"
+            url = "{url}?plugin=obfs-local%3Bobfs%3Dhttp"
+            "#,
+            url = TEST_SHADOWSOCKS_URL,
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_shadowsocks_plugin_reject_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains("shadowsocks plugins are not supported"));
+
         let _ = std::fs::remove_file(path);
     }
 

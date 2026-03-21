@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
 use crate::tls_front::types::{
     CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsFetchResult,
@@ -59,7 +59,10 @@ impl TlsFrontCache {
 
     pub async fn get(&self, sni: &str) -> Arc<CachedTlsData> {
         let guard = self.memory.read().await;
-        guard.get(sni).cloned().unwrap_or_else(|| self.default.clone())
+        guard
+            .get(sni)
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
     }
 
     pub async fn contains_domain(&self, domain: &str) -> bool {
@@ -68,11 +71,7 @@ impl TlsFrontCache {
 
     /// Returns true when full cert payload should be sent for client_ip
     /// according to TTL policy.
-    pub async fn take_full_cert_budget_for_ip(
-        &self,
-        client_ip: IpAddr,
-        ttl: Duration,
-    ) -> bool {
+    pub async fn take_full_cert_budget_for_ip(&self, client_ip: IpAddr, ttl: Duration) -> bool {
         if ttl.is_zero() {
             self.full_cert_sent
                 .write()
@@ -123,7 +122,10 @@ impl TlsFrontCache {
                     {
                         if cached.domain.is_empty()
                             || cached.domain.len() > 255
-                            || !cached.domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                            || !cached
+                                .domain
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
                         {
                             warn!(file = %name, "Skipping TLS cache entry with invalid domain");
                             continue;
@@ -166,12 +168,8 @@ impl TlsFrontCache {
     }
 
     /// Spawn background updater that periodically refreshes cached domains using provided fetcher.
-    pub fn spawn_updater<F>(
-        self: Arc<Self>,
-        domains: Vec<String>,
-        interval: Duration,
-        fetcher: F,
-    ) where
+    pub fn spawn_updater<F>(self: Arc<Self>, domains: Vec<String>, interval: Duration, fetcher: F)
+    where
         F: Fn(String) -> tokio::task::JoinHandle<()> + Send + Sync + 'static,
     {
         tokio::spawn(async move {
@@ -217,43 +215,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_take_full_cert_budget_for_ip_uses_ttl() {
-        let cache = TlsFrontCache::new(
-            &["example.com".to_string()],
-            1024,
-            "tlsfront-test-cache",
-        );
+        let cache = TlsFrontCache::new(&["example.com".to_string()], 1024, "tlsfront-test-cache");
         let ip: IpAddr = "127.0.0.1".parse().expect("ip");
         let ttl = Duration::from_millis(80);
 
-        assert!(cache
-            .take_full_cert_budget_for_ip(ip, ttl)
-            .await);
-        assert!(!cache
-            .take_full_cert_budget_for_ip(ip, ttl)
-            .await);
+        assert!(cache.take_full_cert_budget_for_ip(ip, ttl).await);
+        assert!(!cache.take_full_cert_budget_for_ip(ip, ttl).await);
 
         tokio::time::sleep(Duration::from_millis(90)).await;
 
-        assert!(cache
-            .take_full_cert_budget_for_ip(ip, ttl)
-            .await);
+        assert!(cache.take_full_cert_budget_for_ip(ip, ttl).await);
     }
 
     #[tokio::test]
     async fn test_take_full_cert_budget_for_ip_zero_ttl_always_allows_full_payload() {
-        let cache = TlsFrontCache::new(
-            &["example.com".to_string()],
-            1024,
-            "tlsfront-test-cache",
-        );
+        let cache = TlsFrontCache::new(&["example.com".to_string()], 1024, "tlsfront-test-cache");
         let ip: IpAddr = "127.0.0.1".parse().expect("ip");
         let ttl = Duration::ZERO;
 
-        assert!(cache
-            .take_full_cert_budget_for_ip(ip, ttl)
-            .await);
-        assert!(cache
-            .take_full_cert_budget_for_ip(ip, ttl)
-            .await);
+        assert!(cache.take_full_cert_budget_for_ip(ip, ttl).await);
+        assert!(cache.take_full_cert_budget_for_ip(ip, ttl).await);
     }
 }

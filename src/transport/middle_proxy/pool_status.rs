@@ -277,9 +277,8 @@ impl MePool {
             let drain_started_at_epoch_secs = writer
                 .draining_started_at_epoch_secs
                 .load(Ordering::Relaxed);
-            let drain_deadline_epoch_secs = writer
-                .drain_deadline_epoch_secs
-                .load(Ordering::Relaxed);
+            let drain_deadline_epoch_secs =
+                writer.drain_deadline_epoch_secs.load(Ordering::Relaxed);
             let drain_started_at_epoch_secs =
                 (drain_started_at_epoch_secs != 0).then_some(drain_started_at_epoch_secs);
             let drain_deadline_epoch_secs =
@@ -371,9 +370,10 @@ impl MePool {
                 self.me_adaptive_floor_max_extra_writers_multi_per_core
                     .load(Ordering::Relaxed) as usize
             };
-            let floor_max = base_required.saturating_add(adaptive_cpu_cores.saturating_mul(extra_per_core));
-            let floor_capped = matches!(floor_mode, MeFloorMode::Adaptive)
-                && dc_required_writers < base_required;
+            let floor_max =
+                base_required.saturating_add(adaptive_cpu_cores.saturating_mul(extra_per_core));
+            let floor_capped =
+                matches!(floor_mode, MeFloorMode::Adaptive) && dc_required_writers < base_required;
             let dc_alive_writers = live_writers_by_dc.get(&dc).copied().unwrap_or(0);
             let dc_fresh_alive_writers = fresh_writers_by_dc.get(&dc).copied().unwrap_or(0);
             let dc_load = activity
@@ -440,8 +440,8 @@ impl MePool {
         let pending_started_at = self
             .pending_hardswap_started_at_epoch_secs
             .load(Ordering::Relaxed);
-        let pending_hardswap_age_secs = (pending_started_at > 0)
-            .then_some(now_epoch_secs.saturating_sub(pending_started_at));
+        let pending_hardswap_age_secs =
+            (pending_started_at > 0).then_some(now_epoch_secs.saturating_sub(pending_started_at));
 
         let mut quarantined_endpoints = Vec::<MeApiQuarantinedEndpointSnapshot>::new();
         {
@@ -503,16 +503,20 @@ impl MePool {
                 .load(Ordering::Relaxed) as u16,
             adaptive_floor_max_extra_writers_single_per_core: self
                 .me_adaptive_floor_max_extra_writers_single_per_core
-                .load(Ordering::Relaxed) as u16,
+                .load(Ordering::Relaxed)
+                as u16,
             adaptive_floor_max_extra_writers_multi_per_core: self
                 .me_adaptive_floor_max_extra_writers_multi_per_core
-                .load(Ordering::Relaxed) as u16,
+                .load(Ordering::Relaxed)
+                as u16,
             adaptive_floor_max_active_writers_per_core: self
                 .me_adaptive_floor_max_active_writers_per_core
-                .load(Ordering::Relaxed) as u16,
+                .load(Ordering::Relaxed)
+                as u16,
             adaptive_floor_max_warm_writers_per_core: self
                 .me_adaptive_floor_max_warm_writers_per_core
-                .load(Ordering::Relaxed) as u16,
+                .load(Ordering::Relaxed)
+                as u16,
             adaptive_floor_max_active_writers_global: self
                 .me_adaptive_floor_max_active_writers_global
                 .load(Ordering::Relaxed),
@@ -564,7 +568,8 @@ impl MePool {
             me_pool_drain_ttl_secs: self.me_pool_drain_ttl_secs.load(Ordering::Relaxed),
             me_pool_force_close_secs: self.me_pool_force_close_secs.load(Ordering::Relaxed),
             me_pool_min_fresh_ratio: Self::permille_to_ratio(
-                self.me_pool_min_fresh_ratio_permille.load(Ordering::Relaxed),
+                self.me_pool_min_fresh_ratio_permille
+                    .load(Ordering::Relaxed),
             ),
             me_bind_stale_mode: bind_stale_mode_label(self.bind_stale_mode()),
             me_bind_stale_ttl_secs: self.me_bind_stale_ttl_secs.load(Ordering::Relaxed),
@@ -586,9 +591,7 @@ impl MePool {
             me_single_endpoint_shadow_rotate_every_secs: self
                 .me_single_endpoint_shadow_rotate_every_secs
                 .load(Ordering::Relaxed),
-            me_deterministic_writer_sort: self
-                .me_deterministic_writer_sort
-                .load(Ordering::Relaxed),
+            me_deterministic_writer_sort: self.me_deterministic_writer_sort.load(Ordering::Relaxed),
             me_writer_pick_mode: writer_pick_mode_label(self.writer_pick_mode()),
             me_writer_pick_sample_size: self.writer_pick_sample_size() as u8,
             me_socks_kdf_policy: socks_kdf_policy_label(self.socks_kdf_policy()),

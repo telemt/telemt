@@ -7,33 +7,29 @@ use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::time::timeout;
-use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 use tracing::{debug, warn};
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError};
 
-use x509_parser::prelude::FromDer;
 use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 
 use crate::crypto::SecureRandom;
 use crate::network::dns_overrides::resolve_socket_addr;
 use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
 };
-use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 use crate::tls_front::types::{
-    ParsedCertificateInfo,
-    ParsedServerHello,
-    TlsBehaviorProfile,
-    TlsCertPayload,
-    TlsExtension,
-    TlsFetchResult,
-    TlsProfileSource,
+    ParsedCertificateInfo, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsExtension,
+    TlsFetchResult, TlsProfileSource,
 };
+use crate::transport::UpstreamStream;
+use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
 
 /// No-op verifier: accept any certificate (we only need lengths and metadata).
 #[derive(Debug)]
@@ -144,21 +140,27 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     exts.extend_from_slice(&0x000au16.to_be_bytes());
     exts.extend_from_slice(&((2 + groups.len() * 2) as u16).to_be_bytes());
     exts.extend_from_slice(&(groups.len() as u16 * 2).to_be_bytes());
-    for g in groups { exts.extend_from_slice(&g.to_be_bytes()); }
+    for g in groups {
+        exts.extend_from_slice(&g.to_be_bytes());
+    }
 
     // signature_algorithms
     let sig_algs: [u16; 4] = [0x0804, 0x0805, 0x0403, 0x0503]; // rsa_pss_rsae_sha256/384, ecdsa_secp256r1_sha256, rsa_pkcs1_sha256
     exts.extend_from_slice(&0x000du16.to_be_bytes());
     exts.extend_from_slice(&((2 + sig_algs.len() * 2) as u16).to_be_bytes());
     exts.extend_from_slice(&(sig_algs.len() as u16 * 2).to_be_bytes());
-    for a in sig_algs { exts.extend_from_slice(&a.to_be_bytes()); }
+    for a in sig_algs {
+        exts.extend_from_slice(&a.to_be_bytes());
+    }
 
     // supported_versions (TLS1.3 + TLS1.2)
     let versions: [u16; 2] = [0x0304, 0x0303];
     exts.extend_from_slice(&0x002bu16.to_be_bytes());
     exts.extend_from_slice(&((1 + versions.len() * 2) as u16).to_be_bytes());
     exts.push((versions.len() * 2) as u8);
-    for v in versions { exts.extend_from_slice(&v.to_be_bytes()); }
+    for v in versions {
+        exts.extend_from_slice(&v.to_be_bytes());
+    }
 
     // key_share (x25519)
     let key = gen_key_share(rng);
@@ -273,7 +275,10 @@ fn parse_server_hello(body: &[u8]) -> Option<ParsedServerHello> {
         pos += 4;
         let data = body.get(pos..pos + elen)?.to_vec();
         pos += elen;
-        extensions.push(TlsExtension { ext_type: etype, data });
+        extensions.push(TlsExtension {
+            ext_type: etype,
+            data,
+        });
     }
 
     Some(ParsedServerHello {
@@ -394,37 +399,42 @@ async fn connect_tcp_with_upstream(
     port: u16,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
-) -> Result<TcpStream> {
+    scope: Option<&str>,
+) -> Result<UpstreamStream> {
     if let Some(manager) = upstream {
         if let Some(addr) = resolve_socket_addr(host, port) {
-            match manager.connect(addr, None, None).await {
+            match manager.connect(addr, None, scope).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     warn!(
                         host = %host,
                         port = port,
+                        scope = ?scope,
                         error = %e,
                         "Upstream connect failed, using direct connect"
                     );
                 }
             }
-        } else if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await {
-            if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
-                match manager.connect(addr, None, None).await {
-                    Ok(stream) => return Ok(stream),
-                    Err(e) => {
-                        warn!(
-                            host = %host,
-                            port = port,
-                            error = %e,
-                            "Upstream connect failed, using direct connect"
-                        );
-                    }
+        } else if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await
+            && let Some(addr) = addrs.find(|a| a.is_ipv4())
+        {
+            match manager.connect(addr, None, scope).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    warn!(
+                        host = %host,
+                        port = port,
+                        scope = ?scope,
+                        error = %e,
+                        "Upstream connect failed, using direct connect"
+                    );
                 }
             }
         }
     }
-    connect_with_dns_override(host, port, connect_timeout).await
+    Ok(UpstreamStream::Tcp(
+        connect_with_dns_override(host, port, connect_timeout).await?,
+    ))
 }
 
 fn encode_tls13_certificate_message(cert_chain_der: &[Vec<u8>]) -> Option<Vec<u8>> {
@@ -443,9 +453,7 @@ fn encode_tls13_certificate_message(cert_chain_der: &[Vec<u8>]) -> Option<Vec<u8
     }
 
     // Certificate = context_len(1) + certificate_list_len(3) + entries
-    let body_len = 1usize
-        .checked_add(3)?
-        .checked_add(certificate_list.len())?;
+    let body_len = 1usize.checked_add(3)?.checked_add(certificate_list.len())?;
 
     let mut message = Vec::with_capacity(4 + body_len);
     message.push(0x0b); // HandshakeType::certificate
@@ -537,6 +545,7 @@ async fn fetch_via_raw_tls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
 ) -> Result<TlsFetchResult> {
@@ -549,7 +558,8 @@ async fn fetch_via_raw_tls(
                     sock = %sock_path,
                     "Raw TLS fetch using mask unix socket"
                 );
-                return fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol).await;
+                return fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol)
+                    .await;
             }
             Ok(Err(e)) => {
                 warn!(
@@ -572,7 +582,7 @@ async fn fetch_via_raw_tls(
     #[cfg(not(unix))]
     let _ = unix_sock;
 
-    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream).await?;
+    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope).await?;
     fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol).await
 }
 
@@ -616,12 +626,13 @@ where
         .map(|slice| slice.to_vec())
         .unwrap_or_default();
     let cert_chain_der: Vec<Vec<u8>> = certs.iter().map(|c| c.as_ref().to_vec()).collect();
-    let cert_payload = encode_tls13_certificate_message(&cert_chain_der).map(|certificate_message| {
-        TlsCertPayload {
-            cert_chain_der: cert_chain_der.clone(),
-            certificate_message,
-        }
-    });
+    let cert_payload =
+        encode_tls13_certificate_message(&cert_chain_der).map(|certificate_message| {
+            TlsCertPayload {
+                cert_chain_der: cert_chain_der.clone(),
+                certificate_message,
+            }
+        });
 
     let total_cert_len = cert_payload
         .as_ref()
@@ -675,6 +686,7 @@ async fn fetch_via_rustls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
 ) -> Result<TlsFetchResult> {
@@ -710,7 +722,7 @@ async fn fetch_via_rustls(
     #[cfg(not(unix))]
     let _ = unix_sock;
 
-    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream).await?;
+    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope).await?;
     fetch_via_rustls_stream(stream, host, sni, proxy_protocol).await
 }
 
@@ -726,6 +738,7 @@ pub async fn fetch_real_tls(
     sni: &str,
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
 ) -> Result<TlsFetchResult> {
@@ -735,6 +748,7 @@ pub async fn fetch_real_tls(
         sni,
         connect_timeout,
         upstream.clone(),
+        scope,
         proxy_protocol,
         unix_sock,
     )
@@ -753,6 +767,7 @@ pub async fn fetch_real_tls(
         sni,
         connect_timeout,
         upstream,
+        scope,
         proxy_protocol,
         unix_sock,
     )

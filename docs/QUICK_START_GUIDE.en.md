@@ -181,6 +181,8 @@ docker compose down
 docker build -t telemt:local .
 docker run --name telemt --restart unless-stopped \
   -p 443:443 \
+  -p 9090:9090 \
+  -p 9091:9091 \
   -e RUST_LOG=info \
   -v "$PWD/config.toml:/app/config.toml:ro" \
   --read-only \

@@ -108,6 +108,25 @@ pub(super) struct RuntimeMeQualityRouteDropData {
 }
 
 #[derive(Serialize)]
+pub(super) struct RuntimeMeQualityFamilyStateData {
+    pub(super) family: &'static str,
+    pub(super) state: &'static str,
+    pub(super) state_since_epoch_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) suppressed_until_epoch_secs: Option<u64>,
+    pub(super) fail_streak: u32,
+    pub(super) recover_success_streak: u32,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeMeQualityDrainGateData {
+    pub(super) route_quorum_ok: bool,
+    pub(super) redundancy_ok: bool,
+    pub(super) block_reason: &'static str,
+    pub(super) updated_at_epoch_secs: u64,
+}
+
+#[derive(Serialize)]
 pub(super) struct RuntimeMeQualityDcRttData {
     pub(super) dc: i16,
     pub(super) rtt_ema_ms: Option<f64>,
@@ -120,6 +139,8 @@ pub(super) struct RuntimeMeQualityDcRttData {
 pub(super) struct RuntimeMeQualityPayload {
     pub(super) counters: RuntimeMeQualityCountersData,
     pub(super) route_drops: RuntimeMeQualityRouteDropData,
+    pub(super) family_states: Vec<RuntimeMeQualityFamilyStateData>,
+    pub(super) drain_gate: RuntimeMeQualityDrainGateData,
     pub(super) dc_rtt: Vec<RuntimeMeQualityDcRttData>,
 }
 
@@ -158,6 +179,7 @@ pub(super) struct RuntimeUpstreamQualitySummaryData {
     pub(super) direct_total: usize,
     pub(super) socks4_total: usize,
     pub(super) socks5_total: usize,
+    pub(super) shadowsocks_total: usize,
 }
 
 #[derive(Serialize)]
@@ -360,6 +382,19 @@ pub(super) async fn build_runtime_me_quality_data(shared: &ApiShared) -> Runtime
     };
 
     let status = pool.api_status_snapshot().await;
+    let family_states = pool
+        .api_family_state_snapshot()
+        .into_iter()
+        .map(|entry| RuntimeMeQualityFamilyStateData {
+            family: entry.family,
+            state: entry.state,
+            state_since_epoch_secs: entry.state_since_epoch_secs,
+            suppressed_until_epoch_secs: entry.suppressed_until_epoch_secs,
+            fail_streak: entry.fail_streak,
+            recover_success_streak: entry.recover_success_streak,
+        })
+        .collect();
+    let drain_gate_snapshot = pool.api_drain_gate_snapshot();
     RuntimeMeQualityData {
         enabled: true,
         reason: None,
@@ -379,6 +414,13 @@ pub(super) async fn build_runtime_me_quality_data(shared: &ApiShared) -> Runtime
                 queue_full_total: shared.stats.get_me_route_drop_queue_full(),
                 queue_full_base_total: shared.stats.get_me_route_drop_queue_full_base(),
                 queue_full_high_total: shared.stats.get_me_route_drop_queue_full_high(),
+            },
+            family_states,
+            drain_gate: RuntimeMeQualityDrainGateData {
+                route_quorum_ok: drain_gate_snapshot.route_quorum_ok,
+                redundancy_ok: drain_gate_snapshot.redundancy_ok,
+                block_reason: drain_gate_snapshot.block_reason,
+                updated_at_epoch_secs: drain_gate_snapshot.updated_at_epoch_secs,
             },
             dc_rtt: status
                 .dcs
@@ -404,7 +446,9 @@ pub(super) async fn build_runtime_upstream_quality_data(
         connect_attempt_total: shared.stats.get_upstream_connect_attempt_total(),
         connect_success_total: shared.stats.get_upstream_connect_success_total(),
         connect_fail_total: shared.stats.get_upstream_connect_fail_total(),
-        connect_failfast_hard_error_total: shared.stats.get_upstream_connect_failfast_hard_error_total(),
+        connect_failfast_hard_error_total: shared
+            .stats
+            .get_upstream_connect_failfast_hard_error_total(),
     };
 
     let Some(snapshot) = shared.upstream_manager.try_api_snapshot() else {
@@ -444,6 +488,7 @@ pub(super) async fn build_runtime_upstream_quality_data(
             direct_total: snapshot.summary.direct_total,
             socks4_total: snapshot.summary.socks4_total,
             socks5_total: snapshot.summary.socks5_total,
+            shadowsocks_total: snapshot.summary.shadowsocks_total,
         }),
         upstreams: Some(
             snapshot
@@ -455,6 +500,7 @@ pub(super) async fn build_runtime_upstream_quality_data(
                         crate::transport::UpstreamRouteKind::Direct => "direct",
                         crate::transport::UpstreamRouteKind::Socks4 => "socks4",
                         crate::transport::UpstreamRouteKind::Socks5 => "socks5",
+                        crate::transport::UpstreamRouteKind::Shadowsocks => "shadowsocks",
                     },
                     address: upstream.address,
                     weight: upstream.weight,
@@ -474,7 +520,9 @@ pub(super) async fn build_runtime_upstream_quality_data(
                                 crate::transport::upstream::IpPreference::PreferV6 => "prefer_v6",
                                 crate::transport::upstream::IpPreference::PreferV4 => "prefer_v4",
                                 crate::transport::upstream::IpPreference::BothWork => "both_work",
-                                crate::transport::upstream::IpPreference::Unavailable => "unavailable",
+                                crate::transport::upstream::IpPreference::Unavailable => {
+                                    "unavailable"
+                                }
                             },
                         })
                         .collect(),
@@ -512,14 +560,18 @@ pub(super) async fn build_runtime_nat_stun_data(shared: &ApiShared) -> RuntimeNa
                 live_total: snapshot.live_servers.len(),
             },
             reflection: RuntimeNatStunReflectionBlockData {
-                v4: snapshot.reflection_v4.map(|entry| RuntimeNatStunReflectionData {
-                    addr: entry.addr.to_string(),
-                    age_secs: entry.age_secs,
-                }),
-                v6: snapshot.reflection_v6.map(|entry| RuntimeNatStunReflectionData {
-                    addr: entry.addr.to_string(),
-                    age_secs: entry.age_secs,
-                }),
+                v4: snapshot
+                    .reflection_v4
+                    .map(|entry| RuntimeNatStunReflectionData {
+                        addr: entry.addr.to_string(),
+                        age_secs: entry.age_secs,
+                    }),
+                v6: snapshot
+                    .reflection_v6
+                    .map(|entry| RuntimeNatStunReflectionData {
+                        addr: entry.addr.to_string(),
+                        age_secs: entry.age_secs,
+                    }),
             },
             stun_backoff_remaining_ms: snapshot.stun_backoff_remaining_ms,
         }),

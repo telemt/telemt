@@ -12,8 +12,8 @@ use crate::startup::{
     COMPONENT_ME_PROXY_CONFIG_V6, COMPONENT_ME_SECRET_FETCH, StartupMeStatus, StartupTracker,
 };
 use crate::stats::Stats;
-use crate::transport::middle_proxy::MePool;
 use crate::transport::UpstreamManager;
+use crate::transport::middle_proxy::MePool;
 
 use super::helpers::load_startup_proxy_config_snapshot;
 
@@ -229,15 +229,25 @@ pub(crate) async fn initialize_me_pool(
                     config.general.me_adaptive_floor_recover_grace_secs,
                     config.general.me_adaptive_floor_writers_per_core_total,
                     config.general.me_adaptive_floor_cpu_cores_override,
-                    config.general.me_adaptive_floor_max_extra_writers_single_per_core,
-                    config.general.me_adaptive_floor_max_extra_writers_multi_per_core,
+                    config
+                        .general
+                        .me_adaptive_floor_max_extra_writers_single_per_core,
+                    config
+                        .general
+                        .me_adaptive_floor_max_extra_writers_multi_per_core,
                     config.general.me_adaptive_floor_max_active_writers_per_core,
                     config.general.me_adaptive_floor_max_warm_writers_per_core,
                     config.general.me_adaptive_floor_max_active_writers_global,
                     config.general.me_adaptive_floor_max_warm_writers_global,
                     config.general.hardswap,
                     config.general.me_pool_drain_ttl_secs,
+                    config.general.me_instadrain,
                     config.general.me_pool_drain_threshold,
+                    config.general.me_pool_drain_soft_evict_enabled,
+                    config.general.me_pool_drain_soft_evict_grace_secs,
+                    config.general.me_pool_drain_soft_evict_per_writer,
+                    config.general.me_pool_drain_soft_evict_budget_per_core,
+                    config.general.me_pool_drain_soft_evict_cooldown_ms,
                     config.general.effective_me_pool_force_close_secs(),
                     config.general.me_pool_min_fresh_ratio,
                     config.general.me_hardswap_warmup_delay_min_ms,
@@ -324,18 +334,76 @@ pub(crate) async fn initialize_me_pool(
                                             "Middle-End pool initialized successfully"
                                         );
 
-                                        let pool_health = pool_bg.clone();
-                                        let rng_health = rng_bg.clone();
-                                        let min_conns = pool_size;
-                                        tokio::spawn(async move {
-                                            crate::transport::middle_proxy::me_health_monitor(
-                                                pool_health,
-                                                rng_health,
-                                                min_conns,
-                                            )
-                                            .await;
-                                        });
-                                        break;
+                                            // ── Supervised background tasks ──────────────────
+                                            // Each task runs inside a nested tokio::spawn so
+                                            // that a panic is caught via JoinHandle and the
+                                            // outer loop restarts the task automatically.
+                                            let pool_health = pool_bg.clone();
+                                            let rng_health = rng_bg.clone();
+                                            let min_conns = pool_size;
+                                            tokio::spawn(async move {
+                                                loop {
+                                                    let p = pool_health.clone();
+                                                    let r = rng_health.clone();
+                                                    let res = tokio::spawn(async move {
+                                                        crate::transport::middle_proxy::me_health_monitor(
+                                                            p, r, min_conns,
+                                                        )
+                                                        .await;
+                                                    })
+                                                    .await;
+                                                    match res {
+                                                        Ok(()) => warn!("me_health_monitor exited unexpectedly, restarting"),
+                                                        Err(e) => {
+                                                            error!(error = %e, "me_health_monitor panicked, restarting in 1s");
+                                                            tokio::time::sleep(Duration::from_secs(1)).await;
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            let pool_drain_enforcer = pool_bg.clone();
+                                            tokio::spawn(async move {
+                                                loop {
+                                                    let p = pool_drain_enforcer.clone();
+                                                    let res = tokio::spawn(async move {
+                                                        crate::transport::middle_proxy::me_drain_timeout_enforcer(p).await;
+                                                    })
+                                                    .await;
+                                                    match res {
+                                                        Ok(()) => warn!("me_drain_timeout_enforcer exited unexpectedly, restarting"),
+                                                        Err(e) => {
+                                                            error!(error = %e, "me_drain_timeout_enforcer panicked, restarting in 1s");
+                                                            tokio::time::sleep(Duration::from_secs(1)).await;
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            let pool_watchdog = pool_bg.clone();
+                                            tokio::spawn(async move {
+                                                loop {
+                                                    let p = pool_watchdog.clone();
+                                                    let res = tokio::spawn(async move {
+                                                        crate::transport::middle_proxy::me_zombie_writer_watchdog(p).await;
+                                                    })
+                                                    .await;
+                                                    match res {
+                                                        Ok(()) => warn!("me_zombie_writer_watchdog exited unexpectedly, restarting"),
+                                                        Err(e) => {
+                                                            error!(error = %e, "me_zombie_writer_watchdog panicked, restarting in 1s");
+                                                            tokio::time::sleep(Duration::from_secs(1)).await;
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            // CRITICAL: keep the current-thread runtime
+                                            // alive. Without this, block_on() returns,
+                                            // the Runtime is dropped, and ALL spawned
+                                            // background tasks (health monitor, drain
+                                            // enforcer, zombie watchdog) are silently
+                                            // cancelled — causing the draining-writer
+                                            // leak that brought us here.
+                                            std::future::pending::<()>().await;
+                                            unreachable!();
                                     }
                                     Err(e) => {
                                         startup_tracker_bg.set_me_last_error(Some(e.to_string())).await;
@@ -393,14 +461,69 @@ pub(crate) async fn initialize_me_pool(
                                     "Middle-End pool initialized successfully"
                                 );
 
+                                // ── Supervised background tasks ──────────────────
                                 let pool_clone = pool.clone();
                                 let rng_clone = rng.clone();
                                 let min_conns = pool_size;
                                 tokio::spawn(async move {
-                                    crate::transport::middle_proxy::me_health_monitor(
-                                        pool_clone, rng_clone, min_conns,
-                                    )
-                                    .await;
+                                    loop {
+                                        let p = pool_clone.clone();
+                                        let r = rng_clone.clone();
+                                        let res = tokio::spawn(async move {
+                                            crate::transport::middle_proxy::me_health_monitor(
+                                                p, r, min_conns,
+                                            )
+                                            .await;
+                                        })
+                                        .await;
+                                        match res {
+                                            Ok(()) => warn!(
+                                                "me_health_monitor exited unexpectedly, restarting"
+                                            ),
+                                            Err(e) => {
+                                                error!(error = %e, "me_health_monitor panicked, restarting in 1s");
+                                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                            }
+                                        }
+                                    }
+                                });
+                                let pool_drain_enforcer = pool.clone();
+                                tokio::spawn(async move {
+                                    loop {
+                                        let p = pool_drain_enforcer.clone();
+                                        let res = tokio::spawn(async move {
+                                                crate::transport::middle_proxy::me_drain_timeout_enforcer(p).await;
+                                            })
+                                            .await;
+                                        match res {
+                                            Ok(()) => warn!(
+                                                "me_drain_timeout_enforcer exited unexpectedly, restarting"
+                                            ),
+                                            Err(e) => {
+                                                error!(error = %e, "me_drain_timeout_enforcer panicked, restarting in 1s");
+                                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                            }
+                                        }
+                                    }
+                                });
+                                let pool_watchdog = pool.clone();
+                                tokio::spawn(async move {
+                                    loop {
+                                        let p = pool_watchdog.clone();
+                                        let res = tokio::spawn(async move {
+                                                crate::transport::middle_proxy::me_zombie_writer_watchdog(p).await;
+                                            })
+                                            .await;
+                                        match res {
+                                            Ok(()) => warn!(
+                                                "me_zombie_writer_watchdog exited unexpectedly, restarting"
+                                            ),
+                                            Err(e) => {
+                                                error!(error = %e, "me_zombie_writer_watchdog panicked, restarting in 1s");
+                                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                            }
+                                        }
+                                    }
                                 });
 
                                 break Some(pool);

@@ -1165,6 +1165,60 @@ zabbix_export:
               tags:
                 - tag: Application
                   value: 'Users connections'
+          graph_prototypes:
+            - uuid: 4199de3dcea943d8a1ec62dc297b2e9f
+              name: 'User {#TELEMT_USER}: Connections'
+              graph_items:
+                - color: 1A7C11
+                  item:
+                    host: Telemt
+                    key: 'telemt.active_conn_[{#TELEMT_USER}]'
+                - color: F63100
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.total_conn_[{#TELEMT_USER}]'
+            - uuid: 84b8f22d891e49768891f497cac12fb3
+              name: 'User {#TELEMT_USER}: IPs'
+              graph_items:
+                - color: 0080FF
+                  item:
+                    host: Telemt
+                    key: 'telemt.ips_current_[{#TELEMT_USER}]'
+                - color: FF8000
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.ips_limit_[{#TELEMT_USER}]'
+                - color: AA00FF
+                  sortorder: '2'
+                  item:
+                    host: Telemt
+                    key: 'telemt.ips_utilization_[{#TELEMT_USER}]'
+            - uuid: 09dabe7125114e36a6ce40788a7cb888
+              name: 'User {#TELEMT_USER}: Traffic'
+              graph_items:
+                - color: 00AA00
+                  item:
+                    host: Telemt
+                    key: 'telemt.octets_from_[{#TELEMT_USER}]'
+                - color: AA0000
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.octets_to_[{#TELEMT_USER}]'
+            - uuid: 367f458962574b0ab3c02278a4cd7ecb
+              name: 'User {#TELEMT_USER}: Messages'
+              graph_items:
+                - color: 00AAFF
+                  item:
+                    host: Telemt
+                    key: 'telemt.msgs_from_[{#TELEMT_USER}]'
+                - color: FF5500
+                  sortorder: '1'
+                  item:
+                    host: Telemt
+                    key: 'telemt.msgs_to_[{#TELEMT_USER}]'
           master_item:
             key: telemt.prom_metrics
           lld_macro_paths:
@@ -1177,3 +1231,206 @@ zabbix_export:
       tags:
         - tag: target
           value: Telemt
+  graphs:
+    - uuid: f162658049ca4f50893c5cc02515ff10
+      name: 'Telemt: Server Connections Overview'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: Telemt
+            key: telemt.conn_total
+        - color: F63100
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.conn_bad_total
+        - color: FC6EA3
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.handshake_timeouts_total
+    - uuid: 759eca5e687142f19248f9d9343e1adf
+      name: 'Telemt: Uptime'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.uptime
+    - uuid: 0a27dbd0490d4a508c03ed39fa18545d
+      name: 'Telemt: ME Keepalive'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_sent_total
+        - color: 00AA00
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_pong_total
+        - color: F63100
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_failed_total
+        - color: FF8000
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.me_keepalive_timeout_total
+    - uuid: 4015e24ff70b49f484e884d1dde687c0
+      name: 'Telemt: ME Reconnects'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.me_reconnect_attempts_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_reconnect_success_total
+    - uuid: f3e3eeb0663c471aa26cf4b6872b0c50
+      name: 'Telemt: ME Route Drops'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.me_route_drop_channel_closed_total
+        - color: FF8000
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_route_drop_no_conn_total
+        - color: AA00FF
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_route_drop_queue_full_total
+    - uuid: 49b51ed78a5943bdbd6d1d34fe28bf61
+      name: 'Telemt: ME Writer Pool'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.pool_drain_active
+        - color: F63100
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.pool_force_close_total
+        - color: FF8000
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.pool_stale_pick_total
+        - color: 1A7C11
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.pool_swap_total
+    - uuid: a0779e6c979f4c1ab7ac4da7123a5ecb
+      name: 'Telemt: ME Writer Removals and Restores'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.me_writer_removed_total
+        - color: FF8000
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_writer_removed_unexpected_total
+        - color: FFAA00
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_writer_removed_unexpected_minus_restored_total
+        - color: 1A7C11
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.me_writer_restored_same_endpoint_total
+        - color: 00AA00
+          sortorder: '4'
+          item:
+            host: Telemt
+            key: telemt.me_writer_restored_fallback_total
+    - uuid: 4fead70290664953b026a228108bee0e
+      name: 'Telemt: Desync Detections'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.desync_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.desync_full_logged_total
+        - color: FF8000
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.desync_suppressed_total
+    - uuid: 9f8c9f48cb534a66ac21b1bba1acb602
+      name: 'Telemt: Upstream Connect Cycles'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_attempt_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_success_total
+        - color: F63100
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_fail_total
+        - color: FF8000
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.upstream_connect_failfast_hard_error_total
+    - uuid: 05182057727547f8b8884b7e71e34f19
+      name: 'Telemt: ME Single-Endpoint Outages'
+      graph_items:
+        - color: F63100
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_enter_total
+        - color: 1A7C11
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_exit_total
+        - color: 0080FF
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_reconnect_attempt_total
+        - color: 00AA00
+          sortorder: '3'
+          item:
+            host: Telemt
+            key: telemt.me_single_endpoint_outage_reconnect_success_total
+    - uuid: 6892e8b7fbd2445d9ccc0574af58a354
+      name: 'Telemt: ME Refill Activity'
+      graph_items:
+        - color: 0080FF
+          item:
+            host: Telemt
+            key: telemt.me_refill_triggered_total
+        - color: F63100
+          sortorder: '1'
+          item:
+            host: Telemt
+            key: telemt.me_refill_failed_total
+        - color: FF8000
+          sortorder: '2'
+          item:
+            host: Telemt
+            key: telemt.me_refill_skipped_inflight_total

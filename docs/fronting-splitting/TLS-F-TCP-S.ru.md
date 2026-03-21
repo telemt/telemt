@@ -38,8 +38,9 @@ umweltschutz.de -> A-запись 198.18.88.88
 
 В конфигурации Telemt:
 
-```
-tls_domain = umweltschutz.de
+```toml
+[censorship]
+tls_domain = "umweltschutz.de"
 ```
 
 Этот домен используется клиентом как SNI в ClientHello
@@ -56,8 +57,9 @@ tls_domain = umweltschutz.de
 
 В конфигурации Telemt:
 
-```
-mask_host = 127.0.0.1
+```toml
+[censorship]
+mask_host = "127.0.0.1"
 mask_port = 8443
 ```
 
@@ -151,16 +153,18 @@ mask_host:mask_port
 
 Например:
 
-```
-tls_domain = github.com
-mask_host = github.com
+```toml
+[censorship]
+tls_domain = "github.com"
+mask_host = "github.com"
 mask_port = 443
 ```
 
 или
 
-```
-mask_host = 140.82.121.4
+```toml
+[censorship]
+mask_host = "140.82.121.4"
 ```
 
 В этом случае:

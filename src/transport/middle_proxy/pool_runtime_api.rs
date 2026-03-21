@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::pool::{MePool, RefillDcKey};
+use super::pool::{MeDrainGateReason, MePool, RefillDcKey};
 use crate::network::IpFamily;
 
 #[derive(Clone, Debug)]
@@ -34,6 +34,24 @@ pub(crate) struct MeApiNatStunSnapshot {
     pub reflection_v4: Option<MeApiNatReflectionSnapshot>,
     pub reflection_v6: Option<MeApiNatReflectionSnapshot>,
     pub stun_backoff_remaining_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MeApiFamilyStateSnapshot {
+    pub family: &'static str,
+    pub state: &'static str,
+    pub state_since_epoch_secs: u64,
+    pub suppressed_until_epoch_secs: Option<u64>,
+    pub fail_streak: u32,
+    pub recover_success_streak: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MeApiDrainGateSnapshot {
+    pub route_quorum_ok: bool,
+    pub redundancy_ok: bool,
+    pub block_reason: &'static str,
+    pub updated_at_epoch_secs: u64,
 }
 
 impl MePool {
@@ -123,6 +141,38 @@ impl MePool {
             reflection_v4,
             reflection_v6,
             stun_backoff_remaining_ms,
+        }
+    }
+
+    pub(crate) fn api_family_state_snapshot(&self) -> Vec<MeApiFamilyStateSnapshot> {
+        [IpFamily::V4, IpFamily::V6]
+            .into_iter()
+            .map(|family| {
+                let state = self.family_runtime_state(family);
+                let suppressed_until = self.family_suppressed_until_epoch_secs(family);
+                MeApiFamilyStateSnapshot {
+                    family: match family {
+                        IpFamily::V4 => "v4",
+                        IpFamily::V6 => "v6",
+                    },
+                    state: state.as_str(),
+                    state_since_epoch_secs: self.family_runtime_state_since_epoch_secs(family),
+                    suppressed_until_epoch_secs: (suppressed_until != 0)
+                        .then_some(suppressed_until),
+                    fail_streak: self.family_fail_streak(family),
+                    recover_success_streak: self.family_recover_success_streak(family),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn api_drain_gate_snapshot(&self) -> MeApiDrainGateSnapshot {
+        let reason: MeDrainGateReason = self.last_drain_gate_block_reason();
+        MeApiDrainGateSnapshot {
+            route_quorum_ok: self.last_drain_gate_route_quorum_ok(),
+            redundancy_ok: self.last_drain_gate_redundancy_ok(),
+            block_reason: reason.as_str(),
+            updated_at_epoch_secs: self.last_drain_gate_updated_at_epoch_secs(),
         }
     }
 }

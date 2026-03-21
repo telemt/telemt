@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{ProxyError, Result};
 use crate::network::probe::is_bogon;
-use crate::network::stun::{stun_probe_dual, stun_probe_family_with_bind, IpFamily};
+use crate::network::stun::{IpFamily, stun_probe_dual, stun_probe_family_with_bind};
 
 use super::MePool;
 use std::time::Instant;
@@ -24,14 +24,20 @@ pub async fn stun_probe(stun_addr: Option<String>) -> Result<crate::network::stu
             .unwrap_or_default()
     });
     if stun_addr.is_empty() {
-        return Err(ProxyError::Proxy("STUN server is not configured".to_string()));
+        return Err(ProxyError::Proxy(
+            "STUN server is not configured".to_string(),
+        ));
     }
     stun_probe_dual(&stun_addr).await
 }
 
 #[allow(dead_code)]
 pub async fn detect_public_ip() -> Option<IpAddr> {
-    fetch_public_ipv4_with_retry().await.ok().flatten().map(IpAddr::V4)
+    fetch_public_ipv4_with_retry()
+        .await
+        .ok()
+        .flatten()
+        .map(IpAddr::V4)
 }
 
 impl MePool {
@@ -141,9 +147,7 @@ impl MePool {
 
         match (ip, nat_ip) {
             (IpAddr::V4(src), IpAddr::V4(dst))
-                if is_bogon(IpAddr::V4(src))
-                    || src.is_loopback()
-                    || src.is_unspecified() =>
+                if is_bogon(IpAddr::V4(src)) || src.is_loopback() || src.is_unspecified() =>
             {
                 IpAddr::V4(dst)
             }
@@ -240,9 +244,7 @@ impl MePool {
             return None;
         }
 
-        if use_shared_cache
-            && let Ok(mut cache) = self.nat_reflection_cache.try_lock()
-        {
+        if use_shared_cache && let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
             let slot = match family {
                 IpFamily::V4 => &mut cache.v4,
                 IpFamily::V6 => &mut cache.v6,
@@ -277,9 +279,7 @@ impl MePool {
             return None;
         }
 
-        if use_shared_cache
-            && let Ok(mut cache) = self.nat_reflection_cache.try_lock()
-        {
+        if use_shared_cache && let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
             let slot = match family {
                 IpFamily::V4 => &mut cache.v4,
                 IpFamily::V6 => &mut cache.v6,
@@ -292,7 +292,8 @@ impl MePool {
         }
 
         let attempt = if use_shared_cache {
-            self.nat_probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            self.nat_probe_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         } else {
             0
         };
@@ -308,7 +309,10 @@ impl MePool {
             .probe_stun_batch_for_family(&primary_servers, family, attempt, bind_ip)
             .await;
 
-        if selected_reflected.is_none() && !configured_servers.is_empty() && primary_servers != configured_servers {
+        if selected_reflected.is_none()
+            && !configured_servers.is_empty()
+            && primary_servers != configured_servers
+        {
             let (rediscovered_live, rediscovered_reflected) = self
                 .probe_stun_batch_for_family(&configured_servers, family, attempt, bind_ip)
                 .await;
@@ -325,7 +329,8 @@ impl MePool {
 
         if let Some(reflected_addr) = selected_reflected {
             if use_shared_cache {
-                self.nat_probe_attempts.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.nat_probe_attempts
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
             }
             info!(
                 family = ?family,
@@ -333,9 +338,7 @@ impl MePool {
                 "STUN-Quorum reached, IP: {}",
                 reflected_addr.ip()
             );
-            if use_shared_cache
-                && let Ok(mut cache) = self.nat_reflection_cache.try_lock()
-            {
+            if use_shared_cache && let Ok(mut cache) = self.nat_reflection_cache.try_lock() {
                 let slot = match family {
                     IpFamily::V4 => &mut cache.v4,
                     IpFamily::V6 => &mut cache.v6,
@@ -368,13 +371,14 @@ async fn fetch_public_ipv4_with_retry() -> Result<Option<Ipv4Addr>> {
 }
 
 async fn fetch_public_ipv4_once(url: &str) -> Result<Option<Ipv4Addr>> {
-    let res = reqwest::get(url).await.map_err(|e| {
-        ProxyError::Proxy(format!("public IP detection request failed: {e}"))
-    })?;
+    let res = reqwest::get(url)
+        .await
+        .map_err(|e| ProxyError::Proxy(format!("public IP detection request failed: {e}")))?;
 
-    let text = res.text().await.map_err(|e| {
-        ProxyError::Proxy(format!("public IP detection read failed: {e}"))
-    })?;
+    let text = res
+        .text()
+        .await
+        .map_err(|e| ProxyError::Proxy(format!("public IP detection read failed: {e}")))?;
 
     let ip = text.trim().parse().ok();
     Ok(ip)

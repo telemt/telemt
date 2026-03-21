@@ -1,9 +1,11 @@
 use std::net::IpAddr;
+use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use hyper::StatusCode;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
+
+use crate::crypto::SecureRandom;
 
 const MAX_USERNAME_LEN: usize = 64;
 
@@ -134,6 +136,7 @@ pub(super) struct UpstreamSummaryData {
     pub(super) direct_total: usize,
     pub(super) socks4_total: usize,
     pub(super) socks5_total: usize,
+    pub(super) shadowsocks_total: usize,
 }
 
 #[derive(Serialize, Clone)]
@@ -481,7 +484,9 @@ pub(super) fn is_valid_username(user: &str) -> bool {
 }
 
 pub(super) fn random_user_secret() -> String {
+    static API_SECRET_RNG: OnceLock<SecureRandom> = OnceLock::new();
+    let rng = API_SECRET_RNG.get_or_init(SecureRandom::new);
     let mut bytes = [0u8; 16];
-    rand::rng().fill(&mut bytes);
+    rng.fill(&mut bytes);
     hex::encode(bytes)
 }

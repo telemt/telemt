@@ -7,6 +7,7 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
@@ -125,7 +126,8 @@ pub(crate) async fn reader_loop(
 
                 let data_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
                 let routed = if data_wait_ms == 0 {
-                    reg.route_nowait(cid, MeResponse::Data { flags, data }).await
+                    reg.route_nowait(cid, MeResponse::Data { flags, data })
+                        .await
                 } else {
                     reg.route_with_timeout(cid, MeResponse::Data { flags, data }, data_wait_ms)
                         .await
@@ -133,7 +135,9 @@ pub(crate) async fn reader_loop(
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
-                        RouteResult::ChannelClosed => stats.increment_me_route_drop_channel_closed(),
+                        RouteResult::ChannelClosed => {
+                            stats.increment_me_route_drop_channel_closed()
+                        }
                         RouteResult::QueueFullBase => {
                             stats.increment_me_route_drop_queue_full();
                             stats.increment_me_route_drop_queue_full_base();
@@ -156,7 +160,9 @@ pub(crate) async fn reader_loop(
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
-                        RouteResult::ChannelClosed => stats.increment_me_route_drop_channel_closed(),
+                        RouteResult::ChannelClosed => {
+                            stats.increment_me_route_drop_channel_closed()
+                        }
                         RouteResult::QueueFullBase => {
                             stats.increment_me_route_drop_queue_full();
                             stats.increment_me_route_drop_queue_full_base();
@@ -173,12 +179,12 @@ pub(crate) async fn reader_loop(
             } else if pt == RPC_CLOSE_EXT_U32 && body.len() >= 8 {
                 let cid = u64::from_le_bytes(body[0..8].try_into().unwrap());
                 debug!(cid, "RPC_CLOSE_EXT from ME");
-                reg.route(cid, MeResponse::Close).await;
+                let _ = reg.route_nowait(cid, MeResponse::Close).await;
                 reg.unregister(cid).await;
             } else if pt == RPC_CLOSE_CONN_U32 && body.len() >= 8 {
                 let cid = u64::from_le_bytes(body[0..8].try_into().unwrap());
                 debug!(cid, "RPC_CLOSE_CONN from ME");
-                reg.route(cid, MeResponse::Close).await;
+                let _ = reg.route_nowait(cid, MeResponse::Close).await;
                 reg.unregister(cid).await;
             } else if pt == RPC_PING_U32 && body.len() >= 8 {
                 let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
@@ -186,13 +192,15 @@ pub(crate) async fn reader_loop(
                 let mut pong = Vec::with_capacity(12);
                 pong.extend_from_slice(&RPC_PONG_U32.to_le_bytes());
                 pong.extend_from_slice(&ping_id.to_le_bytes());
-                if tx
-                    .send(WriterCommand::DataAndFlush(Bytes::from(pong)))
-                    .await
-                    .is_err()
-                {
-                    warn!("PONG send failed");
-                    break;
+                match tx.try_send(WriterCommand::DataAndFlush(Bytes::from(pong))) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        debug!(ping_id, "PONG dropped: writer command channel is full");
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        warn!("PONG send failed: writer channel closed");
+                        break;
+                    }
                 }
             } else if pt == RPC_PONG_U32 && body.len() >= 8 {
                 let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
@@ -213,9 +221,18 @@ pub(crate) async fn reader_loop(
                     }
                     let degraded_now = entry.1 > entry.0 * 2.0;
                     degraded.store(degraded_now, Ordering::Relaxed);
-                    writer_rtt_ema_ms_x10
-                        .store((entry.1 * 10.0).clamp(0.0, u32::MAX as f64) as u32, Ordering::Relaxed);
-                    trace!(writer_id = wid, rtt_ms = rtt, ema_ms = entry.1, base_ms = entry.0, degraded = degraded_now, "ME RTT sample");
+                    writer_rtt_ema_ms_x10.store(
+                        (entry.1 * 10.0).clamp(0.0, u32::MAX as f64) as u32,
+                        Ordering::Relaxed,
+                    );
+                    trace!(
+                        writer_id = wid,
+                        rtt_ms = rtt,
+                        ema_ms = entry.1,
+                        base_ms = entry.0,
+                        degraded = degraded_now,
+                        "ME RTT sample"
+                    );
                 }
             } else {
                 debug!(
@@ -232,6 +249,19 @@ async fn send_close_conn(tx: &mpsc::Sender<WriterCommand>, conn_id: u64) {
     let mut p = Vec::with_capacity(12);
     p.extend_from_slice(&RPC_CLOSE_CONN_U32.to_le_bytes());
     p.extend_from_slice(&conn_id.to_le_bytes());
-
-    let _ = tx.send(WriterCommand::DataAndFlush(Bytes::from(p))).await;
+    match tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            debug!(
+                conn_id,
+                "ME close_conn signal skipped: writer command channel is full"
+            );
+        }
+        Err(TrySendError::Closed(_)) => {
+            debug!(
+                conn_id,
+                "ME close_conn signal skipped: writer command channel is closed"
+            );
+        }
+    }
 }

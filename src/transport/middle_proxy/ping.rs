@@ -7,6 +7,7 @@ use tokio::net::UdpSocket;
 use crate::config::{UpstreamConfig, UpstreamType};
 use crate::crypto::SecureRandom;
 use crate::error::ProxyError;
+use crate::transport::shadowsocks::sanitize_shadowsocks_url;
 use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind};
 
 use super::MePool;
@@ -40,7 +41,11 @@ pub fn format_sample_line(sample: &MePingSample) -> String {
     let sign = if sample.dc >= 0 { "+" } else { "-" };
     let addr = format!("{}:{}", sample.addr.ip(), sample.addr.port());
 
-    match (sample.connect_ms, sample.handshake_ms.as_ref(), sample.error.as_ref()) {
+    match (
+        sample.connect_ms,
+        sample.handshake_ms.as_ref(),
+        sample.error.as_ref(),
+    ) {
         (Some(conn), Some(hs), None) => format!(
             "     {sign} {addr}\tPing: {:.0} ms / RPC: {:.0} ms / OK",
             conn, hs
@@ -121,6 +126,7 @@ fn route_from_egress(egress: Option<UpstreamEgressInfo>) -> Option<String> {
                 None => route,
             })
         }
+        UpstreamRouteKind::Shadowsocks => Some("shadowsocks".to_string()),
     }
 }
 
@@ -232,6 +238,9 @@ pub async fn format_me_route(
             }
             UpstreamType::Socks4 { address, .. } => format!("socks4://{address}"),
             UpstreamType::Socks5 { address, .. } => format!("socks5://{address}"),
+            UpstreamType::Shadowsocks { url, .. } => sanitize_shadowsocks_url(url)
+                .map(|address| format!("shadowsocks://{address}"))
+                .unwrap_or_else(|_| "shadowsocks://invalid".to_string()),
         };
     }
 
@@ -253,6 +262,12 @@ pub async fn format_me_route(
     }
     if has_socks5 {
         kinds.push("socks5");
+    }
+    if enabled_upstreams
+        .iter()
+        .any(|u| matches!(u.upstream_type, UpstreamType::Shadowsocks { .. }))
+    {
+        kinds.push("shadowsocks");
     }
     format!("mixed upstreams ({})", kinds.join(", "))
 }
@@ -335,7 +350,10 @@ pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingRe
                 Ok((stream, conn_rtt, upstream_egress)) => {
                     connect_ms = Some(conn_rtt);
                     route = route_from_egress(upstream_egress);
-                    match pool.handshake_only(stream, addr, upstream_egress, rng).await {
+                    match pool
+                        .handshake_only(stream, addr, upstream_egress, rng)
+                        .await
+                    {
                         Ok(hs) => {
                             handshake_ms = Some(hs.handshake_ms);
                             // drop halves to close

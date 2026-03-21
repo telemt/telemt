@@ -1,12 +1,13 @@
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::SocketAddr;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf, split};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -17,21 +18,55 @@ use crate::protocol::constants::*;
 use crate::proxy::handshake::{HandshakeSuccess, encrypt_tg_nonce_with_ciphers, generate_tg_nonce};
 use crate::proxy::relay::relay_bidirectional;
 use crate::proxy::route_mode::{
-    RelayRouteMode, RouteCutoverState, ROUTE_SWITCH_ERROR_MSG, affected_cutover_state,
+    ROUTE_SWITCH_ERROR_MSG, RelayRouteMode, RouteCutoverState, affected_cutover_state,
     cutover_stagger_delay,
 };
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, FromRawFd};
+
 const UNKNOWN_DC_LOG_DISTINCT_LIMIT: usize = 1024;
 static LOGGED_UNKNOWN_DCS: OnceLock<Mutex<HashSet<i16>>> = OnceLock::new();
+const MAX_SCOPE_HINT_LEN: usize = 64;
+
+fn validated_scope_hint(user: &str) -> Option<&str> {
+    let scope = user.strip_prefix("scope_")?;
+    if scope.is_empty() || scope.len() > MAX_SCOPE_HINT_LEN {
+        return None;
+    }
+    if scope
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        Some(scope)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone)]
+struct SanitizedUnknownDcLogPath {
+    resolved_path: PathBuf,
+    allowed_parent: PathBuf,
+    file_name: OsString,
+}
 
 // In tests, this function shares global mutable state. Callers that also use
 // cache-reset helpers must hold `unknown_dc_test_lock()` to keep assertions
 // deterministic under parallel execution.
 fn should_log_unknown_dc(dc_idx: i16) -> bool {
     let set = LOGGED_UNKNOWN_DCS.get_or_init(|| Mutex::new(HashSet::new()));
+    should_log_unknown_dc_with_set(set, dc_idx)
+}
+
+fn should_log_unknown_dc_with_set(set: &Mutex<HashSet<i16>>, dc_idx: i16) -> bool {
     match set.lock() {
         Ok(mut guard) => {
             if guard.contains(&dc_idx) {
@@ -42,9 +77,155 @@ fn should_log_unknown_dc(dc_idx: i16) -> bool {
             }
             guard.insert(dc_idx)
         }
-        // If the lock is poisoned, keep logging rather than silently dropping
-        // operator-visible diagnostics.
-        Err(_) => true,
+        // Fail closed on poisoned state to avoid unbounded blocking log writes.
+        Err(_) => false,
+    }
+}
+
+fn sanitize_unknown_dc_log_path(path: &str) -> Option<SanitizedUnknownDcLogPath> {
+    let candidate = Path::new(path);
+    if candidate.as_os_str().is_empty() {
+        return None;
+    }
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
+
+    let cwd = std::env::current_dir().ok()?;
+    let file_name = candidate.file_name()?;
+    let parent = candidate.parent().unwrap_or_else(|| Path::new("."));
+    let parent_path = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        cwd.join(parent)
+    };
+    let canonical_parent = parent_path.canonicalize().ok()?;
+    if !canonical_parent.is_dir() {
+        return None;
+    }
+
+    Some(SanitizedUnknownDcLogPath {
+        resolved_path: canonical_parent.join(file_name),
+        allowed_parent: canonical_parent,
+        file_name: file_name.to_os_string(),
+    })
+}
+
+fn unknown_dc_log_path_is_still_safe(path: &SanitizedUnknownDcLogPath) -> bool {
+    let Some(parent) = path.resolved_path.parent() else {
+        return false;
+    };
+    let Ok(current_parent) = parent.canonicalize() else {
+        return false;
+    };
+    if current_parent != path.allowed_parent {
+        return false;
+    }
+
+    if let Ok(canonical_target) = path.resolved_path.canonicalize() {
+        let Some(target_parent) = canonical_target.parent() else {
+            return false;
+        };
+        let Some(target_name) = canonical_target.file_name() else {
+            return false;
+        };
+        if target_parent != path.allowed_parent || target_name != path.file_name {
+            return false;
+        }
+    }
+
+    true
+}
+
+#[cfg(test)]
+fn open_unknown_dc_log_append(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unknown_dc_file_log_enabled requires unix O_NOFOLLOW support",
+        ))
+    }
+}
+
+fn open_unknown_dc_log_append_anchored(
+    path: &SanitizedUnknownDcLogPath,
+) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        let parent = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path.allowed_parent)?;
+
+        let file_name =
+            std::ffi::CString::new(path.file_name.as_os_str().as_bytes()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "unknown DC log file name contains NUL byte",
+                )
+            })?;
+
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                file_name.as_ptr(),
+                libc::O_CREAT
+                    | libc::O_APPEND
+                    | libc::O_WRONLY
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "unknown_dc_file_log_enabled requires unix O_NOFOLLOW support",
+        ))
+    }
+}
+
+fn append_unknown_dc_line(file: &mut std::fs::File, dc_idx: i16) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let write_result = writeln!(file, "dc_idx={dc_idx}");
+
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        write_result
+    }
+    #[cfg(not(unix))]
+    {
+        writeln!(file, "dc_idx={dc_idx}")
     }
 }
 
@@ -93,8 +274,15 @@ where
         "Connecting to Telegram DC"
     );
 
+    let scope_hint = validated_scope_hint(user);
+    if user.starts_with("scope_") && scope_hint.is_none() {
+        warn!(
+            user = %user,
+            "Ignoring invalid scope hint and falling back to default upstream selection"
+        );
+    }
     let tg_stream = upstream_manager
-        .connect(dc_addr, Some(success.dc_idx), user.strip_prefix("scope_").filter(|s| !s.is_empty()))
+        .connect(dc_addr, Some(success.dc_idx), scope_hint)
         .await?;
 
     debug!(peer = %success.peer, dc_addr = %dc_addr, "Connected, performing TG handshake");
@@ -105,7 +293,7 @@ where
     debug!(peer = %success.peer, "TG handshake complete, starting relay");
 
     stats.increment_user_connects(user);
-    stats.increment_current_connections_direct();
+    let _direct_connection_lease = stats.acquire_direct_connection_lease();
 
     let relay_result = relay_bidirectional(
         client_reader,
@@ -116,15 +304,14 @@ where
         config.general.direct_relay_copy_buf_s2c_bytes,
         user,
         Arc::clone(&stats),
+        config.access.user_data_quota.get(user).copied(),
         buffer_pool,
     );
     tokio::pin!(relay_result);
     let relay_result = loop {
-        if let Some(cutover) = affected_cutover_state(
-            &route_rx,
-            RelayRouteMode::Direct,
-            route_snapshot.generation,
-        ) {
+        if let Some(cutover) =
+            affected_cutover_state(&route_rx, RelayRouteMode::Direct, route_snapshot.generation)
+        {
             let delay = cutover_stagger_delay(session_id, cutover.generation);
             warn!(
                 user = %user,
@@ -147,8 +334,6 @@ where
             }
         }
     };
-
-    stats.decrement_current_connections_direct();
 
     match &relay_result {
         Ok(()) => debug!(user = %user, "Direct relay completed"),
@@ -174,7 +359,9 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
         for addr_str in addrs {
             match addr_str.parse::<SocketAddr>() {
                 Ok(addr) => parsed.push(addr),
-                Err(_) => warn!(dc_idx = dc_idx, addr_str = %addr_str, "Invalid DC override address in config, ignoring"),
+                Err(_) => {
+                    warn!(dc_idx = dc_idx, addr_str = %addr_str, "Invalid DC override address in config, ignoring")
+                }
             }
         }
 
@@ -196,18 +383,27 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
 
     // Unknown DC requested by client without override: log and fall back.
     if !config.dc_overrides.contains_key(&dc_key) {
-        warn!(dc_idx = dc_idx, "Requested non-standard DC with no override; falling back to default cluster");
+        warn!(
+            dc_idx = dc_idx,
+            "Requested non-standard DC with no override; falling back to default cluster"
+        );
         if config.general.unknown_dc_file_log_enabled
             && let Some(path) = &config.general.unknown_dc_log_path
-            && should_log_unknown_dc(dc_idx)
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
-            let path = path.clone();
-            handle.spawn_blocking(move || {
-                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-                    let _ = writeln!(file, "dc_idx={dc_idx}");
+            if let Some(path) = sanitize_unknown_dc_log_path(path) {
+                if should_log_unknown_dc(dc_idx) {
+                    handle.spawn_blocking(move || {
+                        if unknown_dc_log_path_is_still_safe(&path)
+                            && let Ok(mut file) = open_unknown_dc_log_append_anchored(&path)
+                        {
+                            let _ = append_unknown_dc_line(&mut file, dc_idx);
+                        }
+                    });
                 }
-            });
+            } else {
+                warn!(dc_idx = dc_idx, raw_path = %path, "Rejected unsafe unknown DC log path");
+            }
         }
     }
 
@@ -231,15 +427,15 @@ fn get_dc_addr_static(dc_idx: i16, config: &ProxyConfig) -> Result<SocketAddr> {
     ))
 }
 
-async fn do_tg_handshake_static(
-    mut stream: TcpStream,
+async fn do_tg_handshake_static<S>(
+    mut stream: S,
     success: &HandshakeSuccess,
     config: &ProxyConfig,
     rng: &SecureRandom,
-) -> Result<(
-    CryptoReader<tokio::net::tcp::OwnedReadHalf>,
-    CryptoWriter<tokio::net::tcp::OwnedWriteHalf>,
-)> {
+) -> Result<(CryptoReader<ReadHalf<S>>, CryptoWriter<WriteHalf<S>>)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (nonce, _tg_enc_key, _tg_enc_iv, _tg_dec_key, _tg_dec_iv) = generate_tg_nonce(
         success.proto_tag,
         success.dc_idx,
@@ -260,7 +456,7 @@ async fn do_tg_handshake_static(
     stream.write_all(&encrypted_nonce).await?;
     stream.flush().await?;
 
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = split(stream);
 
     let max_pending = config.general.crypto_pending_buffer;
     Ok((
@@ -270,5 +466,17 @@ async fn do_tg_handshake_static(
 }
 
 #[cfg(test)]
-#[path = "direct_relay_security_tests.rs"]
+#[path = "tests/direct_relay_security_tests.rs"]
 mod security_tests;
+
+#[cfg(test)]
+#[path = "tests/direct_relay_business_logic_tests.rs"]
+mod business_logic_tests;
+
+#[cfg(test)]
+#[path = "tests/direct_relay_common_mistakes_tests.rs"]
+mod common_mistakes_tests;
+
+#[cfg(test)]
+#[path = "tests/direct_relay_subtle_adversarial_tests.rs"]
+mod subtle_adversarial_tests;

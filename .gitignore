@@ -21,3 +21,4 @@ target
 #.idea/
 
 proxy-secret
+coverage-html/

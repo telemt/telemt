@@ -1,5 +1,5 @@
 // Cryptobench
-use criterion::{black_box, criterion_group, Criterion};
+use criterion::{Criterion, black_box, criterion_group};
 
 fn bench_aes_ctr(c: &mut Criterion) {
     c.bench_function("aes_ctr_encrypt_64kb", |b| {

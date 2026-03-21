@@ -11,9 +11,9 @@
 // - admission: conditional-cast gate and route mode switching.
 // - listeners: TCP/Unix listener bind and accept-loop orchestration.
 // - shutdown: graceful shutdown sequence and uptime logging.
-mod helpers;
 mod admission;
 mod connectivity;
+mod helpers;
 mod listeners;
 mod me_startup;
 mod runtime_tasks;
@@ -33,19 +33,19 @@ use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
+use crate::startup::{
+    COMPONENT_API_BOOTSTRAP, COMPONENT_CONFIG_LOAD, COMPONENT_ME_POOL_CONSTRUCT,
+    COMPONENT_ME_POOL_INIT_STAGE1, COMPONENT_ME_PROXY_CONFIG_V4, COMPONENT_ME_PROXY_CONFIG_V6,
+    COMPONENT_ME_SECRET_FETCH, COMPONENT_NETWORK_PROBE, COMPONENT_TRACING_INIT, StartupMeStatus,
+    StartupTracker,
+};
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{ReplayChecker, Stats};
-use crate::startup::{
-    COMPONENT_API_BOOTSTRAP, COMPONENT_CONFIG_LOAD,
-    COMPONENT_ME_POOL_CONSTRUCT, COMPONENT_ME_POOL_INIT_STAGE1,
-    COMPONENT_ME_PROXY_CONFIG_V4, COMPONENT_ME_PROXY_CONFIG_V6, COMPONENT_ME_SECRET_FETCH,
-    COMPONENT_NETWORK_PROBE, COMPONENT_TRACING_INIT, StartupMeStatus, StartupTracker,
-};
 use crate::stream::BufferPool;
-use crate::transport::middle_proxy::MePool;
 use crate::transport::UpstreamManager;
-use helpers::parse_cli;
+use crate::transport::middle_proxy::MePool;
+use helpers::{parse_cli, resolve_runtime_config_path};
 
 /// Runs the full telemt runtime startup pipeline and blocks until shutdown.
 pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -56,20 +56,34 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .as_secs();
     let startup_tracker = Arc::new(StartupTracker::new(process_started_at_epoch_secs));
     startup_tracker
-        .start_component(COMPONENT_CONFIG_LOAD, Some("load and validate config".to_string()))
+        .start_component(
+            COMPONENT_CONFIG_LOAD,
+            Some("load and validate config".to_string()),
+        )
         .await;
-    let (config_path, data_path, cli_silent, cli_log_level) = parse_cli();
+    let (config_path_cli, data_path, cli_silent, cli_log_level) = parse_cli();
+    let startup_cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("[telemt] Can't read current_dir: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let config_path = resolve_runtime_config_path(&config_path_cli, &startup_cwd);
 
     let mut config = match ProxyConfig::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            if std::path::Path::new(&config_path).exists() {
+            if config_path.exists() {
                 eprintln!("[telemt] Error: {}", e);
                 std::process::exit(1);
             } else {
                 let default = ProxyConfig::default();
                 std::fs::write(&config_path, toml::to_string_pretty(&default).unwrap()).unwrap();
-                eprintln!("[telemt] Created default config at {}", config_path);
+                eprintln!(
+                    "[telemt] Created default config at {}",
+                    config_path.display()
+                );
                 default
             }
         }
@@ -86,24 +100,38 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     if let Some(ref data_path) = config.general.data_path {
         if !data_path.is_absolute() {
-            eprintln!("[telemt] data_path must be absolute: {}", data_path.display());
+            eprintln!(
+                "[telemt] data_path must be absolute: {}",
+                data_path.display()
+            );
             std::process::exit(1);
         }
 
         if data_path.exists() {
             if !data_path.is_dir() {
-                eprintln!("[telemt] data_path exists but is not a directory: {}", data_path.display());
+                eprintln!(
+                    "[telemt] data_path exists but is not a directory: {}",
+                    data_path.display()
+                );
                 std::process::exit(1);
             }
         } else {
             if let Err(e) = std::fs::create_dir_all(data_path) {
-                eprintln!("[telemt] Can't create data_path {}: {}", data_path.display(), e);
+                eprintln!(
+                    "[telemt] Can't create data_path {}: {}",
+                    data_path.display(),
+                    e
+                );
                 std::process::exit(1);
             }
         }
 
         if let Err(e) = std::env::set_current_dir(data_path) {
-            eprintln!("[telemt] Can't use data_path {}: {}", data_path.display(), e);
+            eprintln!(
+                "[telemt] Can't use data_path {}: {}",
+                data_path.display(),
+                e
+            );
             std::process::exit(1);
         }
     }
@@ -127,7 +155,10 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let (filter_layer, filter_handle) = reload::Layer::new(EnvFilter::new("info"));
     startup_tracker
-        .start_component(COMPONENT_TRACING_INIT, Some("initialize tracing subscriber".to_string()))
+        .start_component(
+            COMPONENT_TRACING_INIT,
+            Some("initialize tracing subscriber".to_string()),
+        )
         .await;
 
     // Configure color output based on config
@@ -142,7 +173,10 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with(fmt_layer)
         .init();
     startup_tracker
-        .complete_component(COMPONENT_TRACING_INIT, Some("tracing initialized".to_string()))
+        .complete_component(
+            COMPONENT_TRACING_INIT,
+            Some("tracing initialized".to_string()),
+        )
         .await;
 
     info!("Telemt MTProxy v{}", env!("CARGO_PKG_VERSION"));
@@ -208,7 +242,8 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             config.access.user_max_unique_ips_window_secs,
         )
         .await;
-    if config.access.user_max_unique_ips_global_each > 0 || !config.access.user_max_unique_ips.is_empty()
+    if config.access.user_max_unique_ips_global_each > 0
+        || !config.access.user_max_unique_ips.is_empty()
     {
         info!(
             global_each_limit = config.access.user_max_unique_ips_global_each,
@@ -235,7 +270,10 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let route_runtime = Arc::new(RouteRuntimeController::new(initial_route_mode));
     let api_me_pool = Arc::new(RwLock::new(None::<Arc<MePool>>));
     startup_tracker
-        .start_component(COMPONENT_API_BOOTSTRAP, Some("spawn API listener task".to_string()))
+        .start_component(
+            COMPONENT_API_BOOTSTRAP,
+            Some("spawn API listener task".to_string()),
+        )
         .await;
 
     if config.server.api.enabled {
@@ -258,7 +296,7 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let route_runtime_api = route_runtime.clone();
             let config_rx_api = api_config_rx.clone();
             let admission_rx_api = admission_rx.clone();
-            let config_path_api = std::path::PathBuf::from(&config_path);
+            let config_path_api = config_path.clone();
             let startup_tracker_api = startup_tracker.clone();
             let detected_ips_rx_api = detected_ips_rx.clone();
             tokio::spawn(async move {
@@ -318,7 +356,10 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     .await;
 
     startup_tracker
-        .start_component(COMPONENT_NETWORK_PROBE, Some("probe network capabilities".to_string()))
+        .start_component(
+            COMPONENT_NETWORK_PROBE,
+            Some("probe network capabilities".to_string()),
+        )
         .await;
     let probe = run_probe(
         &config.network,
@@ -331,11 +372,8 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         probe.detected_ipv4.map(IpAddr::V4),
         probe.detected_ipv6.map(IpAddr::V6),
     ));
-    let decision = decide_network_capabilities(
-        &config.network,
-        &probe,
-        config.general.middle_proxy_nat_ip,
-    );
+    let decision =
+        decide_network_capabilities(&config.network, &probe, config.general.middle_proxy_nat_ip);
     log_probe_result(&probe, &decision);
     startup_tracker
         .complete_component(
@@ -438,24 +476,16 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // If ME failed to initialize, force direct-only mode.
     if me_pool.is_some() {
-        startup_tracker
-            .set_transport_mode("middle_proxy")
-            .await;
-        startup_tracker
-            .set_degraded(false)
-            .await;
+        startup_tracker.set_transport_mode("middle_proxy").await;
+        startup_tracker.set_degraded(false).await;
         info!("Transport: Middle-End Proxy - all DC-over-RPC");
     } else {
         let _ = use_middle_proxy;
         use_middle_proxy = false;
         // Make runtime config reflect direct-only mode for handlers.
         config.general.use_middle_proxy = false;
-        startup_tracker
-            .set_transport_mode("direct")
-            .await;
-        startup_tracker
-            .set_degraded(true)
-            .await;
+        startup_tracker.set_transport_mode("direct").await;
+        startup_tracker.set_degraded(true).await;
         if me2dc_fallback {
             startup_tracker
                 .set_me_status(StartupMeStatus::Failed, "fallback_to_direct")
@@ -476,7 +506,7 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(config.access.replay_window_secs),
     ));
 
-    let buffer_pool = Arc::new(BufferPool::with_config(16 * 1024, 4096));
+    let buffer_pool = Arc::new(BufferPool::with_config(64 * 1024, 4096));
 
     connectivity::run_startup_connectivity(
         &config,

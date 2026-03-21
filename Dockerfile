@@ -38,6 +38,7 @@ USER telemt
 
 EXPOSE 443
 EXPOSE 9090
+EXPOSE 9091
 
 ENTRYPOINT ["/app/telemt"]
 CMD ["config.toml"]

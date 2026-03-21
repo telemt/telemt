@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use ipnetwork::IpNetwork;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 // Helper defaults kept private to the config module.
 const DEFAULT_NETWORK_IPV6: Option<bool> = Some(false);
@@ -27,8 +27,8 @@ const DEFAULT_ME_C2ME_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_ME_READER_ROUTE_DATA_WAIT_MS: u64 = 2;
 const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_FRAMES: usize = 32;
 const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_BYTES: usize = 128 * 1024;
-const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_DELAY_US: u64 = 1500;
-const DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE: bool = false;
+const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_DELAY_US: u64 = 500;
+const DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE: bool = true;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_C2S_BYTES: usize = 64 * 1024;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_S2C_BYTES: usize = 256 * 1024;
 const DEFAULT_ME_WRITER_PICK_SAMPLE_SIZE: u8 = 3;
@@ -36,7 +36,16 @@ const DEFAULT_ME_HEALTH_INTERVAL_MS_UNHEALTHY: u64 = 1000;
 const DEFAULT_ME_HEALTH_INTERVAL_MS_HEALTHY: u64 = 3000;
 const DEFAULT_ME_ADMISSION_POLL_MS: u64 = 1000;
 const DEFAULT_ME_WARN_RATE_LIMIT_MS: u64 = 5000;
+const DEFAULT_ME_ROUTE_HYBRID_MAX_WAIT_MS: u64 = 3000;
+const DEFAULT_ME_ROUTE_BLOCKING_SEND_TIMEOUT_MS: u64 = 250;
+const DEFAULT_ME_C2ME_SEND_TIMEOUT_MS: u64 = 4000;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_ENABLED: bool = true;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_GRACE_SECS: u64 = 10;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_PER_WRITER: u8 = 2;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_BUDGET_PER_CORE: u16 = 16;
+const DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_COOLDOWN_MS: u64 = 1000;
 const DEFAULT_USER_MAX_UNIQUE_IPS_WINDOW_SECS: u64 = 30;
+const DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS: u64 = 250;
 const DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS: u32 = 2;
 const DEFAULT_UPSTREAM_UNHEALTHY_FAIL_THRESHOLD: u32 = 5;
 const DEFAULT_UPSTREAM_CONNECT_BUDGET_MS: u64 = 3000;
@@ -56,6 +65,10 @@ pub(crate) fn default_tls_domain() -> String {
     "petrovich.ru".to_string()
 }
 
+pub(crate) fn default_tls_fetch_scope() -> String {
+    String::new()
+}
+
 pub(crate) fn default_mask_port() -> u16 {
     443
 }
@@ -73,10 +86,28 @@ pub(crate) fn default_replay_check_len() -> usize {
 }
 
 pub(crate) fn default_replay_window_secs() -> u64 {
-    1800
+    // Keep replay cache TTL tight by default to reduce replay surface.
+    // Deployments with higher RTT or longer reconnect jitter can override this in config.
+    120
 }
 
 pub(crate) fn default_handshake_timeout() -> u64 {
+    30
+}
+
+pub(crate) fn default_relay_idle_policy_v2_enabled() -> bool {
+    true
+}
+
+pub(crate) fn default_relay_client_idle_soft_secs() -> u64 {
+    120
+}
+
+pub(crate) fn default_relay_client_idle_hard_secs() -> u64 {
+    360
+}
+
+pub(crate) fn default_relay_idle_grace_after_downstream_activity_secs() -> u64 {
     30
 }
 
@@ -85,11 +116,11 @@ pub(crate) fn default_connect_timeout() -> u64 {
 }
 
 pub(crate) fn default_keepalive() -> u64 {
-    60
+    15
 }
 
 pub(crate) fn default_ack_timeout() -> u64 {
-    300
+    90
 }
 pub(crate) fn default_me_one_retry() -> u8 {
     12
@@ -112,10 +143,7 @@ pub(crate) fn default_weight() -> u16 {
 }
 
 pub(crate) fn default_metrics_whitelist() -> Vec<IpNetwork> {
-    vec![
-        "127.0.0.1/32".parse().unwrap(),
-        "::1/128".parse().unwrap(),
-    ]
+    vec!["127.0.0.1/32".parse().unwrap(), "::1/128".parse().unwrap()]
 }
 
 pub(crate) fn default_api_listen() -> String {
@@ -138,10 +166,18 @@ pub(crate) fn default_api_minimal_runtime_cache_ttl_ms() -> u64 {
     1000
 }
 
-pub(crate) fn default_api_runtime_edge_enabled() -> bool { false }
-pub(crate) fn default_api_runtime_edge_cache_ttl_ms() -> u64 { 1000 }
-pub(crate) fn default_api_runtime_edge_top_n() -> usize { 10 }
-pub(crate) fn default_api_runtime_edge_events_capacity() -> usize { 256 }
+pub(crate) fn default_api_runtime_edge_enabled() -> bool {
+    false
+}
+pub(crate) fn default_api_runtime_edge_cache_ttl_ms() -> u64 {
+    1000
+}
+pub(crate) fn default_api_runtime_edge_top_n() -> usize {
+    10
+}
+pub(crate) fn default_api_runtime_edge_events_capacity() -> usize {
+    256
+}
 
 pub(crate) fn default_proxy_protocol_header_timeout_ms() -> u64 {
     500
@@ -149,6 +185,10 @@ pub(crate) fn default_proxy_protocol_header_timeout_ms() -> u64 {
 
 pub(crate) fn default_server_max_connections() -> u32 {
     10_000
+}
+
+pub(crate) fn default_accept_permit_timeout_ms() -> u64 {
+    DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS
 }
 
 pub(crate) fn default_prefer_4() -> u8 {
@@ -375,6 +415,18 @@ pub(crate) fn default_me_warn_rate_limit_ms() -> u64 {
     DEFAULT_ME_WARN_RATE_LIMIT_MS
 }
 
+pub(crate) fn default_me_route_hybrid_max_wait_ms() -> u64 {
+    DEFAULT_ME_ROUTE_HYBRID_MAX_WAIT_MS
+}
+
+pub(crate) fn default_me_route_blocking_send_timeout_ms() -> u64 {
+    DEFAULT_ME_ROUTE_BLOCKING_SEND_TIMEOUT_MS
+}
+
+pub(crate) fn default_me_c2me_send_timeout_ms() -> u64 {
+    DEFAULT_ME_C2ME_SEND_TIMEOUT_MS
+}
+
 pub(crate) fn default_upstream_connect_retry_attempts() -> u32 {
     DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS
 }
@@ -456,15 +508,47 @@ pub(crate) fn default_tls_full_cert_ttl_secs() -> u64 {
 }
 
 pub(crate) fn default_server_hello_delay_min_ms() -> u64 {
-    0
+    8
 }
 
 pub(crate) fn default_server_hello_delay_max_ms() -> u64 {
-    0
+    24
 }
 
 pub(crate) fn default_alpn_enforce() -> bool {
     true
+}
+
+pub(crate) fn default_mask_shape_hardening() -> bool {
+    true
+}
+
+pub(crate) fn default_mask_shape_bucket_floor_bytes() -> usize {
+    512
+}
+
+pub(crate) fn default_mask_shape_bucket_cap_bytes() -> usize {
+    4096
+}
+
+pub(crate) fn default_mask_shape_above_cap_blur() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_shape_above_cap_blur_max_bytes() -> usize {
+    512
+}
+
+pub(crate) fn default_mask_timing_normalization_enabled() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_timing_normalization_floor_ms() -> u64 {
+    0
+}
+
+pub(crate) fn default_mask_timing_normalization_ceiling_ms() -> u64 {
+    0
 }
 
 pub(crate) fn default_stun_servers() -> Vec<String> {
@@ -581,15 +665,39 @@ pub(crate) fn default_proxy_secret_len_max() -> usize {
 }
 
 pub(crate) fn default_me_reinit_drain_timeout_secs() -> u64 {
-    120
+    90
 }
 
 pub(crate) fn default_me_pool_drain_ttl_secs() -> u64 {
     90
 }
 
+pub(crate) fn default_me_instadrain() -> bool {
+    false
+}
+
 pub(crate) fn default_me_pool_drain_threshold() -> u64 {
-    128
+    32
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_enabled() -> bool {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_ENABLED
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_grace_secs() -> u64 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_GRACE_SECS
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_per_writer() -> u8 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_PER_WRITER
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_budget_per_core() -> u16 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_BUDGET_PER_CORE
+}
+
+pub(crate) fn default_me_pool_drain_soft_evict_cooldown_ms() -> u64 {
+    DEFAULT_ME_POOL_DRAIN_SOFT_EVICT_COOLDOWN_MS
 }
 
 pub(crate) fn default_me_bind_stale_ttl_secs() -> u64 {

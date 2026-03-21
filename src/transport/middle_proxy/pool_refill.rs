@@ -71,15 +71,29 @@ impl MePool {
         }
 
         if let Some((addr, expiry)) = earliest_quarantine {
+            let remaining = expiry.saturating_duration_since(now);
+            if remaining.is_zero() {
+                return vec![addr];
+            }
+            drop(guard);
             debug!(
                 %addr,
                 wait_ms = expiry.saturating_duration_since(now).as_millis(),
-                "All ME endpoints are quarantined for the DC group; retrying earliest one"
+                "All ME endpoints are quarantined for the DC group; waiting for quarantine expiry"
             );
+            tokio::time::sleep(remaining).await;
             return vec![addr];
         }
 
         Vec::new()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn connectable_endpoints_for_test(
+        &self,
+        endpoints: &[SocketAddr],
+    ) -> Vec<SocketAddr> {
+        self.connectable_endpoints(endpoints).await
     }
 
     pub(super) async fn has_refill_inflight_for_dc_key(&self, key: RefillDcKey) -> bool {
@@ -128,9 +142,7 @@ impl MePool {
                     continue;
                 }
                 if !matches!(
-                    super::pool::WriterContour::from_u8(
-                        writer.contour.load(Ordering::Relaxed),
-                    ),
+                    super::pool::WriterContour::from_u8(writer.contour.load(Ordering::Relaxed),),
                     super::pool::WriterContour::Active
                 ) {
                     continue;
@@ -140,7 +152,8 @@ impl MePool {
                 }
             }
             drop(ws);
-            candidates.sort_by_key(|addr| (active_by_endpoint.get(addr).copied().unwrap_or(0), *addr));
+            candidates
+                .sort_by_key(|addr| (active_by_endpoint.get(addr).copied().unwrap_or(0), *addr));
         }
         let start = (self.rr.fetch_add(1, Ordering::Relaxed) as usize) % candidates.len();
         for offset in 0..candidates.len() {
@@ -165,9 +178,10 @@ impl MePool {
     }
 
     async fn endpoints_for_dc(&self, target_dc: i32) -> Vec<SocketAddr> {
+        let now_epoch_secs = Self::now_epoch_secs();
         let mut endpoints = HashSet::<SocketAddr>::new();
 
-        if self.decision.ipv4_me {
+        if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch_secs) {
             let map = self.proxy_map_v4.read().await;
             if let Some(addrs) = map.get(&target_dc) {
                 for (ip, port) in addrs {
@@ -176,7 +190,7 @@ impl MePool {
             }
         }
 
-        if self.decision.ipv6_me {
+        if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch_secs) {
             let map = self.proxy_map_v6.read().await;
             if let Some(addrs) = map.get(&target_dc) {
                 for (ip, port) in addrs {
@@ -197,10 +211,14 @@ impl MePool {
         if !same_endpoint_quarantined {
             for attempt in 0..fast_retries {
                 self.stats.increment_me_reconnect_attempt();
-                match self.connect_one_for_dc(addr, writer_dc, self.rng.as_ref()).await {
+                match self
+                    .connect_one_for_dc(addr, writer_dc, self.rng.as_ref())
+                    .await
+                {
                     Ok(()) => {
                         self.stats.increment_me_reconnect_success();
-                        self.stats.increment_me_writer_restored_same_endpoint_total();
+                        self.stats
+                            .increment_me_writer_restored_same_endpoint_total();
                         info!(
                             %addr,
                             attempt = attempt + 1,
@@ -252,7 +270,11 @@ impl MePool {
         false
     }
 
-    pub(crate) fn trigger_immediate_refill_for_dc(self: &Arc<Self>, addr: SocketAddr, writer_dc: i32) {
+    pub(crate) fn trigger_immediate_refill_for_dc(
+        self: &Arc<Self>,
+        addr: SocketAddr,
+        writer_dc: i32,
+    ) {
         let endpoint_key = RefillEndpointKey {
             dc: writer_dc,
             addr,

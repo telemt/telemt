@@ -32,6 +32,7 @@ show = "*"
 port = 443
 # proxy_protocol = false           # Enable if behind HAProxy/nginx with PROXY protocol
 # metrics_port = 9090
+# metrics_listen = "0.0.0.0:9090"  # Listen address for metrics (overrides metrics_port)
 # metrics_whitelist = ["127.0.0.1", "::1", "0.0.0.0/0"]
 
 [server.api]

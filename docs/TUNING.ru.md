@@ -82,7 +82,7 @@
 
 | Поле | Применимость | Тип | Обязательно | Default | Назначение |
 |---|---|---|---|---|---|
-| `[[upstreams]].type` | все upstream | `"direct" \| "socks4" \| "socks5"` | да | n/a | Тип upstream транспорта. |
+| `[[upstreams]].type` | все upstream | `"direct" \| "socks4" \| "socks5" \| "shadowsocks"` | да | n/a | Тип upstream транспорта. |
 | `[[upstreams]].weight` | все upstream | `u16` | нет | `1` | Базовый вес в weighted-random выборе. |
 | `[[upstreams]].enabled` | все upstream | `bool` | нет | `true` | Выключенные записи игнорируются на старте. |
 | `[[upstreams]].scopes` | все upstream | `String` | нет | `""` | Список scope-токенов через запятую для маршрутизации. |
@@ -95,6 +95,8 @@
 | `interface` | `socks5` | `Option<String>` | нет | `null` | Используется только если `address` задан как `ip:port`. |
 | `username` | `socks5` | `Option<String>` | нет | `null` | Логин SOCKS5 auth. |
 | `password` | `socks5` | `Option<String>` | нет | `null` | Пароль SOCKS5 auth. |
+| `url` | `shadowsocks` | `String` | да | n/a | Shadowsocks SIP002 URL (`ss://...`). В runtime API раскрывается только `host:port`. |
+| `interface` | `shadowsocks` | `Option<String>` | нет | `null` | Необязательный исходящий bind-интерфейс или literal локальный IP. |
 
 ### Runtime-правила
 
@@ -115,6 +117,7 @@
 8. В ME-режиме выбранный upstream также используется для ME TCP dial path.
 9. В ME-режиме для `direct` upstream с bind/interface STUN-рефлексия выполняется bind-aware для KDF материала.
 10. В ME-режиме для SOCKS upstream используются `BND.ADDR/BND.PORT` для KDF, если адрес валиден/публичен и соответствует IP family.
+11. `shadowsocks` upstream требует `general.use_middle_proxy = false`. При включенном ME-режиме конфиг отклоняется при загрузке.
 
 ## Примеры конфигурации Upstreams
 
@@ -150,7 +153,20 @@ weight = 2
 enabled = true
 ```
 
-### Пример 4: смешанные upstream с scopes
+### Пример 4: Shadowsocks upstream
+
+```toml
+[general]
+use_middle_proxy = false
+
+[[upstreams]]
+type = "shadowsocks"
+url = "ss://2022-blake3-aes-256-gcm:BASE64_KEY@198.51.100.50:8388"
+weight = 2
+enabled = true
+```
+
+### Пример 5: смешанные upstream с scopes
 
 ```toml
 [[upstreams]]

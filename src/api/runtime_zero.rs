@@ -128,7 +128,8 @@ pub(super) fn build_system_info_data(
         .runtime_state
         .last_config_reload_epoch_secs
         .load(Ordering::Relaxed);
-    let last_config_reload_epoch_secs = (last_reload_epoch_secs > 0).then_some(last_reload_epoch_secs);
+    let last_config_reload_epoch_secs =
+        (last_reload_epoch_secs > 0).then_some(last_reload_epoch_secs);
 
     let git_commit = option_env!("TELEMT_GIT_COMMIT")
         .or(option_env!("VERGEN_GIT_SHA"))
@@ -153,7 +154,10 @@ pub(super) fn build_system_info_data(
         uptime_seconds: shared.stats.uptime_secs(),
         config_path: shared.config_path.display().to_string(),
         config_hash: revision.to_string(),
-        config_reload_count: shared.runtime_state.config_reload_count.load(Ordering::Relaxed),
+        config_reload_count: shared
+            .runtime_state
+            .config_reload_count
+            .load(Ordering::Relaxed),
         last_config_reload_epoch_secs,
     }
 }
@@ -233,9 +237,7 @@ pub(super) fn build_limits_effective_data(cfg: &ProxyConfig) -> EffectiveLimitsD
             adaptive_floor_writers_per_core_total: cfg
                 .general
                 .me_adaptive_floor_writers_per_core_total,
-            adaptive_floor_cpu_cores_override: cfg
-                .general
-                .me_adaptive_floor_cpu_cores_override,
+            adaptive_floor_cpu_cores_override: cfg.general.me_adaptive_floor_cpu_cores_override,
             adaptive_floor_max_extra_writers_single_per_core: cfg
                 .general
                 .me_adaptive_floor_max_extra_writers_single_per_core,

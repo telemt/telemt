@@ -497,13 +497,14 @@ Note: the request contract is defined, but the corresponding route currently ret
 | `direct_total` | `usize` | Direct-route upstream entries. |
 | `socks4_total` | `usize` | SOCKS4 upstream entries. |
 | `socks5_total` | `usize` | SOCKS5 upstream entries. |
+| `shadowsocks_total` | `usize` | Shadowsocks upstream entries. |
 
 #### `RuntimeUpstreamQualityUpstreamData`
 | Field | Type | Description |
 | --- | --- | --- |
 | `upstream_id` | `usize` | Runtime upstream index. |
-| `route_kind` | `string` | `direct`, `socks4`, `socks5`. |
-| `address` | `string` | Upstream address (`direct` literal for direct route kind). |
+| `route_kind` | `string` | `direct`, `socks4`, `socks5`, `shadowsocks`. |
+| `address` | `string` | Upstream address (`direct` literal for direct route kind, `host:port` only for proxied upstreams). |
 | `weight` | `u16` | Selection weight. |
 | `scopes` | `string` | Configured scope selector. |
 | `healthy` | `bool` | Current health flag. |
@@ -757,13 +758,14 @@ Note: the request contract is defined, but the corresponding route currently ret
 | `direct_total` | `usize` | Number of direct upstream entries. |
 | `socks4_total` | `usize` | Number of SOCKS4 upstream entries. |
 | `socks5_total` | `usize` | Number of SOCKS5 upstream entries. |
+| `shadowsocks_total` | `usize` | Number of Shadowsocks upstream entries. |
 
 #### `UpstreamStatus`
 | Field | Type | Description |
 | --- | --- | --- |
 | `upstream_id` | `usize` | Runtime upstream index. |
-| `route_kind` | `string` | Upstream route kind: `direct`, `socks4`, `socks5`. |
-| `address` | `string` | Upstream address (`direct` for direct route kind). Authentication fields are intentionally omitted. |
+| `route_kind` | `string` | Upstream route kind: `direct`, `socks4`, `socks5`, `shadowsocks`. |
+| `address` | `string` | Upstream address (`direct` for direct route kind, `host:port` for Shadowsocks). Authentication fields are intentionally omitted. |
 | `weight` | `u16` | Selection weight. |
 | `scopes` | `string` | Configured scope selector string. |
 | `healthy` | `bool` | Current health flag. |

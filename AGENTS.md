@@ -390,6 +390,12 @@ you MUST explain why existing invariants remain valid.
 - Do not modify existing tests unless the task explicitly requires it.
 - Do not weaken assertions.
 - Preserve determinism in testable components.
+- Bug-first forces the discipline of proving you understand a bug before you fix it. Tests written after a fix almost always pass trivially and catch nothing new.
+- Invariants over scenarios is the core shift. The route_mode table alone would have caught both BUG-1 and BUG-2 before they were written — "snapshot equals watch state after any transition burst" is a two-line property test that fails immediately on the current diverged-atomics code.
+- Differential/model catches logic drift over time.
+- Scheduler pressure is specifically aimed at the concurrent state bugs that keep reappearing. A single-threaded happy-path test of set_mode will never find subtle bugs; 10,000 concurrent calls will find it on the first run.
+- Mutation gate answers your original complaint directly. It measures test power. If you can remove a bounds check and nothing breaks, the suite isn't covering that branch yet — it just says so explicitly.
+- Dead parameter is a code smell rule. 
 
 ### 15. Security Constraints
 

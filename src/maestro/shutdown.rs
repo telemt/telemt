@@ -16,8 +16,11 @@ pub(crate) async fn wait_for_shutdown(process_started_at: Instant, me_pool: Opti
             let uptime_secs = process_started_at.elapsed().as_secs();
             info!("Uptime: {}", format_uptime(uptime_secs));
             if let Some(pool) = &me_pool {
-                match tokio::time::timeout(Duration::from_secs(2), pool.shutdown_send_close_conn_all())
-                    .await
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    pool.shutdown_send_close_conn_all(),
+                )
+                .await
                 {
                     Ok(total) => {
                         info!(

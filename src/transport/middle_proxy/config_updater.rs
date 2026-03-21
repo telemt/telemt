@@ -96,32 +96,36 @@ pub async fn save_proxy_config_cache(path: &str, raw_text: &str) -> Result<()> {
 }
 
 pub async fn fetch_proxy_config_with_raw(url: &str) -> Result<(ProxyConfigData, String)> {
-    let resp = reqwest::get(url)
-        .await
-        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}")))?
-        ;
+    let resp = reqwest::get(url).await.map_err(|e| {
+        crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}"))
+    })?;
     let http_status = resp.status().as_u16();
 
     if let Some(date) = resp.headers().get(reqwest::header::DATE)
         && let Ok(date_str) = date.to_str()
         && let Ok(server_time) = httpdate::parse_http_date(date_str)
-        && let Ok(skew) = SystemTime::now().duration_since(server_time).or_else(|e| {
-            server_time.duration_since(SystemTime::now()).map_err(|_| e)
-        })
+        && let Ok(skew) = SystemTime::now()
+            .duration_since(server_time)
+            .or_else(|e| server_time.duration_since(SystemTime::now()).map_err(|_| e))
     {
         let skew_secs = skew.as_secs();
         record_timeskew_sample("proxy_config_date_header", skew_secs);
         if skew_secs > 60 {
-            warn!(skew_secs, "Time skew >60s detected from fetch_proxy_config Date header");
+            warn!(
+                skew_secs,
+                "Time skew >60s detected from fetch_proxy_config Date header"
+            );
         } else if skew_secs > 30 {
-            warn!(skew_secs, "Time skew >30s detected from fetch_proxy_config Date header");
+            warn!(
+                skew_secs,
+                "Time skew >30s detected from fetch_proxy_config Date header"
+            );
         }
     }
 
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config read failed: {e}")))?;
+    let text = resp.text().await.map_err(|e| {
+        crate::error::ProxyError::Proxy(format!("fetch_proxy_config read failed: {e}"))
+    })?;
     let parsed = parse_proxy_config_text(&text, http_status);
     Ok((parsed, text))
 }
@@ -165,8 +169,11 @@ fn hash_proxy_config(cfg: &ProxyConfigData) -> u64 {
     let mut hasher = DefaultHasher::new();
     cfg.default_dc.hash(&mut hasher);
 
-    let mut by_dc: Vec<(i32, Vec<(IpAddr, u16)>)> =
-        cfg.map.iter().map(|(dc, addrs)| (*dc, addrs.clone())).collect();
+    let mut by_dc: Vec<(i32, Vec<(IpAddr, u16)>)> = cfg
+        .map
+        .iter()
+        .map(|(dc, addrs)| (*dc, addrs.clone()))
+        .collect();
     by_dc.sort_by_key(|(dc, _)| *dc);
     for (dc, mut addrs) in by_dc {
         dc.hash(&mut hasher);
@@ -264,9 +271,7 @@ fn snapshot_passes_guards(
     snapshot: &ProxyConfigData,
     snapshot_name: &'static str,
 ) -> bool {
-    if cfg.general.me_snapshot_require_http_2xx
-        && !(200..=299).contains(&snapshot.http_status)
-    {
+    if cfg.general.me_snapshot_require_http_2xx && !(200..=299).contains(&snapshot.http_status) {
         warn!(
             snapshot = snapshot_name,
             http_status = snapshot.http_status,
@@ -298,7 +303,13 @@ async fn run_update_cycle(
     pool.update_runtime_reinit_policy(
         cfg.general.hardswap,
         cfg.general.me_pool_drain_ttl_secs,
+        cfg.general.me_instadrain,
         cfg.general.me_pool_drain_threshold,
+        cfg.general.me_pool_drain_soft_evict_enabled,
+        cfg.general.me_pool_drain_soft_evict_grace_secs,
+        cfg.general.me_pool_drain_soft_evict_per_writer,
+        cfg.general.me_pool_drain_soft_evict_budget_per_core,
+        cfg.general.me_pool_drain_soft_evict_cooldown_ms,
         cfg.general.effective_me_pool_force_close_secs(),
         cfg.general.me_pool_min_fresh_ratio,
         cfg.general.me_hardswap_warmup_delay_min_ms,
@@ -324,8 +335,10 @@ async fn run_update_cycle(
         cfg.general.me_adaptive_floor_recover_grace_secs,
         cfg.general.me_adaptive_floor_writers_per_core_total,
         cfg.general.me_adaptive_floor_cpu_cores_override,
-        cfg.general.me_adaptive_floor_max_extra_writers_single_per_core,
-        cfg.general.me_adaptive_floor_max_extra_writers_multi_per_core,
+        cfg.general
+            .me_adaptive_floor_max_extra_writers_single_per_core,
+        cfg.general
+            .me_adaptive_floor_max_extra_writers_multi_per_core,
         cfg.general.me_adaptive_floor_max_active_writers_per_core,
         cfg.general.me_adaptive_floor_max_warm_writers_per_core,
         cfg.general.me_adaptive_floor_max_active_writers_global,
@@ -394,9 +407,7 @@ async fn run_update_cycle(
                 .as_ref()
                 .map(|(snapshot, _)| snapshot.map.clone())
                 .unwrap_or_default();
-            let update_v6 = ready_v6
-                .as_ref()
-                .map(|(snapshot, _)| snapshot.map.clone());
+            let update_v6 = ready_v6.as_ref().map(|(snapshot, _)| snapshot.map.clone());
             let update_is_empty =
                 update_v4.is_empty() && update_v6.as_ref().is_none_or(|v| v.is_empty());
             let apply_outcome = if update_is_empty && !cfg.general.me_snapshot_reject_empty_map {
@@ -434,10 +445,7 @@ async fn run_update_cycle(
             }
         } else if let Some(last) = state.last_map_apply_at {
             let wait_secs = map_apply_cooldown_remaining_secs(last, apply_cooldown);
-            debug!(
-                wait_secs,
-                "ME config stable snapshot deferred by cooldown"
-            );
+            debug!(wait_secs, "ME config stable snapshot deferred by cooldown");
         }
     }
 
@@ -525,7 +533,13 @@ pub async fn me_config_updater(
                 pool.update_runtime_reinit_policy(
                     cfg.general.hardswap,
                     cfg.general.me_pool_drain_ttl_secs,
+                    cfg.general.me_instadrain,
                     cfg.general.me_pool_drain_threshold,
+                    cfg.general.me_pool_drain_soft_evict_enabled,
+                    cfg.general.me_pool_drain_soft_evict_grace_secs,
+                    cfg.general.me_pool_drain_soft_evict_per_writer,
+                    cfg.general.me_pool_drain_soft_evict_budget_per_core,
+                    cfg.general.me_pool_drain_soft_evict_cooldown_ms,
                     cfg.general.effective_me_pool_force_close_secs(),
                     cfg.general.me_pool_min_fresh_ratio,
                     cfg.general.me_hardswap_warmup_delay_min_ms,

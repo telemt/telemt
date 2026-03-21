@@ -1,7 +1,7 @@
-pub mod types;
 pub mod cache;
-pub mod fetcher;
 pub mod emulator;
+pub mod fetcher;
+pub mod types;
 
 pub use cache::TlsFrontCache;
 #[allow(unused_imports)]
