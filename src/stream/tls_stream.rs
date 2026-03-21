@@ -12,7 +12,7 @@
 //! Telegram MTProto proxy "FakeTLS" mode uses a TLS-looking outer layer for
 //! domain fronting / traffic camouflage. iOS Telegram clients are known to
 //! produce slightly different TLS record sizing patterns than Android/Desktop,
-//! including records that exceed 16384 payload bytes by a small overhead.
+//! including records that exceed MAX_TLS_PLAINTEXT_SIZE payload bytes by a small overhead.
 //!
 //! Key design principles:
 //! - Explicit state machines for all async operations
@@ -23,14 +23,13 @@
 //! - Proper handling of all TLS record types
 //!
 //! Important nuance (Telegram FakeTLS):
-//! - The TLS spec limits "plaintext fragments" to 2^14 (16384) bytes.
-//! - However, the on-the-wire record length can exceed 16384 because TLS 1.3
+//! - The TLS spec limits "plaintext fragments" to MAX_TLS_PLAINTEXT_SIZE bytes.
+//! - However, the on-the-wire record length can exceed MAX_TLS_PLAINTEXT_SIZE because TLS 1.3
 //!   uses AEAD and can include tag/overhead/padding.
 //! - Telegram FakeTLS clients (notably iOS) may send Application Data records
-//!   with length up to 16384 + 256 bytes (RFC 8446 §5.2). We accept that as
-//!   MAX_TLS_CHUNK_SIZE.
+//!   with length up to MAX_TLS_CIPHERTEXT_SIZE bytes (RFC 8446 §5.2).
 //!
-//! If you reject those (e.g. validate length <= 16384), you will see errors like:
+//! If you reject those (e.g. validate length <= MAX_TLS_PLAINTEXT_SIZE), you will see errors like:
 //!   "TLS record too large: 16408 bytes"
 //! and uploads from iOS will break (media/file sending), while small traffic
 //! may still work.
@@ -42,10 +41,11 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt, ReadBuf};
 
 use crate::protocol::constants::{
+    MAX_TLS_PLAINTEXT_SIZE,
     TLS_VERSION,
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER,
     TLS_RECORD_HANDSHAKE, TLS_RECORD_ALERT,
-    MAX_TLS_CHUNK_SIZE,
+    MAX_TLS_CIPHERTEXT_SIZE,
 };
 use super::state::{StreamState, HeaderBuffer, YieldBuffer, WriteBuffer};
 
@@ -56,7 +56,7 @@ const TLS_HEADER_SIZE: usize = 5;
 
 /// Maximum TLS fragment size we emit for Application Data.
 /// Real TLS 1.3 allows up to 16384 + 256 bytes of ciphertext (incl. tag).
-const MAX_TLS_PAYLOAD: usize = 16384 + 256;
+const MAX_TLS_PAYLOAD: usize = MAX_TLS_CIPHERTEXT_SIZE;
 
 /// Maximum pending write buffer for one record remainder.
 /// Note: we never queue unlimited amount of data here; state holds at most one record.
@@ -93,10 +93,10 @@ impl TlsRecordHeader {
     /// - We accept TLS 1.0 header version for ClientHello-like records (0x03 0x01),
     ///   and TLS 1.2/1.3 style version bytes for the rest (we use TLS_VERSION = 0x03 0x03).
     /// - For Application Data, Telegram FakeTLS may send payload length up to
-    ///   MAX_TLS_CHUNK_SIZE (16384 + 256).
+    ///   MAX_TLS_CIPHERTEXT_SIZE (16384 + 256).
     /// - For other record types we keep stricter bounds to avoid memory abuse.
     fn validate(&self) -> Result<()> {
-        // Version: accept TLS 1.0 header (ClientHello quirk) and TLS_VERSION (0x0303).
+        // Version precheck: only 0x0301 and 0x0303 are recognized at all.
         if self.version != [0x03, 0x01] && self.version != TLS_VERSION {
             return Err(Error::new(
                 ErrorKind::InvalidData,
@@ -104,30 +104,74 @@ impl TlsRecordHeader {
             ));
         }
 
+        // Narrow FakeTLS wire profile: TLS 1.0 compatibility header is allowed
+        // only on Handshake records (ClientHello compatibility quirk).
+        if self.record_type != TLS_RECORD_HANDSHAKE && self.version != TLS_VERSION {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "invalid TLS version for record type 0x{:02x}: {:02x?}",
+                    self.record_type,
+                    self.version
+                ),
+            ));
+        }
+
         let len = self.length as usize;
 
         // Length checks depend on record type.
-        // Telegram FakeTLS: ApplicationData length may be 16384 + 256.
+        // Telegram FakeTLS: ApplicationData may use ciphertext envelope limit,
+        // while control records stay structurally strict to reduce probe surface.
         match self.record_type {
             TLS_RECORD_APPLICATION => {
-                if len > MAX_TLS_CHUNK_SIZE {
+                if len == 0 || len > MAX_TLS_CIPHERTEXT_SIZE {
                     return Err(Error::new(
                         ErrorKind::InvalidData,
-                        format!("TLS record too large: {} bytes (max {})", len, MAX_TLS_CHUNK_SIZE),
+                        format!(
+                            "invalid TLS application data length: {} (min 1, max {})",
+                            len,
+                            MAX_TLS_CIPHERTEXT_SIZE
+                        ),
                     ));
                 }
             }
 
-            // ChangeCipherSpec/Alert/Handshake should never be that large for our usage
-            // (post-handshake we don't expect Handshake at all).
-            // Keep strict to reduce attack surface.
-            _ => {
-                if len > MAX_TLS_PAYLOAD {
+            TLS_RECORD_CHANGE_CIPHER => {
+                if len != 1 {
                     return Err(Error::new(
                         ErrorKind::InvalidData,
-                        format!("TLS control record too large: {} bytes (max {})", len, MAX_TLS_PAYLOAD),
+                        format!("invalid TLS ChangeCipherSpec length: {} (expected 1)", len),
                     ));
                 }
+            }
+
+            TLS_RECORD_ALERT => {
+                if len != 2 {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("invalid TLS alert length: {} (expected 2)", len),
+                    ));
+                }
+            }
+
+            TLS_RECORD_HANDSHAKE => {
+                if len < 4 || len > MAX_TLS_PLAINTEXT_SIZE {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "invalid TLS handshake length: {} (min 4, max {})",
+                            len,
+                            MAX_TLS_PLAINTEXT_SIZE
+                        ),
+                    ));
+                }
+            }
+
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("unknown TLS record type: 0x{:02x}", self.record_type),
+                ));
             }
         }
 
@@ -249,6 +293,19 @@ impl<R> FakeTlsReader<R> {
     pub fn get_ref(&self) -> &R { &self.upstream }
     pub fn get_mut(&mut self) -> &mut R { &mut self.upstream }
     pub fn into_inner(self) -> R { self.upstream }
+
+    pub fn into_inner_with_pending_plaintext(mut self) -> (R, Vec<u8>) {
+        let pending = match std::mem::replace(&mut self.state, TlsReaderState::Idle) {
+            TlsReaderState::Yielding { buffer } => buffer.as_slice().to_vec(),
+            TlsReaderState::ReadingBody { record_type, buffer, .. }
+                if record_type == TLS_RECORD_APPLICATION =>
+            {
+                buffer.to_vec()
+            }
+            _ => Vec::new(),
+        };
+        (self.upstream, pending)
+    }
 
     pub fn is_poisoned(&self) -> bool { self.state.is_poisoned() }
     pub fn state_name(&self) -> &'static str { self.state.state_name() }
@@ -584,10 +641,10 @@ impl StreamState for TlsWriterState {
 
 /// Writer that wraps bytes into TLS 1.3 Application Data records.
 ///
-/// We chunk outgoing data into records of <= 16384 payload bytes (MAX_TLS_PAYLOAD).
+/// We chunk outgoing data into records of <= MAX_TLS_CIPHERTEXT_SIZE payload bytes.
 /// We do not try to mimic AEAD overhead on the wire; Telegram clients accept it.
 /// If you want to be more camouflage-accurate later, you could add optional padding
-/// to produce records sized closer to MAX_TLS_CHUNK_SIZE.
+/// to produce records sized closer to MAX_TLS_CIPHERTEXT_SIZE.
 pub struct FakeTlsWriter<W> {
     upstream: W,
     state: TlsWriterState,
@@ -823,7 +880,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FakeTlsWriter<W> {
 impl<W: AsyncWrite + Unpin> FakeTlsWriter<W> {
     /// Write all data wrapped in TLS records.
     ///
-    /// Convenience method that chunks into <= 16384 records.
+    /// Convenience method that chunks into <= MAX_TLS_CIPHERTEXT_SIZE records.
     pub async fn write_all_tls(&mut self, data: &[u8]) -> Result<()> {
         let mut written = 0;
         while written < data.len() {
@@ -837,6 +894,10 @@ impl<W: AsyncWrite + Unpin> FakeTlsWriter<W> {
         self.flush().await
     }
 }
+
+#[cfg(test)]
+#[path = "tls_stream_size_adversarial_tests.rs"]
+mod size_adversarial_tests;
 
 // ============= Tests =============
 
@@ -1237,3 +1298,7 @@ mod tests {
         assert_eq!(bytes, [0x17, 0x03, 0x03, 0x12, 0x34]);
     }
 }
+
+#[cfg(test)]
+#[path = "tls_stream_pending_plaintext_security_tests.rs"]
+mod pending_plaintext_security_tests;

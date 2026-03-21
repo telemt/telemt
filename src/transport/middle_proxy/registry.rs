@@ -169,7 +169,6 @@ impl ConnRegistry {
         None
     }
 
-    #[allow(dead_code)]
     pub async fn route(&self, id: u64, resp: MeResponse) -> RouteResult {
         let tx = {
             let inner = self.inner.read().await;
@@ -395,89 +394,31 @@ impl ConnRegistry {
         inner.writer_for_conn.keys().copied().collect()
     }
 
-    pub(super) async fn bound_conn_ids_for_writer_limited(
-        &self,
-        writer_id: u64,
-        limit: usize,
-    ) -> Vec<u64> {
-        if limit == 0 {
-            return Vec::new();
-        }
-        let inner = self.inner.read().await;
-        let Some(conn_ids) = inner.conns_for_writer.get(&writer_id) else {
-            return Vec::new();
-        };
-        let mut out = conn_ids.iter().copied().collect::<Vec<_>>();
-        out.sort_unstable();
-        out.truncate(limit);
-        out
-    }
-
-    pub(super) async fn evict_bound_conn_if_writer(&self, conn_id: u64, writer_id: u64) -> bool {
-        let maybe_client_tx = {
-            let mut inner = self.inner.write().await;
-            if inner.writer_for_conn.get(&conn_id).copied() != Some(writer_id) {
-                return false;
-            }
-
-            let client_tx = inner.map.get(&conn_id).cloned();
-            inner.map.remove(&conn_id);
-            inner.meta.remove(&conn_id);
-            inner.writer_for_conn.remove(&conn_id);
-
-            let became_empty = if let Some(set) = inner.conns_for_writer.get_mut(&writer_id) {
-                set.remove(&conn_id);
-                set.is_empty()
-            } else {
-                false
-            };
-            if became_empty {
-                inner
-                    .writer_idle_since_epoch_secs
-                    .insert(writer_id, Self::now_epoch_secs());
-            }
-            client_tx
-        };
-
-        if let Some(client_tx) = maybe_client_tx {
-            let _ = client_tx.try_send(MeResponse::Close);
-        }
-        true
-    }
-
     pub async fn writer_lost(&self, writer_id: u64) -> Vec<BoundConn> {
-        let mut close_txs = Vec::<mpsc::Sender<MeResponse>>::new();
-        let mut out = Vec::new();
-        {
-            let mut inner = self.inner.write().await;
-            inner.writers.remove(&writer_id);
-            inner.last_meta_for_writer.remove(&writer_id);
-            inner.writer_idle_since_epoch_secs.remove(&writer_id);
-            let conns = inner
-                .conns_for_writer
-                .remove(&writer_id)
-                .unwrap_or_default()
-                .into_iter()
-                .collect::<Vec<_>>();
+        let mut inner = self.inner.write().await;
+        inner.writers.remove(&writer_id);
+        inner.last_meta_for_writer.remove(&writer_id);
+        inner.writer_idle_since_epoch_secs.remove(&writer_id);
+        let conns = inner
+            .conns_for_writer
+            .remove(&writer_id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>();
 
-            for conn_id in conns {
-                if inner.writer_for_conn.get(&conn_id).copied() != Some(writer_id) {
-                    continue;
-                }
-                inner.writer_for_conn.remove(&conn_id);
-                if let Some(client_tx) = inner.map.remove(&conn_id) {
-                    close_txs.push(client_tx);
-                }
-                if let Some(meta) = inner.meta.remove(&conn_id) {
-                    out.push(BoundConn { conn_id, meta });
-                }
+        let mut out = Vec::new();
+        for conn_id in conns {
+            if inner.writer_for_conn.get(&conn_id).copied() != Some(writer_id) {
+                continue;
+            }
+            inner.writer_for_conn.remove(&conn_id);
+            if let Some(m) = inner.meta.get(&conn_id) {
+                out.push(BoundConn {
+                    conn_id,
+                    meta: m.clone(),
+                });
             }
         }
-
-        for client_tx in close_txs {
-            let _ = client_tx.try_send(MeResponse::Close);
-        }
-
         out
     }
 
@@ -495,16 +436,45 @@ impl ConnRegistry {
             .map(|s| s.is_empty())
             .unwrap_or(true)
     }
+
+    pub async fn unregister_writer_if_empty(&self, writer_id: u64) -> bool {
+        let mut inner = self.inner.write().await;
+        let Some(conn_ids) = inner.conns_for_writer.get(&writer_id) else {
+            // Writer is already absent from the registry.
+            return true;
+        };
+        if !conn_ids.is_empty() {
+            return false;
+        }
+
+        inner.writers.remove(&writer_id);
+        inner.last_meta_for_writer.remove(&writer_id);
+        inner.writer_idle_since_epoch_secs.remove(&writer_id);
+        inner.conns_for_writer.remove(&writer_id);
+        true
+    }
+
+    #[allow(dead_code)]
+    pub(super) async fn non_empty_writer_ids(&self, writer_ids: &[u64]) -> HashSet<u64> {
+        let inner = self.inner.read().await;
+        let mut out = HashSet::<u64>::with_capacity(writer_ids.len());
+        for writer_id in writer_ids {
+            if let Some(conns) = inner.conns_for_writer.get(writer_id)
+                && !conns.is_empty()
+            {
+                out.insert(*writer_id);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::time::Duration;
 
     use super::ConnMeta;
     use super::ConnRegistry;
-    use super::MeResponse;
 
     #[tokio::test]
     async fn writer_activity_snapshot_tracks_writer_and_dc_load() {
@@ -674,39 +644,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_lost_removes_bound_conn_from_registry_and_signals_close() {
-        let registry = ConnRegistry::new();
-        let (conn_id, mut rx) = registry.register().await;
-        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
-        registry.register_writer(10, writer_tx).await;
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-
-        assert!(
-            registry
-                .bind_writer(
-                    conn_id,
-                    10,
-                    ConnMeta {
-                        target_dc: 2,
-                        client_addr: addr,
-                        our_addr: addr,
-                        proto_flags: 0,
-                    },
-                )
-                .await
-        );
-
-        let lost = registry.writer_lost(10).await;
-        assert_eq!(lost.len(), 1);
-        assert_eq!(lost[0].conn_id, conn_id);
-        assert!(registry.get_writer(conn_id).await.is_none());
-        assert!(registry.get_meta(conn_id).await.is_none());
-        assert_eq!(registry.unregister(conn_id).await, None);
-        let close = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
-        assert!(matches!(close, Ok(Some(MeResponse::Close))));
-    }
-
-    #[tokio::test]
     async fn bind_writer_rejects_unregistered_writer() {
         let registry = ConnRegistry::new();
         let (conn_id, _rx) = registry.register().await;
@@ -730,47 +667,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bound_conn_ids_for_writer_limited_is_sorted_and_bounded() {
+    async fn non_empty_writer_ids_returns_only_writers_with_bound_clients() {
         let registry = ConnRegistry::new();
-        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel(8);
-        registry.register_writer(10, writer_tx).await;
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-        let mut conn_ids = Vec::new();
-        for _ in 0..5 {
-            let (conn_id, _rx) = registry.register().await;
-            assert!(
-                registry
-                    .bind_writer(
-                        conn_id,
-                        10,
-                        ConnMeta {
-                            target_dc: 2,
-                            client_addr: addr,
-                            our_addr: addr,
-                            proto_flags: 0,
-                        },
-                    )
-                    .await
-            );
-            conn_ids.push(conn_id);
-        }
-        conn_ids.sort_unstable();
-
-        let limited = registry.bound_conn_ids_for_writer_limited(10, 3).await;
-        assert_eq!(limited.len(), 3);
-        assert_eq!(limited, conn_ids.into_iter().take(3).collect::<Vec<_>>());
-    }
-
-    #[tokio::test]
-    async fn evict_bound_conn_if_writer_does_not_touch_rebound_conn() {
-        let registry = ConnRegistry::new();
-        let (conn_id, mut rx) = registry.register().await;
+        let (conn_id, _rx) = registry.register().await;
         let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
         let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
         registry.register_writer(10, writer_tx_a).await;
         registry.register_writer(20, writer_tx_b).await;
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
 
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
         assert!(
             registry
                 .bind_writer(
@@ -785,29 +690,10 @@ mod tests {
                 )
                 .await
         );
-        assert!(
-            registry
-                .bind_writer(
-                    conn_id,
-                    20,
-                    ConnMeta {
-                        target_dc: 2,
-                        client_addr: addr,
-                        our_addr: addr,
-                        proto_flags: 1,
-                    },
-                )
-                .await
-        );
 
-        let evicted = registry.evict_bound_conn_if_writer(conn_id, 10).await;
-        assert!(!evicted);
-        assert_eq!(registry.get_writer(conn_id).await.expect("writer").writer_id, 20);
-        assert!(rx.try_recv().is_err());
-
-        let evicted = registry.evict_bound_conn_if_writer(conn_id, 20).await;
-        assert!(evicted);
-        assert!(registry.get_writer(conn_id).await.is_none());
-        assert!(matches!(rx.try_recv(), Ok(MeResponse::Close)));
+        let non_empty = registry.non_empty_writer_ids(&[10, 20, 30]).await;
+        assert!(non_empty.contains(&10));
+        assert!(!non_empty.contains(&20));
+        assert!(!non_empty.contains(&30));
     }
 }

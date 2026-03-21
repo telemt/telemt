@@ -6,6 +6,7 @@ pub mod beobachten;
 pub mod telemetry;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -19,134 +20,43 @@ use tracing::debug;
 use crate::config::{MeTelemetryLevel, MeWriterPickMode};
 use self::telemetry::TelemetryPolicy;
 
-const ME_WRITER_TEARDOWN_MODE_COUNT: usize = 2;
-const ME_WRITER_TEARDOWN_REASON_COUNT: usize = 11;
-const ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT: usize = 2;
-const ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT: usize = 12;
-const ME_WRITER_TEARDOWN_DURATION_BUCKET_BOUNDS_MICROS: [u64; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] = [
-    1_000,
-    5_000,
-    10_000,
-    25_000,
-    50_000,
-    100_000,
-    250_000,
-    500_000,
-    1_000_000,
-    2_500_000,
-    5_000_000,
-    10_000_000,
-];
-const ME_WRITER_TEARDOWN_DURATION_BUCKET_LABELS: [&str; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] = [
-    "0.001",
-    "0.005",
-    "0.01",
-    "0.025",
-    "0.05",
-    "0.1",
-    "0.25",
-    "0.5",
-    "1",
-    "2.5",
-    "5",
-    "10",
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum MeWriterTeardownMode {
-    Normal = 0,
-    HardDetach = 1,
+#[derive(Clone, Copy)]
+enum RouteConnectionGauge {
+    Direct,
+    Middle,
 }
 
-impl MeWriterTeardownMode {
-    pub const ALL: [Self; ME_WRITER_TEARDOWN_MODE_COUNT] =
-        [Self::Normal, Self::HardDetach];
+#[must_use = "RouteConnectionLease must be kept alive to hold the connection gauge increment"]
+pub struct RouteConnectionLease {
+    stats: Arc<Stats>,
+    gauge: RouteConnectionGauge,
+    active: bool,
+}
 
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::HardDetach => "hard_detach",
+impl RouteConnectionLease {
+    fn new(stats: Arc<Stats>, gauge: RouteConnectionGauge) -> Self {
+        Self {
+            stats,
+            gauge,
+            active: true,
         }
     }
 
-    const fn idx(self) -> usize {
-        self as usize
+    #[cfg(test)]
+    fn disarm(&mut self) {
+        self.active = false;
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum MeWriterTeardownReason {
-    ReaderExit = 0,
-    WriterTaskExit = 1,
-    PingSendFail = 2,
-    SignalSendFail = 3,
-    RouteChannelClosed = 4,
-    CloseRpcChannelClosed = 5,
-    PruneClosedWriter = 6,
-    ReapTimeoutExpired = 7,
-    ReapThresholdForce = 8,
-    ReapEmpty = 9,
-    WatchdogStuckDraining = 10,
-}
-
-impl MeWriterTeardownReason {
-    pub const ALL: [Self; ME_WRITER_TEARDOWN_REASON_COUNT] = [
-        Self::ReaderExit,
-        Self::WriterTaskExit,
-        Self::PingSendFail,
-        Self::SignalSendFail,
-        Self::RouteChannelClosed,
-        Self::CloseRpcChannelClosed,
-        Self::PruneClosedWriter,
-        Self::ReapTimeoutExpired,
-        Self::ReapThresholdForce,
-        Self::ReapEmpty,
-        Self::WatchdogStuckDraining,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReaderExit => "reader_exit",
-            Self::WriterTaskExit => "writer_task_exit",
-            Self::PingSendFail => "ping_send_fail",
-            Self::SignalSendFail => "signal_send_fail",
-            Self::RouteChannelClosed => "route_channel_closed",
-            Self::CloseRpcChannelClosed => "close_rpc_channel_closed",
-            Self::PruneClosedWriter => "prune_closed_writer",
-            Self::ReapTimeoutExpired => "reap_timeout_expired",
-            Self::ReapThresholdForce => "reap_threshold_force",
-            Self::ReapEmpty => "reap_empty",
-            Self::WatchdogStuckDraining => "watchdog_stuck_draining",
+impl Drop for RouteConnectionLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
         }
-    }
-
-    const fn idx(self) -> usize {
-        self as usize
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum MeWriterCleanupSideEffectStep {
-    CloseSignalChannelFull = 0,
-    CloseSignalChannelClosed = 1,
-}
-
-impl MeWriterCleanupSideEffectStep {
-    pub const ALL: [Self; ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT] =
-        [Self::CloseSignalChannelFull, Self::CloseSignalChannelClosed];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CloseSignalChannelFull => "close_signal_channel_full",
-            Self::CloseSignalChannelClosed => "close_signal_channel_closed",
+        match self.gauge {
+            RouteConnectionGauge::Direct => self.stats.decrement_current_connections_direct(),
+            RouteConnectionGauge::Middle => self.stats.decrement_current_connections_me(),
         }
-    }
-
-    const fn idx(self) -> usize {
-        self as usize
     }
 }
 
@@ -189,6 +99,10 @@ pub struct Stats {
     me_handshake_reject_total: AtomicU64,
     me_reader_eof_total: AtomicU64,
     me_idle_close_by_peer_total: AtomicU64,
+    relay_idle_soft_mark_total: AtomicU64,
+    relay_idle_hard_close_total: AtomicU64,
+    relay_pressure_evict_total: AtomicU64,
+    relay_protocol_desync_close_total: AtomicU64,
     me_crc_mismatch: AtomicU64,
     me_seq_mismatch: AtomicU64,
     me_endpoint_quarantine_total: AtomicU64,
@@ -251,26 +165,9 @@ pub struct Stats {
     pool_swap_total: AtomicU64,
     pool_drain_active: AtomicU64,
     pool_force_close_total: AtomicU64,
-    pool_drain_soft_evict_total: AtomicU64,
-    pool_drain_soft_evict_writer_total: AtomicU64,
     pool_stale_pick_total: AtomicU64,
-    me_writer_close_signal_drop_total: AtomicU64,
-    me_writer_close_signal_channel_full_total: AtomicU64,
-    me_draining_writers_reap_progress_total: AtomicU64,
     me_writer_removed_total: AtomicU64,
     me_writer_removed_unexpected_total: AtomicU64,
-    me_writer_teardown_attempt_total:
-        [[AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT]; ME_WRITER_TEARDOWN_REASON_COUNT],
-    me_writer_teardown_success_total: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
-    me_writer_teardown_timeout_total: AtomicU64,
-    me_writer_teardown_escalation_total: AtomicU64,
-    me_writer_teardown_noop_total: AtomicU64,
-    me_writer_cleanup_side_effect_failures_total:
-        [AtomicU64; ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT],
-    me_writer_teardown_duration_bucket_hits:
-        [[AtomicU64; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT + 1]; ME_WRITER_TEARDOWN_MODE_COUNT],
-    me_writer_teardown_duration_sum_micros: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
-    me_writer_teardown_duration_count: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
     me_refill_triggered_total: AtomicU64,
     me_refill_skipped_inflight_total: AtomicU64,
     me_refill_failed_total: AtomicU64,
@@ -281,11 +178,6 @@ pub struct Stats {
     me_inline_recovery_total: AtomicU64,
     ip_reservation_rollback_tcp_limit_total: AtomicU64,
     ip_reservation_rollback_quota_limit_total: AtomicU64,
-    relay_adaptive_promotions_total: AtomicU64,
-    relay_adaptive_demotions_total: AtomicU64,
-    relay_adaptive_hard_promotions_total: AtomicU64,
-    reconnect_evict_total: AtomicU64,
-    reconnect_stale_close_total: AtomicU64,
     telemetry_core_enabled: AtomicBool,
     telemetry_user_enabled: AtomicBool,
     telemetry_me_level: AtomicU8,
@@ -438,35 +330,15 @@ impl Stats {
     pub fn decrement_current_connections_me(&self) {
         Self::decrement_atomic_saturating(&self.current_connections_me);
     }
-    pub fn increment_relay_adaptive_promotions_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.relay_adaptive_promotions_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
+
+    pub fn acquire_direct_connection_lease(self: &Arc<Self>) -> RouteConnectionLease {
+        self.increment_current_connections_direct();
+        RouteConnectionLease::new(self.clone(), RouteConnectionGauge::Direct)
     }
-    pub fn increment_relay_adaptive_demotions_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.relay_adaptive_demotions_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_relay_adaptive_hard_promotions_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.relay_adaptive_hard_promotions_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_reconnect_evict_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.reconnect_evict_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_reconnect_stale_close_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.reconnect_stale_close_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
+
+    pub fn acquire_me_connection_lease(self: &Arc<Self>) -> RouteConnectionLease {
+        self.increment_current_connections_me();
+        RouteConnectionLease::new(self.clone(), RouteConnectionGauge::Middle)
     }
     pub fn increment_handshake_timeouts(&self) {
         if self.telemetry_core_enabled() {
@@ -654,6 +526,30 @@ impl Stats {
     pub fn increment_me_idle_close_by_peer_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_idle_close_by_peer_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_idle_soft_mark_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_idle_soft_mark_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_idle_hard_close_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_idle_hard_close_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_pressure_evict_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_pressure_evict_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_protocol_desync_close_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_protocol_desync_close_total
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -863,39 +759,9 @@ impl Stats {
             self.pool_force_close_total.fetch_add(1, Ordering::Relaxed);
         }
     }
-    pub fn increment_pool_drain_soft_evict_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.pool_drain_soft_evict_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_pool_drain_soft_evict_writer_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.pool_drain_soft_evict_writer_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
     pub fn increment_pool_stale_pick_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_close_signal_drop_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_close_signal_drop_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_close_signal_channel_full_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_close_signal_channel_full_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_draining_writers_reap_progress_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_draining_writers_reap_progress_total
-                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_writer_removed_total(&self) {
@@ -907,74 +773,6 @@ impl Stats {
         if self.telemetry_me_allows_normal() {
             self.me_writer_removed_unexpected_total.fetch_add(1, Ordering::Relaxed);
         }
-    }
-    pub fn increment_me_writer_teardown_attempt_total(
-        &self,
-        reason: MeWriterTeardownReason,
-        mode: MeWriterTeardownMode,
-    ) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_attempt_total[reason.idx()][mode.idx()]
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_success_total(&self, mode: MeWriterTeardownMode) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_success_total[mode.idx()].fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_timeout_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_timeout_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_escalation_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_escalation_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_noop_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_noop_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_cleanup_side_effect_failures_total(
-        &self,
-        step: MeWriterCleanupSideEffectStep,
-    ) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_cleanup_side_effect_failures_total[step.idx()]
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn observe_me_writer_teardown_duration(
-        &self,
-        mode: MeWriterTeardownMode,
-        duration: Duration,
-    ) {
-        if !self.telemetry_me_allows_normal() {
-            return;
-        }
-        let duration_micros = duration.as_micros().min(u64::MAX as u128) as u64;
-        let mut bucket_idx = ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT;
-        for (idx, upper_bound_micros) in ME_WRITER_TEARDOWN_DURATION_BUCKET_BOUNDS_MICROS
-            .iter()
-            .copied()
-            .enumerate()
-        {
-            if duration_micros <= upper_bound_micros {
-                bucket_idx = idx;
-                break;
-            }
-        }
-        self.me_writer_teardown_duration_bucket_hits[mode.idx()][bucket_idx]
-            .fetch_add(1, Ordering::Relaxed);
-        self.me_writer_teardown_duration_sum_micros[mode.idx()]
-            .fetch_add(duration_micros, Ordering::Relaxed);
-        self.me_writer_teardown_duration_count[mode.idx()].fetch_add(1, Ordering::Relaxed);
     }
     pub fn increment_me_refill_triggered_total(&self) {
         if self.telemetry_me_allows_debug() {
@@ -1214,22 +1012,6 @@ impl Stats {
         self.get_current_connections_direct()
             .saturating_add(self.get_current_connections_me())
     }
-    pub fn get_relay_adaptive_promotions_total(&self) -> u64 {
-        self.relay_adaptive_promotions_total.load(Ordering::Relaxed)
-    }
-    pub fn get_relay_adaptive_demotions_total(&self) -> u64 {
-        self.relay_adaptive_demotions_total.load(Ordering::Relaxed)
-    }
-    pub fn get_relay_adaptive_hard_promotions_total(&self) -> u64 {
-        self.relay_adaptive_hard_promotions_total
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_reconnect_evict_total(&self) -> u64 {
-        self.reconnect_evict_total.load(Ordering::Relaxed)
-    }
-    pub fn get_reconnect_stale_close_total(&self) -> u64 {
-        self.reconnect_stale_close_total.load(Ordering::Relaxed)
-    }
     pub fn get_me_keepalive_sent(&self) -> u64 { self.me_keepalive_sent.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_failed(&self) -> u64 { self.me_keepalive_failed.load(Ordering::Relaxed) }
     pub fn get_me_keepalive_pong(&self) -> u64 { self.me_keepalive_pong.load(Ordering::Relaxed) }
@@ -1264,6 +1046,18 @@ impl Stats {
     }
     pub fn get_me_idle_close_by_peer_total(&self) -> u64 {
         self.me_idle_close_by_peer_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_idle_soft_mark_total(&self) -> u64 {
+        self.relay_idle_soft_mark_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_idle_hard_close_total(&self) -> u64 {
+        self.relay_idle_hard_close_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_pressure_evict_total(&self) -> u64 {
+        self.relay_pressure_evict_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_protocol_desync_close_total(&self) -> u64 {
+        self.relay_protocol_desync_close_total.load(Ordering::Relaxed)
     }
     pub fn get_me_crc_mismatch(&self) -> u64 { self.me_crc_mismatch.load(Ordering::Relaxed) }
     pub fn get_me_seq_mismatch(&self) -> u64 { self.me_seq_mismatch.load(Ordering::Relaxed) }
@@ -1482,104 +1276,14 @@ impl Stats {
     pub fn get_pool_force_close_total(&self) -> u64 {
         self.pool_force_close_total.load(Ordering::Relaxed)
     }
-    pub fn get_pool_drain_soft_evict_total(&self) -> u64 {
-        self.pool_drain_soft_evict_total.load(Ordering::Relaxed)
-    }
-    pub fn get_pool_drain_soft_evict_writer_total(&self) -> u64 {
-        self.pool_drain_soft_evict_writer_total.load(Ordering::Relaxed)
-    }
     pub fn get_pool_stale_pick_total(&self) -> u64 {
         self.pool_stale_pick_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_close_signal_drop_total(&self) -> u64 {
-        self.me_writer_close_signal_drop_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_close_signal_channel_full_total(&self) -> u64 {
-        self.me_writer_close_signal_channel_full_total
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_draining_writers_reap_progress_total(&self) -> u64 {
-        self.me_draining_writers_reap_progress_total
-            .load(Ordering::Relaxed)
     }
     pub fn get_me_writer_removed_total(&self) -> u64 {
         self.me_writer_removed_total.load(Ordering::Relaxed)
     }
     pub fn get_me_writer_removed_unexpected_total(&self) -> u64 {
         self.me_writer_removed_unexpected_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_attempt_total(
-        &self,
-        reason: MeWriterTeardownReason,
-        mode: MeWriterTeardownMode,
-    ) -> u64 {
-        self.me_writer_teardown_attempt_total[reason.idx()][mode.idx()]
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_attempt_total_by_mode(&self, mode: MeWriterTeardownMode) -> u64 {
-        MeWriterTeardownReason::ALL
-            .iter()
-            .copied()
-            .map(|reason| self.get_me_writer_teardown_attempt_total(reason, mode))
-            .sum()
-    }
-    pub fn get_me_writer_teardown_success_total(&self, mode: MeWriterTeardownMode) -> u64 {
-        self.me_writer_teardown_success_total[mode.idx()].load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_timeout_total(&self) -> u64 {
-        self.me_writer_teardown_timeout_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_escalation_total(&self) -> u64 {
-        self.me_writer_teardown_escalation_total
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_noop_total(&self) -> u64 {
-        self.me_writer_teardown_noop_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_cleanup_side_effect_failures_total(
-        &self,
-        step: MeWriterCleanupSideEffectStep,
-    ) -> u64 {
-        self.me_writer_cleanup_side_effect_failures_total[step.idx()]
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_cleanup_side_effect_failures_total_all(&self) -> u64 {
-        MeWriterCleanupSideEffectStep::ALL
-            .iter()
-            .copied()
-            .map(|step| self.get_me_writer_cleanup_side_effect_failures_total(step))
-            .sum()
-    }
-    pub fn me_writer_teardown_duration_bucket_labels(
-    ) -> &'static [&'static str; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] {
-        &ME_WRITER_TEARDOWN_DURATION_BUCKET_LABELS
-    }
-    pub fn get_me_writer_teardown_duration_bucket_hits(
-        &self,
-        mode: MeWriterTeardownMode,
-        bucket_idx: usize,
-    ) -> u64 {
-        self.me_writer_teardown_duration_bucket_hits[mode.idx()][bucket_idx]
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_duration_bucket_total(
-        &self,
-        mode: MeWriterTeardownMode,
-        bucket_idx: usize,
-    ) -> u64 {
-        let capped_idx = bucket_idx.min(ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT);
-        let mut total = 0u64;
-        for idx in 0..=capped_idx {
-            total = total.saturating_add(self.get_me_writer_teardown_duration_bucket_hits(mode, idx));
-        }
-        total
-    }
-    pub fn get_me_writer_teardown_duration_count(&self, mode: MeWriterTeardownMode) -> u64 {
-        self.me_writer_teardown_duration_count[mode.idx()].load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_duration_sum_seconds(&self, mode: MeWriterTeardownMode) -> f64 {
-        self.me_writer_teardown_duration_sum_micros[mode.idx()].load(Ordering::Relaxed) as f64
-            / 1_000_000.0
     }
     pub fn get_me_refill_triggered_total(&self) -> u64 {
         self.me_refill_triggered_total.load(Ordering::Relaxed)
@@ -1643,11 +1347,35 @@ impl Stats {
         Self::touch_user_stats(stats.value());
         stats.curr_connects.fetch_add(1, Ordering::Relaxed);
     }
+
+    pub fn try_acquire_user_curr_connects(&self, user: &str, limit: Option<u64>) -> bool {
+        if !self.telemetry_user_enabled() {
+            return true;
+        }
+
+        self.maybe_cleanup_user_stats();
+        let stats = self.user_stats.entry(user.to_string()).or_default();
+        Self::touch_user_stats(stats.value());
+
+        let counter = &stats.curr_connects;
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            if let Some(max) = limit && current >= max {
+                return false;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current.saturating_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
     
     pub fn decrement_user_curr_connects(&self, user: &str) {
-        if !self.telemetry_user_enabled() {
-            return;
-        }
         self.maybe_cleanup_user_stats();
         if let Some(stats) = self.user_stats.get(user) {
             Self::touch_user_stats(stats.value());
@@ -1820,9 +1548,11 @@ impl Stats {
 // ============= Replay Checker =============
 
 pub struct ReplayChecker {
-    shards: Vec<Mutex<ReplayShard>>,
+    handshake_shards: Vec<Mutex<ReplayShard>>,
+    tls_shards: Vec<Mutex<ReplayShard>>,
     shard_mask: usize,
     window: Duration,
+    tls_window: Duration,
     checks: AtomicU64,
     hits: AtomicU64,
     additions: AtomicU64,
@@ -1899,19 +1629,24 @@ impl ReplayShard {
 
 impl ReplayChecker {
     pub fn new(total_capacity: usize, window: Duration) -> Self {
+        const MIN_TLS_REPLAY_WINDOW: Duration = Duration::from_secs(120);
         let num_shards = 64;
         let shard_capacity = (total_capacity / num_shards).max(1);
         let cap = NonZeroUsize::new(shard_capacity).unwrap();
 
-        let mut shards = Vec::with_capacity(num_shards);
+        let mut handshake_shards = Vec::with_capacity(num_shards);
+        let mut tls_shards = Vec::with_capacity(num_shards);
         for _ in 0..num_shards {
-            shards.push(Mutex::new(ReplayShard::new(cap)));
+            handshake_shards.push(Mutex::new(ReplayShard::new(cap)));
+            tls_shards.push(Mutex::new(ReplayShard::new(cap)));
         }
 
         Self {
-            shards,
+            handshake_shards,
+            tls_shards,
             shard_mask: num_shards - 1,
             window,
+            tls_window: window.max(MIN_TLS_REPLAY_WINDOW),
             checks: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             additions: AtomicU64::new(0),
@@ -1925,46 +1660,60 @@ impl ReplayChecker {
         (hasher.finish() as usize) & self.shard_mask
     }
 
-    fn check_and_add_internal(&self, data: &[u8]) -> bool {
+    fn check_and_add_internal(
+        &self,
+        data: &[u8],
+        shards: &[Mutex<ReplayShard>],
+        window: Duration,
+    ) -> bool {
         self.checks.fetch_add(1, Ordering::Relaxed);
         let idx = self.get_shard_idx(data);
-        let mut shard = self.shards[idx].lock();
+        let mut shard = shards[idx].lock();
         let now = Instant::now();
-        let found = shard.check(data, now, self.window);
+        let found = shard.check(data, now, window);
         if found {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
-            shard.add(data, now, self.window);
+            shard.add(data, now, window);
             self.additions.fetch_add(1, Ordering::Relaxed);
         }
         found
     }
 
-    fn add_only(&self, data: &[u8]) {
+    fn add_only(&self, data: &[u8], shards: &[Mutex<ReplayShard>], window: Duration) {
         self.additions.fetch_add(1, Ordering::Relaxed);
         let idx = self.get_shard_idx(data);
-        let mut shard = self.shards[idx].lock();
-        shard.add(data, Instant::now(), self.window);
+        let mut shard = shards[idx].lock();
+        shard.add(data, Instant::now(), window);
     }
 
     pub fn check_and_add_handshake(&self, data: &[u8]) -> bool {
-        self.check_and_add_internal(data)
+        self.check_and_add_internal(data, &self.handshake_shards, self.window)
     }
 
     pub fn check_and_add_tls_digest(&self, data: &[u8]) -> bool {
-        self.check_and_add_internal(data)
+        self.check_and_add_internal(data, &self.tls_shards, self.tls_window)
     }
 
     // Compatibility helpers (non-atomic split operations) — prefer check_and_add_*.
     pub fn check_handshake(&self, data: &[u8]) -> bool { self.check_and_add_handshake(data) }
-    pub fn add_handshake(&self, data: &[u8]) { self.add_only(data) }
+    pub fn add_handshake(&self, data: &[u8]) {
+        self.add_only(data, &self.handshake_shards, self.window)
+    }
     pub fn check_tls_digest(&self, data: &[u8]) -> bool { self.check_and_add_tls_digest(data) }
-    pub fn add_tls_digest(&self, data: &[u8]) { self.add_only(data) }
+    pub fn add_tls_digest(&self, data: &[u8]) {
+        self.add_only(data, &self.tls_shards, self.tls_window)
+    }
     
     pub fn stats(&self) -> ReplayStats {
         let mut total_entries = 0;
         let mut total_queue_len = 0;
-        for shard in &self.shards {
+        for shard in &self.handshake_shards {
+            let s = shard.lock();
+            total_entries += s.cache.len();
+            total_queue_len += s.queue.len();
+        }
+        for shard in &self.tls_shards {
             let s = shard.lock();
             total_entries += s.cache.len();
             total_queue_len += s.queue.len();
@@ -1977,7 +1726,7 @@ impl ReplayChecker {
             total_hits: self.hits.load(Ordering::Relaxed),
             total_additions: self.additions.load(Ordering::Relaxed),
             total_cleanups: self.cleanups.load(Ordering::Relaxed),
-            num_shards: self.shards.len(),
+            num_shards: self.handshake_shards.len() + self.tls_shards.len(),
             window_secs: self.window.as_secs(),
         }
     }
@@ -1995,10 +1744,17 @@ impl ReplayChecker {
             let now = Instant::now();
             let mut cleaned = 0usize;
             
-            for shard_mutex in &self.shards {
+            for shard_mutex in &self.handshake_shards {
                 let mut shard = shard_mutex.lock();
                 let before = shard.len();
                 shard.cleanup(now, self.window);
+                let after = shard.len();
+                cleaned += before.saturating_sub(after);
+            }
+            for shard_mutex in &self.tls_shards {
+                let mut shard = shard_mutex.lock();
+                let before = shard.len();
+                shard.cleanup(now, self.tls_window);
                 let after = shard.len();
                 cleaned += before.saturating_sub(after);
             }
@@ -2084,79 +1840,6 @@ mod tests {
         assert_eq!(stats.get_me_keepalive_sent(), 0);
         assert_eq!(stats.get_me_route_drop_queue_full(), 0);
     }
-
-    #[test]
-    fn test_teardown_counters_and_duration() {
-        let stats = Stats::new();
-        stats.increment_me_writer_teardown_attempt_total(
-            MeWriterTeardownReason::ReaderExit,
-            MeWriterTeardownMode::Normal,
-        );
-        stats.increment_me_writer_teardown_success_total(MeWriterTeardownMode::Normal);
-        stats.observe_me_writer_teardown_duration(
-            MeWriterTeardownMode::Normal,
-            Duration::from_millis(3),
-        );
-        stats.increment_me_writer_cleanup_side_effect_failures_total(
-            MeWriterCleanupSideEffectStep::CloseSignalChannelFull,
-        );
-
-        assert_eq!(
-            stats.get_me_writer_teardown_attempt_total(
-                MeWriterTeardownReason::ReaderExit,
-                MeWriterTeardownMode::Normal
-            ),
-            1
-        );
-        assert_eq!(
-            stats.get_me_writer_teardown_success_total(MeWriterTeardownMode::Normal),
-            1
-        );
-        assert_eq!(
-            stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal),
-            1
-        );
-        assert!(
-            stats.get_me_writer_teardown_duration_sum_seconds(MeWriterTeardownMode::Normal) > 0.0
-        );
-        assert_eq!(
-            stats.get_me_writer_cleanup_side_effect_failures_total(
-                MeWriterCleanupSideEffectStep::CloseSignalChannelFull
-            ),
-            1
-        );
-    }
-
-    #[test]
-    fn test_teardown_counters_respect_me_silent() {
-        let stats = Stats::new();
-        stats.apply_telemetry_policy(TelemetryPolicy {
-            core_enabled: true,
-            user_enabled: true,
-            me_level: MeTelemetryLevel::Silent,
-        });
-        stats.increment_me_writer_teardown_attempt_total(
-            MeWriterTeardownReason::ReaderExit,
-            MeWriterTeardownMode::Normal,
-        );
-        stats.increment_me_writer_teardown_timeout_total();
-        stats.observe_me_writer_teardown_duration(
-            MeWriterTeardownMode::Normal,
-            Duration::from_millis(1),
-        );
-        assert_eq!(
-            stats.get_me_writer_teardown_attempt_total(
-                MeWriterTeardownReason::ReaderExit,
-                MeWriterTeardownMode::Normal
-            ),
-            0
-        );
-        assert_eq!(stats.get_me_writer_teardown_timeout_total(), 0);
-        assert_eq!(
-            stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal),
-            0
-        );
-    }
     
     #[test]
     fn test_replay_checker_basic() {
@@ -2200,7 +1883,7 @@ mod tests {
     fn test_replay_checker_many_keys() {
         let checker = ReplayChecker::new(10_000, Duration::from_secs(60));
         for i in 0..500u32 {
-            checker.add_only(&i.to_le_bytes());
+            checker.add_handshake(&i.to_le_bytes());
         }
         for i in 0..500u32 {
             assert!(checker.check_handshake(&i.to_le_bytes()));
@@ -2208,3 +1891,11 @@ mod tests {
         assert_eq!(checker.stats().total_entries, 500);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/connection_lease_security_tests.rs"]
+mod connection_lease_security_tests;
+
+#[cfg(test)]
+#[path = "tests/replay_checker_security_tests.rs"]
+mod replay_checker_security_tests;

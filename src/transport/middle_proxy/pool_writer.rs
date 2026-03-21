@@ -6,9 +6,8 @@ use std::io::ErrorKind;
 
 use bytes::Bytes;
 use bytes::BytesMut;
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -16,9 +15,6 @@ use crate::config::MeBindStaleMode;
 use crate::crypto::SecureRandom;
 use crate::error::{ProxyError, Result};
 use crate::protocol::constants::{RPC_CLOSE_EXT_U32, RPC_PING_U32};
-use crate::stats::{
-    MeWriterCleanupSideEffectStep, MeWriterTeardownMode, MeWriterTeardownReason,
-};
 
 use super::codec::{RpcWriter, WriterCommand};
 use super::pool::{MePool, MeWriter, WriterContour};
@@ -31,7 +27,7 @@ const ME_IDLE_KEEPALIVE_MAX_SECS: u64 = 5;
 const ME_RPC_PROXY_REQ_RESPONSE_WAIT_MS: u64 = 700;
 
 #[derive(Clone, Copy)]
-enum WriterRemoveGuardMode {
+enum WriterTeardownMode {
     Any,
     DrainingOnly,
 }
@@ -51,18 +47,7 @@ impl MePool {
         }
 
         for writer_id in closed_writer_ids {
-            if self.registry.is_writer_empty(writer_id).await {
-                let _ = self
-                    .remove_writer_only(writer_id, MeWriterTeardownReason::PruneClosedWriter)
-                    .await;
-            } else {
-                let _ = self
-                    .remove_writer_and_close_clients(
-                        writer_id,
-                        MeWriterTeardownReason::PruneClosedWriter,
-                    )
-                    .await;
-            }
+            let _ = self.remove_writer_and_close_clients(writer_id).await;
         }
     }
 
@@ -183,11 +168,7 @@ impl MePool {
                 .is_ok()
             {
                 if let Some(pool) = pool_writer_task.upgrade() {
-                    pool.remove_writer_and_close_clients(
-                        writer_id,
-                        MeWriterTeardownReason::WriterTaskExit,
-                    )
-                    .await;
+                    pool.remove_writer_and_close_clients(writer_id).await;
                 } else {
                     cancel_wr.cancel();
                 }
@@ -278,11 +259,7 @@ impl MePool {
                 .is_ok()
             {
                 if let Some(pool) = pool.upgrade() {
-                    pool.remove_writer_and_close_clients(
-                        writer_id,
-                        MeWriterTeardownReason::ReaderExit,
-                    )
-                    .await;
+                    pool.remove_writer_and_close_clients(writer_id).await;
                 } else {
                     // Fallback for shutdown races: make writer task exit quickly so stale
                     // channels are observable by periodic prune.
@@ -352,28 +329,41 @@ impl MePool {
                 let mut p = Vec::with_capacity(12);
                 p.extend_from_slice(&RPC_PING_U32.to_le_bytes());
                 p.extend_from_slice(&sent_id.to_le_bytes());
-                let now_epoch_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let mut run_cleanup = false;
-                if let Some(pool) = pool_ping.upgrade() {
-                    let last_cleanup_ms = pool
-                        .ping_tracker_last_cleanup_epoch_ms
-                        .load(Ordering::Relaxed);
-                    if now_epoch_ms.saturating_sub(last_cleanup_ms) >= 30_000
-                        && pool
+                {
+                    let mut tracker = ping_tracker_ping.lock().await;
+                    let now_epoch_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let mut run_cleanup = false;
+                    if let Some(pool) = pool_ping.upgrade() {
+                        let last_cleanup_ms = pool
                             .ping_tracker_last_cleanup_epoch_ms
-                            .compare_exchange(
-                                last_cleanup_ms,
-                                now_epoch_ms,
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                            )
-                            .is_ok()
-                    {
-                        run_cleanup = true;
+                            .load(Ordering::Relaxed);
+                        if now_epoch_ms.saturating_sub(last_cleanup_ms) >= 30_000
+                            && pool
+                                .ping_tracker_last_cleanup_epoch_ms
+                                .compare_exchange(
+                                    last_cleanup_ms,
+                                    now_epoch_ms,
+                                    Ordering::AcqRel,
+                                    Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            run_cleanup = true;
+                        }
                     }
+
+                    if run_cleanup {
+                        let before = tracker.len();
+                        tracker.retain(|_, (ts, _)| ts.elapsed() < Duration::from_secs(120));
+                        let expired = before.saturating_sub(tracker.len());
+                        if expired > 0 {
+                            stats_ping.increment_me_keepalive_timeout_by(expired as u64);
+                        }
+                    }
+                    tracker.insert(sent_id, (std::time::Instant::now(), writer_id));
                 }
                 ping_id = ping_id.wrapping_add(1);
                 stats_ping.increment_me_keepalive_sent();
@@ -385,29 +375,16 @@ impl MePool {
                     stats_ping.increment_me_keepalive_failed();
                     debug!("ME ping failed, removing dead writer");
                     cancel_ping.cancel();
-                    if let Some(pool) = pool_ping.upgrade()
-                        && cleanup_for_ping
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                            .is_ok()
+                    if cleanup_for_ping
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
                     {
-                        pool.remove_writer_and_close_clients(
-                            writer_id,
-                            MeWriterTeardownReason::PingSendFail,
-                        )
-                        .await;
+                        if let Some(pool) = pool_ping.upgrade() {
+                            pool.remove_writer_and_close_clients(writer_id).await;
+                        }
                     }
                     break;
                 }
-                let mut tracker = ping_tracker_ping.lock().await;
-                if run_cleanup {
-                    let before = tracker.len();
-                    tracker.retain(|_, (ts, _)| ts.elapsed() < Duration::from_secs(120));
-                    let expired = before.saturating_sub(tracker.len());
-                    if expired > 0 {
-                        stats_ping.increment_me_keepalive_timeout_by(expired as u64);
-                    }
-                }
-                tracker.insert(sent_id, (std::time::Instant::now(), writer_id));
             }
         });
 
@@ -487,11 +464,7 @@ impl MePool {
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                         .is_ok()
                     {
-                        pool.remove_writer_and_close_clients(
-                            writer_id,
-                            MeWriterTeardownReason::SignalSendFail,
-                        )
-                        .await;
+                        pool.remove_writer_and_close_clients(writer_id).await;
                     }
                     break;
                 }
@@ -525,11 +498,7 @@ impl MePool {
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                         .is_ok()
                     {
-                        pool.remove_writer_and_close_clients(
-                            writer_id,
-                            MeWriterTeardownReason::SignalSendFail,
-                        )
-                        .await;
+                        pool.remove_writer_and_close_clients(writer_id).await;
                     }
                     break;
                 }
@@ -542,48 +511,25 @@ impl MePool {
         Ok(())
     }
 
-    pub(crate) async fn remove_writer_and_close_clients(
-        self: &Arc<Self>,
-        writer_id: u64,
-        reason: MeWriterTeardownReason,
-    ) -> bool {
+    pub(crate) async fn remove_writer_and_close_clients(self: &Arc<Self>, writer_id: u64) {
         // Full client cleanup now happens inside `registry.writer_lost` to keep
         // writer reap/remove paths strictly non-blocking per connection.
-        self.remove_writer_with_mode(
-            writer_id,
-            reason,
-            MeWriterTeardownMode::Normal,
-            WriterRemoveGuardMode::Any,
-        )
-        .await
+        let _ = self
+            .remove_writer_with_mode(writer_id, WriterTeardownMode::Any)
+            .await;
     }
 
     pub(super) async fn remove_draining_writer_hard_detach(
         self: &Arc<Self>,
         writer_id: u64,
-        reason: MeWriterTeardownReason,
     ) -> bool {
-        self.remove_writer_with_mode(
-            writer_id,
-            reason,
-            MeWriterTeardownMode::HardDetach,
-            WriterRemoveGuardMode::DrainingOnly,
-        )
-        .await
+        self.remove_writer_with_mode(writer_id, WriterTeardownMode::DrainingOnly)
+            .await
     }
 
-    async fn remove_writer_only(
-        self: &Arc<Self>,
-        writer_id: u64,
-        reason: MeWriterTeardownReason,
-    ) -> bool {
-        self.remove_writer_with_mode(
-            writer_id,
-            reason,
-            MeWriterTeardownMode::Normal,
-            WriterRemoveGuardMode::Any,
-        )
-        .await
+    async fn remove_writer_only(self: &Arc<Self>, writer_id: u64) -> bool {
+        self.remove_writer_with_mode(writer_id, WriterTeardownMode::Any)
+            .await
     }
 
     // Authoritative teardown primitive shared by normal cleanup and watchdog path.
@@ -595,13 +541,8 @@ impl MePool {
     async fn remove_writer_with_mode(
         self: &Arc<Self>,
         writer_id: u64,
-        reason: MeWriterTeardownReason,
-        mode: MeWriterTeardownMode,
-        guard_mode: WriterRemoveGuardMode,
+        mode: WriterTeardownMode,
     ) -> bool {
-        let started_at = Instant::now();
-        self.stats
-            .increment_me_writer_teardown_attempt_total(reason, mode);
         let mut close_tx: Option<mpsc::Sender<WriterCommand>> = None;
         let mut removed_addr: Option<SocketAddr> = None;
         let mut removed_dc: Option<i32> = None;
@@ -611,18 +552,16 @@ impl MePool {
         {
             let mut ws = self.writers.write().await;
             if let Some(pos) = ws.iter().position(|w| w.id == writer_id) {
-                if matches!(guard_mode, WriterRemoveGuardMode::DrainingOnly)
+                if matches!(mode, WriterTeardownMode::DrainingOnly)
                     && !ws[pos].draining.load(Ordering::Relaxed)
                 {
-                    self.stats.increment_me_writer_teardown_noop_total();
-                    self.stats
-                        .observe_me_writer_teardown_duration(mode, started_at.elapsed());
                     return false;
                 }
                 let w = ws.remove(pos);
                 let was_draining = w.draining.load(Ordering::Relaxed);
                 if was_draining {
                     self.stats.decrement_pool_drain_active();
+                    self.decrement_draining_active_runtime();
                 }
                 self.stats.increment_me_writer_removed_total();
                 w.cancel.cancel();
@@ -650,34 +589,11 @@ impl MePool {
         }
         self.rtt_stats.lock().await.remove(&writer_id);
         if let Some(tx) = close_tx {
-            match tx.try_send(WriterCommand::Close) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    self.stats.increment_me_writer_close_signal_drop_total();
-                    self.stats
-                        .increment_me_writer_close_signal_channel_full_total();
-                    self.stats.increment_me_writer_cleanup_side_effect_failures_total(
-                        MeWriterCleanupSideEffectStep::CloseSignalChannelFull,
-                    );
-                    debug!(
-                        writer_id,
-                        "Skipping close signal for removed writer: command channel is full"
-                    );
-                }
-                Err(TrySendError::Closed(_)) => {
-                    self.stats.increment_me_writer_close_signal_drop_total();
-                    self.stats.increment_me_writer_cleanup_side_effect_failures_total(
-                        MeWriterCleanupSideEffectStep::CloseSignalChannelClosed,
-                    );
-                    debug!(
-                        writer_id,
-                        "Skipping close signal for removed writer: command channel is closed"
-                    );
-                }
-            }
+            let _ = tx.send(WriterCommand::Close).await;
         }
         if let Some(addr) = removed_addr {
             if let Some(uptime) = removed_uptime {
+                // Quarantine flapping endpoints regardless of draining state.
                 self.maybe_quarantine_flapping_endpoint(addr, uptime).await;
             }
             if trigger_refill
@@ -686,13 +602,6 @@ impl MePool {
                 self.trigger_immediate_refill_for_dc(addr, writer_dc);
             }
         }
-        if removed {
-            self.stats.increment_me_writer_teardown_success_total(mode);
-        } else {
-            self.stats.increment_me_writer_teardown_noop_total();
-        }
-        self.stats
-            .observe_me_writer_teardown_duration(mode, started_at.elapsed());
         removed
     }
 
@@ -719,6 +628,7 @@ impl MePool {
                     .store(drain_deadline_epoch_secs, Ordering::Relaxed);
                 if !already_draining {
                     self.stats.increment_pool_drain_active();
+                    self.increment_draining_active_runtime();
                 }
                 w.contour
                     .store(WriterContour::Draining.as_u8(), Ordering::Relaxed);

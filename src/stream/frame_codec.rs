@@ -513,6 +513,7 @@ impl FrameCodecTrait for SecureCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use tokio_util::codec::{FramedRead, FramedWrite};
     use tokio::io::duplex;
     use futures::{SinkExt, StreamExt};
@@ -629,5 +630,32 @@ mod tests {
         
         let result = codec.decode(&mut buf);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn secure_codec_always_adds_padding_and_jitters_wire_length() {
+        let codec = SecureCodec::new(Arc::new(SecureRandom::new()));
+        let payload = Bytes::from_static(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut wire_lens = HashSet::new();
+
+        for _ in 0..64 {
+            let frame = Frame::new(payload.clone());
+            let mut out = BytesMut::new();
+            codec.encode(&frame, &mut out).unwrap();
+
+            assert!(out.len() >= 4 + payload.len() + 1);
+            let wire_len = u32::from_le_bytes([out[0], out[1], out[2], out[3]]) as usize;
+            assert!(
+                (payload.len() + 1..=payload.len() + 3).contains(&wire_len),
+                "Secure wire length must be payload+1..3, got {wire_len}"
+            );
+            assert_ne!(wire_len % 4, 0, "Secure wire length must be non-4-aligned");
+            wire_lens.insert(wire_len);
+        }
+
+        assert!(
+            wire_lens.len() >= 2,
+            "Secure padding should create observable wire-length jitter"
+        );
     }
 }

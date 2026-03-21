@@ -152,11 +152,29 @@ pub const TLS_RECORD_CHANGE_CIPHER: u8 = 0x14;
 pub const TLS_RECORD_APPLICATION: u8 = 0x17;
 /// TLS record type: Alert
 pub const TLS_RECORD_ALERT: u8 = 0x15;
-/// Maximum TLS record size
-pub const MAX_TLS_RECORD_SIZE: usize = 16384;
-/// Maximum TLS chunk size (with overhead)
-/// RFC 8446 §5.2 allows up to 16384 + 256 bytes of ciphertext
-pub const MAX_TLS_CHUNK_SIZE: usize = 16384 + 256;
+/// Maximum TLS plaintext record payload size.
+/// RFC 8446 §5.1: "The length MUST NOT exceed 2^14 bytes."
+/// Use this for validating incoming unencrypted records
+/// (ClientHello, ChangeCipherSpec, unprotected Handshake messages).
+pub const MAX_TLS_PLAINTEXT_SIZE: usize = 16_384;
+
+/// Structural minimum for a valid TLS 1.3 ClientHello with SNI.
+/// Derived from RFC 8446 §4.1.2 field layout + Appendix D.4 compat mode.
+/// Deliberately conservative (below any real client) to avoid false
+/// positives on legitimate connections with compact extension sets.
+pub const MIN_TLS_CLIENT_HELLO_SIZE: usize = 100;
+
+/// Maximum TLS ciphertext record payload size.
+/// RFC 8446 §5.2: "The length MUST NOT exceed 2^14 + 256 bytes."
+/// The +256 accounts for maximum AEAD expansion overhead.
+/// Use this for validating or sizing buffers for encrypted records.
+pub const MAX_TLS_CIPHERTEXT_SIZE: usize = 16_384 + 256;
+
+#[deprecated(note = "use MAX_TLS_PLAINTEXT_SIZE")]
+pub const MAX_TLS_RECORD_SIZE: usize = MAX_TLS_PLAINTEXT_SIZE;
+
+#[deprecated(note = "use MAX_TLS_CIPHERTEXT_SIZE")]
+pub const MAX_TLS_CHUNK_SIZE: usize = MAX_TLS_CIPHERTEXT_SIZE;
 
 /// Secure Intermediate payload is expected to be 4-byte aligned.
 pub fn is_valid_secure_payload_len(data_len: usize) -> bool {
@@ -319,6 +337,10 @@ pub mod rpc_flags {
     
     pub const ME_CONNECT_TIMEOUT_SECS: u64 = 5;
     pub const ME_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+
+    #[cfg(test)]
+    #[path = "tests/tls_size_constants_security_tests.rs"]
+    mod tls_size_constants_security_tests;
     
     #[cfg(test)]
 mod tests {

@@ -10,6 +10,16 @@ use crate::transport::middle_proxy::{
     ProxyConfigData, fetch_proxy_config_with_raw, load_proxy_config_cache, save_proxy_config_cache,
 };
 
+pub(crate) fn resolve_runtime_config_path(config_path_cli: &str, startup_cwd: &std::path::Path) -> PathBuf {
+    let raw = PathBuf::from(config_path_cli);
+    let absolute = if raw.is_absolute() {
+        raw
+    } else {
+        startup_cwd.join(raw)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
 pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
     let mut config_path = "config.toml".to_string();
     let mut data_path: Option<PathBuf> = None;
@@ -94,6 +104,44 @@ pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
     }
 
     (config_path, data_path, silent, log_level)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_runtime_config_path;
+
+    #[test]
+    fn resolve_runtime_config_path_anchors_relative_to_startup_cwd() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let startup_cwd = std::env::temp_dir().join(format!("telemt_cfg_path_{nonce}"));
+        std::fs::create_dir_all(&startup_cwd).unwrap();
+        let target = startup_cwd.join("config.toml");
+        std::fs::write(&target, " ").unwrap();
+
+        let resolved = resolve_runtime_config_path("config.toml", &startup_cwd);
+        assert_eq!(resolved, target.canonicalize().unwrap());
+
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir(&startup_cwd);
+    }
+
+    #[test]
+    fn resolve_runtime_config_path_keeps_absolute_for_missing_file() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let startup_cwd = std::env::temp_dir().join(format!("telemt_cfg_path_missing_{nonce}"));
+        std::fs::create_dir_all(&startup_cwd).unwrap();
+
+        let resolved = resolve_runtime_config_path("missing.toml", &startup_cwd);
+        assert_eq!(resolved, startup_cwd.join("missing.toml"));
+
+        let _ = std::fs::remove_dir(&startup_cwd);
+    }
 }
 
 pub(crate) fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {

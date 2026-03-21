@@ -268,8 +268,6 @@ pub(crate) async fn initialize_me_pool(
                     config.general.me_warn_rate_limit_ms,
                     config.general.me_route_no_writer_mode,
                     config.general.me_route_no_writer_wait_ms,
-                    config.general.me_route_hybrid_max_wait_ms,
-                    config.general.me_route_blocking_send_timeout_ms,
                     config.general.me_route_inline_recovery_attempts,
                     config.general.me_route_inline_recovery_wait_ms,
                 );
@@ -517,7 +515,7 @@ pub(crate) async fn initialize_me_pool(
                                             }
                                         }
                                     });
-    
+
                                 break Some(pool);
                             }
                             Err(e) => {

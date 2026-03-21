@@ -45,7 +45,7 @@ use crate::startup::{
 use crate::stream::BufferPool;
 use crate::transport::middle_proxy::MePool;
 use crate::transport::UpstreamManager;
-use helpers::parse_cli;
+use helpers::{parse_cli, resolve_runtime_config_path};
 
 /// Runs the full telemt runtime startup pipeline and blocks until shutdown.
 pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -58,18 +58,26 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     startup_tracker
         .start_component(COMPONENT_CONFIG_LOAD, Some("load and validate config".to_string()))
         .await;
-    let (config_path, data_path, cli_silent, cli_log_level) = parse_cli();
+    let (config_path_cli, data_path, cli_silent, cli_log_level) = parse_cli();
+    let startup_cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("[telemt] Can't read current_dir: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let config_path = resolve_runtime_config_path(&config_path_cli, &startup_cwd);
 
     let mut config = match ProxyConfig::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            if std::path::Path::new(&config_path).exists() {
+            if config_path.exists() {
                 eprintln!("[telemt] Error: {}", e);
                 std::process::exit(1);
             } else {
                 let default = ProxyConfig::default();
                 std::fs::write(&config_path, toml::to_string_pretty(&default).unwrap()).unwrap();
-                eprintln!("[telemt] Created default config at {}", config_path);
+                eprintln!("[telemt] Created default config at {}", config_path.display());
                 default
             }
         }
@@ -258,7 +266,7 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let route_runtime_api = route_runtime.clone();
             let config_rx_api = api_config_rx.clone();
             let admission_rx_api = admission_rx.clone();
-            let config_path_api = std::path::PathBuf::from(&config_path);
+            let config_path_api = config_path.clone();
             let startup_tracker_api = startup_tracker.clone();
             let detected_ips_rx_api = detected_ips_rx.clone();
             tokio::spawn(async move {

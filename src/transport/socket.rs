@@ -23,7 +23,7 @@ pub fn configure_tcp_socket(
     let socket = socket2::SockRef::from(stream);
     
     // Disable Nagle's algorithm for lower latency
-    socket.set_nodelay(true)?;
+    socket.set_tcp_nodelay(true)?;
     
     // Set keepalive if enabled
     if keepalive {
@@ -54,7 +54,7 @@ pub fn configure_client_socket(
     let socket = socket2::SockRef::from(stream);
     
     // Disable Nagle's algorithm
-    socket.set_nodelay(true)?;
+    socket.set_tcp_nodelay(true)?;
     
     // Set keepalive
     let keepalive = TcpKeepalive::new()
@@ -129,7 +129,7 @@ pub fn create_outgoing_socket_bound(addr: SocketAddr, bind_addr: Option<IpAddr>)
     socket.set_nonblocking(true)?;
     
     // Disable Nagle
-    socket.set_nodelay(true)?;
+    socket.set_tcp_nodelay(true)?;
     socket.set_recv_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
     socket.set_send_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
 

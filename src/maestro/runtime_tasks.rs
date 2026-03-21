@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
@@ -32,7 +32,7 @@ pub(crate) struct RuntimeWatches {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_runtime_tasks(
     config: &Arc<ProxyConfig>,
-    config_path: &str,
+    config_path: &Path,
     probe: &NetworkProbe,
     prefer_ipv6: bool,
     decision_ipv4_dc: bool,
@@ -83,7 +83,7 @@ pub(crate) async fn spawn_runtime_tasks(
         watch::Receiver<Arc<ProxyConfig>>,
         watch::Receiver<LogLevel>,
     ) = spawn_config_watcher(
-        PathBuf::from(config_path),
+        config_path.to_path_buf(),
         config.clone(),
         detected_ip_v4,
         detected_ip_v6,

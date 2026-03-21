@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -112,8 +113,6 @@ async fn make_pool(
         general.me_warn_rate_limit_ms,
         MeRouteNoWriterMode::default(),
         general.me_route_no_writer_wait_ms,
-        general.me_route_hybrid_max_wait_ms,
-        general.me_route_blocking_send_timeout_ms,
         general.me_route_inline_recovery_attempts,
         general.me_route_inline_recovery_wait_ms,
     );
@@ -189,15 +188,48 @@ async fn sorted_writer_ids(pool: &Arc<MePool>) -> Vec<u64> {
     ids
 }
 
+fn lcg_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+    *state
+}
+
+async fn draining_writer_ids(pool: &Arc<MePool>) -> HashSet<u64> {
+    pool.writers
+        .read()
+        .await
+        .iter()
+        .filter(|writer| writer.draining.load(Ordering::Relaxed))
+        .map(|writer| writer.id)
+        .collect::<HashSet<u64>>()
+}
+
+async fn set_writer_runtime_state(
+    pool: &Arc<MePool>,
+    writer_id: u64,
+    draining: bool,
+    drain_started_at_epoch_secs: u64,
+    drain_deadline_epoch_secs: u64,
+) {
+    let writers = pool.writers.read().await;
+    if let Some(writer) = writers.iter().find(|writer| writer.id == writer_id) {
+        writer.draining.store(draining, Ordering::Relaxed);
+        writer
+            .draining_started_at_epoch_secs
+            .store(drain_started_at_epoch_secs, Ordering::Relaxed);
+        writer
+            .drain_deadline_epoch_secs
+            .store(drain_deadline_epoch_secs, Ordering::Relaxed);
+    }
+}
+
 #[tokio::test]
 async fn reap_draining_writers_clears_warn_state_when_pool_empty() {
     let (pool, _rng) = make_pool(128, 1, 1).await;
     let mut warn_next_allowed = HashMap::new();
-    let mut soft_evict_next_allowed = HashMap::new();
     warn_next_allowed.insert(11, Instant::now() + Duration::from_secs(5));
     warn_next_allowed.insert(22, Instant::now() + Duration::from_secs(5));
 
-    reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+    reap_draining_writers(&pool, &mut warn_next_allowed).await;
 
     assert!(warn_next_allowed.is_empty());
 }
@@ -206,8 +238,6 @@ async fn reap_draining_writers_clears_warn_state_when_pool_empty() {
 async fn reap_draining_writers_respects_threshold_across_multiple_overflow_cycles() {
     let threshold = 3u64;
     let (pool, _rng) = make_pool(threshold, 1, 1).await;
-    pool.me_pool_drain_soft_evict_enabled
-        .store(false, Ordering::Relaxed);
     let now_epoch_secs = MePool::now_epoch_secs();
 
     for writer_id in 1..=60u64 {
@@ -222,9 +252,8 @@ async fn reap_draining_writers_respects_threshold_across_multiple_overflow_cycle
     }
 
     let mut warn_next_allowed = HashMap::new();
-    let mut soft_evict_next_allowed = HashMap::new();
     for _ in 0..64 {
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
         if writer_count(&pool).await <= threshold as usize {
             break;
         }
@@ -252,12 +281,11 @@ async fn reap_draining_writers_handles_large_empty_writer_population() {
     }
 
     let mut warn_next_allowed = HashMap::new();
-    let mut soft_evict_next_allowed = HashMap::new();
     for _ in 0..24 {
         if writer_count(&pool).await == 0 {
             break;
         }
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
     }
 
     assert_eq!(writer_count(&pool).await, 0);
@@ -281,12 +309,11 @@ async fn reap_draining_writers_processes_mass_deadline_expiry_without_unbounded_
     }
 
     let mut warn_next_allowed = HashMap::new();
-    let mut soft_evict_next_allowed = HashMap::new();
     for _ in 0..40 {
         if writer_count(&pool).await == 0 {
             break;
         }
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
     }
 
     assert_eq!(writer_count(&pool).await, 0);
@@ -297,7 +324,6 @@ async fn reap_draining_writers_maintains_warn_state_subset_property_under_bulk_c
     let (pool, _rng) = make_pool(128, 1, 1).await;
     let now_epoch_secs = MePool::now_epoch_secs();
     let mut warn_next_allowed = HashMap::new();
-    let mut soft_evict_next_allowed = HashMap::new();
 
     for wave in 0..40u64 {
         for offset in 0..8u64 {
@@ -311,20 +337,15 @@ async fn reap_draining_writers_maintains_warn_state_subset_property_under_bulk_c
             .await;
         }
 
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
         assert!(warn_next_allowed.len() <= writer_count(&pool).await);
 
         let ids = sorted_writer_ids(&pool).await;
         for writer_id in ids.into_iter().take(3) {
-            let _ = pool
-                .remove_writer_and_close_clients(
-                    writer_id,
-                    crate::stats::MeWriterTeardownReason::ReapEmpty,
-                )
-                .await;
+            let _ = pool.remove_writer_and_close_clients(writer_id).await;
         }
 
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
         assert!(warn_next_allowed.len() <= writer_count(&pool).await);
     }
 }
@@ -346,10 +367,9 @@ async fn reap_draining_writers_budgeted_cleanup_never_increases_pool_size() {
     }
 
     let mut warn_next_allowed = HashMap::new();
-    let mut soft_evict_next_allowed = HashMap::new();
     let mut previous = writer_count(&pool).await;
     for _ in 0..32 {
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
         let current = writer_count(&pool).await;
         assert!(current <= previous);
         previous = current;
@@ -449,6 +469,149 @@ async fn me_health_monitor_eliminates_mixed_empty_and_deadline_backlog() {
     let _ = monitor.await;
 
     assert!(writer_count(&pool).await <= threshold as usize);
+}
+
+#[tokio::test]
+async fn reap_draining_writers_deterministic_mixed_state_churn_preserves_invariants() {
+    let threshold = 9u64;
+    let (pool, _rng) = make_pool(threshold, 1, 1).await;
+    let mut warn_next_allowed = HashMap::new();
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next_writer_id = 20_000u64;
+    let now_epoch_secs = MePool::now_epoch_secs();
+
+    for writer_id in 1..=72u64 {
+        let bound_clients = if writer_id % 4 == 0 { 0 } else { 1 };
+        let deadline = if writer_id % 5 == 0 {
+            now_epoch_secs.saturating_sub(1)
+        } else {
+            0
+        };
+        insert_draining_writer(
+            &pool,
+            writer_id,
+            now_epoch_secs.saturating_sub(500).saturating_add(writer_id),
+            bound_clients,
+            deadline,
+        )
+        .await;
+    }
+
+    for _round in 0..90 {
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+
+        let draining_ids = draining_writer_ids(&pool).await;
+        assert!(
+            warn_next_allowed.keys().all(|id| draining_ids.contains(id)),
+            "warn-state keys must always be a subset of live draining writers"
+        );
+
+        let writer_ids = sorted_writer_ids(&pool).await;
+        if writer_ids.is_empty() {
+            continue;
+        }
+
+        let remove_n = (lcg_next(&mut seed) % 3) as usize;
+        for writer_id in writer_ids.iter().copied().take(remove_n) {
+            let _ = pool.remove_writer_and_close_clients(writer_id).await;
+        }
+
+        let survivors = sorted_writer_ids(&pool).await;
+        if !survivors.is_empty() {
+            let idx = (lcg_next(&mut seed) as usize) % survivors.len();
+            let target = survivors[idx];
+            set_writer_runtime_state(&pool, target, false, 0, 0).await;
+        }
+
+        let survivors = sorted_writer_ids(&pool).await;
+        if survivors.len() > 1 {
+            let idx = (lcg_next(&mut seed) as usize) % survivors.len();
+            let target = survivors[idx];
+            let expired_deadline = if lcg_next(&mut seed) & 1 == 0 {
+                now_epoch_secs.saturating_sub(1)
+            } else {
+                0
+            };
+            set_writer_runtime_state(
+                &pool,
+                target,
+                true,
+                now_epoch_secs.saturating_sub(120),
+                expired_deadline,
+            )
+            .await;
+        }
+
+        let inject_n = (lcg_next(&mut seed) % 4) as usize;
+        for _ in 0..inject_n {
+            let bound_clients = if lcg_next(&mut seed) & 1 == 0 { 0 } else { 1 };
+            let deadline = if lcg_next(&mut seed) & 1 == 0 {
+                now_epoch_secs.saturating_sub(1)
+            } else {
+                0
+            };
+            insert_draining_writer(
+                &pool,
+                next_writer_id,
+                now_epoch_secs.saturating_sub(240),
+                bound_clients,
+                deadline,
+            )
+            .await;
+            next_writer_id = next_writer_id.saturating_add(1);
+        }
+    }
+
+    for _ in 0..64 {
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+        if writer_count(&pool).await <= threshold as usize {
+            break;
+        }
+    }
+
+    assert!(writer_count(&pool).await <= threshold as usize);
+    let draining_ids = draining_writer_ids(&pool).await;
+    assert!(warn_next_allowed.keys().all(|id| draining_ids.contains(id)));
+}
+
+#[tokio::test]
+async fn reap_draining_writers_repeated_draining_flips_never_leave_stale_warn_state() {
+    let (pool, _rng) = make_pool(64, 1, 1).await;
+    let now_epoch_secs = MePool::now_epoch_secs();
+
+    for writer_id in 1..=24u64 {
+        insert_draining_writer(
+            &pool,
+            writer_id,
+            now_epoch_secs.saturating_sub(240),
+            1,
+            0,
+        )
+        .await;
+    }
+
+    let mut warn_next_allowed = HashMap::new();
+    for _round in 0..48u64 {
+        for writer_id in 1..=24u64 {
+            let draining = (writer_id + _round) % 3 != 0;
+            set_writer_runtime_state(
+                &pool,
+                writer_id,
+                draining,
+                now_epoch_secs.saturating_sub(120),
+                0,
+            )
+            .await;
+        }
+
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+
+        let draining_ids = draining_writer_ids(&pool).await;
+        assert!(
+            warn_next_allowed.keys().all(|id| draining_ids.contains(id)),
+            "warn-state map must not retain entries for writers outside draining set"
+        );
+    }
 }
 
 #[test]

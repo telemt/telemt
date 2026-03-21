@@ -2,12 +2,19 @@
 #![allow(dead_code)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::OnceLock;
 
 use tokio::net::{lookup_host, UdpSocket};
 use tokio::time::{timeout, Duration, sleep};
 
+use crate::crypto::SecureRandom;
 use crate::error::{ProxyError, Result};
 use crate::network::dns_overrides::{resolve, split_host_port};
+
+fn stun_rng() -> &'static SecureRandom {
+    static STUN_RNG: OnceLock<SecureRandom> = OnceLock::new();
+    STUN_RNG.get_or_init(SecureRandom::new)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IpFamily {
@@ -49,8 +56,6 @@ pub async fn stun_probe_family_with_bind(
     family: IpFamily,
     bind_ip: Option<IpAddr>,
 ) -> Result<Option<StunProbeResult>> {
-    use rand::RngCore;
-
     let bind_addr = match (family, bind_ip) {
         (IpFamily::V4, Some(IpAddr::V4(ip))) => SocketAddr::new(IpAddr::V4(ip), 0),
         (IpFamily::V6, Some(IpAddr::V6(ip))) => SocketAddr::new(IpAddr::V6(ip), 0),
@@ -88,7 +93,7 @@ pub async fn stun_probe_family_with_bind(
     req[0..2].copy_from_slice(&0x0001u16.to_be_bytes()); // Binding Request
     req[2..4].copy_from_slice(&0u16.to_be_bytes()); // length
     req[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes()); // magic cookie
-    rand::rng().fill_bytes(&mut req[8..20]); // transaction ID
+    stun_rng().fill(&mut req[8..20]); // transaction ID
 
     let mut buf = [0u8; 256];
     let mut attempt = 0;

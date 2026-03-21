@@ -86,10 +86,28 @@ pub(crate) fn default_replay_check_len() -> usize {
 }
 
 pub(crate) fn default_replay_window_secs() -> u64 {
-    1800
+    // Keep replay cache TTL tight by default to reduce replay surface.
+    // Deployments with higher RTT or longer reconnect jitter can override this in config.
+    120
 }
 
 pub(crate) fn default_handshake_timeout() -> u64 {
+    30
+}
+
+pub(crate) fn default_relay_idle_policy_v2_enabled() -> bool {
+    true
+}
+
+pub(crate) fn default_relay_client_idle_soft_secs() -> u64 {
+    120
+}
+
+pub(crate) fn default_relay_client_idle_hard_secs() -> u64 {
+    360
+}
+
+pub(crate) fn default_relay_idle_grace_after_downstream_activity_secs() -> u64 {
     30
 }
 
@@ -485,15 +503,47 @@ pub(crate) fn default_tls_full_cert_ttl_secs() -> u64 {
 }
 
 pub(crate) fn default_server_hello_delay_min_ms() -> u64 {
-    0
+    8
 }
 
 pub(crate) fn default_server_hello_delay_max_ms() -> u64 {
-    0
+    24
 }
 
 pub(crate) fn default_alpn_enforce() -> bool {
     true
+}
+
+pub(crate) fn default_mask_shape_hardening() -> bool {
+    true
+}
+
+pub(crate) fn default_mask_shape_bucket_floor_bytes() -> usize {
+    512
+}
+
+pub(crate) fn default_mask_shape_bucket_cap_bytes() -> usize {
+    4096
+}
+
+pub(crate) fn default_mask_shape_above_cap_blur() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_shape_above_cap_blur_max_bytes() -> usize {
+    512
+}
+
+pub(crate) fn default_mask_timing_normalization_enabled() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_timing_normalization_floor_ms() -> u64 {
+    0
+}
+
+pub(crate) fn default_mask_timing_normalization_ceiling_ms() -> u64 {
+    0
 }
 
 pub(crate) fn default_stun_servers() -> Vec<String> {

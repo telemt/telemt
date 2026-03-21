@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use rand::Rng;
+use rand::RngExt;
 
 /// Options for the init command
 pub struct InitOptions {
@@ -246,7 +246,7 @@ tls_full_cert_ttl_secs = 90
 
 [access]
 replay_check_len = 65536
-replay_window_secs = 1800
+replay_window_secs = 120
 ignore_time_skew = false
 
 [access.users]

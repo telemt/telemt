@@ -8,26 +8,21 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::codec::WriterCommand;
-use super::health::health_drain_close_budget;
 use super::pool::{MePool, MeWriter, WriterContour};
-use super::registry::ConnMeta;
-use super::me_health_monitor;
 use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
 use crate::crypto::SecureRandom;
 use crate::network::probe::NetworkDecision;
 use crate::stats::Stats;
 
-async fn make_pool(
-    me_pool_drain_threshold: u64,
-    me_health_interval_ms_unhealthy: u64,
-    me_health_interval_ms_healthy: u64,
-) -> (Arc<MePool>, Arc<SecureRandom>) {
+async fn make_pool() -> (Arc<MePool>, Arc<SecureRandom>) {
     let general = GeneralConfig {
-        me_pool_drain_threshold,
-        me_health_interval_ms_unhealthy,
-        me_health_interval_ms_healthy,
+        me_route_no_writer_mode: MeRouteNoWriterMode::AsyncRecoveryFailfast,
+        me_route_no_writer_wait_ms: 50,
+        me_writer_pick_mode: MeWriterPickMode::SortedRr,
+        me_deterministic_writer_sort: true,
         ..GeneralConfig::default()
     };
+
     let rng = Arc::new(SecureRandom::new());
     let pool = MePool::new(
         None,
@@ -97,7 +92,7 @@ async fn make_pool(
         general.me_bind_stale_ttl_secs,
         general.me_secret_atomic_snapshot,
         general.me_deterministic_writer_sort,
-        MeWriterPickMode::default(),
+        general.me_writer_pick_mode,
         general.me_writer_pick_sample_size,
         MeSocksKdfPolicy::default(),
         general.me_writer_cmd_channel_capacity,
@@ -109,127 +104,166 @@ async fn make_pool(
         general.me_health_interval_ms_unhealthy,
         general.me_health_interval_ms_healthy,
         general.me_warn_rate_limit_ms,
-        MeRouteNoWriterMode::default(),
+        general.me_route_no_writer_mode,
         general.me_route_no_writer_wait_ms,
-        general.me_route_hybrid_max_wait_ms,
-        general.me_route_blocking_send_timeout_ms,
         general.me_route_inline_recovery_attempts,
         general.me_route_inline_recovery_wait_ms,
     );
+
     (pool, rng)
 }
 
-async fn insert_draining_writer(
+async fn insert_writer(
     pool: &Arc<MePool>,
     writer_id: u64,
-    drain_started_at_epoch_secs: u64,
-    bound_clients: usize,
-    drain_deadline_epoch_secs: u64,
-) {
-    let (tx, _writer_rx) = mpsc::channel::<WriterCommand>(8);
+    writer_dc: i32,
+    addr: SocketAddr,
+    register_in_registry: bool,
+) -> mpsc::Receiver<WriterCommand> {
+    let (tx, rx) = mpsc::channel::<WriterCommand>(8);
     let writer = MeWriter {
         id: writer_id,
-        addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5500 + writer_id as u16),
-        source_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        writer_dc: 2,
-        generation: 1,
-        contour: Arc::new(AtomicU8::new(WriterContour::Draining.as_u8())),
-        created_at: Instant::now() - Duration::from_secs(writer_id),
+        addr,
+        source_ip: addr.ip(),
+        writer_dc,
+        generation: pool.current_generation(),
+        contour: Arc::new(AtomicU8::new(WriterContour::Active.as_u8())),
+        created_at: Instant::now(),
         tx: tx.clone(),
         cancel: CancellationToken::new(),
         degraded: Arc::new(AtomicBool::new(false)),
         rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
-        draining: Arc::new(AtomicBool::new(true)),
-        draining_started_at_epoch_secs: Arc::new(AtomicU64::new(drain_started_at_epoch_secs)),
-        drain_deadline_epoch_secs: Arc::new(AtomicU64::new(drain_deadline_epoch_secs)),
+        draining: Arc::new(AtomicBool::new(false)),
+        draining_started_at_epoch_secs: Arc::new(AtomicU64::new(0)),
+        drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
         allow_drain_fallback: Arc::new(AtomicBool::new(false)),
     };
+
     pool.writers.write().await.push(writer);
-    pool.registry.register_writer(writer_id, tx).await;
-    pool.conn_count.fetch_add(1, Ordering::Relaxed);
-    for idx in 0..bound_clients {
-        let (conn_id, _rx) = pool.registry.register().await;
-        assert!(
-            pool.registry
-                .bind_writer(
-                    conn_id,
-                    writer_id,
-                    ConnMeta {
-                        target_dc: 2,
-                        client_addr: SocketAddr::new(
-                            IpAddr::V4(Ipv4Addr::LOCALHOST),
-                            7200 + idx as u16,
-                        ),
-                        our_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
-                        proto_flags: 0,
-                    },
-                )
-                .await
-        );
+    {
+        let mut map = pool.proxy_map_v4.write().await;
+        map.entry(writer_dc)
+            .or_insert_with(Vec::new)
+            .push((addr.ip(), addr.port()));
     }
+    pool.rebuild_endpoint_dc_map().await;
+    if register_in_registry {
+        pool.registry.register_writer(writer_id, tx).await;
+    }
+    rx
+}
+
+async fn recv_data_count(rx: &mut mpsc::Receiver<WriterCommand>, budget: Duration) -> usize {
+    let start = Instant::now();
+    let mut data_count = 0usize;
+    while Instant::now().duration_since(start) < budget {
+        let remaining = budget.saturating_sub(Instant::now().duration_since(start));
+        match tokio::time::timeout(remaining.min(Duration::from_millis(10)), rx.recv()).await {
+            Ok(Some(WriterCommand::Data(_))) => data_count += 1,
+            Ok(Some(WriterCommand::DataAndFlush(_))) => data_count += 1,
+            Ok(Some(WriterCommand::Close)) => {}
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    data_count
 }
 
 #[tokio::test]
-async fn me_health_monitor_drains_expired_backlog_over_multiple_cycles() {
-    let (pool, rng) = make_pool(128, 1, 1).await;
-    let now_epoch_secs = MePool::now_epoch_secs();
-    let writer_total = health_drain_close_budget().saturating_mul(2).saturating_add(9);
-    for writer_id in 1..=writer_total as u64 {
-        insert_draining_writer(
-            &pool,
-            writer_id,
-            now_epoch_secs.saturating_sub(120),
-            1,
-            now_epoch_secs.saturating_sub(1),
-        )
-        .await;
-    }
+async fn send_proxy_req_does_not_replay_when_first_bind_commit_fails() {
+    let (pool, _rng) = make_pool().await;
+    pool.rr.store(0, Ordering::Relaxed);
 
-    let monitor = tokio::spawn(me_health_monitor(pool.clone(), rng, 0));
-    tokio::time::sleep(Duration::from_millis(60)).await;
-    monitor.abort();
-    let _ = monitor.await;
+    let (conn_id, _rx) = pool.registry.register().await;
+    let mut stale_rx = insert_writer(
+        &pool,
+        10,
+        2,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 10)), 443),
+        false,
+    )
+    .await;
+    let mut live_rx = insert_writer(
+        &pool,
+        11,
+        2,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 11)), 443),
+        true,
+    )
+    .await;
 
-    assert!(pool.writers.read().await.is_empty());
-}
-
-#[tokio::test]
-async fn me_health_monitor_cleans_empty_draining_writers_without_force_close() {
-    let (pool, rng) = make_pool(128, 1, 1).await;
-    let now_epoch_secs = MePool::now_epoch_secs();
-    for writer_id in 1..=24u64 {
-        insert_draining_writer(&pool, writer_id, now_epoch_secs.saturating_sub(60), 0, 0).await;
-    }
-
-    let monitor = tokio::spawn(me_health_monitor(pool.clone(), rng, 0));
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    monitor.abort();
-    let _ = monitor.await;
-
-    assert!(pool.writers.read().await.is_empty());
-}
-
-#[tokio::test]
-async fn me_health_monitor_converges_retry_like_threshold_backlog_to_empty() {
-    let threshold = 4u64;
-    let (pool, rng) = make_pool(threshold, 1, 1).await;
-    let now_epoch_secs = MePool::now_epoch_secs();
-    let writer_total = threshold as usize + health_drain_close_budget().saturating_add(11);
-    for writer_id in 1..=writer_total as u64 {
-        insert_draining_writer(
-            &pool,
-            writer_id,
-            now_epoch_secs.saturating_sub(300).saturating_add(writer_id),
-            1,
+    let result = pool
+        .send_proxy_req(
+            conn_id,
+            2,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30000),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            b"hello",
             0,
+            None,
         )
         .await;
-    }
 
-    let monitor = tokio::spawn(me_health_monitor(pool.clone(), rng, 0));
-    tokio::time::sleep(Duration::from_millis(60)).await;
-    monitor.abort();
-    let _ = monitor.await;
+    assert!(result.is_ok());
+    assert_eq!(recv_data_count(&mut stale_rx, Duration::from_millis(50)).await, 0);
+    assert_eq!(recv_data_count(&mut live_rx, Duration::from_millis(50)).await, 1);
 
-    assert!(pool.writers.read().await.is_empty());
+    let bound = pool.registry.get_writer(conn_id).await;
+    assert!(bound.is_some());
+    assert_eq!(bound.expect("writer should be bound").writer_id, 11);
+}
+
+#[tokio::test]
+async fn send_proxy_req_prunes_iterative_stale_bind_failures_without_data_replay() {
+    let (pool, _rng) = make_pool().await;
+    pool.rr.store(0, Ordering::Relaxed);
+
+    let (conn_id, _rx) = pool.registry.register().await;
+
+    let mut stale_rx_1 = insert_writer(
+        &pool,
+        21,
+        2,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 1, 21)), 443),
+        false,
+    )
+    .await;
+    let mut stale_rx_2 = insert_writer(
+        &pool,
+        22,
+        2,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 1, 22)), 443),
+        false,
+    )
+    .await;
+    let mut live_rx = insert_writer(
+        &pool,
+        23,
+        2,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 1, 23)), 443),
+        true,
+    )
+    .await;
+
+    let result = pool
+        .send_proxy_req(
+            conn_id,
+            2,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30001),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            b"storm",
+            0,
+            None,
+        )
+        .await;
+
+    assert!(result.is_ok());
+    assert_eq!(recv_data_count(&mut stale_rx_1, Duration::from_millis(50)).await, 0);
+    assert_eq!(recv_data_count(&mut stale_rx_2, Duration::from_millis(50)).await, 0);
+    assert_eq!(recv_data_count(&mut live_rx, Duration::from_millis(50)).await, 1);
+
+    let writers = pool.writers.read().await;
+    let writer_ids = writers.iter().map(|w| w.id).collect::<Vec<_>>();
+    drop(writers);
+    assert_eq!(writer_ids, vec![23]);
 }

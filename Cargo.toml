@@ -1,6 +1,6 @@
 [package]
 name = "telemt"
-version = "3.3.28"
+version = "3.4.0"
 edition = "2024"
 
 [dependencies]
@@ -22,17 +22,19 @@ hmac = "0.12"
 crc32fast = "1.4"
 crc32c = "0.6"
 zeroize = { version = "1.8", features = ["derive"] }
+subtle = "2.6"
+static_assertions = "1.1"
 
 # Network
-socket2 = { version = "0.5", features = ["all"] }
-nix = { version = "0.28", default-features = false, features = ["net"] }
+socket2 = { version = "0.6", features = ["all"] }
+nix = { version = "0.31", default-features = false, features = ["net"] }
 shadowsocks = { version = "1.24", features = ["aead-cipher-2022"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
-x509-parser = "0.15"
+toml = "1.0"
+x509-parser = "0.18"
 
 # Utils
 bytes = "1.9"
@@ -40,10 +42,10 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
-dashmap = "5.5"
+dashmap = "6.1"
 arc-swap = "1.7"
 lru = "0.16"
-rand = "0.9"
+rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 base64 = "0.22"
@@ -52,23 +54,24 @@ regex = "1.11"
 crossbeam-queue = "0.3"
 num-bigint = "0.4"
 num-traits = "0.2"
+x25519-dalek = "2"
 anyhow = "1.0"
 
 # HTTP
-reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
-notify = { version = "6", features = ["macos_fsevent"] }
-ipnetwork = "0.20"
+reqwest = { version = "0.13", features = ["rustls"], default-features = false }
+notify = "8.2"
+ipnetwork = { version = "0.21", features = ["serde"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 httpdate = "1.0"
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = "0.5"
+criterion = "0.8"
 proptest = "1.4"
 futures = "0.3"
 

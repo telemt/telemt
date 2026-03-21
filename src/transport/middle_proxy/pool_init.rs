@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use rand::Rng;
+use rand::RngExt;
 use rand::seq::SliceRandom;
 use tracing::{debug, info, warn};
 

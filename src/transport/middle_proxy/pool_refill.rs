@@ -71,14 +71,29 @@ impl MePool {
         }
 
         if let Some((addr, expiry)) = earliest_quarantine {
+            let remaining = expiry.saturating_duration_since(now);
+            if remaining.is_zero() {
+                return vec![addr];
+            }
+            drop(guard);
             debug!(
                 %addr,
                 wait_ms = expiry.saturating_duration_since(now).as_millis(),
                 "All ME endpoints are quarantined for the DC group; waiting for quarantine expiry"
             );
+            tokio::time::sleep(remaining).await;
+            return vec![addr];
         }
 
         Vec::new()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn connectable_endpoints_for_test(
+        &self,
+        endpoints: &[SocketAddr],
+    ) -> Vec<SocketAddr> {
+        self.connectable_endpoints(endpoints).await
     }
 
     pub(super) async fn has_refill_inflight_for_dc_key(&self, key: RefillDcKey) -> bool {

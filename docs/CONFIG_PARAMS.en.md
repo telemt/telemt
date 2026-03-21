@@ -260,6 +260,65 @@ This document lists all configuration keys accepted by `config.toml`.
 | tls_full_cert_ttl_secs | `u64` | `90` | — | TTL for sending full cert payload per (domain, client IP) tuple. |
 | alpn_enforce | `bool` | `true` | — | Enforces ALPN echo behavior based on client preference. |
 | mask_proxy_protocol | `u8` | `0` | — | PROXY protocol mode for mask backend (`0` disabled, `1` v1, `2` v2). |
+| mask_shape_hardening | `bool` | `true` | — | Enables client->mask shape-channel hardening by applying controlled tail padding to bucket boundaries on mask relay shutdown. |
+| mask_shape_bucket_floor_bytes | `usize` | `512` | Must be `> 0`; should be `<= mask_shape_bucket_cap_bytes`. | Minimum bucket size used by shape-channel hardening. |
+| mask_shape_bucket_cap_bytes | `usize` | `4096` | Must be `>= mask_shape_bucket_floor_bytes`. | Maximum bucket size used by shape-channel hardening; traffic above cap is not padded further. |
+| mask_shape_above_cap_blur | `bool` | `false` | Requires `mask_shape_hardening = true`; requires `mask_shape_above_cap_blur_max_bytes > 0`. | Adds bounded randomized tail bytes even when forwarded size already exceeds cap. |
+| mask_shape_above_cap_blur_max_bytes | `usize` | `512` | Must be `<= 1048576`; must be `> 0` when `mask_shape_above_cap_blur = true`. | Maximum randomized extra bytes appended above cap. |
+| mask_timing_normalization_enabled | `bool` | `false` | Requires `mask_timing_normalization_floor_ms > 0`; requires `ceiling >= floor`. | Enables timing envelope normalization on masking outcomes. |
+| mask_timing_normalization_floor_ms | `u64` | `0` | Must be `> 0` when timing normalization is enabled; must be `<= ceiling`. | Lower bound (ms) for masking outcome normalization target. |
+| mask_timing_normalization_ceiling_ms | `u64` | `0` | Must be `>= floor`; must be `<= 60000`. | Upper bound (ms) for masking outcome normalization target. |
+
+### Shape-channel hardening notes (`[censorship]`)
+
+These parameters are designed to reduce one specific fingerprint source during masking: the exact number of bytes sent from proxy to `mask_host` for invalid or probing traffic.
+
+Without hardening, a censor can often correlate probe input length with backend-observed length very precisely (for example: `5 + body_sent` on early TLS reject paths). That creates a length-based classifier signal.
+
+When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail to a bucket boundary at relay shutdown:
+
+- Total bytes sent to mask are first measured.
+- A bucket is selected using powers of two starting from `mask_shape_bucket_floor_bytes`.
+- Padding is added only if total bytes are below `mask_shape_bucket_cap_bytes`.
+- If bytes already exceed cap, no extra padding is added.
+
+This means multiple nearby probe sizes collapse into the same backend-observed size class, making active classification harder.
+
+Practical trade-offs:
+
+- Better anti-fingerprinting on size/shape channel.
+- Slightly higher egress overhead for small probes due to padding.
+- Behavior is intentionally conservative and enabled by default.
+
+Recommended starting profile:
+
+- `mask_shape_hardening = true` (default)
+- `mask_shape_bucket_floor_bytes = 512`
+- `mask_shape_bucket_cap_bytes = 4096`
+
+### Above-cap blur notes (`[censorship]`)
+
+`mask_shape_above_cap_blur` adds a second-stage blur for very large probes that are already above `mask_shape_bucket_cap_bytes`.
+
+- A random tail in `[0, mask_shape_above_cap_blur_max_bytes]` is appended.
+- This reduces exact-size leakage above cap at bounded overhead.
+- Keep `mask_shape_above_cap_blur_max_bytes` conservative to avoid unnecessary egress growth.
+
+### Timing normalization envelope notes (`[censorship]`)
+
+`mask_timing_normalization_enabled` smooths timing differences between masking outcomes by applying a target duration envelope.
+
+- A random target is selected in `[mask_timing_normalization_floor_ms, mask_timing_normalization_ceiling_ms]`.
+- Fast paths are delayed up to the selected target.
+- Slow paths are not forced to finish by the ceiling (the envelope is best-effort shaping, not truncation).
+
+Recommended starting profile for timing shaping:
+
+- `mask_timing_normalization_enabled = true`
+- `mask_timing_normalization_floor_ms = 180`
+- `mask_timing_normalization_ceiling_ms = 320`
+
+If your backend or network is very bandwidth-constrained, reduce cap first. If probes are still too distinguishable in your environment, increase floor gradually.
 
 ## [access]
 

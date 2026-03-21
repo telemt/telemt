@@ -1228,6 +1228,13 @@ pub struct ServerConfig {
     #[serde(default = "default_proxy_protocol_header_timeout_ms")]
     pub proxy_protocol_header_timeout_ms: u64,
 
+    /// Trusted source CIDRs allowed to send incoming PROXY protocol headers.
+    ///
+    /// When non-empty, connections from addresses outside this allowlist are
+    /// rejected before `src_addr` is applied.
+    #[serde(default)]
+    pub proxy_protocol_trusted_cidrs: Vec<IpNetwork>,
+
     /// Port for the Prometheus-compatible metrics endpoint.
     /// Enables metrics when set; binds on all interfaces (dual-stack) by default.
     #[serde(default)]
@@ -1270,6 +1277,7 @@ impl Default for ServerConfig {
             listen_tcp: None,
             proxy_protocol: false,
             proxy_protocol_header_timeout_ms: default_proxy_protocol_header_timeout_ms(),
+            proxy_protocol_trusted_cidrs: Vec::new(),
             metrics_port: None,
             metrics_listen: None,
             metrics_whitelist: default_metrics_whitelist(),
@@ -1285,6 +1293,24 @@ impl Default for ServerConfig {
 pub struct TimeoutsConfig {
     #[serde(default = "default_handshake_timeout")]
     pub client_handshake: u64,
+
+    /// Enables soft/hard relay client idle policy for middle-relay sessions.
+    #[serde(default = "default_relay_idle_policy_v2_enabled")]
+    pub relay_idle_policy_v2_enabled: bool,
+
+    /// Soft idle threshold for middle-relay client uplink activity in seconds.
+    /// Hitting this threshold marks the session as idle-candidate, but does not close it.
+    #[serde(default = "default_relay_client_idle_soft_secs")]
+    pub relay_client_idle_soft_secs: u64,
+
+    /// Hard idle threshold for middle-relay client uplink activity in seconds.
+    /// Hitting this threshold closes the session.
+    #[serde(default = "default_relay_client_idle_hard_secs")]
+    pub relay_client_idle_hard_secs: u64,
+
+    /// Additional grace in seconds added to hard idle window after recent downstream activity.
+    #[serde(default = "default_relay_idle_grace_after_downstream_activity_secs")]
+    pub relay_idle_grace_after_downstream_activity_secs: u64,
 
     #[serde(default = "default_connect_timeout")]
     pub tg_connect: u64,
@@ -1308,6 +1334,11 @@ impl Default for TimeoutsConfig {
     fn default() -> Self {
         Self {
             client_handshake: default_handshake_timeout(),
+            relay_idle_policy_v2_enabled: default_relay_idle_policy_v2_enabled(),
+            relay_client_idle_soft_secs: default_relay_client_idle_soft_secs(),
+            relay_client_idle_hard_secs: default_relay_client_idle_hard_secs(),
+            relay_idle_grace_after_downstream_activity_secs:
+                default_relay_idle_grace_after_downstream_activity_secs(),
             tg_connect: default_connect_timeout(),
             client_keepalive: default_keepalive(),
             client_ack: default_ack_timeout(),
@@ -1381,6 +1412,40 @@ pub struct AntiCensorshipConfig {
     /// Allows the backend to see the real client IP.
     #[serde(default)]
     pub mask_proxy_protocol: u8,
+
+    /// Enable shape-channel hardening on mask backend path by padding
+    /// client->mask stream tail to configured buckets on stream end.
+    #[serde(default = "default_mask_shape_hardening")]
+    pub mask_shape_hardening: bool,
+
+    /// Minimum bucket size for mask shape hardening padding.
+    #[serde(default = "default_mask_shape_bucket_floor_bytes")]
+    pub mask_shape_bucket_floor_bytes: usize,
+
+    /// Maximum bucket size for mask shape hardening padding.
+    #[serde(default = "default_mask_shape_bucket_cap_bytes")]
+    pub mask_shape_bucket_cap_bytes: usize,
+
+    /// Add bounded random tail bytes even when total bytes already exceed
+    /// mask_shape_bucket_cap_bytes.
+    #[serde(default = "default_mask_shape_above_cap_blur")]
+    pub mask_shape_above_cap_blur: bool,
+
+    /// Maximum random bytes appended above cap when above-cap blur is enabled.
+    #[serde(default = "default_mask_shape_above_cap_blur_max_bytes")]
+    pub mask_shape_above_cap_blur_max_bytes: usize,
+
+    /// Enable outcome-time normalization envelope for masking fallback.
+    #[serde(default = "default_mask_timing_normalization_enabled")]
+    pub mask_timing_normalization_enabled: bool,
+
+    /// Lower bound (ms) for masking outcome timing envelope.
+    #[serde(default = "default_mask_timing_normalization_floor_ms")]
+    pub mask_timing_normalization_floor_ms: u64,
+
+    /// Upper bound (ms) for masking outcome timing envelope.
+    #[serde(default = "default_mask_timing_normalization_ceiling_ms")]
+    pub mask_timing_normalization_ceiling_ms: u64,
 }
 
 impl Default for AntiCensorshipConfig {
@@ -1402,6 +1467,14 @@ impl Default for AntiCensorshipConfig {
             tls_full_cert_ttl_secs: default_tls_full_cert_ttl_secs(),
             alpn_enforce: default_alpn_enforce(),
             mask_proxy_protocol: 0,
+            mask_shape_hardening: default_mask_shape_hardening(),
+            mask_shape_bucket_floor_bytes: default_mask_shape_bucket_floor_bytes(),
+            mask_shape_bucket_cap_bytes: default_mask_shape_bucket_cap_bytes(),
+            mask_shape_above_cap_blur: default_mask_shape_above_cap_blur(),
+            mask_shape_above_cap_blur_max_bytes: default_mask_shape_above_cap_blur_max_bytes(),
+            mask_timing_normalization_enabled: default_mask_timing_normalization_enabled(),
+            mask_timing_normalization_floor_ms: default_mask_timing_normalization_floor_ms(),
+            mask_timing_normalization_ceiling_ms: default_mask_timing_normalization_ceiling_ms(),
         }
     }
 }

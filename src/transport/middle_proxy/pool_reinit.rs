@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use rand::seq::SliceRandom;
 use tracing::{debug, info, warn};
 use std::collections::hash_map::DefaultHasher;
@@ -145,6 +145,38 @@ impl MePool {
         }
 
         out
+    }
+
+    pub(super) async fn has_non_draining_writer_per_desired_dc_group(&self) -> bool {
+        let desired_by_dc = self.desired_dc_endpoints().await;
+        let required_dcs: HashSet<i32> = desired_by_dc
+            .iter()
+            .filter_map(|(dc, endpoints)| {
+                if endpoints.is_empty() {
+                    None
+                } else {
+                    Some(*dc)
+                }
+            })
+            .collect();
+        if required_dcs.is_empty() {
+            return true;
+        }
+
+        let ws = self.writers.read().await;
+        let mut covered_dcs = HashSet::<i32>::with_capacity(required_dcs.len());
+        for writer in ws.iter() {
+            if writer.draining.load(Ordering::Relaxed) {
+                continue;
+            }
+            if required_dcs.contains(&writer.writer_dc) {
+                covered_dcs.insert(writer.writer_dc);
+                if covered_dcs.len() == required_dcs.len() {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn hardswap_warmup_connect_delay_ms(&self) -> u64 {
@@ -506,12 +538,30 @@ impl MePool {
             coverage_ratio = format_args!("{coverage_ratio:.3}"),
             min_ratio = format_args!("{min_ratio:.3}"),
             drain_timeout_secs,
-            "ME reinit cycle covered; draining stale writers"
+            "ME reinit cycle covered; processing stale writers"
         );
         self.stats.increment_pool_swap_total();
+        let can_drop_with_replacement = self
+            .has_non_draining_writer_per_desired_dc_group()
+            .await;
+        if can_drop_with_replacement {
+            info!(
+                stale_writers = stale_writer_ids.len(),
+                "ME reinit stale writers: replacement coverage ready, force-closing clients for fast rebind"
+            );
+        } else {
+            warn!(
+                stale_writers = stale_writer_ids.len(),
+                "ME reinit stale writers: replacement coverage incomplete, keeping draining fallback"
+            );
+        }
         for writer_id in stale_writer_ids {
             self.mark_writer_draining_with_timeout(writer_id, drain_timeout, !hardswap)
                 .await;
+            if can_drop_with_replacement {
+                self.stats.increment_pool_force_close_total();
+                self.remove_writer_and_close_clients(writer_id).await;
+            }
         }
         if hardswap {
             self.clear_pending_hardswap_state();

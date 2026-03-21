@@ -22,11 +22,23 @@ mod selftest;
 mod wire;
 mod pool_status;
 #[cfg(test)]
+#[path = "tests/health_regression_tests.rs"]
 mod health_regression_tests;
 #[cfg(test)]
+#[path = "tests/health_integration_tests.rs"]
 mod health_integration_tests;
 #[cfg(test)]
+#[path = "tests/health_adversarial_tests.rs"]
 mod health_adversarial_tests;
+#[cfg(test)]
+#[path = "tests/send_adversarial_tests.rs"]
+mod send_adversarial_tests;
+#[cfg(test)]
+#[path = "tests/pool_writer_security_tests.rs"]
+mod pool_writer_security_tests;
+#[cfg(test)]
+#[path = "tests/pool_refill_security_tests.rs"]
+mod pool_refill_security_tests;
 
 use bytes::Bytes;
 
