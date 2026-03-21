@@ -355,49 +355,49 @@ async fn run_update_cycle(
 
     let mut ready_v4: Option<(ProxyConfigData, u64)> = None;
     let cfg_v4 = retry_fetch("https://core.telegram.org/getProxyConfig").await;
-    if let Some(cfg_v4) = cfg_v4 {
-        if snapshot_passes_guards(cfg, &cfg_v4, "getProxyConfig") {
-            let cfg_v4_hash = hash_proxy_config(&cfg_v4);
-            let stable_hits = state.config_v4.observe(cfg_v4_hash);
-            if stable_hits < required_cfg_snapshots {
-                debug!(
-                    stable_hits,
-                    required_cfg_snapshots,
-                    snapshot = format_args!("0x{cfg_v4_hash:016x}"),
-                    "ME config v4 candidate observed"
-                );
-            } else if state.config_v4.is_applied(cfg_v4_hash) {
-                debug!(
-                    snapshot = format_args!("0x{cfg_v4_hash:016x}"),
-                    "ME config v4 stable snapshot already applied"
-                );
-            } else {
-                ready_v4 = Some((cfg_v4, cfg_v4_hash));
-            }
+    if let Some(cfg_v4) = cfg_v4
+        && snapshot_passes_guards(cfg, &cfg_v4, "getProxyConfig")
+    {
+        let cfg_v4_hash = hash_proxy_config(&cfg_v4);
+        let stable_hits = state.config_v4.observe(cfg_v4_hash);
+        if stable_hits < required_cfg_snapshots {
+            debug!(
+                stable_hits,
+                required_cfg_snapshots,
+                snapshot = format_args!("0x{cfg_v4_hash:016x}"),
+                "ME config v4 candidate observed"
+            );
+        } else if state.config_v4.is_applied(cfg_v4_hash) {
+            debug!(
+                snapshot = format_args!("0x{cfg_v4_hash:016x}"),
+                "ME config v4 stable snapshot already applied"
+            );
+        } else {
+            ready_v4 = Some((cfg_v4, cfg_v4_hash));
         }
     }
 
     let mut ready_v6: Option<(ProxyConfigData, u64)> = None;
     let cfg_v6 = retry_fetch("https://core.telegram.org/getProxyConfigV6").await;
-    if let Some(cfg_v6) = cfg_v6 {
-        if snapshot_passes_guards(cfg, &cfg_v6, "getProxyConfigV6") {
-            let cfg_v6_hash = hash_proxy_config(&cfg_v6);
-            let stable_hits = state.config_v6.observe(cfg_v6_hash);
-            if stable_hits < required_cfg_snapshots {
-                debug!(
-                    stable_hits,
-                    required_cfg_snapshots,
-                    snapshot = format_args!("0x{cfg_v6_hash:016x}"),
-                    "ME config v6 candidate observed"
-                );
-            } else if state.config_v6.is_applied(cfg_v6_hash) {
-                debug!(
-                    snapshot = format_args!("0x{cfg_v6_hash:016x}"),
-                    "ME config v6 stable snapshot already applied"
-                );
-            } else {
-                ready_v6 = Some((cfg_v6, cfg_v6_hash));
-            }
+    if let Some(cfg_v6) = cfg_v6
+        && snapshot_passes_guards(cfg, &cfg_v6, "getProxyConfigV6")
+    {
+        let cfg_v6_hash = hash_proxy_config(&cfg_v6);
+        let stable_hits = state.config_v6.observe(cfg_v6_hash);
+        if stable_hits < required_cfg_snapshots {
+            debug!(
+                stable_hits,
+                required_cfg_snapshots,
+                snapshot = format_args!("0x{cfg_v6_hash:016x}"),
+                "ME config v6 candidate observed"
+            );
+        } else if state.config_v6.is_applied(cfg_v6_hash) {
+            debug!(
+                snapshot = format_args!("0x{cfg_v6_hash:016x}"),
+                "ME config v6 stable snapshot already applied"
+            );
+        } else {
+            ready_v6 = Some((cfg_v6, cfg_v6_hash));
         }
     }
 

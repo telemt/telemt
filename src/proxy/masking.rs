@@ -98,6 +98,7 @@ async fn maybe_write_shape_padding<W>(
     cap: usize,
     above_cap_blur: bool,
     above_cap_blur_max_bytes: usize,
+    aggressive_mode: bool,
 ) where
     W: AsyncWrite + Unpin,
 {
@@ -107,7 +108,11 @@ async fn maybe_write_shape_padding<W>(
 
     let target_total = if total_sent >= cap && above_cap_blur && above_cap_blur_max_bytes > 0 {
         let mut rng = rand::rng();
-        let extra = rng.random_range(0..=above_cap_blur_max_bytes);
+        let extra = if aggressive_mode {
+            rng.random_range(1..=above_cap_blur_max_bytes)
+        } else {
+            rng.random_range(0..=above_cap_blur_max_bytes)
+        };
         total_sent.saturating_add(extra)
     } else {
         next_mask_shape_bucket(total_sent, floor, cap)
@@ -316,11 +321,11 @@ pub async fn handle_bad_client<R, W>(
                     peer,
                     local_addr,
                 );
-                if let Some(header) = proxy_header {
-                    if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
-                        wait_mask_outcome_budget(outcome_started, config).await;
-                        return;
-                    }
+                if let Some(header) = proxy_header
+                    && !write_proxy_header_with_timeout(&mut mask_write, &header).await
+                {
+                    wait_mask_outcome_budget(outcome_started, config).await;
+                    return;
                 }
                 if timeout(
                     MASK_RELAY_TIMEOUT,
@@ -335,6 +340,7 @@ pub async fn handle_bad_client<R, W>(
                         config.censorship.mask_shape_bucket_cap_bytes,
                         config.censorship.mask_shape_above_cap_blur,
                         config.censorship.mask_shape_above_cap_blur_max_bytes,
+                        config.censorship.mask_shape_hardening_aggressive_mode,
                     ),
                 )
                 .await
@@ -387,11 +393,11 @@ pub async fn handle_bad_client<R, W>(
                 build_mask_proxy_header(config.censorship.mask_proxy_protocol, peer, local_addr);
 
             let (mask_read, mut mask_write) = stream.into_split();
-            if let Some(header) = proxy_header {
-                if !write_proxy_header_with_timeout(&mut mask_write, &header).await {
-                    wait_mask_outcome_budget(outcome_started, config).await;
-                    return;
-                }
+            if let Some(header) = proxy_header
+                && !write_proxy_header_with_timeout(&mut mask_write, &header).await
+            {
+                wait_mask_outcome_budget(outcome_started, config).await;
+                return;
             }
             if timeout(
                 MASK_RELAY_TIMEOUT,
@@ -406,6 +412,7 @@ pub async fn handle_bad_client<R, W>(
                     config.censorship.mask_shape_bucket_cap_bytes,
                     config.censorship.mask_shape_above_cap_blur,
                     config.censorship.mask_shape_above_cap_blur_max_bytes,
+                    config.censorship.mask_shape_hardening_aggressive_mode,
                 ),
             )
             .await
@@ -441,6 +448,7 @@ async fn relay_to_mask<R, W, MR, MW>(
     shape_bucket_cap_bytes: usize,
     shape_above_cap_blur: bool,
     shape_above_cap_blur_max_bytes: usize,
+    shape_hardening_aggressive_mode: bool,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -455,31 +463,32 @@ async fn relay_to_mask<R, W, MR, MW>(
         return;
     }
 
-    let _ = tokio::join!(
-        async {
-            let copied = copy_with_idle_timeout(&mut reader, &mut mask_write).await;
-            let total_sent = initial_data.len().saturating_add(copied.total);
-
-            let should_shape =
-                shape_hardening_enabled && copied.ended_by_eof && !initial_data.is_empty();
-
-            maybe_write_shape_padding(
-                &mut mask_write,
-                total_sent,
-                should_shape,
-                shape_bucket_floor_bytes,
-                shape_bucket_cap_bytes,
-                shape_above_cap_blur,
-                shape_above_cap_blur_max_bytes,
-            )
-            .await;
-            let _ = mask_write.shutdown().await;
-        },
-        async {
-            let _ = copy_with_idle_timeout(&mut mask_read, &mut writer).await;
-            let _ = writer.shutdown().await;
-        }
+    let (upstream_copy, downstream_copy) = tokio::join!(
+        async { copy_with_idle_timeout(&mut reader, &mut mask_write).await },
+        async { copy_with_idle_timeout(&mut mask_read, &mut writer).await }
     );
+
+    let total_sent = initial_data.len().saturating_add(upstream_copy.total);
+
+    let should_shape = shape_hardening_enabled
+        && !initial_data.is_empty()
+        && (upstream_copy.ended_by_eof
+            || (shape_hardening_aggressive_mode && downstream_copy.total == 0));
+
+    maybe_write_shape_padding(
+        &mut mask_write,
+        total_sent,
+        should_shape,
+        shape_bucket_floor_bytes,
+        shape_bucket_cap_bytes,
+        shape_above_cap_blur,
+        shape_above_cap_blur_max_bytes,
+        shape_hardening_aggressive_mode,
+    )
+    .await;
+
+    let _ = mask_write.shutdown().await;
+    let _ = writer.shutdown().await;
 }
 
 /// Just consume all data from client without responding
@@ -527,6 +536,14 @@ mod masking_shape_guard_adversarial_tests;
 #[cfg(test)]
 #[path = "tests/masking_shape_classifier_resistance_adversarial_tests.rs"]
 mod masking_shape_classifier_resistance_adversarial_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_shape_bypass_blackhat_tests.rs"]
+mod masking_shape_bypass_blackhat_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_aggressive_mode_security_tests.rs"]
+mod masking_aggressive_mode_security_tests;
 
 #[cfg(test)]
 #[path = "tests/masking_timing_sidechannel_redteam_expected_fail_tests.rs"]

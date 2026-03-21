@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -619,6 +621,7 @@ impl MePool {
         self.runtime_ready.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub(super) fn set_family_runtime_state(
         &self,
         family: IpFamily,
@@ -982,28 +985,33 @@ impl MePool {
         Some(Duration::from_secs(secs))
     }
 
+    #[allow(dead_code)]
     pub(super) fn drain_soft_evict_enabled(&self) -> bool {
         self.me_pool_drain_soft_evict_enabled
             .load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub(super) fn drain_soft_evict_grace_secs(&self) -> u64 {
         self.me_pool_drain_soft_evict_grace_secs
             .load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub(super) fn drain_soft_evict_per_writer(&self) -> usize {
         self.me_pool_drain_soft_evict_per_writer
             .load(Ordering::Relaxed)
             .max(1) as usize
     }
 
+    #[allow(dead_code)]
     pub(super) fn drain_soft_evict_budget_per_core(&self) -> usize {
         self.me_pool_drain_soft_evict_budget_per_core
             .load(Ordering::Relaxed)
             .max(1) as usize
     }
 
+    #[allow(dead_code)]
     pub(super) fn drain_soft_evict_cooldown(&self) -> Duration {
         Duration::from_millis(
             self.me_pool_drain_soft_evict_cooldown_ms

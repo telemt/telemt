@@ -21,16 +21,13 @@ env:
 
 jobs:
   prepare:
-    name: Prepare metadata
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       release_enabled: ${{ steps.meta.outputs.release_enabled }}
     steps:
-      - name: Derive version
-        id: meta
-        shell: bash
+      - id: meta
         run: |
           set -euo pipefail
 
@@ -53,62 +50,38 @@ jobs:
           echo "release_enabled=$RELEASE_ENABLED" >> "$GITHUB_OUTPUT"
 
   checks:
-    name: Checks
     runs-on: ubuntu-latest
     container:
       image: debian:trixie
     steps:
-      - name: Install system dependencies
-        run: |
-          set -euo pipefail
+      - run: |
           apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            git \
-            build-essential \
-            pkg-config \
-            clang \
-            llvm \
-            python3 \
-            python3-pip
-          update-ca-certificates
+          apt-get install -y build-essential clang llvm pkg-config curl git
 
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             /github/home/.cargo/registry
             /github/home/.cargo/git
             target
-          key: checks-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            checks-${{ runner.os }}-
+          key: checks-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Cargo fetch
-        run: cargo fetch --locked
-
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy
-
-      - name: Tests
-        run: cargo test
+      - run: cargo fetch --locked
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy
+      - run: cargo test
 
   build-binaries:
-    name: Build ${{ matrix.asset_name }}
     needs: [prepare, checks]
     runs-on: ubuntu-latest
     container:
       image: debian:trixie
+
     strategy:
       fail-fast: false
       matrix:
@@ -127,154 +100,80 @@ jobs:
             asset_name: telemt-aarch64-linux-musl
 
     steps:
-      - name: Install system dependencies
-        run: |
-          set -euo pipefail
+      - run: |
           apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            git \
-            build-essential \
-            pkg-config \
-            clang \
-            llvm \
-            file \
-            tar \
-            xz-utils \
-            python3 \
-            python3-pip
-          update-ca-certificates
+          apt-get install -y clang llvm pkg-config curl git python3 python3-pip file tar xz-utils
 
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             /github/home/.cargo/registry
             /github/home/.cargo/git
             target
           key: build-${{ matrix.zig_target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            build-${{ matrix.zig_target }}-
 
-      - name: Install cargo-zigbuild + Zig
-        run: |
-          set -euo pipefail
+      - run: |
           python3 -m pip install --user --break-system-packages cargo-zigbuild
           echo "/github/home/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Cargo fetch
-        run: cargo fetch --locked
+      - run: cargo fetch --locked
 
-      - name: Build release
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "fat"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
-          CARGO_PROFILE_RELEASE_PANIC: "abort"
-        run: |
-          set -euo pipefail
+      - run: |
           cargo zigbuild --release --locked --target "${{ matrix.zig_target }}"
 
-      - name: Debug target dir (optional but useful)
-        run: |
-          set -euo pipefail
-          ls -lah "target/${{ matrix.rust_target }}/release/" || true
+      - run: |
+          BIN="target/${{ matrix.rust_target }}/release/${BINARY_NAME}"
+          llvm-strip "$BIN" || true
 
-      - name: Strip binary
-        run: |
-          set -euo pipefail
-          llvm-strip "target/${{ matrix.rust_target }}/release/${BINARY_NAME}" || true
+      - run: |
+          BIN="target/${{ matrix.rust_target }}/release/${BINARY_NAME}"
+          OUT="$RUNNER_TEMP/${{ matrix.asset_name }}"
+          mkdir -p "$OUT"
+          install -m755 "$BIN" "$OUT/${BINARY_NAME}"
 
-      - name: Inspect binary
-        run: |
-          set -euo pipefail
-          file "target/${{ matrix.rust_target }}/release/${BINARY_NAME}"
-
-      - name: Package
-        run: |
-          set -euo pipefail
-
-          BIN_PATH="target/${{ matrix.rust_target }}/release/${BINARY_NAME}"
-
-          test -f "$BIN_PATH"
-
-          OUTDIR="$RUNNER_TEMP/pkg/${{ matrix.asset_name }}"
-          mkdir -p "$OUTDIR"
-
-          install -m 0755 "$BIN_PATH" "$OUTDIR/${BINARY_NAME}"
-
-          if [[ -f LICENSE ]]; then cp LICENSE "$OUTDIR/"; fi
-          if [[ -f README.md ]]; then cp README.md "$OUTDIR/"; fi
-
-          cat > "$OUTDIR/BUILD-INFO.txt" <<EOF
-          project=${GITHUB_REPOSITORY}
-          version=${{ needs.prepare.outputs.version }}
-          git_ref=${GITHUB_REF}
-          git_sha=${GITHUB_SHA}
-          rust_target=${{ matrix.rust_target }}
-          zig_target=${{ matrix.zig_target }}
-          built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          EOF
-
-          mkdir -p dist
-          tar -C "$RUNNER_TEMP/pkg" -czf "dist/${{ matrix.asset_name }}.tar.gz" "${{ matrix.asset_name }}"
-          sha256sum "dist/${{ matrix.asset_name }}.tar.gz" > "dist/${{ matrix.asset_name }}.sha256"
+          tar -C "$RUNNER_TEMP" -czf "${{ matrix.asset_name }}.tar.gz" "${{ matrix.asset_name }}"
+          sha256sum "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
           path: |
-            dist/${{ matrix.asset_name }}.tar.gz
-            dist/${{ matrix.asset_name }}.sha256
-          if-no-files-found: error
-          retention-days: 14
-
-  attest-binaries:
-    name: Attest binary archives
-    needs: build-binaries
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      attestations: write
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: Flatten artifacts
-        run: |
-          set -euo pipefail
-          mkdir -p upload
-          find dist -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} upload/ \;
-          ls -lah upload
-
-      - name: Attest release archives
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: 'upload/*.tar.gz'
+            ${{ matrix.asset_name }}.tar.gz
+            ${{ matrix.asset_name }}.sha256
 
   docker-image:
-    name: Build and push GHCR image
-    needs: [prepare, checks]
+    name: Docker ${{ matrix.platform }}
+    needs: [prepare, build-binaries]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            artifact: telemt-x86_64-linux-gnu
+          - platform: linux/arm64
+            artifact: telemt-aarch64-linux-gnu
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+
+      - run: |
+          mkdir docker-build
+          tar -xzf dist/*.tar.gz -C docker-build --strip-components=1
+
       - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Login
         if: ${{ needs.prepare.outputs.release_enabled == 'true' }}
         uses: docker/login-action@v3
         with:
@@ -282,42 +181,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      - uses: docker/build-push-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ needs.prepare.outputs.version }}
-            type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease != 'true' && needs.prepare.outputs.release_enabled == 'true' }}
-          labels: |
-            org.opencontainers.image.title=telemt
-            org.opencontainers.image.description=telemt
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          context: ./docker-build
+          platforms: ${{ matrix.platform }}
           push: ${{ needs.prepare.outputs.release_enabled == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: mode=max
-          sbom: true
-          build-args: |
-            TELEMT_VERSION=${{ needs.prepare.outputs.version }}
-            VCS_REF=${{ github.sha }}
+          tags: ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=telemt-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=telemt-${{ matrix.platform }}
+          provenance: false
+          sbom: false
 
   release:
-    name: Create GitHub Release
     if: ${{ needs.prepare.outputs.release_enabled == 'true' }}
-    needs: [prepare, build-binaries, attest-binaries, docker-image]
+    needs: [prepare, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -326,18 +203,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+          pattern: telemt-*
 
-      - name: Flatten artifacts
-        run: |
-          set -euo pipefail
-          mkdir -p upload
+      - run: |
+          mkdir upload
           find release-artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' \) -exec cp {} upload/ \;
-          ls -lah upload
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: upload/*
           generate_release_notes: true
-          draft: false
           prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}

@@ -10,6 +10,9 @@ mod ip_tracker;
 #[path = "tests/ip_tracker_hotpath_adversarial_tests.rs"]
 mod ip_tracker_hotpath_adversarial_tests;
 #[cfg(test)]
+#[path = "tests/ip_tracker_encapsulation_adversarial_tests.rs"]
+mod ip_tracker_encapsulation_adversarial_tests;
+#[cfg(test)]
 #[path = "tests/ip_tracker_regression_tests.rs"]
 mod ip_tracker_regression_tests;
 mod maestro;

@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+
+// Adaptive buffer policy is staged and retained for deterministic rollout.
+// Keep definitions compiled for compatibility and security test scaffolding.
+
 use dashmap::DashMap;
 use std::cmp::max;
 use std::sync::OnceLock;

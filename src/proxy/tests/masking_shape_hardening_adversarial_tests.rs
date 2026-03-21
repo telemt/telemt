@@ -56,14 +56,14 @@ fn shape_bucket_never_drops_below_total_for_valid_ranges() {
 #[tokio::test]
 async fn maybe_write_shape_padding_writes_exact_delta() {
     let mut writer = CountingWriter::new();
-    maybe_write_shape_padding(&mut writer, 1200, true, 1000, 1500, false, 0).await;
+    maybe_write_shape_padding(&mut writer, 1200, true, 1000, 1500, false, 0, false).await;
     assert_eq!(writer.written, 300);
 }
 
 #[tokio::test]
 async fn maybe_write_shape_padding_skips_when_disabled() {
     let mut writer = CountingWriter::new();
-    maybe_write_shape_padding(&mut writer, 1200, false, 1000, 1500, false, 0).await;
+    maybe_write_shape_padding(&mut writer, 1200, false, 1000, 1500, false, 0, false).await;
     assert_eq!(writer.written, 0);
 }
 
@@ -87,6 +87,7 @@ async fn relay_to_mask_applies_cap_clamped_padding_for_non_power_of_two_cap() {
             1500,
             false,
             0,
+            false,
         )
         .await;
     });

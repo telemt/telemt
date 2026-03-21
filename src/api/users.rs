@@ -495,11 +495,11 @@ fn resolve_link_hosts(
             push_unique_host(&mut hosts, host);
             continue;
         }
-        if let Some(ip) = listener.announce_ip {
-            if !ip.is_unspecified() {
-                push_unique_host(&mut hosts, &ip.to_string());
-                continue;
-            }
+        if let Some(ip) = listener.announce_ip
+            && !ip.is_unspecified()
+        {
+            push_unique_host(&mut hosts, &ip.to_string());
+            continue;
         }
         if listener.ip.is_unspecified() {
             let detected_ip = if listener.ip.is_ipv4() {

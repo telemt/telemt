@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::thread;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -36,11 +36,6 @@ fn make_pooled_payload_from(pool: &Arc<BufferPool>, data: &[u8]) -> PooledBuffer
     payload.resize(data.len(), 0);
     payload[..data.len()].copy_from_slice(data);
     payload
-}
-
-fn quota_user_lock_test_lock() -> &'static Mutex<()> {
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[test]
@@ -243,6 +238,11 @@ fn desync_dedup_cache_is_bounded() {
 
 #[test]
 fn quota_user_lock_cache_reuses_entry_for_same_user() {
+    let _guard = super::quota_user_lock_test_scope();
+
+    let map = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
+    map.clear();
+
     let a = quota_user_lock("quota-user-a");
     let b = quota_user_lock("quota-user-a");
     assert!(Arc::ptr_eq(&a, &b), "same user must reuse same quota lock");
@@ -250,9 +250,7 @@ fn quota_user_lock_cache_reuses_entry_for_same_user() {
 
 #[test]
 fn quota_user_lock_cache_is_bounded_under_unique_churn() {
-    let _guard = quota_user_lock_test_lock()
-        .lock()
-        .expect("quota user lock test lock must be available");
+    let _guard = super::quota_user_lock_test_scope();
 
     let map = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
     map.clear();
@@ -270,10 +268,8 @@ fn quota_user_lock_cache_is_bounded_under_unique_churn() {
 }
 
 #[test]
-fn quota_user_lock_cache_saturation_returns_ephemeral_lock_without_growth() {
-    let _guard = quota_user_lock_test_lock()
-        .lock()
-        .expect("quota user lock test lock must be available");
+fn quota_user_lock_cache_saturation_returns_stable_overflow_lock_without_growth() {
+    let _guard = super::quota_user_lock_test_scope();
 
     let map = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
     for attempt in 0..8u32 {
@@ -305,8 +301,8 @@ fn quota_user_lock_cache_saturation_returns_ephemeral_lock_without_growth() {
             "overflow path should not cache new user lock when map is saturated and all entries are retained"
         );
         assert!(
-            !Arc::ptr_eq(&overflow_a, &overflow_b),
-            "overflow user lock should be ephemeral under saturation to preserve bounded cache size"
+            Arc::ptr_eq(&overflow_a, &overflow_b),
+            "overflow user lock should use deterministic striping under saturation"
         );
 
         drop(retained);
@@ -951,24 +947,6 @@ fn light_fuzz_desync_dedup_temporal_gate_behavior_is_stable() {
     }
 
     panic!("expected at least one post-window sample to re-emit forensic record");
-}
-
-#[test]
-#[ignore = "Tracking for M-04: Verify should_emit_full_desync returns true on first occurrence and false on duplicate within window"]
-fn should_emit_full_desync_filters_duplicates() {
-    unimplemented!("Stub for M-04");
-}
-
-#[test]
-#[ignore = "Tracking for M-04: Verify desync dedup eviction behaves correctly under map-full condition"]
-fn desync_dedup_eviction_under_map_full_condition() {
-    unimplemented!("Stub for M-04");
-}
-
-#[tokio::test]
-#[ignore = "Tracking for M-05: Verify C2ME channel full path yields then sends under backpressure"]
-async fn c2me_channel_full_path_yields_then_sends() {
-    unimplemented!("Stub for M-05");
 }
 
 fn make_forensics_state() -> RelayForensicsState {

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -593,7 +595,7 @@ impl MePool {
 
         let round = *hybrid_recovery_round;
         let target_triggered = self.trigger_async_recovery_for_target_dc(routed_dc).await;
-        if !target_triggered || round % HYBRID_GLOBAL_BURST_PERIOD_ROUNDS == 0 {
+        if !target_triggered || round.is_multiple_of(HYBRID_GLOBAL_BURST_PERIOD_ROUNDS) {
             self.trigger_async_recovery_global().await;
         }
         *hybrid_recovery_round = round.saturating_add(1);
@@ -672,7 +674,7 @@ impl MePool {
             if !self.writer_eligible_for_selection(w, include_warm) {
                 continue;
             }
-            if w.writer_dc == routed_dc && preferred.iter().any(|endpoint| *endpoint == w.addr) {
+            if w.writer_dc == routed_dc && preferred.contains(&w.addr) {
                 out.push(idx);
             }
         }

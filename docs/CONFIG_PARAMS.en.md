@@ -261,6 +261,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | alpn_enforce | `bool` | `true` | — | Enforces ALPN echo behavior based on client preference. |
 | mask_proxy_protocol | `u8` | `0` | — | PROXY protocol mode for mask backend (`0` disabled, `1` v1, `2` v2). |
 | mask_shape_hardening | `bool` | `true` | — | Enables client->mask shape-channel hardening by applying controlled tail padding to bucket boundaries on mask relay shutdown. |
+| mask_shape_hardening_aggressive_mode | `bool` | `false` | Requires `mask_shape_hardening = true`. | Opt-in aggressive shaping profile: allows shaping on backend-silent non-EOF paths and switches above-cap blur to strictly positive random tail. |
 | mask_shape_bucket_floor_bytes | `usize` | `512` | Must be `> 0`; should be `<= mask_shape_bucket_cap_bytes`. | Minimum bucket size used by shape-channel hardening. |
 | mask_shape_bucket_cap_bytes | `usize` | `4096` | Must be `>= mask_shape_bucket_floor_bytes`. | Maximum bucket size used by shape-channel hardening; traffic above cap is not padded further. |
 | mask_shape_above_cap_blur | `bool` | `false` | Requires `mask_shape_hardening = true`; requires `mask_shape_above_cap_blur_max_bytes > 0`. | Adds bounded randomized tail bytes even when forwarded size already exceeds cap. |
@@ -284,6 +285,27 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
 
 This means multiple nearby probe sizes collapse into the same backend-observed size class, making active classification harder.
 
+What each parameter changes in practice:
+
+- `mask_shape_hardening`
+	Enables or disables this entire length-shaping stage on the fallback path.
+	When `false`, backend-observed length stays close to the real forwarded probe length.
+	When `true`, clean relay shutdown can append random padding bytes to move the total into a bucket.
+
+- `mask_shape_bucket_floor_bytes`
+	Sets the first bucket boundary used for small probes.
+	Example: with floor `512`, a malformed probe that would otherwise forward `37` bytes can be expanded to `512` bytes on clean EOF.
+	Larger floor values hide very small probes better, but increase egress cost.
+
+- `mask_shape_bucket_cap_bytes`
+	Sets the largest bucket Telemt will pad up to with bucket logic.
+	Example: with cap `4096`, a forwarded total of `1800` bytes may be padded to `2048` or `4096` depending on the bucket ladder, but a total already above `4096` will not be bucket-padded further.
+	Larger cap values increase the range over which size classes are collapsed, but also increase worst-case overhead.
+
+- Clean EOF matters in conservative mode
+	In the default profile, shape padding is intentionally conservative: it is applied on clean relay shutdown, not on every timeout/drip path.
+	This avoids introducing new timeout-tail artifacts that some backends or tests interpret as a separate fingerprint.
+
 Practical trade-offs:
 
 - Better anti-fingerprinting on size/shape channel.
@@ -296,13 +318,55 @@ Recommended starting profile:
 - `mask_shape_bucket_floor_bytes = 512`
 - `mask_shape_bucket_cap_bytes = 4096`
 
+### Aggressive mode notes (`[censorship]`)
+
+`mask_shape_hardening_aggressive_mode` is an opt-in profile for higher anti-classifier pressure.
+
+- Default is `false` to preserve conservative timeout/no-tail behavior.
+- Requires `mask_shape_hardening = true`.
+- When enabled, backend-silent non-EOF masking paths may be shaped.
+- When enabled together with above-cap blur, the random extra tail uses `[1, max]` instead of `[0, max]`.
+
+What changes when aggressive mode is enabled:
+
+- Backend-silent timeout paths can be shaped
+	In default mode, a client that keeps the socket half-open and times out will usually not receive shape padding on that path.
+	In aggressive mode, Telemt may still shape that backend-silent session if no backend bytes were returned.
+	This is specifically aimed at active probes that try to avoid EOF in order to preserve an exact backend-observed length.
+
+- Above-cap blur always adds at least one byte
+	In default mode, above-cap blur may choose `0`, so some oversized probes still land on their exact base forwarded length.
+	In aggressive mode, that exact-base sample is removed by construction.
+
+- Tradeoff
+	Aggressive mode improves resistance to active length classifiers, but it is more opinionated and less conservative.
+	If your deployment prioritizes strict compatibility with timeout/no-tail semantics, leave it disabled.
+	If your threat model includes repeated active probing by a censor, this mode is the stronger profile.
+
+Use this mode only when your threat model prioritizes classifier resistance over strict compatibility with conservative masking semantics.
+
 ### Above-cap blur notes (`[censorship]`)
 
 `mask_shape_above_cap_blur` adds a second-stage blur for very large probes that are already above `mask_shape_bucket_cap_bytes`.
 
-- A random tail in `[0, mask_shape_above_cap_blur_max_bytes]` is appended.
+- A random tail in `[0, mask_shape_above_cap_blur_max_bytes]` is appended in default mode.
+- In aggressive mode, the random tail becomes strictly positive: `[1, mask_shape_above_cap_blur_max_bytes]`.
 - This reduces exact-size leakage above cap at bounded overhead.
 - Keep `mask_shape_above_cap_blur_max_bytes` conservative to avoid unnecessary egress growth.
+
+Operational meaning:
+
+- Without above-cap blur
+	A probe that forwards `5005` bytes will still look like `5005` bytes to the backend if it is already above cap.
+
+- With above-cap blur enabled
+	That same probe may look like any value in a bounded window above its base length.
+	Example with `mask_shape_above_cap_blur_max_bytes = 64`:
+	backend-observed size becomes `5005..5069` in default mode, or `5006..5069` in aggressive mode.
+
+- Choosing `mask_shape_above_cap_blur_max_bytes`
+	Small values reduce cost but preserve more separability between far-apart oversized classes.
+	Larger values blur oversized classes more aggressively, but add more egress overhead and more output variance.
 
 ### Timing normalization envelope notes (`[censorship]`)
 

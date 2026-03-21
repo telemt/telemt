@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 

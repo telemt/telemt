@@ -523,6 +523,10 @@ pub(crate) fn default_mask_shape_hardening() -> bool {
     true
 }
 
+pub(crate) fn default_mask_shape_hardening_aggressive_mode() -> bool {
+    false
+}
+
 pub(crate) fn default_mask_shape_bucket_floor_bytes() -> usize {
     512
 }

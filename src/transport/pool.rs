@@ -199,8 +199,12 @@ impl ConnectionPool {
 
     /// Close all pooled connections
     pub async fn close_all(&self) {
-        let pools = self.pools.read();
-        for (addr, pool) in pools.iter() {
+        let pools_snapshot: Vec<(SocketAddr, Arc<Mutex<PoolInner>>)> = {
+            let pools = self.pools.read();
+            pools.iter().map(|(addr, pool)| (*addr, Arc::clone(pool))).collect()
+        };
+
+        for (addr, pool) in pools_snapshot {
             let mut inner = pool.lock().await;
             let count = inner.connections.len();
             inner.connections.clear();
@@ -210,12 +214,15 @@ impl ConnectionPool {
 
     /// Get pool statistics
     pub async fn stats(&self) -> PoolStats {
-        let pools = self.pools.read();
+        let pools_snapshot: Vec<Arc<Mutex<PoolInner>>> = {
+            let pools = self.pools.read();
+            pools.values().cloned().collect()
+        };
         let mut total_connections = 0;
         let mut total_pending = 0;
         let mut endpoints = 0;
 
-        for pool in pools.values() {
+        for pool in pools_snapshot {
             let inner = pool.lock().await;
             total_connections += inner.connections.len();
             total_pending += inner.pending;

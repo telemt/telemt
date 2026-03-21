@@ -509,8 +509,9 @@ async fn enqueue_cleanup_recovers_from_poisoned_mutex() {
     let ip = ip_from_idx(99);
 
     // Poison the lock by panicking while holding it
-    let result = std::panic::catch_unwind(|| {
-        let _guard = tracker.cleanup_queue.lock().unwrap();
+    let cleanup_queue = tracker.cleanup_queue_mutex_for_tests();
+    let result = std::panic::catch_unwind(move || {
+        let _guard = cleanup_queue.lock().unwrap();
         panic!("Intentional poison panic");
     });
     assert!(result.is_err(), "Expected panic to poison mutex");
@@ -612,8 +613,9 @@ async fn poisoned_cleanup_queue_still_releases_slot_for_next_ip() {
     tracker.check_and_add("poison-slot", ip1).await.unwrap();
 
     // Poison the queue lock as an adversarial condition.
-    let _ = std::panic::catch_unwind(|| {
-        let _guard = tracker.cleanup_queue.lock().unwrap();
+    let cleanup_queue = tracker.cleanup_queue_mutex_for_tests();
+    let _ = std::panic::catch_unwind(move || {
+        let _guard = cleanup_queue.lock().unwrap();
         panic!("intentional queue poison");
     });
 
@@ -660,8 +662,9 @@ async fn stress_repeated_queue_poison_recovery_preserves_admission_progress() {
         .unwrap();
 
     for _ in 0..64 {
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = tracker.cleanup_queue.lock().unwrap();
+        let cleanup_queue = tracker.cleanup_queue_mutex_for_tests();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = cleanup_queue.lock().unwrap();
             panic!("intentional queue poison in stress loop");
         });
 

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::items_after_test_module)]
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -197,11 +198,10 @@ pub async fn run_probe(
     if nat_probe
         && probe.reflected_ipv4.is_none()
         && probe.detected_ipv4.map(is_bogon_v4).unwrap_or(false)
+        && let Some(public_ip) = detect_public_ipv4_http(&config.http_ip_detect_urls).await
     {
-        if let Some(public_ip) = detect_public_ipv4_http(&config.http_ip_detect_urls).await {
-            probe.reflected_ipv4 = Some(SocketAddr::new(IpAddr::V4(public_ip), 0));
-            info!(public_ip = %public_ip, "STUN unavailable, using HTTP public IPv4 fallback");
-        }
+        probe.reflected_ipv4 = Some(SocketAddr::new(IpAddr::V4(public_ip), 0));
+        info!(public_ip = %public_ip, "STUN unavailable, using HTTP public IPv4 fallback");
     }
 
     probe.ipv4_nat_detected = match (probe.detected_ipv4, probe.reflected_ipv4) {
@@ -286,8 +286,6 @@ async fn probe_stun_servers_parallel(
         while next_idx < servers.len() && join_set.len() < concurrency {
             let stun_addr = servers[next_idx].clone();
             next_idx += 1;
-            let bind_v4 = bind_v4;
-            let bind_v6 = bind_v6;
             join_set.spawn(async move {
                 let res = timeout(STUN_BATCH_TIMEOUT, async {
                     let v4 = stun_probe_family_with_bind(&stun_addr, IpFamily::V4, bind_v4).await?;

@@ -8,6 +8,9 @@ pub mod state;
 pub mod tls_stream;
 pub mod traits;
 
+#[cfg(test)]
+mod frame_stream_padding_security_tests;
+
 // Legacy compatibility - will be removed later
 pub mod frame_stream;
 

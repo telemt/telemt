@@ -116,11 +116,23 @@ fn beobachten_ttl(config: &ProxyConfig) -> Duration {
 }
 
 fn wrap_tls_application_record(payload: &[u8]) -> Vec<u8> {
-    let mut record = Vec::with_capacity(5 + payload.len());
-    record.push(TLS_RECORD_APPLICATION);
-    record.extend_from_slice(&TLS_VERSION);
-    record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-    record.extend_from_slice(payload);
+    let chunks = payload.len().div_ceil(u16::MAX as usize).max(1);
+    let mut record = Vec::with_capacity(payload.len() + 5 * chunks);
+
+    if payload.is_empty() {
+        record.push(TLS_RECORD_APPLICATION);
+        record.extend_from_slice(&TLS_VERSION);
+        record.extend_from_slice(&0u16.to_be_bytes());
+        return record;
+    }
+
+    for chunk in payload.chunks(u16::MAX as usize) {
+        record.push(TLS_RECORD_APPLICATION);
+        record.extend_from_slice(&TLS_VERSION);
+        record.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+        record.extend_from_slice(chunk);
+    }
+
     record
 }
 
@@ -1312,3 +1324,7 @@ mod masking_probe_evasion_blackhat_tests;
 #[cfg(test)]
 #[path = "tests/client_beobachten_ttl_bounds_security_tests.rs"]
 mod beobachten_ttl_bounds_security_tests;
+
+#[cfg(test)]
+#[path = "tests/client_tls_record_wrap_hardening_security_tests.rs"]
+mod tls_record_wrap_hardening_security_tests;

@@ -652,7 +652,7 @@ mod tests {
             let mut out = BytesMut::new();
             codec.encode(&frame, &mut out).unwrap();
 
-            assert!(out.len() >= 4 + payload.len() + 1);
+            assert!(out.len() > 4 + payload.len());
             let wire_len = u32::from_le_bytes([out[0], out[1], out[2], out[3]]) as usize;
             assert!(
                 (payload.len() + 1..=payload.len() + 3).contains(&wire_len),

@@ -154,7 +154,7 @@ impl TlsRecordHeader {
             }
 
             TLS_RECORD_HANDSHAKE => {
-                if len < 4 || len > MAX_TLS_PLAINTEXT_SIZE {
+                if !(4..=MAX_TLS_PLAINTEXT_SIZE).contains(&len) {
                     return Err(Error::new(
                         ErrorKind::InvalidData,
                         format!(

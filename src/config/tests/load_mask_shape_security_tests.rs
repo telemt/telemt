@@ -194,3 +194,45 @@ mask_timing_normalization_ceiling_ms = 240
 
     remove_temp_config(&path);
 }
+
+#[test]
+fn load_rejects_aggressive_shape_mode_when_shape_hardening_disabled() {
+    let path = write_temp_config(
+        r#"
+[censorship]
+mask_shape_hardening = false
+mask_shape_hardening_aggressive_mode = true
+"#,
+    );
+
+    let err = ProxyConfig::load(&path)
+        .expect_err("aggressive shape hardening mode must require shape hardening enabled");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("censorship.mask_shape_hardening_aggressive_mode requires censorship.mask_shape_hardening = true"),
+        "error must explain aggressive-mode prerequisite, got: {msg}"
+    );
+
+    remove_temp_config(&path);
+}
+
+#[test]
+fn load_accepts_aggressive_shape_mode_when_shape_hardening_enabled() {
+    let path = write_temp_config(
+        r#"
+[censorship]
+mask_shape_hardening = true
+mask_shape_hardening_aggressive_mode = true
+mask_shape_above_cap_blur = true
+mask_shape_above_cap_blur_max_bytes = 8
+"#,
+    );
+
+    let cfg = ProxyConfig::load(&path)
+        .expect("aggressive shape hardening mode should be accepted when prerequisites are met");
+    assert!(cfg.censorship.mask_shape_hardening);
+    assert!(cfg.censorship.mask_shape_hardening_aggressive_mode);
+    assert!(cfg.censorship.mask_shape_above_cap_blur);
+
+    remove_temp_config(&path);
+}

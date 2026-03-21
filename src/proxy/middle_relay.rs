@@ -1,7 +1,6 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeSet, HashMap};
-use std::hash::BuildHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -50,11 +49,16 @@ const ME_D2C_FLUSH_BATCH_MAX_BYTES_MIN: usize = 4096;
 const QUOTA_USER_LOCKS_MAX: usize = 64;
 #[cfg(not(test))]
 const QUOTA_USER_LOCKS_MAX: usize = 4_096;
+#[cfg(test)]
+const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 16;
+#[cfg(not(test))]
+const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 256;
 static DESYNC_DEDUP: OnceLock<DashMap<u64, Instant>> = OnceLock::new();
 static DESYNC_HASHER: OnceLock<RandomState> = OnceLock::new();
 static DESYNC_FULL_CACHE_LAST_EMIT_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static DESYNC_DEDUP_EVER_SATURATED: OnceLock<AtomicBool> = OnceLock::new();
 static QUOTA_USER_LOCKS: OnceLock<DashMap<String, Arc<AsyncMutex<()>>>> = OnceLock::new();
+static QUOTA_USER_OVERFLOW_LOCKS: OnceLock<Vec<Arc<AsyncMutex<()>>>> = OnceLock::new();
 static RELAY_IDLE_CANDIDATE_REGISTRY: OnceLock<Mutex<RelayIdleCandidateRegistry>> = OnceLock::new();
 static RELAY_IDLE_MARK_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -286,9 +290,7 @@ impl MeD2cFlushPolicy {
 
 fn hash_value<T: Hash>(value: &T) -> u64 {
     let state = DESYNC_HASHER.get_or_init(RandomState::new);
-    let mut hasher = state.build_hasher();
-    value.hash(&mut hasher);
-    hasher.finish()
+    state.hash_one(value)
 }
 
 fn hash_ip(ip: IpAddr) -> u64 {
@@ -416,6 +418,13 @@ fn desync_dedup_test_lock() -> &'static Mutex<()> {
     TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn desync_forensics_len_bytes(len: usize) -> ([u8; 4], bool) {
+    match u32::try_from(len) {
+        Ok(value) => (value.to_le_bytes(), false),
+        Err(_) => (u32::MAX.to_le_bytes(), true),
+    }
+}
+
 fn report_desync_frame_too_large(
     state: &RelayForensicsState,
     proto_tag: ProtoTag,
@@ -425,7 +434,8 @@ fn report_desync_frame_too_large(
     raw_len_bytes: Option<[u8; 4]>,
     stats: &Stats,
 ) -> ProxyError {
-    let len_buf = raw_len_bytes.unwrap_or((len as u32).to_le_bytes());
+    let (fallback_len_buf, len_buf_truncated) = desync_forensics_len_bytes(len);
+    let len_buf = raw_len_bytes.unwrap_or(fallback_len_buf);
     let looks_like_tls = raw_len_bytes
         .map(|b| b[0] == 0x16 && b[1] == 0x03)
         .unwrap_or(false);
@@ -461,6 +471,7 @@ fn report_desync_frame_too_large(
             bytes_me2c,
             raw_len = len,
             raw_len_hex = format_args!("0x{:08x}", len),
+            raw_len_bytes_truncated = len_buf_truncated,
             raw_bytes = format_args!(
                 "{:02x} {:02x} {:02x} {:02x}",
                 len_buf[0], len_buf[1], len_buf[2], len_buf[3]
@@ -527,6 +538,30 @@ fn quota_would_be_exceeded_for_user(
     })
 }
 
+#[cfg(test)]
+fn quota_user_lock_test_guard() -> &'static Mutex<()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+fn quota_user_lock_test_scope() -> std::sync::MutexGuard<'static, ()> {
+    quota_user_lock_test_guard()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn quota_overflow_user_lock(user: &str) -> Arc<AsyncMutex<()>> {
+    let stripes = QUOTA_USER_OVERFLOW_LOCKS.get_or_init(|| {
+        (0..QUOTA_OVERFLOW_LOCK_STRIPES)
+            .map(|_| Arc::new(AsyncMutex::new(())))
+            .collect()
+    });
+
+    let hash = crc32fast::hash(user.as_bytes()) as usize;
+    Arc::clone(&stripes[hash % stripes.len()])
+}
+
 fn quota_user_lock(user: &str) -> Arc<AsyncMutex<()>> {
     let locks = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
     if let Some(existing) = locks.get(user) {
@@ -538,7 +573,7 @@ fn quota_user_lock(user: &str) -> Arc<AsyncMutex<()>> {
     }
 
     if locks.len() >= QUOTA_USER_LOCKS_MAX {
-        return Arc::new(AsyncMutex::new(()));
+        return quota_overflow_user_lock(user);
     }
 
     let created = Arc::new(AsyncMutex::new(()));
@@ -686,7 +721,6 @@ where
         .max(C2ME_CHANNEL_CAPACITY_FALLBACK);
     let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(c2me_channel_capacity);
     let me_pool_c2me = me_pool.clone();
-    let effective_tag = effective_tag;
     let c2me_sender = tokio::spawn(async move {
         let mut sent_since_yield = 0usize;
         while let Some(cmd) = c2me_rx.recv().await {
@@ -1522,6 +1556,31 @@ where
     }
 }
 
+fn compute_intermediate_secure_wire_len(
+    data_len: usize,
+    padding_len: usize,
+    quickack: bool,
+) -> Result<(u32, usize)> {
+    let wire_len = data_len
+        .checked_add(padding_len)
+        .ok_or_else(|| ProxyError::Proxy("Frame length overflow".into()))?;
+    if wire_len > 0x7fff_ffffusize {
+        return Err(ProxyError::Proxy(format!(
+            "Intermediate/Secure frame too large: {wire_len}"
+        )));
+    }
+
+    let total = 4usize
+        .checked_add(wire_len)
+        .ok_or_else(|| ProxyError::Proxy("Frame buffer size overflow".into()))?;
+    let mut len_val = u32::try_from(wire_len)
+        .map_err(|_| ProxyError::Proxy("Frame length conversion overflow".into()))?;
+    if quickack {
+        len_val |= 0x8000_0000;
+    }
+    Ok((len_val, total))
+}
+
 async fn write_client_payload<W>(
     client_writer: &mut CryptoWriter<W>,
     proto_tag: ProtoTag,
@@ -1591,11 +1650,8 @@ where
             } else {
                 0
             };
-            let mut len_val = (data.len() + padding_len) as u32;
-            if quickack {
-                len_val |= 0x8000_0000;
-            }
-            let total = 4 + data.len() + padding_len;
+            let (len_val, total) =
+                compute_intermediate_secure_wire_len(data.len(), padding_len, quickack)?;
             frame_buf.clear();
             frame_buf.reserve(total);
             frame_buf.extend_from_slice(&len_val.to_le_bytes());
@@ -1645,3 +1701,23 @@ mod idle_policy_security_tests;
 #[cfg(test)]
 #[path = "tests/middle_relay_desync_all_full_dedup_security_tests.rs"]
 mod desync_all_full_dedup_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_stub_completion_security_tests.rs"]
+mod stub_completion_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_coverage_high_risk_security_tests.rs"]
+mod coverage_high_risk_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_quota_overflow_lock_security_tests.rs"]
+mod quota_overflow_lock_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_length_cast_hardening_security_tests.rs"]
+mod length_cast_hardening_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_blackhat_campaign_integration_tests.rs"]
+mod blackhat_campaign_integration_tests;

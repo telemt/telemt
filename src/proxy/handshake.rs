@@ -626,7 +626,7 @@ where
     let cached = if config.censorship.tls_emulation {
         if let Some(cache) = tls_cache.as_ref() {
             let selected_domain = if let Some(sni) = client_sni.as_ref() {
-                if cache.contains_domain(&sni).await {
+                if cache.contains_domain(sni).await {
                     sni.clone()
                 } else {
                     config.censorship.tls_domain.clone()
@@ -954,7 +954,6 @@ pub fn encrypt_tg_nonce_with_ciphers(nonce: &[u8; HANDSHAKE_LEN]) -> (Vec<u8>, A
 }
 
 /// Encrypt nonce for sending to Telegram (legacy function for compatibility)
-
 pub fn encrypt_tg_nonce(nonce: &[u8; HANDSHAKE_LEN]) -> Vec<u8> {
     let (encrypted, _, _) = encrypt_tg_nonce_with_ciphers(nonce);
     encrypted

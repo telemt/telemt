@@ -27,7 +27,7 @@ static_assertions = "1.1"
 
 # Network
 socket2 = { version = "0.6", features = ["all"] }
-nix = { version = "0.31", default-features = false, features = ["net"] }
+nix = { version = "0.31", default-features = false, features = ["net", "fs"] }
 shadowsocks = { version = "1.24", features = ["aead-cipher-2022"] }
 
 # Serialization

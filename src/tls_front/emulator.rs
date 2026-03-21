@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::crypto::{SecureRandom, sha256_hmac};
 use crate::protocol::constants::{
     MAX_TLS_CIPHERTEXT_SIZE, TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER,

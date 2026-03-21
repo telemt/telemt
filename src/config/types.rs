@@ -1417,6 +1417,12 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_mask_shape_hardening")]
     pub mask_shape_hardening: bool,
 
+    /// Opt-in aggressive shape hardening mode.
+    /// When enabled, masking may shape some backend-silent timeout paths and
+    /// enforces strictly positive above-cap blur when blur is enabled.
+    #[serde(default = "default_mask_shape_hardening_aggressive_mode")]
+    pub mask_shape_hardening_aggressive_mode: bool,
+
     /// Minimum bucket size for mask shape hardening padding.
     #[serde(default = "default_mask_shape_bucket_floor_bytes")]
     pub mask_shape_bucket_floor_bytes: usize,
@@ -1467,6 +1473,7 @@ impl Default for AntiCensorshipConfig {
             alpn_enforce: default_alpn_enforce(),
             mask_proxy_protocol: 0,
             mask_shape_hardening: default_mask_shape_hardening(),
+            mask_shape_hardening_aggressive_mode: default_mask_shape_hardening_aggressive_mode(),
             mask_shape_bucket_floor_bytes: default_mask_shape_bucket_floor_bytes(),
             mask_shape_bucket_cap_bytes: default_mask_shape_bucket_cap_bytes(),
             mask_shape_above_cap_blur: default_mask_shape_above_cap_blur(),

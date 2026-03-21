@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;

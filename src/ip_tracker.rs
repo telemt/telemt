@@ -22,7 +22,7 @@ pub struct UserIpTracker {
     limit_mode: Arc<RwLock<UserMaxUniqueIpsMode>>,
     limit_window: Arc<RwLock<Duration>>,
     last_compact_epoch_secs: Arc<AtomicU64>,
-    pub(crate) cleanup_queue: Arc<Mutex<Vec<(String, IpAddr)>>>,
+    cleanup_queue: Arc<Mutex<Vec<(String, IpAddr)>>>,
     cleanup_drain_lock: Arc<AsyncMutex<()>>,
 }
 
@@ -55,6 +55,19 @@ impl UserIpTracker {
                 );
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_queue_len_for_tests(&self) -> usize {
+        self.cleanup_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_queue_mutex_for_tests(&self) -> Arc<Mutex<Vec<(String, IpAddr)>>> {
+        Arc::clone(&self.cleanup_queue)
     }
 
     pub(crate) async fn drain_cleanup_queue(&self) {

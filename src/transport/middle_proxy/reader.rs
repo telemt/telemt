@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::sync::Arc;

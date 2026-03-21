@@ -406,6 +406,15 @@ impl ProxyConfig {
             ));
         }
 
+        if config.censorship.mask_shape_hardening_aggressive_mode
+            && !config.censorship.mask_shape_hardening
+        {
+            return Err(ProxyError::Config(
+                "censorship.mask_shape_hardening_aggressive_mode requires censorship.mask_shape_hardening = true"
+                    .to_string(),
+            ));
+        }
+
         if config.censorship.mask_shape_above_cap_blur
             && config.censorship.mask_shape_above_cap_blur_max_bytes == 0
         {

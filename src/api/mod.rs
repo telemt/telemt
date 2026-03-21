@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;

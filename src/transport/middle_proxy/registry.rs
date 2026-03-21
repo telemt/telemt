@@ -165,6 +165,7 @@ impl ConnRegistry {
         None
     }
 
+    #[allow(dead_code)]
     pub async fn route(&self, id: u64, resp: MeResponse) -> RouteResult {
         let tx = {
             let inner = self.inner.read().await;
@@ -438,6 +439,7 @@ impl ConnRegistry {
             .unwrap_or(true)
     }
 
+    #[allow(dead_code)]
     pub async fn unregister_writer_if_empty(&self, writer_id: u64) -> bool {
         let mut inner = self.inner.write().await;
         let Some(conn_ids) = inner.conns_for_writer.get(&writer_id) else {

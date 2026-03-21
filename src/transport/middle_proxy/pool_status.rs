@@ -293,20 +293,20 @@ impl MePool {
                 WriterContour::Draining => "draining",
             };
 
-            if !draining {
-                if let Some(dc_idx) = dc {
-                    *live_writers_by_dc_endpoint
-                        .entry((dc_idx, endpoint))
-                        .or_insert(0) += 1;
-                    *live_writers_by_dc.entry(dc_idx).or_insert(0) += 1;
-                    if let Some(ema_ms) = rtt_ema_ms {
-                        let entry = dc_rtt_agg.entry(dc_idx).or_insert((0.0, 0));
-                        entry.0 += ema_ms;
-                        entry.1 += 1;
-                    }
-                    if matches_active_generation && in_desired_map {
-                        *fresh_writers_by_dc.entry(dc_idx).or_insert(0) += 1;
-                    }
+            if !draining
+                && let Some(dc_idx) = dc
+            {
+                *live_writers_by_dc_endpoint
+                    .entry((dc_idx, endpoint))
+                    .or_insert(0) += 1;
+                *live_writers_by_dc.entry(dc_idx).or_insert(0) += 1;
+                if let Some(ema_ms) = rtt_ema_ms {
+                    let entry = dc_rtt_agg.entry(dc_idx).or_insert((0.0, 0));
+                    entry.0 += ema_ms;
+                    entry.1 += 1;
+                }
+                if matches_active_generation && in_desired_map {
+                    *fresh_writers_by_dc.entry(dc_idx).or_insert(0) += 1;
                 }
             }
 

@@ -64,7 +64,7 @@ async fn user_connection_reservation_drop_enqueues_cleanup_synchronously() {
     drop(reservation);
 
     // The IP is now inside the cleanup_queue, check that the queue has length 1
-    let queue_len = ip_tracker.cleanup_queue.lock().unwrap().len();
+    let queue_len = ip_tracker.cleanup_queue_len_for_tests();
     assert_eq!(
         queue_len, 1,
         "Reservation drop must push directly to synchronized IP queue"

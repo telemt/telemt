@@ -24,13 +24,13 @@ use crate::proxy::route_mode::{
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
+#[cfg(unix)]
+use nix::fcntl::{Flock, FlockArg, OFlag, openat};
+#[cfg(unix)]
+use nix::sys::stat::Mode;
 
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-#[cfg(unix)]
-use std::os::unix::io::{AsRawFd, FromRawFd};
 
 const UNKNOWN_DC_LOG_DISTINCT_LIMIT: usize = 1024;
 static LOGGED_UNKNOWN_DCS: OnceLock<Mutex<HashSet<i16>>> = OnceLock::new();
@@ -170,32 +170,16 @@ fn open_unknown_dc_log_append_anchored(
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path.allowed_parent)?;
 
-        let file_name =
-            std::ffi::CString::new(path.file_name.as_os_str().as_bytes()).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "unknown DC log file name contains NUL byte",
-                )
-            })?;
-
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                file_name.as_ptr(),
-                libc::O_CREAT
-                    | libc::O_APPEND
-                    | libc::O_WRONLY
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let oflags = OFlag::O_CREAT
+            | OFlag::O_APPEND
+            | OFlag::O_WRONLY
+            | OFlag::O_NOFOLLOW
+            | OFlag::O_CLOEXEC;
+        let mode = Mode::from_bits_truncate(0o600);
+        let path_component = Path::new(path.file_name.as_os_str());
+        let fd = openat(&parent, path_component, oflags, mode)
+            .map_err(|err| std::io::Error::from_raw_os_error(err as i32))?;
+        let file = std::fs::File::from(fd);
         Ok(file)
     }
     #[cfg(not(unix))]
@@ -211,16 +195,13 @@ fn open_unknown_dc_log_append_anchored(
 fn append_unknown_dc_line(file: &mut std::fs::File, dc_idx: i16) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let write_result = writeln!(file, "dc_idx={dc_idx}");
-
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
+        let cloned = file.try_clone()?;
+        let mut locked = Flock::lock(cloned, FlockArg::LockExclusive)
+            .map_err(|(_, err)| std::io::Error::from_raw_os_error(err as i32))?;
+        let write_result = writeln!(&mut *locked, "dc_idx={dc_idx}");
+        let _ = locked
+            .unlock()
+            .map_err(|(_, err)| std::io::Error::from_raw_os_error(err as i32))?;
         write_result
     }
     #[cfg(not(unix))]

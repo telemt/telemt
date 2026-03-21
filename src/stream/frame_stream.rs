@@ -584,7 +584,7 @@ mod tests {
 
         // Long frame (> 0x7f words = 508 bytes)
         let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-        let padded_len = (data.len() + 3) / 4 * 4;
+        let padded_len = data.len().div_ceil(4) * 4;
         let mut padded = data.clone();
         padded.resize(padded_len, 0);
 

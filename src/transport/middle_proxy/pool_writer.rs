@@ -268,10 +268,10 @@ impl MePool {
                     cancel_reader_token.cancel();
                 }
             }
-            if let Err(e) = res {
-                if !idle_close_by_peer {
-                    warn!(error = %e, "ME reader ended");
-                }
+            if let Err(e) = res
+                && !idle_close_by_peer
+            {
+                warn!(error = %e, "ME reader ended");
             }
             let remaining = writers_arc.read().await.len();
             debug!(writer_id, remaining, "ME reader task finished");
@@ -386,10 +386,9 @@ impl MePool {
                     if cleanup_for_ping
                         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                         .is_ok()
+                        && let Some(pool) = pool_ping.upgrade()
                     {
-                        if let Some(pool) = pool_ping.upgrade() {
-                            pool.remove_writer_and_close_clients(writer_id).await;
-                        }
+                        pool.remove_writer_and_close_clients(writer_id).await;
                     }
                     break;
                 }
@@ -538,6 +537,7 @@ impl MePool {
             .await
     }
 
+    #[allow(dead_code)]
     async fn remove_writer_only(self: &Arc<Self>, writer_id: u64) -> bool {
         self.remove_writer_with_mode(writer_id, WriterTeardownMode::Any)
             .await
