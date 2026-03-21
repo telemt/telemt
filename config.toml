@@ -39,8 +39,8 @@ port = 443
 enabled = true
 listen = "0.0.0.0:9091"
 whitelist = ["127.0.0.0/8"]
-# Network for Docker Environment 
-#whitelist = ["127.0.0.0/8", "172.16.0.0/12"]
+# Allow API access from Docker bridge subnets
+# whitelist = ["127.0.0.0/8", "172.16.0.0/12"]
 minimal_runtime_enabled = false
 minimal_runtime_cache_ttl_ms = 1000
 
