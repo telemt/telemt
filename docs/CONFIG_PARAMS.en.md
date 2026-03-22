@@ -20,7 +20,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | Parameter | Type | Default | Constraints / validation | Description |
 |---|---|---|---|---|
 | data_path | `String \| null` | `null` | — | Optional runtime data directory path. |
-| prefer_ipv6 | `bool` | `false` | — | Prefer IPv6 where applicable in runtime logic. |
+| prefer_ipv6 | `bool` | `false` | Deprecated. Use `network.prefer`. | Legacy IPv6 preference switch kept for backward compatibility. |
 | fast_mode | `bool` | `true` | — | Enables fast-path optimizations for traffic processing. |
 | use_middle_proxy | `bool` | `true` | none | Enables ME transport mode; if `false`, runtime falls back to direct DC routing. |
 | proxy_secret_path | `String \| null` | `"proxy-secret"` | Path may be `null`. | Path to Telegram infrastructure proxy-secret file used by ME handshake logic. |
