@@ -1164,7 +1164,10 @@ impl RunningClientHandler {
             .access
             .user_max_tcp_conns
             .get(user)
-            .map(|v| *v as u64);
+            .copied()
+            .or((config.access.user_max_tcp_conns_global_each > 0)
+                .then_some(config.access.user_max_tcp_conns_global_each))
+            .map(|v| v as u64);
         if !stats.try_acquire_user_curr_connects(user, limit) {
             return Err(ProxyError::ConnectionLimitExceeded {
                 user: user.to_string(),
@@ -1223,7 +1226,10 @@ impl RunningClientHandler {
             .access
             .user_max_tcp_conns
             .get(user)
-            .map(|v| *v as u64);
+            .copied()
+            .or((config.access.user_max_tcp_conns_global_each > 0)
+                .then_some(config.access.user_max_tcp_conns_global_each))
+            .map(|v| v as u64);
         if !stats.try_acquire_user_curr_connects(user, limit) {
             return Err(ProxyError::ConnectionLimitExceeded {
                 user: user.to_string(),

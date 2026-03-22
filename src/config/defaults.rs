@@ -761,6 +761,10 @@ pub(crate) fn default_access_users() -> HashMap<String, String> {
     )])
 }
 
+pub(crate) fn default_user_max_tcp_conns_global_each() -> usize {
+    0
+}
+
 pub(crate) fn default_user_max_unique_ips_window_secs() -> u64 {
     DEFAULT_USER_MAX_UNIQUE_IPS_WINDOW_SECS
 }

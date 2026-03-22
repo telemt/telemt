@@ -715,6 +715,101 @@ async fn reservation_limit_failure_does_not_leak_curr_connects_counter() {
 }
 
 #[tokio::test]
+async fn global_tcp_limit_applies_without_user_override() {
+    let user = "global-limit-user";
+    let mut config = crate::config::ProxyConfig::default();
+    config.access.user_max_tcp_conns_global_each = 1;
+
+    let stats = Arc::new(crate::stats::Stats::new());
+    let ip_tracker = Arc::new(crate::ip_tracker::UserIpTracker::new());
+    ip_tracker.set_user_limit(user, 8).await;
+
+    let first_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 201, 1)), 50001);
+    let first = RunningClientHandler::acquire_user_connection_reservation_static(
+        user,
+        &config,
+        stats.clone(),
+        first_peer,
+        ip_tracker.clone(),
+    )
+    .await
+    .expect("first reservation must succeed under inherited tcp-conns limit");
+
+    let second_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 201, 2)), 50002);
+    let second = RunningClientHandler::acquire_user_connection_reservation_static(
+        user,
+        &config,
+        stats.clone(),
+        second_peer,
+        ip_tracker.clone(),
+    )
+    .await;
+
+    assert!(
+        matches!(second, Err(crate::error::ProxyError::ConnectionLimitExceeded { user: denied }) if denied == user),
+        "second reservation must be rejected at the inherited tcp-conns limit"
+    );
+
+    first.release().await;
+    ip_tracker.drain_cleanup_queue().await;
+    assert_eq!(stats.get_user_curr_connects(user), 0);
+}
+
+#[tokio::test]
+async fn per_user_tcp_limit_override_wins_over_global_limit() {
+    let user = "override-limit-user";
+    let mut config = crate::config::ProxyConfig::default();
+    config.access.user_max_tcp_conns_global_each = 1;
+    config.access.user_max_tcp_conns.insert(user.to_string(), 2);
+
+    let stats = Arc::new(crate::stats::Stats::new());
+    let ip_tracker = Arc::new(crate::ip_tracker::UserIpTracker::new());
+    ip_tracker.set_user_limit(user, 8).await;
+
+    let first_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 202, 1)), 50001);
+    let first = RunningClientHandler::acquire_user_connection_reservation_static(
+        user,
+        &config,
+        stats.clone(),
+        first_peer,
+        ip_tracker.clone(),
+    )
+    .await
+    .expect("first reservation must succeed under per-user override");
+
+    let second_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 202, 2)), 50002);
+    let second = RunningClientHandler::acquire_user_connection_reservation_static(
+        user,
+        &config,
+        stats.clone(),
+        second_peer,
+        ip_tracker.clone(),
+    )
+    .await
+    .expect("second reservation must succeed under per-user override");
+
+    let third_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 202, 3)), 50003);
+    let third = RunningClientHandler::acquire_user_connection_reservation_static(
+        user,
+        &config,
+        stats.clone(),
+        third_peer,
+        ip_tracker.clone(),
+    )
+    .await;
+
+    assert!(
+        matches!(third, Err(crate::error::ProxyError::ConnectionLimitExceeded { user: denied }) if denied == user),
+        "third reservation must be rejected once the per-user override is reached"
+    );
+
+    first.release().await;
+    second.release().await;
+    ip_tracker.drain_cleanup_queue().await;
+    assert_eq!(stats.get_user_curr_connects(user), 0);
+}
+
+#[tokio::test]
 async fn short_tls_probe_is_masked_through_client_pipeline() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = listener.local_addr().unwrap();

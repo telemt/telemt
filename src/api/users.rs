@@ -144,7 +144,13 @@ pub(super) async fn create_user(
         .unwrap_or(UserInfo {
             username: body.username.clone(),
             user_ad_tag: None,
-            max_tcp_conns: None,
+            max_tcp_conns: cfg
+                .access
+                .user_max_tcp_conns
+                .get(&body.username)
+                .copied()
+                .or((cfg.access.user_max_tcp_conns_global_each > 0)
+                    .then_some(cfg.access.user_max_tcp_conns_global_each)),
             expiration_rfc3339: None,
             data_quota_bytes: None,
             max_unique_ips: updated_limit,
@@ -395,7 +401,13 @@ pub(super) async fn users_from_config(
             });
         users.push(UserInfo {
             user_ad_tag: cfg.access.user_ad_tags.get(&username).cloned(),
-            max_tcp_conns: cfg.access.user_max_tcp_conns.get(&username).copied(),
+            max_tcp_conns: cfg
+                .access
+                .user_max_tcp_conns
+                .get(&username)
+                .copied()
+                .or((cfg.access.user_max_tcp_conns_global_each > 0)
+                    .then_some(cfg.access.user_max_tcp_conns_global_each)),
             expiration_rfc3339: cfg
                 .access
                 .user_expirations

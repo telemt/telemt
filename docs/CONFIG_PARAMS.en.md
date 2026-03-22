@@ -390,7 +390,8 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 |---|---|---|---|---|---|
 | users | `Map<String, String>` | `{"default": "000…000"}` | Secret must be 32 hex characters. | `[access.users]`<br>`user = "32-hex secret"`<br>`user2 = "32-hex secret"` | User credentials map used for client authentication. |
 | user_ad_tags | `Map<String, String>` | `{}` | Every value must be exactly 32 hex characters. | `[access.user_ad_tags]`<br>`user = "32-hex ad_tag"` | Per-user ad tags used as override over `general.ad_tag`. |
-| user_max_tcp_conns | `Map<String, usize>` | `{}` | — | `[access.user_max_tcp_conns]`<br>`user = 500` | Per-user maximum concurrent TCP connections. |
+| user_max_tcp_conns | `Map<String, usize>` | `{}` | — | `[access.user_max_tcp_conns]`<br>`user = 500` | Per-user override for the maximum concurrent TCP connections. |
+| user_max_tcp_conns_global_each | `usize` | `0` | — | `user_max_tcp_conns_global_each = 0` | Global fallback used when `[access.user_max_tcp_conns]` has no per-user override. |
 | user_expirations | `Map<String, DateTime<Utc>>` | `{}` | Timestamp must be valid RFC3339/ISO-8601 datetime. | `[access.user_expirations]`<br>`user = "2026-12-31T23:59:59Z"` | Per-user account expiration timestamps. |
 | user_data_quota | `Map<String, u64>` | `{}` | — | `[access.user_data_quota]`<br>`user = 1073741824` | Per-user traffic quota in bytes. |
 | user_max_unique_ips | `Map<String, usize>` | `{}` | — | `[access.user_max_unique_ips]`<br>`user = 16` | Per-user unique source IP limits. |

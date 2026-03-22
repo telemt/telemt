@@ -1507,6 +1507,11 @@ pub struct AccessConfig {
     #[serde(default)]
     pub user_max_tcp_conns: HashMap<String, usize>,
 
+    /// Global per-user TCP connection limit applied when a user has no individual override.
+    /// `0` disables the inherited limit.
+    #[serde(default = "default_user_max_tcp_conns_global_each")]
+    pub user_max_tcp_conns_global_each: usize,
+
     #[serde(default)]
     pub user_expirations: HashMap<String, DateTime<Utc>>,
 
@@ -1543,6 +1548,7 @@ impl Default for AccessConfig {
             users: default_access_users(),
             user_ad_tags: HashMap::new(),
             user_max_tcp_conns: HashMap::new(),
+            user_max_tcp_conns_global_each: default_user_max_tcp_conns_global_each(),
             user_expirations: HashMap::new(),
             user_data_quota: HashMap::new(),
             user_max_unique_ips: HashMap::new(),
