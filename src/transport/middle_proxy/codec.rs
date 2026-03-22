@@ -4,8 +4,9 @@ use bytes::Bytes;
 use crate::crypto::{AesCbc, crc32, crc32c};
 use crate::error::{ProxyError, Result};
 use crate::protocol::constants::*;
+use crate::transport::UpstreamStream;
 
-/// Commands sent to dedicated writer tasks to avoid mutex contention on TCP writes.
+/// Commands sent to dedicated writer tasks to avoid mutex contention on upstream writes.
 pub(crate) enum WriterCommand {
     Data(Bytes),
     DataAndFlush(Bytes),
@@ -213,7 +214,7 @@ pub(crate) fn cbc_decrypt_inplace(
 }
 
 pub(crate) struct RpcWriter {
-    pub(crate) writer: tokio::io::WriteHalf<tokio::net::TcpStream>,
+    pub(crate) writer: tokio::io::WriteHalf<UpstreamStream>,
     pub(crate) key: [u8; 32],
     pub(crate) iv: [u8; 16],
     pub(crate) seq_no: i32,

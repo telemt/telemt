@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
@@ -16,13 +15,14 @@ use crate::crypto::AesCbc;
 use crate::error::{ProxyError, Result};
 use crate::protocol::constants::*;
 use crate::stats::Stats;
+use crate::transport::UpstreamStream;
 
 use super::codec::{RpcChecksumMode, WriterCommand, rpc_crc};
 use super::registry::RouteResult;
 use super::{ConnRegistry, MeResponse};
 
 pub(crate) async fn reader_loop(
-    mut rd: tokio::io::ReadHalf<TcpStream>,
+    mut rd: tokio::io::ReadHalf<UpstreamStream>,
     dk: [u8; 32],
     mut div: [u8; 16],
     crc_mode: RpcChecksumMode,

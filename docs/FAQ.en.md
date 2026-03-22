@@ -122,11 +122,11 @@ enabled = true
 ```
 
 #### Shadowsocks as Upstream
-Requires `use_middle_proxy = false`.
+Works with both `use_middle_proxy = false` and `use_middle_proxy = true`.
 
 ```toml
 [general]
-use_middle_proxy = false
+use_middle_proxy = true
 
 [[upstreams]]
 type = "shadowsocks"

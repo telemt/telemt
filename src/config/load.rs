@@ -129,16 +129,6 @@ fn sanitize_ad_tag(ad_tag: &mut Option<String>) {
 }
 
 fn validate_upstreams(config: &ProxyConfig) -> Result<()> {
-    let has_enabled_shadowsocks = config.upstreams.iter().any(|upstream| {
-        upstream.enabled && matches!(upstream.upstream_type, UpstreamType::Shadowsocks { .. })
-    });
-
-    if has_enabled_shadowsocks && config.general.use_middle_proxy {
-        return Err(ProxyError::Config(
-            "shadowsocks upstreams require general.use_middle_proxy = false".to_string(),
-        ));
-    }
-
     for upstream in &config.upstreams {
         if let UpstreamType::Shadowsocks { url, .. } = &upstream.upstream_type {
             let parsed = ShadowsocksServerConfig::from_url(url)
@@ -2275,7 +2265,7 @@ mod tests {
     }
 
     #[test]
-    fn shadowsocks_requires_direct_mode() {
+    fn shadowsocks_is_allowed_with_middle_proxy() {
         let toml = format!(
             r#"
             [general]
@@ -2294,11 +2284,11 @@ mod tests {
             url = TEST_SHADOWSOCKS_URL,
         );
         let dir = std::env::temp_dir();
-        let path = dir.join("telemt_shadowsocks_me_reject_test.toml");
+        let path = dir.join("telemt_shadowsocks_me_allow_test.toml");
         std::fs::write(&path, toml).unwrap();
-        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        let loaded = ProxyConfig::load(&path);
 
-        assert!(err.contains("shadowsocks upstreams require general.use_middle_proxy = false"));
+        assert!(loaded.is_ok());
 
         let _ = std::fs::remove_file(path);
     }

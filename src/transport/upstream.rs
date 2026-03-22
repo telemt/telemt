@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
@@ -173,6 +175,7 @@ pub struct StartupPingResult {
     pub both_available: bool,
 }
 
+/// Transport stream returned by an upstream connection attempt.
 pub enum UpstreamStream {
     Tcp(TcpStream),
     Shadowsocks(Box<ShadowsocksStream>),
@@ -188,6 +191,35 @@ impl std::fmt::Debug for UpstreamStream {
 }
 
 impl UpstreamStream {
+    pub(crate) fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            Self::Tcp(stream) => stream.local_addr(),
+            Self::Shadowsocks(stream) => stream.get_ref().local_addr(),
+        }
+    }
+
+    pub(crate) fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            Self::Tcp(stream) => stream.peer_addr(),
+            Self::Shadowsocks(stream) => stream.get_ref().peer_addr(),
+        }
+    }
+
+    pub(crate) fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_nodelay(nodelay),
+            Self::Shadowsocks(stream) => stream.get_ref().set_nodelay(nodelay),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn raw_fd(&self) -> RawFd {
+        match self {
+            Self::Tcp(stream) => stream.as_raw_fd(),
+            Self::Shadowsocks(stream) => stream.get_ref().as_raw_fd(),
+        }
+    }
+
     pub fn into_tcp(self) -> Result<TcpStream> {
         match self {
             Self::Tcp(stream) => Ok(stream),
@@ -744,13 +776,13 @@ impl UpstreamManager {
         Ok(stream)
     }
 
-    /// Connect to target through a selected upstream and return egress details.
-    pub async fn connect_with_details(
+    /// Connect to target through a selected upstream and return transport egress details.
+    pub(crate) async fn connect_stream_with_details(
         &self,
         target: SocketAddr,
         dc_idx: Option<i16>,
         scope: Option<&str>,
-    ) -> Result<(TcpStream, UpstreamEgressInfo)> {
+    ) -> Result<(UpstreamStream, UpstreamEgressInfo)> {
         let idx = self
             .select_upstream(dc_idx, scope)
             .await
@@ -773,6 +805,19 @@ impl UpstreamManager {
 
         let (stream, egress) = self
             .connect_selected_upstream(idx, upstream, target, dc_idx, bind_rr)
+            .await?;
+        Ok((stream, egress))
+    }
+
+    /// Connect to target through a selected upstream and return egress details.
+    pub async fn connect_with_details(
+        &self,
+        target: SocketAddr,
+        dc_idx: Option<i16>,
+        scope: Option<&str>,
+    ) -> Result<(TcpStream, UpstreamEgressInfo)> {
+        let (stream, egress) = self
+            .connect_stream_with_details(target, dc_idx, scope)
             .await?;
         Ok((stream.into_tcp()?, egress))
     }

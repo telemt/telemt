@@ -117,7 +117,7 @@ Defaults below are code defaults (used when a key is omitted), not necessarily v
 8. In ME mode, the selected upstream is also used for ME TCP dial path.
 9. In ME mode for `direct` upstream with bind/interface, STUN reflection logic is bind-aware for KDF source material.
 10. In ME mode for SOCKS upstream, SOCKS `BND.ADDR/BND.PORT` is used for KDF when it is valid/public for the same family.
-11. `shadowsocks` upstreams require `general.use_middle_proxy = false`. Config load fails fast if ME mode is enabled.
+11. `shadowsocks` upstreams work in both Direct and ME modes. In ME mode, the connected local Shadowsocks address is reused for bind-aware STUN reflection when available.
 
 ## Upstream Configuration Examples
 
@@ -157,7 +157,7 @@ enabled = true
 
 ```toml
 [general]
-use_middle_proxy = false
+use_middle_proxy = true
 
 [[upstreams]]
 type = "shadowsocks"
