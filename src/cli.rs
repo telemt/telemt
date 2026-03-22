@@ -7,11 +7,17 @@ use std::process::Command;
 
 /// Options for the init command
 pub struct InitOptions {
+    /// Listen port for the generated proxy configuration.
     pub port: u16,
+    /// TLS masking domain written into the generated configuration.
     pub domain: String,
+    /// Optional user-provided MTProxy secret in hex form.
     pub secret: Option<String>,
+    /// Username inserted into the generated access configuration.
     pub username: String,
+    /// Destination directory for the generated config file.
     pub config_dir: PathBuf,
+    /// Skips starting the service after installation.
     pub no_start: bool,
 }
 
@@ -49,26 +55,38 @@ pub fn parse_init_args(args: &[String]) -> Option<InitOptions> {
             }
             "--domain" => {
                 i += 1;
-                if i < args.len() {
+                if i < args.len() && !args[i].starts_with('-') {
                     opts.domain = args[i].clone();
+                } else {
+                    eprintln!("[error] Missing value for --domain");
+                    std::process::exit(1);
                 }
             }
             "--secret" => {
                 i += 1;
-                if i < args.len() {
+                if i < args.len() && !args[i].starts_with('-') {
                     opts.secret = Some(args[i].clone());
+                } else {
+                    eprintln!("[error] Missing value for --secret");
+                    std::process::exit(1);
                 }
             }
             "--user" => {
                 i += 1;
-                if i < args.len() {
+                if i < args.len() && !args[i].starts_with('-') {
                     opts.username = args[i].clone();
+                } else {
+                    eprintln!("[error] Missing value for --user");
+                    std::process::exit(1);
                 }
             }
             "--config-dir" => {
                 i += 1;
-                if i < args.len() {
+                if i < args.len() && !args[i].starts_with('-') {
                     opts.config_dir = PathBuf::from(&args[i]);
+                } else {
+                    eprintln!("[error] Missing value for --config-dir");
+                    std::process::exit(1);
                 }
             }
             "--no-start" => {
