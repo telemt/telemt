@@ -7,11 +7,17 @@ use std::process::Command;
 
 /// Options for the init command
 pub struct InitOptions {
+    /// Listen port for the generated proxy configuration.
     pub port: u16,
+    /// TLS masking domain written into the generated configuration.
     pub domain: String,
+    /// Optional user-provided MTProxy secret in hex form.
     pub secret: Option<String>,
+    /// Username inserted into the generated access configuration.
     pub username: String,
+    /// Destination directory for the generated config file.
     pub config_dir: PathBuf,
+    /// Skips starting the systemd service after installation.
     pub no_start: bool,
 }
 
@@ -41,6 +47,7 @@ pub fn parse_init_args(args: &[String]) -> Option<InitOptions> {
 
     while i < args.len() {
         match args[i].as_str() {
+            "--init" => {}
             "--port" => {
                 i += 1;
                 if i < args.len() {
@@ -73,6 +80,10 @@ pub fn parse_init_args(args: &[String]) -> Option<InitOptions> {
             }
             "--no-start" => {
                 opts.no_start = true;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("[error] Unknown option for --init: {}", other);
+                std::process::exit(1);
             }
             _ => {}
         }
