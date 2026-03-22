@@ -12,6 +12,7 @@ use crate::transport::middle_proxy::{
     ProxyConfigData, fetch_proxy_config_with_raw, load_proxy_config_cache, save_proxy_config_cache,
 };
 
+/// Resolves the runtime config path relative to the startup working directory.
 pub(crate) fn resolve_runtime_config_path(
     config_path_cli: &str,
     startup_cwd: &std::path::Path,
@@ -25,6 +26,7 @@ pub(crate) fn resolve_runtime_config_path(
     absolute.canonicalize().unwrap_or(absolute)
 }
 
+/// Parses CLI arguments and handles process-exiting utility commands.
 pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
     let mut config_path = "config.toml".to_string();
     let mut data_path: Option<PathBuf> = None;
@@ -107,6 +109,7 @@ pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
             }
             other => {
                 eprintln!("Unknown option: {}", other);
+                std::process::exit(1);
             }
         }
         i += 1;
@@ -153,6 +156,7 @@ mod tests {
     }
 }
 
+/// Logs Telegram proxy links derived from the active runtime configuration.
 pub(crate) fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
     info!(target: "telemt::links", "--- Proxy Links ({}) ---", host);
     for user_name in config
@@ -202,6 +206,7 @@ pub(crate) fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
     info!(target: "telemt::links", "------------------------");
 }
 
+/// Persists the beobachten snapshot payload and creates parent directories when needed.
 pub(crate) async fn write_beobachten_snapshot(path: &str, payload: &str) -> std::io::Result<()> {
     if let Some(parent) = std::path::Path::new(path).parent()
         && !parent.as_os_str().is_empty()
@@ -211,10 +216,12 @@ pub(crate) async fn write_beobachten_snapshot(path: &str, payload: &str) -> std:
     tokio::fs::write(path, payload).await
 }
 
+/// Returns the singular or plural unit label for a numeric value.
 pub(crate) fn unit_label(value: u64, singular: &'static str, plural: &'static str) -> &'static str {
     if value == 1 { singular } else { plural }
 }
 
+/// Formats process uptime into a human-readable multi-unit string.
 pub(crate) fn format_uptime(total_secs: u64) -> String {
     const SECS_PER_MINUTE: u64 = 60;
     const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
@@ -267,6 +274,7 @@ pub(crate) fn format_uptime(total_secs: u64) -> String {
     format!("{} / {} seconds", parts.join(", "), total_secs)
 }
 
+/// Waits until admission opens or the watch channel closes.
 #[allow(dead_code)]
 pub(crate) async fn wait_until_admission_open(admission_rx: &mut watch::Receiver<bool>) -> bool {
     loop {
@@ -279,10 +287,12 @@ pub(crate) async fn wait_until_admission_open(admission_rx: &mut watch::Receiver
     }
 }
 
+/// Identifies EOFs that match the expected empty-handshake shutdown path.
 pub(crate) fn is_expected_handshake_eof(err: &crate::error::ProxyError) -> bool {
     err.to_string().contains("expected 64 bytes, got 0")
 }
 
+/// Loads the startup proxy-config snapshot, falling back to the on-disk cache when needed.
 pub(crate) async fn load_startup_proxy_config_snapshot(
     url: &str,
     cache_path: Option<&str>,
