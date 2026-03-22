@@ -1060,6 +1060,8 @@ Link generation uses active config and enabled modes:
 | `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged. Current implementation persists full config document on success. |
 | `POST /v1/users/{username}/rotate-secret` | Currently returns `404` in runtime route matcher; request schema is reserved for intended behavior. |
 | `DELETE /v1/users/{username}` | Deletes only specified user, removes this user from related optional `access.user_*` maps, blocks last-user deletion, and atomically updates only related `access.*` TOML tables. |
+| `POST /v1/users/{username}/reset-octets` | Resets the per-user octet counters (`octets_from_client` and `octets_to_client`) to zero. Returns `{ "username": "...", "octets_reset": true }`. Useful for implementing periodic (monthly/daily) quota resets without restarting the proxy. |
+| `POST /v1/users/reset-octets` | Resets octet counters for **all** tracked users. Returns `{ "users_reset": N }`. |
 
 All mutating endpoints:
 - Respect `read_only` mode.
