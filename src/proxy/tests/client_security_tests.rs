@@ -8,7 +8,7 @@ use crate::proxy::handshake::HandshakeSuccess;
 use crate::stream::{CryptoReader, CryptoWriter};
 use crate::transport::proxy_protocol::ProxyProtocolV1Builder;
 use rand::rngs::StdRng;
-use rand::Rng;
+use rand::RngCore;
 use rand::SeedableRng;
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
