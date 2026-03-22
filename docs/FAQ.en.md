@@ -3,7 +3,7 @@
 1. Go to @MTProxybot bot.
 2. Enter the command `/newproxy`
 3. Send the server IP and port. For example: 1.2.3.4:443
-4. Open the config `nano /etc/telemt/telemt.toml`.
+4. Open the config `nano /etc/telemt/config.toml`.
 5. Copy and send the user secret from the [access.users] section to the bot.
 6. Copy the tag received from the bot. For example 1234567890abcdef1234567890abcdef.
 > [!WARNING]
@@ -46,7 +46,7 @@ This parameter limits how many unique IPs can use 1 link simultaneously. If one 
 ## How to create multiple different links
 
 1. Generate the required number of secrets `openssl rand -hex 16`
-2. Open the config `nano /etc/telemt/telemt.toml`
+2. Open the config `nano /etc/telemt/config.toml`
 3. Add new users.
 ```toml
 [access.users]
@@ -62,7 +62,7 @@ curl -s http://127.0.0.1:9091/v1/users | jq
 
 ## How to view metrics
 
-1. Open the config `nano /etc/telemt/telemt.toml`
+1. Open the config `nano /etc/telemt/config.toml`
 2. Add the following parameters
 ```toml
 [server]

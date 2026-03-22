@@ -48,7 +48,7 @@ Save the obtained result somewhere. You will need it later!
 
 ---
 
-**1. Place your config to /etc/telemt/telemt.toml**
+**1. Place your config to /etc/telemt/config.toml**
 
 Create config directory:
 ```bash
@@ -57,7 +57,7 @@ mkdir /etc/telemt
 
 Open nano
 ```bash
-nano /etc/telemt/telemt.toml
+nano /etc/telemt/config.toml
 ```
 paste your config
 
@@ -124,7 +124,7 @@ Type=simple
 User=telemt
 Group=telemt
 WorkingDirectory=/opt/telemt
-ExecStart=/bin/telemt /etc/telemt/telemt.toml
+ExecStart=/bin/telemt /etc/telemt/config.toml
 Restart=on-failure
 LimitNOFILE=65536
 AmbientCapabilities=CAP_NET_BIND_SERVICE

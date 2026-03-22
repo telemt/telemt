@@ -48,7 +48,7 @@ python3 -c 'import os; print(os.urandom(16).hex())'
 
 ---
 
-**1. Поместите свою конфигурацию в файл /etc/telemt/telemt.toml**
+**1. Поместите свою конфигурацию в файл /etc/telemt/config.toml**
 
 Создаём директорию для конфига:
 ```bash
@@ -57,7 +57,7 @@ mkdir /etc/telemt
 
 Открываем nano
 ```bash
-nano /etc/telemt/telemt.toml
+nano /etc/telemt/config.toml
 ```
 Вставьте свою конфигурацию
 
@@ -124,7 +124,7 @@ Type=simple
 User=telemt
 Group=telemt
 WorkingDirectory=/opt/telemt
-ExecStart=/bin/telemt /etc/telemt/telemt.toml
+ExecStart=/bin/telemt /etc/telemt/config.toml
 Restart=on-failure
 LimitNOFILE=65536
 AmbientCapabilities=CAP_NET_BIND_SERVICE
