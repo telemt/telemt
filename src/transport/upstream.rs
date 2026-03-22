@@ -1807,6 +1807,7 @@ impl UpstreamManager {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use tokio::net::TcpListener;
 
     use crate::stats::Stats;
 
@@ -1960,5 +1961,41 @@ mod tests {
             UpstreamRouteKind::Shadowsocks
         );
         assert_eq!(snapshot.upstreams[0].address, "127.0.0.1:8388");
+    }
+
+    #[tokio::test]
+    async fn connect_with_details_keeps_direct_tcp_compatibility() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let (_stream, _peer) = listener.accept().await.unwrap();
+        });
+        let manager = UpstreamManager::new(
+            vec![UpstreamConfig {
+                upstream_type: UpstreamType::Direct {
+                    interface: None,
+                    bind_addresses: None,
+                },
+                weight: 1,
+                enabled: true,
+                scopes: String::new(),
+                selected_scope: String::new(),
+            }],
+            1,
+            100,
+            1000,
+            1,
+            false,
+            Arc::new(Stats::new()),
+        );
+
+        let (stream, egress) = manager
+            .connect_with_details(target, None, None)
+            .await
+            .expect("direct upstream should return a raw TCP stream");
+
+        assert_eq!(stream.peer_addr().unwrap(), target);
+        assert_eq!(egress.route_kind, UpstreamRouteKind::Direct);
+        accept_task.await.unwrap();
     }
 }
