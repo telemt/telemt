@@ -19,6 +19,7 @@ use crate::stats::Stats;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::transport::{ListenOptions, create_listener};
 
+/// Serves the Prometheus metrics and beobachten plaintext endpoints.
 pub async fn serve(
     port: u16,
     listen: Option<String>,
@@ -205,6 +206,7 @@ async fn handle<B>(
 
     let resp = Response::builder()
         .status(StatusCode::NOT_FOUND)
+        .header("content-type", "text/plain; charset=utf-8")
         .body(Full::new(Bytes::from("Not Found\n")))
         .unwrap();
     Ok(resp)
@@ -2782,5 +2784,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp404.headers().get("content-type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
     }
 }
