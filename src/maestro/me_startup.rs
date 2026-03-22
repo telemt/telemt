@@ -146,39 +146,70 @@ pub(crate) async fn initialize_me_pool(
                     )
                     .await;
             }
-            startup_tracker
-                .start_component(
-                    COMPONENT_ME_PROXY_CONFIG_V6,
-                    Some("load startup proxy-config v6".to_string()),
+            let ipv6_enabled = config.network.ipv6 != Some(false);
+            let cfg_v6 = if ipv6_enabled {
+                startup_tracker
+                    .start_component(
+                        COMPONENT_ME_PROXY_CONFIG_V6,
+                        Some("load startup proxy-config v6".to_string()),
+                    )
+                    .await;
+                startup_tracker
+                    .set_me_status(StartupMeStatus::Initializing, COMPONENT_ME_PROXY_CONFIG_V6)
+                    .await;
+                let cfg_v6 = load_startup_proxy_config_snapshot(
+                    "https://core.telegram.org/getProxyConfigV6",
+                    config.general.proxy_config_v6_cache_path.as_deref(),
+                    me2dc_fallback,
+                    "getProxyConfigV6",
                 )
                 .await;
-            startup_tracker
-                .set_me_status(StartupMeStatus::Initializing, COMPONENT_ME_PROXY_CONFIG_V6)
-                .await;
-            let cfg_v6 = load_startup_proxy_config_snapshot(
-                "https://core.telegram.org/getProxyConfigV6",
-                config.general.proxy_config_v6_cache_path.as_deref(),
-                me2dc_fallback,
-                "getProxyConfigV6",
-            )
-            .await;
-            if cfg_v6.is_some() {
-                startup_tracker
-                    .complete_component(
-                        COMPONENT_ME_PROXY_CONFIG_V6,
-                        Some("proxy-config v6 loaded".to_string()),
-                    )
-                    .await;
+                if cfg_v6.is_some() {
+                    startup_tracker
+                        .complete_component(
+                            COMPONENT_ME_PROXY_CONFIG_V6,
+                            Some("proxy-config v6 loaded".to_string()),
+                        )
+                        .await;
+                } else {
+                    startup_tracker
+                        .fail_component(
+                            COMPONENT_ME_PROXY_CONFIG_V6,
+                            Some("proxy-config v6 unavailable".to_string()),
+                        )
+                        .await;
+                }
+                cfg_v6
             } else {
                 startup_tracker
-                    .fail_component(
+                    .skip_component(
                         COMPONENT_ME_PROXY_CONFIG_V6,
-                        Some("proxy-config v6 unavailable".to_string()),
+                        Some("IPv6 is disabled in config".to_string()),
                     )
                     .await;
-            }
+                None
+            };
 
-            if let (Some(cfg_v4), Some(cfg_v6)) = (cfg_v4, cfg_v6) {
+            if let Some(cfg_v4) = cfg_v4 {
+                if ipv6_enabled && cfg_v6.is_none() {
+                    startup_tracker
+                        .skip_component(
+                            COMPONENT_ME_POOL_CONSTRUCT,
+                            Some("ME configs are incomplete".to_string()),
+                        )
+                        .await;
+                    startup_tracker
+                        .fail_component(
+                            COMPONENT_ME_POOL_INIT_STAGE1,
+                            Some("ME configs are incomplete".to_string()),
+                        )
+                        .await;
+                    startup_tracker
+                        .set_me_status(StartupMeStatus::Failed, "failed")
+                        .await;
+                    return None;
+                }
+
                 startup_tracker
                     .start_component(
                         COMPONENT_ME_POOL_CONSTRUCT,
@@ -200,8 +231,10 @@ pub(crate) async fn initialize_me_pool(
                     config.timeouts.me_one_retry,
                     config.timeouts.me_one_timeout_ms,
                     cfg_v4.map.clone(),
-                    cfg_v6.map.clone(),
-                    cfg_v4.default_dc.or(cfg_v6.default_dc),
+                    cfg_v6.as_ref().map(|cfg| cfg.map.clone()).unwrap_or_default(),
+                    cfg_v4
+                        .default_dc
+                        .or(cfg_v6.as_ref().and_then(|cfg| cfg.default_dc)),
                     decision.clone(),
                     Some(upstream_manager.clone()),
                     rng.clone(),
