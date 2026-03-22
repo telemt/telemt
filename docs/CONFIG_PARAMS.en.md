@@ -198,6 +198,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | listen_tcp | `bool \| null` | `null` (auto) | — | Explicit TCP listener enable/disable override. |
 | proxy_protocol | `bool` | `false` | — | Enables HAProxy PROXY protocol parsing on incoming client connections. |
 | proxy_protocol_header_timeout_ms | `u64` | `500` | Must be `> 0`. | Timeout for PROXY protocol header read/parse (ms). |
+| proxy_protocol_trusted_cidrs | `IpNetwork[]` | `null` | — | CIDRS that are allowed to send PROXY protocol header in the incoming request. |
 | metrics_port | `u16 \| null` | `null` | — | Metrics endpoint port (enables metrics listener). |
 | metrics_listen | `String \| null` | `null` | — | Full metrics bind address (`IP:PORT`), overrides `metrics_port`. |
 | metrics_whitelist | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | — | CIDR whitelist for metrics endpoint access. |
