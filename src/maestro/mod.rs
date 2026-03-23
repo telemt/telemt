@@ -220,6 +220,12 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let stats = Arc::new(Stats::new());
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
 
+    // Spawn background task to periodically clean up stale user-stats entries.
+    // This replaces per-packet maybe_cleanup_user_stats() calls that were removed
+    // from the I/O hot path to reduce DashMap write-lock contention under high
+    // connection counts.
+    let _stats_cleanup_task = stats.spawn_cleanup_task();
+
     let upstream_manager = Arc::new(UpstreamManager::new(
         config.upstreams.clone(),
         config.general.upstream_connect_retry_attempts,
