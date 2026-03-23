@@ -14,6 +14,7 @@
 //! | `general` | `me_reinit_*`                  | Applied to ME reinit scheduler immediately     |
 //! | `general` | `hardswap` / `me_*_reinit`     | Applied on next ME map update                  |
 //! | `general` | `telemetry` / `me_*_policy`    | Applied immediately                            |
+//! | `general` | `beobachten*`                  | Applied immediately                            |
 //! | `network` | `dns_overrides`                | Applied immediately                            |
 //! | `access`  | All user/quota fields          | Effective immediately                          |
 //!
@@ -47,6 +48,10 @@ pub struct HotFields {
     pub ad_tag: Option<String>,
     pub dns_overrides: Vec<String>,
     pub desync_all_full: bool,
+    pub beobachten: bool,
+    pub beobachten_minutes: u64,
+    pub beobachten_flush_secs: u64,
+    pub beobachten_file: String,
     pub update_every_secs: u64,
     pub me_reinit_every_secs: u64,
     pub me_reinit_singleflight: bool,
@@ -132,6 +137,10 @@ impl HotFields {
             ad_tag: cfg.general.ad_tag.clone(),
             dns_overrides: cfg.network.dns_overrides.clone(),
             desync_all_full: cfg.general.desync_all_full,
+            beobachten: cfg.general.beobachten,
+            beobachten_minutes: cfg.general.beobachten_minutes,
+            beobachten_flush_secs: cfg.general.beobachten_flush_secs,
+            beobachten_file: cfg.general.beobachten_file.clone(),
             update_every_secs: cfg.general.effective_update_every_secs(),
             me_reinit_every_secs: cfg.general.me_reinit_every_secs,
             me_reinit_singleflight: cfg.general.me_reinit_singleflight,
@@ -432,6 +441,10 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.general.ad_tag = new.general.ad_tag.clone();
     cfg.network.dns_overrides = new.network.dns_overrides.clone();
     cfg.general.desync_all_full = new.general.desync_all_full;
+    cfg.general.beobachten = new.general.beobachten;
+    cfg.general.beobachten_minutes = new.general.beobachten_minutes;
+    cfg.general.beobachten_flush_secs = new.general.beobachten_flush_secs;
+    cfg.general.beobachten_file = new.general.beobachten_file.clone();
     cfg.general.update_every = new.general.update_every;
     cfg.general.proxy_secret_auto_reload_secs = new.general.proxy_secret_auto_reload_secs;
     cfg.general.proxy_config_auto_reload_secs = new.general.proxy_config_auto_reload_secs;
@@ -1525,6 +1538,57 @@ mod tests {
             old.general.use_middle_proxy
         );
         assert!(!config_equal(&applied, &new));
+    }
+
+    #[test]
+    fn reload_applies_beobachten_hot_fields() {
+        let path = temp_config_path("telemt_hot_reload_beobachten");
+        let initial_contents = r#"
+            [general]
+            beobachten = true
+            beobachten_minutes = 15
+            beobachten_flush_secs = 15
+            beobachten_file = "cache/beobachten.txt"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let final_contents = r#"
+            [general]
+            beobachten = false
+            beobachten_minutes = 42
+            beobachten_flush_secs = 3
+            beobachten_file = "/tmp/beobachten.txt"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+
+        std::fs::write(&path, initial_contents).unwrap();
+        let initial_cfg = Arc::new(ProxyConfig::load(&path).unwrap());
+        let initial_hash = ProxyConfig::load_with_metadata(&path)
+            .unwrap()
+            .rendered_hash;
+        let (config_tx, _config_rx) = watch::channel(initial_cfg.clone());
+        let (log_tx, _log_rx) = watch::channel(initial_cfg.general.log_level.clone());
+        let mut reload_state = ReloadState::new(Some(initial_hash));
+
+        std::fs::write(&path, final_contents).unwrap();
+        reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
+
+        let applied = config_tx.borrow().clone();
+        assert!(!applied.general.beobachten);
+        assert_eq!(applied.general.beobachten_minutes, 42);
+        assert_eq!(applied.general.beobachten_flush_secs, 3);
+        assert_eq!(applied.general.beobachten_file, "/tmp/beobachten.txt");
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
