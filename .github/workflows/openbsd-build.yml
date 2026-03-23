@@ -53,6 +53,17 @@ jobs:
             pkg_add rust
           run: |
             set -e
+            required_major=1
+            required_minor=85
+            rustc_version="$(rustc --version | awk '{print $2}')"
+            rustc_major="${rustc_version%%.*}"
+            rustc_rest="${rustc_version#*.}"
+            rustc_minor="${rustc_rest%%.*}"
+            if [ "$rustc_major" -lt "$required_major" ] || { [ "$rustc_major" -eq "$required_major" ] && [ "$rustc_minor" -lt "$required_minor" ]; }; then
+              echo "Installed rustc version ($rustc_version) is older than the required minimum ${required_major}.${required_minor}.x for this project (e.g., edition = \"2024\")."
+              echo "Please update the OpenBSD rust package or adjust the workflow to use a newer toolchain."
+              exit 1
+            fi
             cargo build --release --locked --verbose
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
