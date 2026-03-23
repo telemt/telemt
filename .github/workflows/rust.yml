@@ -40,7 +40,7 @@ jobs:
           ${{ runner.os }}-cargo-
 
     - name: Compile (no tests)
-      run: cargo check --workspace --all-features --lib --bins --verbose
+      run: cargo check --workspace --all-features --bins --verbose
 
     - name: Run tests (single pass)
       run: cargo test --workspace --all-features --verbose
