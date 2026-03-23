@@ -29,6 +29,9 @@ FROM debian:12-slim AS minimal
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils \
+    xz-utils \
+    libgcc-s1 \
+    libstdc++6 \
     curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -72,6 +75,8 @@ FROM debug-base AS debug
 WORKDIR /app
 
 COPY --from=minimal /telemt /app/telemt
+COPY --from=minimal /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/
+COPY --from=minimal /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib/x86_64-linux-gnu/
 COPY config.toml /app/config.toml
 
 USER root
@@ -91,6 +96,8 @@ FROM gcr.io/distroless/base-debian12 AS prod
 WORKDIR /app
 
 COPY --from=minimal /telemt /app/telemt
+COPY --from=minimal /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/
+COPY --from=minimal /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib/x86_64-linux-gnu/
 COPY config.toml /app/config.toml
 
 # TLS + timezone + shell
