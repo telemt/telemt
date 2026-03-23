@@ -24,10 +24,10 @@ jobs:
         include:
           - arch: x86_64
             artifact: telemt-openbsd-x86_64
-            rustflags: -C target-cpu=x86-64-v2 -C opt-level=3
+            rustflags: -C opt-level=3
           - arch: aarch64
             artifact: telemt-openbsd-aarch64
-            rustflags: -C target-cpu=cortex-a53 -C target-feature=+aes,+pmull,+sha2,+sha1,+crc -C opt-level=3
+            rustflags: -C opt-level=3
 
     permissions:
       contents: read
