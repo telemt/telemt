@@ -23,7 +23,7 @@ jobs:
 # GNU / glibc
 # ==========================
   build-gnu:
-    name: GNU ${{ matrix.target }}
+    name: GNU ${{ matrix.asset }}
     runs-on: ubuntu-latest
 
     container:
@@ -35,8 +35,15 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             asset: telemt-x86_64-linux-gnu
+            cpu: baseline
+
+          - target: x86_64-unknown-linux-gnu
+            asset: telemt-x86_64-v3-linux-gnu
+            cpu: v3
+
           - target: aarch64-unknown-linux-gnu
             asset: telemt-aarch64-linux-gnu
+            cpu: generic
 
     steps:
       - uses: actions/checkout@v4
@@ -72,13 +79,21 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             export CC=aarch64-linux-gnu-gcc
             export CXX=aarch64-linux-gnu-g++
-            export RUSTFLAGS="-C linker=aarch64-linux-gnu-gcc -C lto=fat"
+            export RUSTFLAGS="-C linker=aarch64-linux-gnu-gcc -C lto=fat -C panic=abort"
+
           else
             export CC=clang
             export CXX=clang++
-            export RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat"
+
+            if [ "${{ matrix.cpu }}" = "v3" ]; then
+              CPU_FLAGS="-C target-cpu=x86-64-v3"
+            else
+              CPU_FLAGS="-C target-cpu=x86-64"
+            fi
+
+            export RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat -C panic=abort $CPU_FLAGS"
           fi
-      
+
           cargo build --release --target ${{ matrix.target }}
 
       - name: Package
@@ -102,7 +117,7 @@ jobs:
 # MUSL
 # ==========================
   build-musl:
-    name: MUSL ${{ matrix.target }}
+    name: MUSL ${{ matrix.asset }}
     runs-on: ubuntu-latest
   
     container:
@@ -114,8 +129,15 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             asset: telemt-x86_64-linux-musl
+            cpu: baseline
+
+          - target: x86_64-unknown-linux-musl
+            asset: telemt-x86_64-v3-linux-musl
+            cpu: v3
+
           - target: aarch64-unknown-linux-musl
             asset: telemt-aarch64-linux-musl
+            cpu: generic
   
     steps:
       - uses: actions/checkout@v4
@@ -177,13 +199,21 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
             export CC=aarch64-linux-musl-gcc
             export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
-            export RUSTFLAGS="-C target-feature=+crt-static -C linker=aarch64-linux-musl-gcc -C lto=fat"
+            export RUSTFLAGS="-C target-feature=+crt-static -C linker=aarch64-linux-musl-gcc -C lto=fat -C panic=abort"
+
           else
             export CC=musl-gcc
             export CC_x86_64_unknown_linux_musl=musl-gcc
-            export RUSTFLAGS="-C target-feature=+crt-static -C lto=fat"
+
+            if [ "${{ matrix.cpu }}" = "v3" ]; then
+              CPU_FLAGS="-C target-cpu=x86-64-v3"
+            else
+              CPU_FLAGS="-C target-cpu=x86-64"
+            fi
+
+            export RUSTFLAGS="-C target-feature=+crt-static -C lto=fat -C panic=abort $CPU_FLAGS"
           fi
-      
+
           cargo build --release --target ${{ matrix.target }}
   
       - name: Package
