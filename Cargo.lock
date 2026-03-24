@@ -2793,7 +2793,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "telemt"
-version = "3.3.30"
+version = "3.3.31"
 dependencies = [
  "aes",
  "anyhow",
