@@ -6,3 +6,9 @@ cache
 tlsfront
 *.tar
 *.tar.gz
+docker-compose.yml
+Dockerfile
+*.md
+.idea
+.gitignore
+.dockerignore
