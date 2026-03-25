@@ -189,8 +189,14 @@ impl MePool {
     }
 
     fn hardswap_warmup_connect_delay_ms(&self) -> u64 {
-        let min_ms = self.me_hardswap_warmup_delay_min_ms.load(Ordering::Relaxed);
-        let max_ms = self.me_hardswap_warmup_delay_max_ms.load(Ordering::Relaxed);
+        let min_ms = self
+            .reinit
+            .me_hardswap_warmup_delay_min_ms
+            .load(Ordering::Relaxed);
+        let max_ms = self
+            .reinit
+            .me_hardswap_warmup_delay_max_ms
+            .load(Ordering::Relaxed);
         let (min_ms, max_ms) = if min_ms <= max_ms {
             (min_ms, max_ms)
         } else {
@@ -204,6 +210,7 @@ impl MePool {
 
     fn hardswap_warmup_backoff_ms(&self, pass_idx: usize) -> u64 {
         let base_ms = self
+            .reinit
             .me_hardswap_warmup_pass_backoff_base_ms
             .load(Ordering::Relaxed);
         let cap_ms = (self.me_reconnect_backoff_cap.as_millis() as u64).max(base_ms);
@@ -249,6 +256,7 @@ impl MePool {
         desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
     ) {
         let extra_passes = self
+            .reinit
             .me_hardswap_warmup_extra_passes
             .load(Ordering::Relaxed)
             .min(10) as usize;

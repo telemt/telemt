@@ -587,7 +587,10 @@ impl MePool {
                     .load(Ordering::Relaxed),
             ),
             me_bind_stale_mode: bind_stale_mode_label(self.bind_stale_mode()),
-            me_bind_stale_ttl_secs: self.me_bind_stale_ttl_secs.load(Ordering::Relaxed),
+            me_bind_stale_ttl_secs: self
+                .binding_policy
+                .me_bind_stale_ttl_secs
+                .load(Ordering::Relaxed),
             me_single_endpoint_shadow_writers: self
                 .single_endpoint_runtime
                 .me_single_endpoint_shadow_writers

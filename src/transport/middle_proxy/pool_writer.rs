@@ -681,7 +681,10 @@ impl MePool {
             MeBindStaleMode::Never => false,
             MeBindStaleMode::Always => true,
             MeBindStaleMode::Ttl => {
-                let ttl_secs = self.me_bind_stale_ttl_secs.load(Ordering::Relaxed);
+                let ttl_secs = self
+                    .binding_policy
+                    .me_bind_stale_ttl_secs
+                    .load(Ordering::Relaxed);
                 if ttl_secs == 0 {
                     return true;
                 }

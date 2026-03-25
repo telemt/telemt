@@ -273,6 +273,10 @@ pub(super) struct ReinitCore {
     pub(super) pending_hardswap_started_at_epoch_secs: AtomicU64,
     pub(super) pending_hardswap_map_hash: AtomicU64,
     pub(super) hardswap: AtomicBool,
+    pub(super) me_hardswap_warmup_delay_min_ms: AtomicU64,
+    pub(super) me_hardswap_warmup_delay_max_ms: AtomicU64,
+    pub(super) me_hardswap_warmup_extra_passes: AtomicU32,
+    pub(super) me_hardswap_warmup_pass_backoff_base_ms: AtomicU64,
 }
 
 pub(super) struct WriterLifecycleCore {
@@ -330,6 +334,11 @@ pub(super) struct SingleEndpointRuntimeCore {
     pub(super) me_single_endpoint_shadow_rotate_every_secs: AtomicU64,
 }
 
+pub(super) struct BindingPolicyCore {
+    pub(super) me_bind_stale_mode: AtomicU8,
+    pub(super) me_bind_stale_ttl_secs: AtomicU64,
+}
+
 #[allow(dead_code)]
 pub struct MePool {
     pub(super) routing: Arc<RoutingCore>,
@@ -339,6 +348,7 @@ pub struct MePool {
     pub(super) health_runtime: Arc<HealthRuntimeCore>,
     pub(super) drain_runtime: Arc<DrainRuntimeCore>,
     pub(super) single_endpoint_runtime: Arc<SingleEndpointRuntimeCore>,
+    pub(super) binding_policy: Arc<BindingPolicyCore>,
     pub(super) decision: NetworkDecision,
     pub(super) upstream: Option<Arc<UpstreamManager>>,
     pub(super) rng: Arc<SecureRandom>,
@@ -404,12 +414,6 @@ pub struct MePool {
     pub(super) stats: Arc<crate::stats::Stats>,
     pub(super) endpoint_quarantine: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
     pub(super) kdf_material_fingerprint: Arc<RwLock<HashMap<SocketAddr, (u64, u16)>>>,
-    pub(super) me_hardswap_warmup_delay_min_ms: AtomicU64,
-    pub(super) me_hardswap_warmup_delay_max_ms: AtomicU64,
-    pub(super) me_hardswap_warmup_extra_passes: AtomicU32,
-    pub(super) me_hardswap_warmup_pass_backoff_base_ms: AtomicU64,
-    pub(super) me_bind_stale_mode: AtomicU8,
-    pub(super) me_bind_stale_ttl_secs: AtomicU64,
     pub(super) secret_atomic_snapshot: AtomicBool,
     pub(super) me_deterministic_writer_sort: AtomicBool,
     pub(super) me_writer_pick_mode: AtomicU8,
@@ -575,6 +579,14 @@ impl MePool {
                 pending_hardswap_started_at_epoch_secs: AtomicU64::new(0),
                 pending_hardswap_map_hash: AtomicU64::new(0),
                 hardswap: AtomicBool::new(hardswap),
+                me_hardswap_warmup_delay_min_ms: AtomicU64::new(me_hardswap_warmup_delay_min_ms),
+                me_hardswap_warmup_delay_max_ms: AtomicU64::new(me_hardswap_warmup_delay_max_ms),
+                me_hardswap_warmup_extra_passes: AtomicU32::new(
+                    me_hardswap_warmup_extra_passes as u32,
+                ),
+                me_hardswap_warmup_pass_backoff_base_ms: AtomicU64::new(
+                    me_hardswap_warmup_pass_backoff_base_ms,
+                ),
             }),
             writer_lifecycle: Arc::new(WriterLifecycleCore {
                 me_keepalive_enabled,
@@ -665,6 +677,10 @@ impl MePool {
                 me_single_endpoint_shadow_rotate_every_secs: AtomicU64::new(
                     me_single_endpoint_shadow_rotate_every_secs,
                 ),
+            }),
+            binding_policy: Arc::new(BindingPolicyCore {
+                me_bind_stale_mode: AtomicU8::new(me_bind_stale_mode.as_u8()),
+                me_bind_stale_ttl_secs: AtomicU64::new(me_bind_stale_ttl_secs),
             }),
             decision,
             upstream,
@@ -767,14 +783,6 @@ impl MePool {
             draining_active_runtime: AtomicU64::new(0),
             endpoint_quarantine: Arc::new(Mutex::new(HashMap::new())),
             kdf_material_fingerprint: Arc::new(RwLock::new(HashMap::new())),
-            me_hardswap_warmup_delay_min_ms: AtomicU64::new(me_hardswap_warmup_delay_min_ms),
-            me_hardswap_warmup_delay_max_ms: AtomicU64::new(me_hardswap_warmup_delay_max_ms),
-            me_hardswap_warmup_extra_passes: AtomicU32::new(me_hardswap_warmup_extra_passes as u32),
-            me_hardswap_warmup_pass_backoff_base_ms: AtomicU64::new(
-                me_hardswap_warmup_pass_backoff_base_ms,
-            ),
-            me_bind_stale_mode: AtomicU8::new(me_bind_stale_mode.as_u8()),
-            me_bind_stale_ttl_secs: AtomicU64::new(me_bind_stale_ttl_secs),
             secret_atomic_snapshot: AtomicBool::new(me_secret_atomic_snapshot),
             me_deterministic_writer_sort: AtomicBool::new(me_deterministic_writer_sort),
             me_writer_pick_mode: AtomicU8::new(me_writer_pick_mode.as_u8()),
@@ -1035,17 +1043,23 @@ impl MePool {
         self.drain_runtime
             .me_pool_min_fresh_ratio_permille
             .store(Self::ratio_to_permille(min_fresh_ratio), Ordering::Relaxed);
-        self.me_hardswap_warmup_delay_min_ms
+        self.reinit
+            .me_hardswap_warmup_delay_min_ms
             .store(hardswap_warmup_delay_min_ms, Ordering::Relaxed);
-        self.me_hardswap_warmup_delay_max_ms
+        self.reinit
+            .me_hardswap_warmup_delay_max_ms
             .store(hardswap_warmup_delay_max_ms, Ordering::Relaxed);
-        self.me_hardswap_warmup_extra_passes
+        self.reinit
+            .me_hardswap_warmup_extra_passes
             .store(hardswap_warmup_extra_passes as u32, Ordering::Relaxed);
-        self.me_hardswap_warmup_pass_backoff_base_ms
+        self.reinit
+            .me_hardswap_warmup_pass_backoff_base_ms
             .store(hardswap_warmup_pass_backoff_base_ms, Ordering::Relaxed);
-        self.me_bind_stale_mode
+        self.binding_policy
+            .me_bind_stale_mode
             .store(bind_stale_mode.as_u8(), Ordering::Relaxed);
-        self.me_bind_stale_ttl_secs
+        self.binding_policy
+            .me_bind_stale_ttl_secs
             .store(bind_stale_ttl_secs, Ordering::Relaxed);
         self.secret_atomic_snapshot
             .store(secret_atomic_snapshot, Ordering::Relaxed);
@@ -1294,7 +1308,11 @@ impl MePool {
     }
 
     pub(super) fn bind_stale_mode(&self) -> MeBindStaleMode {
-        MeBindStaleMode::from_u8(self.me_bind_stale_mode.load(Ordering::Relaxed))
+        MeBindStaleMode::from_u8(
+            self.binding_policy
+                .me_bind_stale_mode
+                .load(Ordering::Relaxed),
+        )
     }
 
     pub(super) fn writer_pick_mode(&self) -> MeWriterPickMode {
