@@ -12,17 +12,15 @@ use tracing::{debug, error, info, warn};
 use crate::config::ProxyConfig;
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
-use crate::proxy::route_mode::{ROUTE_SWITCH_ERROR_MSG, RouteRuntimeController};
 use crate::proxy::ClientHandler;
+use crate::proxy::route_mode::{ROUTE_SWITCH_ERROR_MSG, RouteRuntimeController};
 use crate::startup::{COMPONENT_LISTENERS_BIND, StartupTracker};
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::tls_front::TlsFrontCache;
 use crate::transport::middle_proxy::MePool;
-use crate::transport::{
-    ListenOptions, UpstreamManager, create_listener, find_listener_processes,
-};
+use crate::transport::{ListenOptions, UpstreamManager, create_listener, find_listener_processes};
 
 use super::helpers::{is_expected_handshake_eof, print_proxy_links};
 
@@ -81,8 +79,9 @@ pub(crate) async fn bind_listeners(
             Ok(socket) => {
                 let listener = TcpListener::from_std(socket.into())?;
                 info!("Listening on {}", addr);
-                let listener_proxy_protocol =
-                    listener_conf.proxy_protocol.unwrap_or(config.server.proxy_protocol);
+                let listener_proxy_protocol = listener_conf
+                    .proxy_protocol
+                    .unwrap_or(config.server.proxy_protocol);
 
                 let public_host = if let Some(ref announce) = listener_conf.announce {
                     announce.clone()
@@ -100,8 +99,14 @@ pub(crate) async fn bind_listeners(
                     listener_conf.ip.to_string()
                 };
 
-                if config.general.links.public_host.is_none() && !config.general.links.show.is_empty() {
-                    let link_port = config.general.links.public_port.unwrap_or(config.server.port);
+                if config.general.links.public_host.is_none()
+                    && !config.general.links.show.is_empty()
+                {
+                    let link_port = config
+                        .general
+                        .links
+                        .public_port
+                        .unwrap_or(config.server.port);
                     print_proxy_links(&public_host, link_port, config);
                 }
 
@@ -145,12 +150,14 @@ pub(crate) async fn bind_listeners(
         let (host, port) = if let Some(ref h) = config.general.links.public_host {
             (
                 h.clone(),
-                config.general.links.public_port.unwrap_or(config.server.port),
+                config
+                    .general
+                    .links
+                    .public_port
+                    .unwrap_or(config.server.port),
             )
         } else {
-            let ip = detected_ip_v4
-                .or(detected_ip_v6)
-                .map(|ip| ip.to_string());
+            let ip = detected_ip_v4.or(detected_ip_v6).map(|ip| ip.to_string());
             if ip.is_none() {
                 warn!(
                     "show_link is configured but public IP could not be detected. Set public_host in config."
@@ -158,7 +165,11 @@ pub(crate) async fn bind_listeners(
             }
             (
                 ip.unwrap_or_else(|| "UNKNOWN".to_string()),
-                config.general.links.public_port.unwrap_or(config.server.port),
+                config
+                    .general
+                    .links
+                    .public_port
+                    .unwrap_or(config.server.port),
             )
         };
 
@@ -178,13 +189,19 @@ pub(crate) async fn bind_listeners(
                     use std::os::unix::fs::PermissionsExt;
                     let perms = std::fs::Permissions::from_mode(mode);
                     if let Err(e) = std::fs::set_permissions(unix_path, perms) {
-                        error!("Failed to set unix socket permissions to {}: {}", perm_str, e);
+                        error!(
+                            "Failed to set unix socket permissions to {}: {}",
+                            perm_str, e
+                        );
                     } else {
                         info!("Listening on unix:{} (mode {})", unix_path, perm_str);
                     }
                 }
                 Err(e) => {
-                    warn!("Invalid listen_unix_sock_perm '{}': {}. Ignoring.", perm_str, e);
+                    warn!(
+                        "Invalid listen_unix_sock_perm '{}': {}. Ignoring.",
+                        perm_str, e
+                    );
                     info!("Listening on unix:{}", unix_path);
                 }
             }
@@ -218,10 +235,8 @@ pub(crate) async fn bind_listeners(
                             drop(stream);
                             continue;
                         }
-                        let accept_permit_timeout_ms = config_rx_unix
-                            .borrow()
-                            .server
-                            .accept_permit_timeout_ms;
+                        let accept_permit_timeout_ms =
+                            config_rx_unix.borrow().server.accept_permit_timeout_ms;
                         let permit = if accept_permit_timeout_ms == 0 {
                             match max_connections_unix.clone().acquire_owned().await {
                                 Ok(permit) => permit,
@@ -361,10 +376,8 @@ pub(crate) fn spawn_tcp_accept_loops(
                             drop(stream);
                             continue;
                         }
-                        let accept_permit_timeout_ms = config_rx
-                            .borrow()
-                            .server
-                            .accept_permit_timeout_ms;
+                        let accept_permit_timeout_ms =
+                            config_rx.borrow().server.accept_permit_timeout_ms;
                         let permit = if accept_permit_timeout_ms == 0 {
                             match max_connections_tcp.clone().acquire_owned().await {
                                 Ok(permit) => permit,

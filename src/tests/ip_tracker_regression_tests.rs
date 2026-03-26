@@ -23,9 +23,19 @@ async fn active_window_enforces_large_unique_ip_burst() {
         .await;
 
     for idx in 0..64 {
-        assert!(tracker.check_and_add("burst_user", ip_from_idx(idx)).await.is_ok());
+        assert!(
+            tracker
+                .check_and_add("burst_user", ip_from_idx(idx))
+                .await
+                .is_ok()
+        );
     }
-    assert!(tracker.check_and_add("burst_user", ip_from_idx(9_999)).await.is_err());
+    assert!(
+        tracker
+            .check_and_add("burst_user", ip_from_idx(9_999))
+            .await
+            .is_err()
+    );
     assert_eq!(tracker.get_active_ip_count("burst_user").await, 64);
 }
 
@@ -36,19 +46,30 @@ async fn global_limit_applies_across_many_users() {
 
     for user_idx in 0..150u32 {
         let user = format!("u{}", user_idx);
-        assert!(tracker.check_and_add(&user, ip_from_idx(user_idx * 10)).await.is_ok());
-        assert!(tracker
-            .check_and_add(&user, ip_from_idx(user_idx * 10 + 1))
-            .await
-            .is_ok());
-        assert!(tracker
-            .check_and_add(&user, ip_from_idx(user_idx * 10 + 2))
-            .await
-            .is_ok());
-        assert!(tracker
-            .check_and_add(&user, ip_from_idx(user_idx * 10 + 3))
-            .await
-            .is_err());
+        assert!(
+            tracker
+                .check_and_add(&user, ip_from_idx(user_idx * 10))
+                .await
+                .is_ok()
+        );
+        assert!(
+            tracker
+                .check_and_add(&user, ip_from_idx(user_idx * 10 + 1))
+                .await
+                .is_ok()
+        );
+        assert!(
+            tracker
+                .check_and_add(&user, ip_from_idx(user_idx * 10 + 2))
+                .await
+                .is_ok()
+        );
+        assert!(
+            tracker
+                .check_and_add(&user, ip_from_idx(user_idx * 10 + 3))
+                .await
+                .is_err()
+        );
     }
 
     assert_eq!(tracker.get_stats().await.len(), 150);
@@ -61,9 +82,24 @@ async fn user_zero_override_falls_back_to_global_limit() {
     limits.insert("target".to_string(), 0);
     tracker.load_limits(2, &limits).await;
 
-    assert!(tracker.check_and_add("target", ip_from_idx(1)).await.is_ok());
-    assert!(tracker.check_and_add("target", ip_from_idx(2)).await.is_ok());
-    assert!(tracker.check_and_add("target", ip_from_idx(3)).await.is_err());
+    assert!(
+        tracker
+            .check_and_add("target", ip_from_idx(1))
+            .await
+            .is_ok()
+    );
+    assert!(
+        tracker
+            .check_and_add("target", ip_from_idx(2))
+            .await
+            .is_ok()
+    );
+    assert!(
+        tracker
+            .check_and_add("target", ip_from_idx(3))
+            .await
+            .is_err()
+    );
     assert_eq!(tracker.get_user_limit("target").await, Some(2));
 }
 
@@ -293,7 +329,11 @@ async fn concurrent_many_users_isolate_limits() {
 
     let stats = tracker.get_stats().await;
     assert_eq!(stats.len(), 120);
-    assert!(stats.iter().all(|(_, active, limit)| *active <= 4 && *limit == 4));
+    assert!(
+        stats
+            .iter()
+            .all(|(_, active, limit)| *active <= 4 && *limit == 4)
+    );
 }
 
 #[tokio::test]
@@ -314,7 +354,10 @@ async fn same_ip_reconnect_high_frequency_keeps_single_unique() {
 async fn format_stats_contains_expected_limited_and_unlimited_markers() {
     let tracker = UserIpTracker::new();
     tracker.set_user_limit("limited", 2).await;
-    tracker.check_and_add("limited", ip_from_idx(1)).await.unwrap();
+    tracker
+        .check_and_add("limited", ip_from_idx(1))
+        .await
+        .unwrap();
     tracker.check_and_add("open", ip_from_idx(2)).await.unwrap();
 
     let text = tracker.format_stats().await;
@@ -333,8 +376,16 @@ async fn stats_report_global_default_for_users_without_override() {
     tracker.check_and_add("b", ip_from_idx(2)).await.unwrap();
 
     let stats = tracker.get_stats().await;
-    assert!(stats.iter().any(|(user, _, limit)| user == "a" && *limit == 5));
-    assert!(stats.iter().any(|(user, _, limit)| user == "b" && *limit == 5));
+    assert!(
+        stats
+            .iter()
+            .any(|(user, _, limit)| user == "a" && *limit == 5)
+    );
+    assert!(
+        stats
+            .iter()
+            .any(|(user, _, limit)| user == "b" && *limit == 5)
+    );
 }
 
 #[tokio::test]
@@ -382,7 +433,10 @@ async fn active_and_recent_views_match_after_mixed_workload() {
     tracker.set_user_limit("mix", 16).await;
 
     for ip_idx in 0..12u32 {
-        tracker.check_and_add("mix", ip_from_idx(ip_idx)).await.unwrap();
+        tracker
+            .check_and_add("mix", ip_from_idx(ip_idx))
+            .await
+            .unwrap();
     }
     for ip_idx in 0..6u32 {
         tracker.remove_ip("mix", ip_from_idx(ip_idx)).await;
@@ -447,4 +501,184 @@ async fn concurrent_reconnect_and_disconnect_preserves_non_negative_counts() {
     }
 
     assert!(tracker.get_active_ip_count("cc").await <= 8);
+}
+
+#[tokio::test]
+async fn enqueue_cleanup_recovers_from_poisoned_mutex() {
+    let tracker = UserIpTracker::new();
+    let ip = ip_from_idx(99);
+
+    // Poison the lock by panicking while holding it
+    let cleanup_queue = tracker.cleanup_queue_mutex_for_tests();
+    let result = std::panic::catch_unwind(move || {
+        let _guard = cleanup_queue.lock().unwrap();
+        panic!("Intentional poison panic");
+    });
+    assert!(result.is_err(), "Expected panic to poison mutex");
+
+    // Attempt to enqueue anyway; should hit the poison catch arm and still insert
+    tracker.enqueue_cleanup("poison-user".to_string(), ip);
+
+    tracker.drain_cleanup_queue().await;
+
+    assert_eq!(tracker.get_active_ip_count("poison-user").await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mass_reconnect_sync_cleanup_prevents_temporary_reservation_bloat() {
+    // Tests that synchronous M-01 drop mechanism protects against starvation
+    let tracker = Arc::new(UserIpTracker::new());
+    tracker.set_user_limit("mass", 5).await;
+
+    let ip = ip_from_idx(42);
+    let mut join_handles = Vec::new();
+
+    // 10,000 rapid concurrent requests hitting the same IP limit
+    for _ in 0..10_000 {
+        let tracker_clone = tracker.clone();
+        join_handles.push(tokio::spawn(async move {
+            if tracker_clone.check_and_add("mass", ip).await.is_ok() {
+                // Instantly enqueue cleanup, simulating synchronous reservation drop
+                tracker_clone.enqueue_cleanup("mass".to_string(), ip);
+                // The next caller will drain it before acquiring again
+            }
+        }));
+    }
+
+    for handle in join_handles {
+        let _ = handle.await;
+    }
+
+    // Force flush
+    tracker.drain_cleanup_queue().await;
+    assert_eq!(
+        tracker.get_active_ip_count("mass").await,
+        0,
+        "No leaked footprints"
+    );
+}
+
+#[tokio::test]
+async fn adversarial_drain_cleanup_queue_race_does_not_cause_false_rejections() {
+    // Regression guard: concurrent cleanup draining must not produce false
+    // limit denials for a new IP when the previous IP is already queued.
+    let tracker = Arc::new(UserIpTracker::new());
+    tracker.set_user_limit("racer", 1).await;
+    let ip1 = ip_from_idx(1);
+    let ip2 = ip_from_idx(2);
+
+    // Initial state: add ip1
+    tracker.check_and_add("racer", ip1).await.unwrap();
+
+    // User disconnects from ip1, queuing it
+    tracker.enqueue_cleanup("racer".to_string(), ip1);
+
+    let mut saw_false_rejection = false;
+    for _ in 0..100 {
+        // Queue cleanup then race explicit drain and check-and-add on the alternative IP.
+        tracker.enqueue_cleanup("racer".to_string(), ip1);
+        let tracker_a = tracker.clone();
+        let tracker_b = tracker.clone();
+
+        let drain_handle = tokio::spawn(async move {
+            tracker_a.drain_cleanup_queue().await;
+        });
+        let handle = tokio::spawn(async move { tracker_b.check_and_add("racer", ip2).await });
+
+        drain_handle.await.unwrap();
+        let res = handle.await.unwrap();
+        if res.is_err() {
+            saw_false_rejection = true;
+            break;
+        }
+
+        // Restore baseline for next iteration.
+        tracker.remove_ip("racer", ip2).await;
+        tracker.check_and_add("racer", ip1).await.unwrap();
+    }
+
+    assert!(
+        !saw_false_rejection,
+        "Concurrent cleanup draining must not cause false-positive IP denials"
+    );
+}
+
+#[tokio::test]
+async fn poisoned_cleanup_queue_still_releases_slot_for_next_ip() {
+    let tracker = UserIpTracker::new();
+    tracker.set_user_limit("poison-slot", 1).await;
+    let ip1 = ip_from_idx(7001);
+    let ip2 = ip_from_idx(7002);
+
+    tracker.check_and_add("poison-slot", ip1).await.unwrap();
+
+    // Poison the queue lock as an adversarial condition.
+    let cleanup_queue = tracker.cleanup_queue_mutex_for_tests();
+    let _ = std::panic::catch_unwind(move || {
+        let _guard = cleanup_queue.lock().unwrap();
+        panic!("intentional queue poison");
+    });
+
+    // Disconnect path must still queue cleanup so the next IP can be admitted.
+    tracker.enqueue_cleanup("poison-slot".to_string(), ip1);
+    let admitted = tracker.check_and_add("poison-slot", ip2).await;
+    assert!(
+        admitted.is_ok(),
+        "cleanup queue poison must not permanently block slot release for the next IP"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_cleanup_entries_do_not_break_future_admission() {
+    let tracker = UserIpTracker::new();
+    tracker.set_user_limit("dup-cleanup", 1).await;
+    let ip1 = ip_from_idx(7101);
+    let ip2 = ip_from_idx(7102);
+
+    tracker.check_and_add("dup-cleanup", ip1).await.unwrap();
+    tracker.enqueue_cleanup("dup-cleanup".to_string(), ip1);
+    tracker.enqueue_cleanup("dup-cleanup".to_string(), ip1);
+    tracker.enqueue_cleanup("dup-cleanup".to_string(), ip1);
+
+    tracker.drain_cleanup_queue().await;
+
+    assert_eq!(tracker.get_active_ip_count("dup-cleanup").await, 0);
+    assert!(
+        tracker.check_and_add("dup-cleanup", ip2).await.is_ok(),
+        "extra queued cleanup entries must not leave user stuck in denied state"
+    );
+}
+
+#[tokio::test]
+async fn stress_repeated_queue_poison_recovery_preserves_admission_progress() {
+    let tracker = UserIpTracker::new();
+    tracker.set_user_limit("poison-stress", 1).await;
+    let ip_primary = ip_from_idx(7201);
+    let ip_alt = ip_from_idx(7202);
+
+    tracker
+        .check_and_add("poison-stress", ip_primary)
+        .await
+        .unwrap();
+
+    for _ in 0..64 {
+        let cleanup_queue = tracker.cleanup_queue_mutex_for_tests();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = cleanup_queue.lock().unwrap();
+            panic!("intentional queue poison in stress loop");
+        });
+
+        tracker.enqueue_cleanup("poison-stress".to_string(), ip_primary);
+
+        assert!(
+            tracker.check_and_add("poison-stress", ip_alt).await.is_ok(),
+            "poison recovery must preserve admission progress under repeated queue poisoning"
+        );
+
+        tracker.remove_ip("poison-stress", ip_alt).await;
+        tracker
+            .check_and_add("poison-stress", ip_primary)
+            .await
+            .unwrap();
+    }
 }

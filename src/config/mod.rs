@@ -1,9 +1,9 @@
 //! Configuration.
 
 pub(crate) mod defaults;
-mod types;
-mod load;
 pub mod hot_reload;
+mod load;
+mod types;
 
 pub use load::ProxyConfig;
 pub use types::*;

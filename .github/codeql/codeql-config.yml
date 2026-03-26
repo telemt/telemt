@@ -7,7 +7,16 @@ queries:
   - uses: security-and-quality
   - uses: ./.github/codeql/queries
 
+paths-ignore:
+  - "**/tests/**"
+  - "**/test/**"
+  - "**/*_test.rs"
+  - "**/*/tests.rs"
 query-filters:
+  - exclude:
+      tags:
+        - test
+
   - exclude:
       id:
         - rust/unwrap-on-option

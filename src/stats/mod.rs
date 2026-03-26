@@ -5,148 +5,80 @@
 pub mod beobachten;
 pub mod telemetry;
 
+use dashmap::DashMap;
+use lru::LruCache;
+use parking_lot::Mutex;
+use std::collections::VecDeque;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use dashmap::DashMap;
-use parking_lot::Mutex;
-use lru::LruCache;
-use std::num::NonZeroUsize;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-use std::collections::VecDeque;
 use tracing::debug;
 
-use crate::config::{MeTelemetryLevel, MeWriterPickMode};
 use self::telemetry::TelemetryPolicy;
+use crate::config::{MeTelemetryLevel, MeWriterPickMode};
 
-const ME_WRITER_TEARDOWN_MODE_COUNT: usize = 2;
-const ME_WRITER_TEARDOWN_REASON_COUNT: usize = 11;
-const ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT: usize = 2;
-const ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT: usize = 12;
-const ME_WRITER_TEARDOWN_DURATION_BUCKET_BOUNDS_MICROS: [u64; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] = [
-    1_000,
-    5_000,
-    10_000,
-    25_000,
-    50_000,
-    100_000,
-    250_000,
-    500_000,
-    1_000_000,
-    2_500_000,
-    5_000_000,
-    10_000_000,
-];
-const ME_WRITER_TEARDOWN_DURATION_BUCKET_LABELS: [&str; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] = [
-    "0.001",
-    "0.005",
-    "0.01",
-    "0.025",
-    "0.05",
-    "0.1",
-    "0.25",
-    "0.5",
-    "1",
-    "2.5",
-    "5",
-    "10",
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum MeWriterTeardownMode {
-    Normal = 0,
-    HardDetach = 1,
+#[derive(Clone, Copy)]
+enum RouteConnectionGauge {
+    Direct,
+    Middle,
 }
 
-impl MeWriterTeardownMode {
-    pub const ALL: [Self; ME_WRITER_TEARDOWN_MODE_COUNT] =
-        [Self::Normal, Self::HardDetach];
+#[derive(Debug, Clone, Copy)]
+pub enum MeD2cFlushReason {
+    QueueDrain,
+    BatchFrames,
+    BatchBytes,
+    MaxDelay,
+    AckImmediate,
+    Close,
+}
 
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Normal => "normal",
-            Self::HardDetach => "hard_detach",
+#[derive(Debug, Clone, Copy)]
+pub enum MeD2cWriteMode {
+    Coalesced,
+    Split,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MeD2cQuotaRejectStage {
+    PreWrite,
+    PostWrite,
+}
+
+#[must_use = "RouteConnectionLease must be kept alive to hold the connection gauge increment"]
+pub struct RouteConnectionLease {
+    stats: Arc<Stats>,
+    gauge: RouteConnectionGauge,
+    active: bool,
+}
+
+impl RouteConnectionLease {
+    fn new(stats: Arc<Stats>, gauge: RouteConnectionGauge) -> Self {
+        Self {
+            stats,
+            gauge,
+            active: true,
         }
     }
 
-    const fn idx(self) -> usize {
-        self as usize
+    #[cfg(test)]
+    fn disarm(&mut self) {
+        self.active = false;
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum MeWriterTeardownReason {
-    ReaderExit = 0,
-    WriterTaskExit = 1,
-    PingSendFail = 2,
-    SignalSendFail = 3,
-    RouteChannelClosed = 4,
-    CloseRpcChannelClosed = 5,
-    PruneClosedWriter = 6,
-    ReapTimeoutExpired = 7,
-    ReapThresholdForce = 8,
-    ReapEmpty = 9,
-    WatchdogStuckDraining = 10,
-}
-
-impl MeWriterTeardownReason {
-    pub const ALL: [Self; ME_WRITER_TEARDOWN_REASON_COUNT] = [
-        Self::ReaderExit,
-        Self::WriterTaskExit,
-        Self::PingSendFail,
-        Self::SignalSendFail,
-        Self::RouteChannelClosed,
-        Self::CloseRpcChannelClosed,
-        Self::PruneClosedWriter,
-        Self::ReapTimeoutExpired,
-        Self::ReapThresholdForce,
-        Self::ReapEmpty,
-        Self::WatchdogStuckDraining,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReaderExit => "reader_exit",
-            Self::WriterTaskExit => "writer_task_exit",
-            Self::PingSendFail => "ping_send_fail",
-            Self::SignalSendFail => "signal_send_fail",
-            Self::RouteChannelClosed => "route_channel_closed",
-            Self::CloseRpcChannelClosed => "close_rpc_channel_closed",
-            Self::PruneClosedWriter => "prune_closed_writer",
-            Self::ReapTimeoutExpired => "reap_timeout_expired",
-            Self::ReapThresholdForce => "reap_threshold_force",
-            Self::ReapEmpty => "reap_empty",
-            Self::WatchdogStuckDraining => "watchdog_stuck_draining",
+impl Drop for RouteConnectionLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
         }
-    }
-
-    const fn idx(self) -> usize {
-        self as usize
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum MeWriterCleanupSideEffectStep {
-    CloseSignalChannelFull = 0,
-    CloseSignalChannelClosed = 1,
-}
-
-impl MeWriterCleanupSideEffectStep {
-    pub const ALL: [Self; ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT] =
-        [Self::CloseSignalChannelFull, Self::CloseSignalChannelClosed];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::CloseSignalChannelFull => "close_signal_channel_full",
-            Self::CloseSignalChannelClosed => "close_signal_channel_closed",
+        match self.gauge {
+            RouteConnectionGauge::Direct => self.stats.decrement_current_connections_direct(),
+            RouteConnectionGauge::Middle => self.stats.decrement_current_connections_me(),
         }
-    }
-
-    const fn idx(self) -> usize {
-        self as usize
     }
 }
 
@@ -189,9 +121,15 @@ pub struct Stats {
     me_handshake_reject_total: AtomicU64,
     me_reader_eof_total: AtomicU64,
     me_idle_close_by_peer_total: AtomicU64,
+    relay_idle_soft_mark_total: AtomicU64,
+    relay_idle_hard_close_total: AtomicU64,
+    relay_pressure_evict_total: AtomicU64,
+    relay_protocol_desync_close_total: AtomicU64,
     me_crc_mismatch: AtomicU64,
     me_seq_mismatch: AtomicU64,
     me_endpoint_quarantine_total: AtomicU64,
+    me_endpoint_quarantine_unexpected_total: AtomicU64,
+    me_endpoint_quarantine_draining_suppressed_total: AtomicU64,
     me_kdf_drift_total: AtomicU64,
     me_kdf_port_only_drift_total: AtomicU64,
     me_hardswap_pending_reuse_total: AtomicU64,
@@ -226,6 +164,44 @@ pub struct Stats {
     me_route_drop_queue_full: AtomicU64,
     me_route_drop_queue_full_base: AtomicU64,
     me_route_drop_queue_full_high: AtomicU64,
+    me_d2c_batches_total: AtomicU64,
+    me_d2c_batch_frames_total: AtomicU64,
+    me_d2c_batch_bytes_total: AtomicU64,
+    me_d2c_flush_reason_queue_drain_total: AtomicU64,
+    me_d2c_flush_reason_batch_frames_total: AtomicU64,
+    me_d2c_flush_reason_batch_bytes_total: AtomicU64,
+    me_d2c_flush_reason_max_delay_total: AtomicU64,
+    me_d2c_flush_reason_ack_immediate_total: AtomicU64,
+    me_d2c_flush_reason_close_total: AtomicU64,
+    me_d2c_data_frames_total: AtomicU64,
+    me_d2c_ack_frames_total: AtomicU64,
+    me_d2c_payload_bytes_total: AtomicU64,
+    me_d2c_write_mode_coalesced_total: AtomicU64,
+    me_d2c_write_mode_split_total: AtomicU64,
+    me_d2c_quota_reject_pre_write_total: AtomicU64,
+    me_d2c_quota_reject_post_write_total: AtomicU64,
+    me_d2c_frame_buf_shrink_total: AtomicU64,
+    me_d2c_frame_buf_shrink_bytes_total: AtomicU64,
+    me_d2c_batch_frames_bucket_1: AtomicU64,
+    me_d2c_batch_frames_bucket_2_4: AtomicU64,
+    me_d2c_batch_frames_bucket_5_8: AtomicU64,
+    me_d2c_batch_frames_bucket_9_16: AtomicU64,
+    me_d2c_batch_frames_bucket_17_32: AtomicU64,
+    me_d2c_batch_frames_bucket_gt_32: AtomicU64,
+    me_d2c_batch_bytes_bucket_0_1k: AtomicU64,
+    me_d2c_batch_bytes_bucket_1k_4k: AtomicU64,
+    me_d2c_batch_bytes_bucket_4k_16k: AtomicU64,
+    me_d2c_batch_bytes_bucket_16k_64k: AtomicU64,
+    me_d2c_batch_bytes_bucket_64k_128k: AtomicU64,
+    me_d2c_batch_bytes_bucket_gt_128k: AtomicU64,
+    me_d2c_flush_duration_us_bucket_0_50: AtomicU64,
+    me_d2c_flush_duration_us_bucket_51_200: AtomicU64,
+    me_d2c_flush_duration_us_bucket_201_1000: AtomicU64,
+    me_d2c_flush_duration_us_bucket_1001_5000: AtomicU64,
+    me_d2c_flush_duration_us_bucket_5001_20000: AtomicU64,
+    me_d2c_flush_duration_us_bucket_gt_20000: AtomicU64,
+    me_d2c_batch_timeout_armed_total: AtomicU64,
+    me_d2c_batch_timeout_fired_total: AtomicU64,
     me_writer_pick_sorted_rr_success_try_total: AtomicU64,
     me_writer_pick_sorted_rr_success_fallback_total: AtomicU64,
     me_writer_pick_sorted_rr_full_total: AtomicU64,
@@ -251,45 +227,26 @@ pub struct Stats {
     pool_swap_total: AtomicU64,
     pool_drain_active: AtomicU64,
     pool_force_close_total: AtomicU64,
-    pool_drain_soft_evict_total: AtomicU64,
-    pool_drain_soft_evict_writer_total: AtomicU64,
     pool_stale_pick_total: AtomicU64,
-    me_writer_close_signal_drop_total: AtomicU64,
-    me_writer_close_signal_channel_full_total: AtomicU64,
-    me_draining_writers_reap_progress_total: AtomicU64,
     me_writer_removed_total: AtomicU64,
     me_writer_removed_unexpected_total: AtomicU64,
-    me_writer_teardown_attempt_total:
-        [[AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT]; ME_WRITER_TEARDOWN_REASON_COUNT],
-    me_writer_teardown_success_total: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
-    me_writer_teardown_timeout_total: AtomicU64,
-    me_writer_teardown_escalation_total: AtomicU64,
-    me_writer_teardown_noop_total: AtomicU64,
-    me_writer_cleanup_side_effect_failures_total:
-        [AtomicU64; ME_WRITER_CLEANUP_SIDE_EFFECT_STEP_COUNT],
-    me_writer_teardown_duration_bucket_hits:
-        [[AtomicU64; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT + 1]; ME_WRITER_TEARDOWN_MODE_COUNT],
-    me_writer_teardown_duration_sum_micros: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
-    me_writer_teardown_duration_count: [AtomicU64; ME_WRITER_TEARDOWN_MODE_COUNT],
     me_refill_triggered_total: AtomicU64,
     me_refill_skipped_inflight_total: AtomicU64,
     me_refill_failed_total: AtomicU64,
     me_writer_restored_same_endpoint_total: AtomicU64,
     me_writer_restored_fallback_total: AtomicU64,
     me_no_writer_failfast_total: AtomicU64,
+    me_hybrid_timeout_total: AtomicU64,
     me_async_recovery_trigger_total: AtomicU64,
     me_inline_recovery_total: AtomicU64,
     ip_reservation_rollback_tcp_limit_total: AtomicU64,
     ip_reservation_rollback_quota_limit_total: AtomicU64,
-    relay_adaptive_promotions_total: AtomicU64,
-    relay_adaptive_demotions_total: AtomicU64,
-    relay_adaptive_hard_promotions_total: AtomicU64,
-    reconnect_evict_total: AtomicU64,
-    reconnect_stale_close_total: AtomicU64,
+    quota_write_fail_bytes_total: AtomicU64,
+    quota_write_fail_events_total: AtomicU64,
     telemetry_core_enabled: AtomicBool,
     telemetry_user_enabled: AtomicBool,
     telemetry_me_level: AtomicU8,
-    user_stats: DashMap<String, UserStats>,
+    user_stats: DashMap<String, Arc<UserStats>>,
     user_stats_last_cleanup_epoch_secs: AtomicU64,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -302,7 +259,49 @@ pub struct UserStats {
     pub octets_to_client: AtomicU64,
     pub msgs_from_client: AtomicU64,
     pub msgs_to_client: AtomicU64,
+    /// Total bytes charged against per-user quota admission.
+    ///
+    /// This counter is the single source of truth for quota enforcement and
+    /// intentionally tracks attempted traffic, not guaranteed delivery.
+    pub quota_used: AtomicU64,
     pub last_seen_epoch_secs: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaReserveError {
+    LimitExceeded,
+    Contended,
+}
+
+impl UserStats {
+    #[inline]
+    pub fn quota_used(&self) -> u64 {
+        self.quota_used.load(Ordering::Relaxed)
+    }
+
+    /// Attempts one CAS reservation step against the quota counter.
+    ///
+    /// Callers control retry/yield policy. This primitive intentionally does
+    /// not block or sleep so both sync poll paths and async paths can wrap it
+    /// with their own contention strategy.
+    #[inline]
+    pub fn quota_try_reserve(&self, bytes: u64, limit: u64) -> Result<u64, QuotaReserveError> {
+        let current = self.quota_used.load(Ordering::Relaxed);
+        if bytes > limit.saturating_sub(current) {
+            return Err(QuotaReserveError::LimitExceeded);
+        }
+
+        let next = current.saturating_add(bytes);
+        match self.quota_used.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => Ok(next),
+            Err(_) => Err(QuotaReserveError::Contended),
+        }
+    }
 }
 
 impl Stats {
@@ -364,6 +363,74 @@ impl Stats {
             .store(Self::now_epoch_secs(), Ordering::Relaxed);
     }
 
+    pub(crate) fn get_or_create_user_stats_handle(&self, user: &str) -> Arc<UserStats> {
+        self.maybe_cleanup_user_stats();
+        if let Some(existing) = self.user_stats.get(user) {
+            let handle = Arc::clone(existing.value());
+            Self::touch_user_stats(handle.as_ref());
+            return handle;
+        }
+
+        let entry = self.user_stats.entry(user.to_string()).or_default();
+        if entry.last_seen_epoch_secs.load(Ordering::Relaxed) == 0 {
+            Self::touch_user_stats(entry.value().as_ref());
+        }
+        Arc::clone(entry.value())
+    }
+
+    #[inline]
+    pub(crate) fn add_user_octets_from_handle(&self, user_stats: &UserStats, bytes: u64) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
+        Self::touch_user_stats(user_stats);
+        user_stats
+            .octets_from_client
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn add_user_octets_to_handle(&self, user_stats: &UserStats, bytes: u64) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
+        Self::touch_user_stats(user_stats);
+        user_stats
+            .octets_to_client
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn increment_user_msgs_from_handle(&self, user_stats: &UserStats) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
+        Self::touch_user_stats(user_stats);
+        user_stats.msgs_from_client.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn increment_user_msgs_to_handle(&self, user_stats: &UserStats) {
+        if !self.telemetry_user_enabled() {
+            return;
+        }
+        Self::touch_user_stats(user_stats);
+        user_stats.msgs_to_client.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Charges already committed bytes in a post-I/O path.
+    ///
+    /// This helper is intentionally separate from `quota_try_reserve` to avoid
+    /// mixing reserve and post-charge on a single I/O event.
+    #[inline]
+    pub(crate) fn quota_charge_post_write(&self, user_stats: &UserStats, bytes: u64) -> u64 {
+        Self::touch_user_stats(user_stats);
+        user_stats
+            .quota_used
+            .fetch_add(bytes, Ordering::Relaxed)
+            .saturating_add(bytes)
+    }
+
     fn maybe_cleanup_user_stats(&self) {
         const USER_STATS_CLEANUP_INTERVAL_SECS: u64 = 60;
         const USER_STATS_IDLE_TTL_SECS: u64 = 24 * 60 * 60;
@@ -372,8 +439,7 @@ impl Stats {
         let last_cleanup_epoch_secs = self
             .user_stats_last_cleanup_epoch_secs
             .load(Ordering::Relaxed);
-        if now_epoch_secs.saturating_sub(last_cleanup_epoch_secs)
-            < USER_STATS_CLEANUP_INTERVAL_SECS
+        if now_epoch_secs.saturating_sub(last_cleanup_epoch_secs) < USER_STATS_CLEANUP_INTERVAL_SECS
         {
             return;
         }
@@ -415,7 +481,7 @@ impl Stats {
             me_level: self.telemetry_me_level(),
         }
     }
-    
+
     pub fn increment_connects_all(&self) {
         if self.telemetry_core_enabled() {
             self.connects_all.fetch_add(1, Ordering::Relaxed);
@@ -427,7 +493,8 @@ impl Stats {
         }
     }
     pub fn increment_current_connections_direct(&self) {
-        self.current_connections_direct.fetch_add(1, Ordering::Relaxed);
+        self.current_connections_direct
+            .fetch_add(1, Ordering::Relaxed);
     }
     pub fn decrement_current_connections_direct(&self) {
         Self::decrement_atomic_saturating(&self.current_connections_direct);
@@ -438,35 +505,15 @@ impl Stats {
     pub fn decrement_current_connections_me(&self) {
         Self::decrement_atomic_saturating(&self.current_connections_me);
     }
-    pub fn increment_relay_adaptive_promotions_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.relay_adaptive_promotions_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
+
+    pub fn acquire_direct_connection_lease(self: &Arc<Self>) -> RouteConnectionLease {
+        self.increment_current_connections_direct();
+        RouteConnectionLease::new(self.clone(), RouteConnectionGauge::Direct)
     }
-    pub fn increment_relay_adaptive_demotions_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.relay_adaptive_demotions_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_relay_adaptive_hard_promotions_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.relay_adaptive_hard_promotions_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_reconnect_evict_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.reconnect_evict_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_reconnect_stale_close_total(&self) {
-        if self.telemetry_core_enabled() {
-            self.reconnect_stale_close_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
+
+    pub fn acquire_me_connection_lease(self: &Arc<Self>) -> RouteConnectionLease {
+        self.increment_current_connections_me();
+        RouteConnectionLease::new(self.clone(), RouteConnectionGauge::Middle)
     }
     pub fn increment_handshake_timeouts(&self) {
         if self.telemetry_core_enabled() {
@@ -588,7 +635,8 @@ impl Stats {
     }
     pub fn increment_me_keepalive_timeout_by(&self, value: u64) {
         if self.telemetry_me_allows_normal() {
-            self.me_keepalive_timeout.fetch_add(value, Ordering::Relaxed);
+            self.me_keepalive_timeout
+                .fetch_add(value, Ordering::Relaxed);
         }
     }
     pub fn increment_me_rpc_proxy_req_signal_sent_total(&self) {
@@ -633,7 +681,8 @@ impl Stats {
     }
     pub fn increment_me_handshake_reject_total(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_handshake_reject_total.fetch_add(1, Ordering::Relaxed);
+            self.me_handshake_reject_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_handshake_error_code(&self, code: i32) {
@@ -657,6 +706,30 @@ impl Stats {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn increment_relay_idle_soft_mark_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_idle_soft_mark_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_idle_hard_close_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_idle_hard_close_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_pressure_evict_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_pressure_evict_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_relay_protocol_desync_close_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.relay_protocol_desync_close_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_crc_mismatch(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_crc_mismatch.fetch_add(1, Ordering::Relaxed);
@@ -674,22 +747,236 @@ impl Stats {
     }
     pub fn increment_me_route_drop_channel_closed(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_route_drop_channel_closed.fetch_add(1, Ordering::Relaxed);
+            self.me_route_drop_channel_closed
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_route_drop_queue_full(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_route_drop_queue_full.fetch_add(1, Ordering::Relaxed);
+            self.me_route_drop_queue_full
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_route_drop_queue_full_base(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_route_drop_queue_full_base.fetch_add(1, Ordering::Relaxed);
+            self.me_route_drop_queue_full_base
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_route_drop_queue_full_high(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_route_drop_queue_full_high.fetch_add(1, Ordering::Relaxed);
+            self.me_route_drop_queue_full_high
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_d2c_batches_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_d2c_batches_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn add_me_d2c_batch_frames_total(&self, frames: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_d2c_batch_frames_total
+                .fetch_add(frames, Ordering::Relaxed);
+        }
+    }
+    pub fn add_me_d2c_batch_bytes_total(&self, bytes: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_d2c_batch_bytes_total
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_d2c_flush_reason(&self, reason: MeD2cFlushReason) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match reason {
+            MeD2cFlushReason::QueueDrain => {
+                self.me_d2c_flush_reason_queue_drain_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeD2cFlushReason::BatchFrames => {
+                self.me_d2c_flush_reason_batch_frames_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeD2cFlushReason::BatchBytes => {
+                self.me_d2c_flush_reason_batch_bytes_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeD2cFlushReason::MaxDelay => {
+                self.me_d2c_flush_reason_max_delay_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeD2cFlushReason::AckImmediate => {
+                self.me_d2c_flush_reason_ack_immediate_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeD2cFlushReason::Close => {
+                self.me_d2c_flush_reason_close_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_d2c_data_frames_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_d2c_data_frames_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_d2c_ack_frames_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_d2c_ack_frames_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn add_me_d2c_payload_bytes_total(&self, bytes: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_d2c_payload_bytes_total
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_d2c_write_mode(&self, mode: MeD2cWriteMode) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match mode {
+            MeD2cWriteMode::Coalesced => {
+                self.me_d2c_write_mode_coalesced_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeD2cWriteMode::Split => {
+                self.me_d2c_write_mode_split_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_d2c_quota_reject_total(&self, stage: MeD2cQuotaRejectStage) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        match stage {
+            MeD2cQuotaRejectStage::PreWrite => {
+                self.me_d2c_quota_reject_pre_write_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            MeD2cQuotaRejectStage::PostWrite => {
+                self.me_d2c_quota_reject_post_write_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn observe_me_d2c_frame_buf_shrink(&self, bytes_freed: u64) {
+        if !self.telemetry_me_allows_normal() {
+            return;
+        }
+        self.me_d2c_frame_buf_shrink_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.me_d2c_frame_buf_shrink_bytes_total
+            .fetch_add(bytes_freed, Ordering::Relaxed);
+    }
+    pub fn observe_me_d2c_batch_frames(&self, frames: u64) {
+        if !self.telemetry_me_allows_debug() {
+            return;
+        }
+        match frames {
+            0 => {}
+            1 => {
+                self.me_d2c_batch_frames_bucket_1
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            2..=4 => {
+                self.me_d2c_batch_frames_bucket_2_4
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            5..=8 => {
+                self.me_d2c_batch_frames_bucket_5_8
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            9..=16 => {
+                self.me_d2c_batch_frames_bucket_9_16
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            17..=32 => {
+                self.me_d2c_batch_frames_bucket_17_32
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.me_d2c_batch_frames_bucket_gt_32
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn observe_me_d2c_batch_bytes(&self, bytes: u64) {
+        if !self.telemetry_me_allows_debug() {
+            return;
+        }
+        match bytes {
+            0..=1024 => {
+                self.me_d2c_batch_bytes_bucket_0_1k
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            1025..=4096 => {
+                self.me_d2c_batch_bytes_bucket_1k_4k
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            4097..=16_384 => {
+                self.me_d2c_batch_bytes_bucket_4k_16k
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            16_385..=65_536 => {
+                self.me_d2c_batch_bytes_bucket_16k_64k
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            65_537..=131_072 => {
+                self.me_d2c_batch_bytes_bucket_64k_128k
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.me_d2c_batch_bytes_bucket_gt_128k
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn observe_me_d2c_flush_duration_us(&self, duration_us: u64) {
+        if !self.telemetry_me_allows_debug() {
+            return;
+        }
+        match duration_us {
+            0..=50 => {
+                self.me_d2c_flush_duration_us_bucket_0_50
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            51..=200 => {
+                self.me_d2c_flush_duration_us_bucket_51_200
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            201..=1000 => {
+                self.me_d2c_flush_duration_us_bucket_201_1000
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            1001..=5000 => {
+                self.me_d2c_flush_duration_us_bucket_1001_5000
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            5001..=20_000 => {
+                self.me_d2c_flush_duration_us_bucket_5001_20000
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.me_d2c_flush_duration_us_bucket_gt_20000
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn increment_me_d2c_batch_timeout_armed_total(&self) {
+        if self.telemetry_me_allows_debug() {
+            self.me_d2c_batch_timeout_armed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_d2c_batch_timeout_fired_total(&self) {
+        if self.telemetry_me_allows_debug() {
+            self.me_d2c_batch_timeout_fired_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_writer_pick_success_try_total(&self, mode: MeWriterPickMode) {
@@ -781,12 +1068,14 @@ impl Stats {
     }
     pub fn increment_me_socks_kdf_strict_reject(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_socks_kdf_strict_reject.fetch_add(1, Ordering::Relaxed);
+            self.me_socks_kdf_strict_reject
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_socks_kdf_compat_fallback(&self) {
         if self.telemetry_me_allows_debug() {
-            self.me_socks_kdf_compat_fallback.fetch_add(1, Ordering::Relaxed);
+            self.me_socks_kdf_compat_fallback
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_secure_padding_invalid(&self) {
@@ -818,13 +1107,16 @@ impl Stats {
                 self.desync_frames_bucket_0.fetch_add(1, Ordering::Relaxed);
             }
             1..=2 => {
-                self.desync_frames_bucket_1_2.fetch_add(1, Ordering::Relaxed);
+                self.desync_frames_bucket_1_2
+                    .fetch_add(1, Ordering::Relaxed);
             }
             3..=10 => {
-                self.desync_frames_bucket_3_10.fetch_add(1, Ordering::Relaxed);
+                self.desync_frames_bucket_3_10
+                    .fetch_add(1, Ordering::Relaxed);
             }
             _ => {
-                self.desync_frames_bucket_gt_10.fetch_add(1, Ordering::Relaxed);
+                self.desync_frames_bucket_gt_10
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -863,39 +1155,9 @@ impl Stats {
             self.pool_force_close_total.fetch_add(1, Ordering::Relaxed);
         }
     }
-    pub fn increment_pool_drain_soft_evict_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.pool_drain_soft_evict_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_pool_drain_soft_evict_writer_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.pool_drain_soft_evict_writer_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
     pub fn increment_pool_stale_pick_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.pool_stale_pick_total.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_close_signal_drop_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_close_signal_drop_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_close_signal_channel_full_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_close_signal_channel_full_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_draining_writers_reap_progress_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_draining_writers_reap_progress_total
-                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_writer_removed_total(&self) {
@@ -905,85 +1167,20 @@ impl Stats {
     }
     pub fn increment_me_writer_removed_unexpected_total(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_writer_removed_unexpected_total.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_attempt_total(
-        &self,
-        reason: MeWriterTeardownReason,
-        mode: MeWriterTeardownMode,
-    ) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_attempt_total[reason.idx()][mode.idx()]
+            self.me_writer_removed_unexpected_total
                 .fetch_add(1, Ordering::Relaxed);
         }
-    }
-    pub fn increment_me_writer_teardown_success_total(&self, mode: MeWriterTeardownMode) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_success_total[mode.idx()].fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_timeout_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_timeout_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_escalation_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_escalation_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_teardown_noop_total(&self) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_teardown_noop_total
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn increment_me_writer_cleanup_side_effect_failures_total(
-        &self,
-        step: MeWriterCleanupSideEffectStep,
-    ) {
-        if self.telemetry_me_allows_normal() {
-            self.me_writer_cleanup_side_effect_failures_total[step.idx()]
-                .fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    pub fn observe_me_writer_teardown_duration(
-        &self,
-        mode: MeWriterTeardownMode,
-        duration: Duration,
-    ) {
-        if !self.telemetry_me_allows_normal() {
-            return;
-        }
-        let duration_micros = duration.as_micros().min(u64::MAX as u128) as u64;
-        let mut bucket_idx = ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT;
-        for (idx, upper_bound_micros) in ME_WRITER_TEARDOWN_DURATION_BUCKET_BOUNDS_MICROS
-            .iter()
-            .copied()
-            .enumerate()
-        {
-            if duration_micros <= upper_bound_micros {
-                bucket_idx = idx;
-                break;
-            }
-        }
-        self.me_writer_teardown_duration_bucket_hits[mode.idx()][bucket_idx]
-            .fetch_add(1, Ordering::Relaxed);
-        self.me_writer_teardown_duration_sum_micros[mode.idx()]
-            .fetch_add(duration_micros, Ordering::Relaxed);
-        self.me_writer_teardown_duration_count[mode.idx()].fetch_add(1, Ordering::Relaxed);
     }
     pub fn increment_me_refill_triggered_total(&self) {
         if self.telemetry_me_allows_debug() {
-            self.me_refill_triggered_total.fetch_add(1, Ordering::Relaxed);
+            self.me_refill_triggered_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_refill_skipped_inflight_total(&self) {
         if self.telemetry_me_allows_debug() {
-            self.me_refill_skipped_inflight_total.fetch_add(1, Ordering::Relaxed);
+            self.me_refill_skipped_inflight_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_refill_failed_total(&self) {
@@ -1005,7 +1202,13 @@ impl Stats {
     }
     pub fn increment_me_no_writer_failfast_total(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_no_writer_failfast_total.fetch_add(1, Ordering::Relaxed);
+            self.me_no_writer_failfast_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_hybrid_timeout_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_hybrid_timeout_total.fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_async_recovery_trigger_total(&self) {
@@ -1016,7 +1219,8 @@ impl Stats {
     }
     pub fn increment_me_inline_recovery_total(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_inline_recovery_total.fetch_add(1, Ordering::Relaxed);
+            self.me_inline_recovery_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_ip_reservation_rollback_tcp_limit_total(&self) {
@@ -1031,9 +1235,33 @@ impl Stats {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn add_quota_write_fail_bytes_total(&self, bytes: u64) {
+        if self.telemetry_core_enabled() {
+            self.quota_write_fail_bytes_total
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_quota_write_fail_events_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.quota_write_fail_events_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_endpoint_quarantine_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_endpoint_quarantine_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_endpoint_quarantine_unexpected_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_endpoint_quarantine_unexpected_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn increment_me_endpoint_quarantine_draining_suppressed_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_endpoint_quarantine_draining_suppressed_total
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1188,12 +1416,14 @@ impl Stats {
     }
     pub fn increment_me_floor_cap_block_total(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_floor_cap_block_total.fetch_add(1, Ordering::Relaxed);
+            self.me_floor_cap_block_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_floor_swap_idle_total(&self) {
         if self.telemetry_me_allows_normal() {
-            self.me_floor_swap_idle_total.fetch_add(1, Ordering::Relaxed);
+            self.me_floor_swap_idle_total
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn increment_me_floor_swap_idle_failed_total(&self) {
@@ -1202,8 +1432,12 @@ impl Stats {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
-    pub fn get_connects_all(&self) -> u64 { self.connects_all.load(Ordering::Relaxed) }
-    pub fn get_connects_bad(&self) -> u64 { self.connects_bad.load(Ordering::Relaxed) }
+    pub fn get_connects_all(&self) -> u64 {
+        self.connects_all.load(Ordering::Relaxed)
+    }
+    pub fn get_connects_bad(&self) -> u64 {
+        self.connects_bad.load(Ordering::Relaxed)
+    }
     pub fn get_current_connections_direct(&self) -> u64 {
         self.current_connections_direct.load(Ordering::Relaxed)
     }
@@ -1214,26 +1448,18 @@ impl Stats {
         self.get_current_connections_direct()
             .saturating_add(self.get_current_connections_me())
     }
-    pub fn get_relay_adaptive_promotions_total(&self) -> u64 {
-        self.relay_adaptive_promotions_total.load(Ordering::Relaxed)
+    pub fn get_me_keepalive_sent(&self) -> u64 {
+        self.me_keepalive_sent.load(Ordering::Relaxed)
     }
-    pub fn get_relay_adaptive_demotions_total(&self) -> u64 {
-        self.relay_adaptive_demotions_total.load(Ordering::Relaxed)
+    pub fn get_me_keepalive_failed(&self) -> u64 {
+        self.me_keepalive_failed.load(Ordering::Relaxed)
     }
-    pub fn get_relay_adaptive_hard_promotions_total(&self) -> u64 {
-        self.relay_adaptive_hard_promotions_total
-            .load(Ordering::Relaxed)
+    pub fn get_me_keepalive_pong(&self) -> u64 {
+        self.me_keepalive_pong.load(Ordering::Relaxed)
     }
-    pub fn get_reconnect_evict_total(&self) -> u64 {
-        self.reconnect_evict_total.load(Ordering::Relaxed)
+    pub fn get_me_keepalive_timeout(&self) -> u64 {
+        self.me_keepalive_timeout.load(Ordering::Relaxed)
     }
-    pub fn get_reconnect_stale_close_total(&self) -> u64 {
-        self.reconnect_stale_close_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_keepalive_sent(&self) -> u64 { self.me_keepalive_sent.load(Ordering::Relaxed) }
-    pub fn get_me_keepalive_failed(&self) -> u64 { self.me_keepalive_failed.load(Ordering::Relaxed) }
-    pub fn get_me_keepalive_pong(&self) -> u64 { self.me_keepalive_pong.load(Ordering::Relaxed) }
-    pub fn get_me_keepalive_timeout(&self) -> u64 { self.me_keepalive_timeout.load(Ordering::Relaxed) }
     pub fn get_me_rpc_proxy_req_signal_sent_total(&self) -> u64 {
         self.me_rpc_proxy_req_signal_sent_total
             .load(Ordering::Relaxed)
@@ -1254,8 +1480,12 @@ impl Stats {
         self.me_rpc_proxy_req_signal_close_sent_total
             .load(Ordering::Relaxed)
     }
-    pub fn get_me_reconnect_attempts(&self) -> u64 { self.me_reconnect_attempts.load(Ordering::Relaxed) }
-    pub fn get_me_reconnect_success(&self) -> u64 { self.me_reconnect_success.load(Ordering::Relaxed) }
+    pub fn get_me_reconnect_attempts(&self) -> u64 {
+        self.me_reconnect_attempts.load(Ordering::Relaxed)
+    }
+    pub fn get_me_reconnect_success(&self) -> u64 {
+        self.me_reconnect_success.load(Ordering::Relaxed)
+    }
     pub fn get_me_handshake_reject_total(&self) -> u64 {
         self.me_handshake_reject_total.load(Ordering::Relaxed)
     }
@@ -1265,10 +1495,35 @@ impl Stats {
     pub fn get_me_idle_close_by_peer_total(&self) -> u64 {
         self.me_idle_close_by_peer_total.load(Ordering::Relaxed)
     }
-    pub fn get_me_crc_mismatch(&self) -> u64 { self.me_crc_mismatch.load(Ordering::Relaxed) }
-    pub fn get_me_seq_mismatch(&self) -> u64 { self.me_seq_mismatch.load(Ordering::Relaxed) }
+    pub fn get_relay_idle_soft_mark_total(&self) -> u64 {
+        self.relay_idle_soft_mark_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_idle_hard_close_total(&self) -> u64 {
+        self.relay_idle_hard_close_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_pressure_evict_total(&self) -> u64 {
+        self.relay_pressure_evict_total.load(Ordering::Relaxed)
+    }
+    pub fn get_relay_protocol_desync_close_total(&self) -> u64 {
+        self.relay_protocol_desync_close_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_crc_mismatch(&self) -> u64 {
+        self.me_crc_mismatch.load(Ordering::Relaxed)
+    }
+    pub fn get_me_seq_mismatch(&self) -> u64 {
+        self.me_seq_mismatch.load(Ordering::Relaxed)
+    }
     pub fn get_me_endpoint_quarantine_total(&self) -> u64 {
         self.me_endpoint_quarantine_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_endpoint_quarantine_unexpected_total(&self) -> u64 {
+        self.me_endpoint_quarantine_unexpected_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_endpoint_quarantine_draining_suppressed_total(&self) -> u64 {
+        self.me_endpoint_quarantine_draining_suppressed_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_kdf_drift_total(&self) -> u64 {
         self.me_kdf_drift_total.load(Ordering::Relaxed)
@@ -1277,8 +1532,7 @@ impl Stats {
         self.me_kdf_port_only_drift_total.load(Ordering::Relaxed)
     }
     pub fn get_me_hardswap_pending_reuse_total(&self) -> u64 {
-        self.me_hardswap_pending_reuse_total
-            .load(Ordering::Relaxed)
+        self.me_hardswap_pending_reuse_total.load(Ordering::Relaxed)
     }
     pub fn get_me_hardswap_pending_ttl_expired_total(&self) -> u64 {
         self.me_hardswap_pending_ttl_expired_total
@@ -1359,12 +1613,10 @@ impl Stats {
             .load(Ordering::Relaxed)
     }
     pub fn get_me_writers_active_current_gauge(&self) -> u64 {
-        self.me_writers_active_current_gauge
-            .load(Ordering::Relaxed)
+        self.me_writers_active_current_gauge.load(Ordering::Relaxed)
     }
     pub fn get_me_writers_warm_current_gauge(&self) -> u64 {
-        self.me_writers_warm_current_gauge
-            .load(Ordering::Relaxed)
+        self.me_writers_warm_current_gauge.load(Ordering::Relaxed)
     }
     pub fn get_me_floor_cap_block_total(&self) -> u64 {
         self.me_floor_cap_block_total.load(Ordering::Relaxed)
@@ -1384,7 +1636,9 @@ impl Stats {
         out.sort_by_key(|(code, _)| *code);
         out
     }
-    pub fn get_me_route_drop_no_conn(&self) -> u64 { self.me_route_drop_no_conn.load(Ordering::Relaxed) }
+    pub fn get_me_route_drop_no_conn(&self) -> u64 {
+        self.me_route_drop_no_conn.load(Ordering::Relaxed)
+    }
     pub fn get_me_route_drop_channel_closed(&self) -> u64 {
         self.me_route_drop_channel_closed.load(Ordering::Relaxed)
     }
@@ -1396,6 +1650,143 @@ impl Stats {
     }
     pub fn get_me_route_drop_queue_full_high(&self) -> u64 {
         self.me_route_drop_queue_full_high.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batches_total(&self) -> u64 {
+        self.me_d2c_batches_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_frames_total(&self) -> u64 {
+        self.me_d2c_batch_frames_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_bytes_total(&self) -> u64 {
+        self.me_d2c_batch_bytes_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_reason_queue_drain_total(&self) -> u64 {
+        self.me_d2c_flush_reason_queue_drain_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_reason_batch_frames_total(&self) -> u64 {
+        self.me_d2c_flush_reason_batch_frames_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_reason_batch_bytes_total(&self) -> u64 {
+        self.me_d2c_flush_reason_batch_bytes_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_reason_max_delay_total(&self) -> u64 {
+        self.me_d2c_flush_reason_max_delay_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_reason_ack_immediate_total(&self) -> u64 {
+        self.me_d2c_flush_reason_ack_immediate_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_reason_close_total(&self) -> u64 {
+        self.me_d2c_flush_reason_close_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_data_frames_total(&self) -> u64 {
+        self.me_d2c_data_frames_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_ack_frames_total(&self) -> u64 {
+        self.me_d2c_ack_frames_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_payload_bytes_total(&self) -> u64 {
+        self.me_d2c_payload_bytes_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_write_mode_coalesced_total(&self) -> u64 {
+        self.me_d2c_write_mode_coalesced_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_write_mode_split_total(&self) -> u64 {
+        self.me_d2c_write_mode_split_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_quota_reject_pre_write_total(&self) -> u64 {
+        self.me_d2c_quota_reject_pre_write_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_quota_reject_post_write_total(&self) -> u64 {
+        self.me_d2c_quota_reject_post_write_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_frame_buf_shrink_total(&self) -> u64 {
+        self.me_d2c_frame_buf_shrink_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_frame_buf_shrink_bytes_total(&self) -> u64 {
+        self.me_d2c_frame_buf_shrink_bytes_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_frames_bucket_1(&self) -> u64 {
+        self.me_d2c_batch_frames_bucket_1.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_frames_bucket_2_4(&self) -> u64 {
+        self.me_d2c_batch_frames_bucket_2_4.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_frames_bucket_5_8(&self) -> u64 {
+        self.me_d2c_batch_frames_bucket_5_8.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_frames_bucket_9_16(&self) -> u64 {
+        self.me_d2c_batch_frames_bucket_9_16.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_frames_bucket_17_32(&self) -> u64 {
+        self.me_d2c_batch_frames_bucket_17_32
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_frames_bucket_gt_32(&self) -> u64 {
+        self.me_d2c_batch_frames_bucket_gt_32
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_bytes_bucket_0_1k(&self) -> u64 {
+        self.me_d2c_batch_bytes_bucket_0_1k.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_bytes_bucket_1k_4k(&self) -> u64 {
+        self.me_d2c_batch_bytes_bucket_1k_4k.load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_bytes_bucket_4k_16k(&self) -> u64 {
+        self.me_d2c_batch_bytes_bucket_4k_16k
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_bytes_bucket_16k_64k(&self) -> u64 {
+        self.me_d2c_batch_bytes_bucket_16k_64k
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_bytes_bucket_64k_128k(&self) -> u64 {
+        self.me_d2c_batch_bytes_bucket_64k_128k
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_bytes_bucket_gt_128k(&self) -> u64 {
+        self.me_d2c_batch_bytes_bucket_gt_128k
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_duration_us_bucket_0_50(&self) -> u64 {
+        self.me_d2c_flush_duration_us_bucket_0_50
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_duration_us_bucket_51_200(&self) -> u64 {
+        self.me_d2c_flush_duration_us_bucket_51_200
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_duration_us_bucket_201_1000(&self) -> u64 {
+        self.me_d2c_flush_duration_us_bucket_201_1000
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_duration_us_bucket_1001_5000(&self) -> u64 {
+        self.me_d2c_flush_duration_us_bucket_1001_5000
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_duration_us_bucket_5001_20000(&self) -> u64 {
+        self.me_d2c_flush_duration_us_bucket_5001_20000
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_flush_duration_us_bucket_gt_20000(&self) -> u64 {
+        self.me_d2c_flush_duration_us_bucket_gt_20000
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_timeout_armed_total(&self) -> u64 {
+        self.me_d2c_batch_timeout_armed_total
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_d2c_batch_timeout_fired_total(&self) -> u64 {
+        self.me_d2c_batch_timeout_fired_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_writer_pick_sorted_rr_success_try_total(&self) -> u64 {
         self.me_writer_pick_sorted_rr_success_try_total
@@ -1482,122 +1873,39 @@ impl Stats {
     pub fn get_pool_force_close_total(&self) -> u64 {
         self.pool_force_close_total.load(Ordering::Relaxed)
     }
-    pub fn get_pool_drain_soft_evict_total(&self) -> u64 {
-        self.pool_drain_soft_evict_total.load(Ordering::Relaxed)
-    }
-    pub fn get_pool_drain_soft_evict_writer_total(&self) -> u64 {
-        self.pool_drain_soft_evict_writer_total.load(Ordering::Relaxed)
-    }
     pub fn get_pool_stale_pick_total(&self) -> u64 {
         self.pool_stale_pick_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_close_signal_drop_total(&self) -> u64 {
-        self.me_writer_close_signal_drop_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_close_signal_channel_full_total(&self) -> u64 {
-        self.me_writer_close_signal_channel_full_total
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_draining_writers_reap_progress_total(&self) -> u64 {
-        self.me_draining_writers_reap_progress_total
-            .load(Ordering::Relaxed)
     }
     pub fn get_me_writer_removed_total(&self) -> u64 {
         self.me_writer_removed_total.load(Ordering::Relaxed)
     }
     pub fn get_me_writer_removed_unexpected_total(&self) -> u64 {
-        self.me_writer_removed_unexpected_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_attempt_total(
-        &self,
-        reason: MeWriterTeardownReason,
-        mode: MeWriterTeardownMode,
-    ) -> u64 {
-        self.me_writer_teardown_attempt_total[reason.idx()][mode.idx()]
+        self.me_writer_removed_unexpected_total
             .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_attempt_total_by_mode(&self, mode: MeWriterTeardownMode) -> u64 {
-        MeWriterTeardownReason::ALL
-            .iter()
-            .copied()
-            .map(|reason| self.get_me_writer_teardown_attempt_total(reason, mode))
-            .sum()
-    }
-    pub fn get_me_writer_teardown_success_total(&self, mode: MeWriterTeardownMode) -> u64 {
-        self.me_writer_teardown_success_total[mode.idx()].load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_timeout_total(&self) -> u64 {
-        self.me_writer_teardown_timeout_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_escalation_total(&self) -> u64 {
-        self.me_writer_teardown_escalation_total
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_noop_total(&self) -> u64 {
-        self.me_writer_teardown_noop_total.load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_cleanup_side_effect_failures_total(
-        &self,
-        step: MeWriterCleanupSideEffectStep,
-    ) -> u64 {
-        self.me_writer_cleanup_side_effect_failures_total[step.idx()]
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_cleanup_side_effect_failures_total_all(&self) -> u64 {
-        MeWriterCleanupSideEffectStep::ALL
-            .iter()
-            .copied()
-            .map(|step| self.get_me_writer_cleanup_side_effect_failures_total(step))
-            .sum()
-    }
-    pub fn me_writer_teardown_duration_bucket_labels(
-    ) -> &'static [&'static str; ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT] {
-        &ME_WRITER_TEARDOWN_DURATION_BUCKET_LABELS
-    }
-    pub fn get_me_writer_teardown_duration_bucket_hits(
-        &self,
-        mode: MeWriterTeardownMode,
-        bucket_idx: usize,
-    ) -> u64 {
-        self.me_writer_teardown_duration_bucket_hits[mode.idx()][bucket_idx]
-            .load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_duration_bucket_total(
-        &self,
-        mode: MeWriterTeardownMode,
-        bucket_idx: usize,
-    ) -> u64 {
-        let capped_idx = bucket_idx.min(ME_WRITER_TEARDOWN_DURATION_BUCKET_COUNT);
-        let mut total = 0u64;
-        for idx in 0..=capped_idx {
-            total = total.saturating_add(self.get_me_writer_teardown_duration_bucket_hits(mode, idx));
-        }
-        total
-    }
-    pub fn get_me_writer_teardown_duration_count(&self, mode: MeWriterTeardownMode) -> u64 {
-        self.me_writer_teardown_duration_count[mode.idx()].load(Ordering::Relaxed)
-    }
-    pub fn get_me_writer_teardown_duration_sum_seconds(&self, mode: MeWriterTeardownMode) -> f64 {
-        self.me_writer_teardown_duration_sum_micros[mode.idx()].load(Ordering::Relaxed) as f64
-            / 1_000_000.0
     }
     pub fn get_me_refill_triggered_total(&self) -> u64 {
         self.me_refill_triggered_total.load(Ordering::Relaxed)
     }
     pub fn get_me_refill_skipped_inflight_total(&self) -> u64 {
-        self.me_refill_skipped_inflight_total.load(Ordering::Relaxed)
+        self.me_refill_skipped_inflight_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_refill_failed_total(&self) -> u64 {
         self.me_refill_failed_total.load(Ordering::Relaxed)
     }
     pub fn get_me_writer_restored_same_endpoint_total(&self) -> u64 {
-        self.me_writer_restored_same_endpoint_total.load(Ordering::Relaxed)
+        self.me_writer_restored_same_endpoint_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_writer_restored_fallback_total(&self) -> u64 {
-        self.me_writer_restored_fallback_total.load(Ordering::Relaxed)
+        self.me_writer_restored_fallback_total
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_no_writer_failfast_total(&self) -> u64 {
         self.me_no_writer_failfast_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_hybrid_timeout_total(&self) -> u64 {
+        self.me_hybrid_timeout_total.load(Ordering::Relaxed)
     }
     pub fn get_me_async_recovery_trigger_total(&self) -> u64 {
         self.me_async_recovery_trigger_total.load(Ordering::Relaxed)
@@ -1613,44 +1921,63 @@ impl Stats {
         self.ip_reservation_rollback_quota_limit_total
             .load(Ordering::Relaxed)
     }
-    
+    pub fn get_quota_write_fail_bytes_total(&self) -> u64 {
+        self.quota_write_fail_bytes_total.load(Ordering::Relaxed)
+    }
+    pub fn get_quota_write_fail_events_total(&self) -> u64 {
+        self.quota_write_fail_events_total.load(Ordering::Relaxed)
+    }
+
     pub fn increment_user_connects(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.maybe_cleanup_user_stats();
-        if let Some(stats) = self.user_stats.get(user) {
-            Self::touch_user_stats(stats.value());
-            stats.connects.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        let stats = self.user_stats.entry(user.to_string()).or_default();
-        Self::touch_user_stats(stats.value());
+        let stats = self.get_or_create_user_stats_handle(user);
+        Self::touch_user_stats(stats.as_ref());
         stats.connects.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub fn increment_user_curr_connects(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.maybe_cleanup_user_stats();
-        if let Some(stats) = self.user_stats.get(user) {
-            Self::touch_user_stats(stats.value());
-            stats.curr_connects.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        let stats = self.user_stats.entry(user.to_string()).or_default();
-        Self::touch_user_stats(stats.value());
+        let stats = self.get_or_create_user_stats_handle(user);
+        Self::touch_user_stats(stats.as_ref());
         stats.curr_connects.fetch_add(1, Ordering::Relaxed);
     }
-    
-    pub fn decrement_user_curr_connects(&self, user: &str) {
+
+    pub fn try_acquire_user_curr_connects(&self, user: &str, limit: Option<u64>) -> bool {
         if !self.telemetry_user_enabled() {
-            return;
+            return true;
         }
+
+        let stats = self.get_or_create_user_stats_handle(user);
+        Self::touch_user_stats(stats.as_ref());
+
+        let counter = &stats.curr_connects;
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            if let Some(max) = limit
+                && current >= max
+            {
+                return false;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current.saturating_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn decrement_user_curr_connects(&self, user: &str) {
         self.maybe_cleanup_user_stats();
         if let Some(stats) = self.user_stats.get(user) {
-            Self::touch_user_stats(stats.value());
+            Self::touch_user_stats(stats.value().as_ref());
             let counter = &stats.curr_connects;
             let mut current = counter.load(Ordering::Relaxed);
             loop {
@@ -1669,83 +1996,66 @@ impl Stats {
             }
         }
     }
-    
+
     pub fn get_user_curr_connects(&self, user: &str) -> u64 {
-        self.user_stats.get(user)
+        self.user_stats
+            .get(user)
             .map(|s| s.curr_connects.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
-    
+
     pub fn add_user_octets_from(&self, user: &str, bytes: u64) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.maybe_cleanup_user_stats();
-        if let Some(stats) = self.user_stats.get(user) {
-            Self::touch_user_stats(stats.value());
-            stats.octets_from_client.fetch_add(bytes, Ordering::Relaxed);
-            return;
-        }
-        let stats = self.user_stats.entry(user.to_string()).or_default();
-        Self::touch_user_stats(stats.value());
-        stats.octets_from_client.fetch_add(bytes, Ordering::Relaxed);
+        let stats = self.get_or_create_user_stats_handle(user);
+        self.add_user_octets_from_handle(stats.as_ref(), bytes);
     }
-    
+
     pub fn add_user_octets_to(&self, user: &str, bytes: u64) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.maybe_cleanup_user_stats();
-        if let Some(stats) = self.user_stats.get(user) {
-            Self::touch_user_stats(stats.value());
-            stats.octets_to_client.fetch_add(bytes, Ordering::Relaxed);
-            return;
-        }
-        let stats = self.user_stats.entry(user.to_string()).or_default();
-        Self::touch_user_stats(stats.value());
-        stats.octets_to_client.fetch_add(bytes, Ordering::Relaxed);
+        let stats = self.get_or_create_user_stats_handle(user);
+        self.add_user_octets_to_handle(stats.as_ref(), bytes);
     }
-    
+
     pub fn increment_user_msgs_from(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.maybe_cleanup_user_stats();
-        if let Some(stats) = self.user_stats.get(user) {
-            Self::touch_user_stats(stats.value());
-            stats.msgs_from_client.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        let stats = self.user_stats.entry(user.to_string()).or_default();
-        Self::touch_user_stats(stats.value());
-        stats.msgs_from_client.fetch_add(1, Ordering::Relaxed);
+        let stats = self.get_or_create_user_stats_handle(user);
+        self.increment_user_msgs_from_handle(stats.as_ref());
     }
-    
+
     pub fn increment_user_msgs_to(&self, user: &str) {
         if !self.telemetry_user_enabled() {
             return;
         }
-        self.maybe_cleanup_user_stats();
-        if let Some(stats) = self.user_stats.get(user) {
-            Self::touch_user_stats(stats.value());
-            stats.msgs_to_client.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        let stats = self.user_stats.entry(user.to_string()).or_default();
-        Self::touch_user_stats(stats.value());
-        stats.msgs_to_client.fetch_add(1, Ordering::Relaxed);
+        let stats = self.get_or_create_user_stats_handle(user);
+        self.increment_user_msgs_to_handle(stats.as_ref());
     }
-    
+
     pub fn get_user_total_octets(&self, user: &str) -> u64 {
-        self.user_stats.get(user)
+        self.user_stats
+            .get(user)
             .map(|s| {
-                s.octets_from_client.load(Ordering::Relaxed) +
-                s.octets_to_client.load(Ordering::Relaxed)
+                s.octets_from_client.load(Ordering::Relaxed)
+                    + s.octets_to_client.load(Ordering::Relaxed)
             })
             .unwrap_or(0)
     }
-    
-    pub fn get_handshake_timeouts(&self) -> u64 { self.handshake_timeouts.load(Ordering::Relaxed) }
+
+    pub fn get_user_quota_used(&self, user: &str) -> u64 {
+        self.user_stats
+            .get(user)
+            .map(|s| s.quota_used.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    pub fn get_handshake_timeouts(&self) -> u64 {
+        self.handshake_timeouts.load(Ordering::Relaxed)
+    }
     pub fn get_upstream_connect_attempt_total(&self) -> u64 {
         self.upstream_connect_attempt_total.load(Ordering::Relaxed)
     }
@@ -1760,10 +2070,12 @@ impl Stats {
             .load(Ordering::Relaxed)
     }
     pub fn get_upstream_connect_attempts_bucket_1(&self) -> u64 {
-        self.upstream_connect_attempts_bucket_1.load(Ordering::Relaxed)
+        self.upstream_connect_attempts_bucket_1
+            .load(Ordering::Relaxed)
     }
     pub fn get_upstream_connect_attempts_bucket_2(&self) -> u64 {
-        self.upstream_connect_attempts_bucket_2.load(Ordering::Relaxed)
+        self.upstream_connect_attempts_bucket_2
+            .load(Ordering::Relaxed)
     }
     pub fn get_upstream_connect_attempts_bucket_3_4(&self) -> u64 {
         self.upstream_connect_attempts_bucket_3_4
@@ -1806,12 +2118,13 @@ impl Stats {
             .load(Ordering::Relaxed)
     }
 
-    pub fn iter_user_stats(&self) -> dashmap::iter::Iter<'_, String, UserStats> {
+    pub fn iter_user_stats(&self) -> dashmap::iter::Iter<'_, String, Arc<UserStats>> {
         self.user_stats.iter()
     }
 
     pub fn uptime_secs(&self) -> f64 {
-        self.start_time.read()
+        self.start_time
+            .read()
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or(0.0)
     }
@@ -1820,9 +2133,11 @@ impl Stats {
 // ============= Replay Checker =============
 
 pub struct ReplayChecker {
-    shards: Vec<Mutex<ReplayShard>>,
+    handshake_shards: Vec<Mutex<ReplayShard>>,
+    tls_shards: Vec<Mutex<ReplayShard>>,
     shard_mask: usize,
     window: Duration,
+    tls_window: Duration,
     checks: AtomicU64,
     hits: AtomicU64,
     additions: AtomicU64,
@@ -1848,7 +2163,7 @@ impl ReplayShard {
             seq_counter: 0,
         }
     }
-    
+
     fn next_seq(&mut self) -> u64 {
         self.seq_counter += 1;
         self.seq_counter
@@ -1859,13 +2174,13 @@ impl ReplayShard {
             return;
         }
         let cutoff = now.checked_sub(window).unwrap_or(now);
-        
+
         while let Some((ts, _, _)) = self.queue.front() {
             if *ts >= cutoff {
                 break;
             }
             let (_, key, queue_seq) = self.queue.pop_front().unwrap();
-            
+
             // Use key.as_ref() to get &[u8] — avoids Borrow<Q> ambiguity
             // between Borrow<[u8]> and Borrow<Box<[u8]>>
             if let Some(entry) = self.cache.peek(key.as_ref())
@@ -1875,23 +2190,24 @@ impl ReplayShard {
             }
         }
     }
-    
+
     fn check(&mut self, key: &[u8], now: Instant, window: Duration) -> bool {
         self.cleanup(now, window);
         // key is &[u8], resolves Q=[u8] via Box<[u8]>: Borrow<[u8]>
         self.cache.get(key).is_some()
     }
-    
+
     fn add(&mut self, key: &[u8], now: Instant, window: Duration) {
         self.cleanup(now, window);
-        
+
         let seq = self.next_seq();
         let boxed_key: Box<[u8]> = key.into();
-        
-        self.cache.put(boxed_key.clone(), ReplayEntry { seen_at: now, seq });
+
+        self.cache
+            .put(boxed_key.clone(), ReplayEntry { seen_at: now, seq });
         self.queue.push_back((now, boxed_key, seq));
     }
-    
+
     fn len(&self) -> usize {
         self.cache.len()
     }
@@ -1899,19 +2215,24 @@ impl ReplayShard {
 
 impl ReplayChecker {
     pub fn new(total_capacity: usize, window: Duration) -> Self {
+        const MIN_TLS_REPLAY_WINDOW: Duration = Duration::from_secs(120);
         let num_shards = 64;
         let shard_capacity = (total_capacity / num_shards).max(1);
         let cap = NonZeroUsize::new(shard_capacity).unwrap();
 
-        let mut shards = Vec::with_capacity(num_shards);
+        let mut handshake_shards = Vec::with_capacity(num_shards);
+        let mut tls_shards = Vec::with_capacity(num_shards);
         for _ in 0..num_shards {
-            shards.push(Mutex::new(ReplayShard::new(cap)));
+            handshake_shards.push(Mutex::new(ReplayShard::new(cap)));
+            tls_shards.push(Mutex::new(ReplayShard::new(cap)));
         }
 
         Self {
-            shards,
+            handshake_shards,
+            tls_shards,
             shard_mask: num_shards - 1,
             window,
+            tls_window: window.max(MIN_TLS_REPLAY_WINDOW),
             checks: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             additions: AtomicU64::new(0),
@@ -1925,51 +2246,85 @@ impl ReplayChecker {
         (hasher.finish() as usize) & self.shard_mask
     }
 
-    fn check_and_add_internal(&self, data: &[u8]) -> bool {
+    fn check_and_add_internal(
+        &self,
+        data: &[u8],
+        shards: &[Mutex<ReplayShard>],
+        window: Duration,
+    ) -> bool {
         self.checks.fetch_add(1, Ordering::Relaxed);
         let idx = self.get_shard_idx(data);
-        let mut shard = self.shards[idx].lock();
+        let mut shard = shards[idx].lock();
         let now = Instant::now();
-        let found = shard.check(data, now, self.window);
+        let found = shard.check(data, now, window);
         if found {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
-            shard.add(data, now, self.window);
+            shard.add(data, now, window);
             self.additions.fetch_add(1, Ordering::Relaxed);
         }
         found
     }
 
-    fn add_only(&self, data: &[u8]) {
+    fn check_only_internal(
+        &self,
+        data: &[u8],
+        shards: &[Mutex<ReplayShard>],
+        window: Duration,
+    ) -> bool {
+        self.checks.fetch_add(1, Ordering::Relaxed);
+        let idx = self.get_shard_idx(data);
+        let mut shard = shards[idx].lock();
+        let found = shard.check(data, Instant::now(), window);
+        if found {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
+        found
+    }
+
+    fn add_only(&self, data: &[u8], shards: &[Mutex<ReplayShard>], window: Duration) {
         self.additions.fetch_add(1, Ordering::Relaxed);
         let idx = self.get_shard_idx(data);
-        let mut shard = self.shards[idx].lock();
-        shard.add(data, Instant::now(), self.window);
+        let mut shard = shards[idx].lock();
+        shard.add(data, Instant::now(), window);
     }
 
     pub fn check_and_add_handshake(&self, data: &[u8]) -> bool {
-        self.check_and_add_internal(data)
+        self.check_and_add_internal(data, &self.handshake_shards, self.window)
     }
 
     pub fn check_and_add_tls_digest(&self, data: &[u8]) -> bool {
-        self.check_and_add_internal(data)
+        self.check_and_add_internal(data, &self.tls_shards, self.tls_window)
     }
 
     // Compatibility helpers (non-atomic split operations) — prefer check_and_add_*.
-    pub fn check_handshake(&self, data: &[u8]) -> bool { self.check_and_add_handshake(data) }
-    pub fn add_handshake(&self, data: &[u8]) { self.add_only(data) }
-    pub fn check_tls_digest(&self, data: &[u8]) -> bool { self.check_and_add_tls_digest(data) }
-    pub fn add_tls_digest(&self, data: &[u8]) { self.add_only(data) }
-    
+    pub fn check_handshake(&self, data: &[u8]) -> bool {
+        self.check_and_add_handshake(data)
+    }
+    pub fn add_handshake(&self, data: &[u8]) {
+        self.add_only(data, &self.handshake_shards, self.window)
+    }
+    pub fn check_tls_digest(&self, data: &[u8]) -> bool {
+        self.check_only_internal(data, &self.tls_shards, self.tls_window)
+    }
+    pub fn add_tls_digest(&self, data: &[u8]) {
+        self.add_only(data, &self.tls_shards, self.tls_window)
+    }
+
     pub fn stats(&self) -> ReplayStats {
         let mut total_entries = 0;
         let mut total_queue_len = 0;
-        for shard in &self.shards {
+        for shard in &self.handshake_shards {
             let s = shard.lock();
             total_entries += s.cache.len();
             total_queue_len += s.queue.len();
         }
-        
+        for shard in &self.tls_shards {
+            let s = shard.lock();
+            total_entries += s.cache.len();
+            total_queue_len += s.queue.len();
+        }
+
         ReplayStats {
             total_entries,
             total_queue_len,
@@ -1977,34 +2332,41 @@ impl ReplayChecker {
             total_hits: self.hits.load(Ordering::Relaxed),
             total_additions: self.additions.load(Ordering::Relaxed),
             total_cleanups: self.cleanups.load(Ordering::Relaxed),
-            num_shards: self.shards.len(),
+            num_shards: self.handshake_shards.len() + self.tls_shards.len(),
             window_secs: self.window.as_secs(),
         }
     }
-    
+
     pub async fn run_periodic_cleanup(&self) {
         let interval = if self.window.as_secs() > 60 {
             Duration::from_secs(30)
         } else {
             Duration::from_secs(self.window.as_secs().max(1) / 2)
         };
-        
+
         loop {
             tokio::time::sleep(interval).await;
-            
+
             let now = Instant::now();
             let mut cleaned = 0usize;
-            
-            for shard_mutex in &self.shards {
+
+            for shard_mutex in &self.handshake_shards {
                 let mut shard = shard_mutex.lock();
                 let before = shard.len();
                 shard.cleanup(now, self.window);
                 let after = shard.len();
                 cleaned += before.saturating_sub(after);
             }
-            
+            for shard_mutex in &self.tls_shards {
+                let mut shard = shard_mutex.lock();
+                let before = shard.len();
+                shard.cleanup(now, self.tls_window);
+                let after = shard.len();
+                cleaned += before.saturating_sub(after);
+            }
+
             self.cleanups.fetch_add(1, Ordering::Relaxed);
-            
+
             if cleaned > 0 {
                 debug!(cleaned = cleaned, "Replay checker: periodic cleanup");
             }
@@ -2026,13 +2388,19 @@ pub struct ReplayStats {
 
 impl ReplayStats {
     pub fn hit_rate(&self) -> f64 {
-        if self.total_checks == 0 { 0.0 }
-        else { (self.total_hits as f64 / self.total_checks as f64) * 100.0 }
+        if self.total_checks == 0 {
+            0.0
+        } else {
+            (self.total_hits as f64 / self.total_checks as f64) * 100.0
+        }
     }
-    
+
     pub fn ghost_ratio(&self) -> f64 {
-        if self.total_entries == 0 { 0.0 }
-        else { self.total_queue_len as f64 / self.total_entries as f64 }
+        if self.total_entries == 0 {
+            0.0
+        } else {
+            self.total_queue_len as f64 / self.total_entries as f64
+        }
     }
 }
 
@@ -2041,7 +2409,8 @@ mod tests {
     use super::*;
     use crate::config::MeTelemetryLevel;
     use std::sync::Arc;
-    
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     #[test]
     fn test_stats_shared_counters() {
         let stats = Arc::new(Stats::new());
@@ -2080,92 +2449,93 @@ mod tests {
         stats.increment_me_crc_mismatch();
         stats.increment_me_keepalive_sent();
         stats.increment_me_route_drop_queue_full();
+        stats.increment_me_d2c_batches_total();
+        stats.add_me_d2c_batch_frames_total(4);
+        stats.add_me_d2c_batch_bytes_total(4096);
+        stats.increment_me_d2c_flush_reason(MeD2cFlushReason::BatchBytes);
+        stats.increment_me_d2c_write_mode(MeD2cWriteMode::Coalesced);
+        stats.increment_me_d2c_quota_reject_total(MeD2cQuotaRejectStage::PreWrite);
+        stats.observe_me_d2c_frame_buf_shrink(1024);
+        stats.observe_me_d2c_batch_frames(4);
+        stats.observe_me_d2c_batch_bytes(4096);
+        stats.observe_me_d2c_flush_duration_us(120);
+        stats.increment_me_d2c_batch_timeout_armed_total();
+        stats.increment_me_d2c_batch_timeout_fired_total();
         assert_eq!(stats.get_me_crc_mismatch(), 0);
         assert_eq!(stats.get_me_keepalive_sent(), 0);
         assert_eq!(stats.get_me_route_drop_queue_full(), 0);
+        assert_eq!(stats.get_me_d2c_batches_total(), 0);
+        assert_eq!(stats.get_me_d2c_flush_reason_batch_bytes_total(), 0);
+        assert_eq!(stats.get_me_d2c_write_mode_coalesced_total(), 0);
+        assert_eq!(stats.get_me_d2c_quota_reject_pre_write_total(), 0);
+        assert_eq!(stats.get_me_d2c_frame_buf_shrink_total(), 0);
+        assert_eq!(stats.get_me_d2c_batch_frames_bucket_2_4(), 0);
+        assert_eq!(stats.get_me_d2c_batch_bytes_bucket_1k_4k(), 0);
+        assert_eq!(stats.get_me_d2c_flush_duration_us_bucket_51_200(), 0);
+        assert_eq!(stats.get_me_d2c_batch_timeout_armed_total(), 0);
+        assert_eq!(stats.get_me_d2c_batch_timeout_fired_total(), 0);
     }
 
     #[test]
-    fn test_teardown_counters_and_duration() {
-        let stats = Stats::new();
-        stats.increment_me_writer_teardown_attempt_total(
-            MeWriterTeardownReason::ReaderExit,
-            MeWriterTeardownMode::Normal,
-        );
-        stats.increment_me_writer_teardown_success_total(MeWriterTeardownMode::Normal);
-        stats.observe_me_writer_teardown_duration(
-            MeWriterTeardownMode::Normal,
-            Duration::from_millis(3),
-        );
-        stats.increment_me_writer_cleanup_side_effect_failures_total(
-            MeWriterCleanupSideEffectStep::CloseSignalChannelFull,
-        );
-
-        assert_eq!(
-            stats.get_me_writer_teardown_attempt_total(
-                MeWriterTeardownReason::ReaderExit,
-                MeWriterTeardownMode::Normal
-            ),
-            1
-        );
-        assert_eq!(
-            stats.get_me_writer_teardown_success_total(MeWriterTeardownMode::Normal),
-            1
-        );
-        assert_eq!(
-            stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal),
-            1
-        );
-        assert!(
-            stats.get_me_writer_teardown_duration_sum_seconds(MeWriterTeardownMode::Normal) > 0.0
-        );
-        assert_eq!(
-            stats.get_me_writer_cleanup_side_effect_failures_total(
-                MeWriterCleanupSideEffectStep::CloseSignalChannelFull
-            ),
-            1
-        );
-    }
-
-    #[test]
-    fn test_teardown_counters_respect_me_silent() {
+    fn test_telemetry_policy_me_normal_blocks_d2c_debug_metrics() {
         let stats = Stats::new();
         stats.apply_telemetry_policy(TelemetryPolicy {
             core_enabled: true,
             user_enabled: true,
-            me_level: MeTelemetryLevel::Silent,
+            me_level: MeTelemetryLevel::Normal,
         });
-        stats.increment_me_writer_teardown_attempt_total(
-            MeWriterTeardownReason::ReaderExit,
-            MeWriterTeardownMode::Normal,
-        );
-        stats.increment_me_writer_teardown_timeout_total();
-        stats.observe_me_writer_teardown_duration(
-            MeWriterTeardownMode::Normal,
-            Duration::from_millis(1),
-        );
-        assert_eq!(
-            stats.get_me_writer_teardown_attempt_total(
-                MeWriterTeardownReason::ReaderExit,
-                MeWriterTeardownMode::Normal
-            ),
-            0
-        );
-        assert_eq!(stats.get_me_writer_teardown_timeout_total(), 0);
-        assert_eq!(
-            stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal),
-            0
-        );
+
+        stats.increment_me_d2c_batches_total();
+        stats.add_me_d2c_batch_frames_total(2);
+        stats.add_me_d2c_batch_bytes_total(2048);
+        stats.increment_me_d2c_flush_reason(MeD2cFlushReason::QueueDrain);
+        stats.observe_me_d2c_batch_frames(2);
+        stats.observe_me_d2c_batch_bytes(2048);
+        stats.observe_me_d2c_flush_duration_us(100);
+        stats.increment_me_d2c_batch_timeout_armed_total();
+        stats.increment_me_d2c_batch_timeout_fired_total();
+
+        assert_eq!(stats.get_me_d2c_batches_total(), 1);
+        assert_eq!(stats.get_me_d2c_batch_frames_total(), 2);
+        assert_eq!(stats.get_me_d2c_batch_bytes_total(), 2048);
+        assert_eq!(stats.get_me_d2c_flush_reason_queue_drain_total(), 1);
+        assert_eq!(stats.get_me_d2c_batch_frames_bucket_2_4(), 0);
+        assert_eq!(stats.get_me_d2c_batch_bytes_bucket_1k_4k(), 0);
+        assert_eq!(stats.get_me_d2c_flush_duration_us_bucket_51_200(), 0);
+        assert_eq!(stats.get_me_d2c_batch_timeout_armed_total(), 0);
+        assert_eq!(stats.get_me_d2c_batch_timeout_fired_total(), 0);
     }
-    
+
+    #[test]
+    fn test_telemetry_policy_me_debug_enables_d2c_debug_metrics() {
+        let stats = Stats::new();
+        stats.apply_telemetry_policy(TelemetryPolicy {
+            core_enabled: true,
+            user_enabled: true,
+            me_level: MeTelemetryLevel::Debug,
+        });
+
+        stats.observe_me_d2c_batch_frames(7);
+        stats.observe_me_d2c_batch_bytes(70_000);
+        stats.observe_me_d2c_flush_duration_us(1400);
+        stats.increment_me_d2c_batch_timeout_armed_total();
+        stats.increment_me_d2c_batch_timeout_fired_total();
+
+        assert_eq!(stats.get_me_d2c_batch_frames_bucket_5_8(), 1);
+        assert_eq!(stats.get_me_d2c_batch_bytes_bucket_64k_128k(), 1);
+        assert_eq!(stats.get_me_d2c_flush_duration_us_bucket_1001_5000(), 1);
+        assert_eq!(stats.get_me_d2c_batch_timeout_armed_total(), 1);
+        assert_eq!(stats.get_me_d2c_batch_timeout_fired_total(), 1);
+    }
+
     #[test]
     fn test_replay_checker_basic() {
         let checker = ReplayChecker::new(100, Duration::from_secs(60));
         assert!(!checker.check_handshake(b"test1")); // first time, inserts
-        assert!(checker.check_handshake(b"test1"));  // duplicate
+        assert!(checker.check_handshake(b"test1")); // duplicate
         assert!(!checker.check_handshake(b"test2")); // new key inserts
     }
-    
+
     #[test]
     fn test_replay_checker_duplicate_add() {
         let checker = ReplayChecker::new(100, Duration::from_secs(60));
@@ -2173,7 +2543,7 @@ mod tests {
         checker.add_handshake(b"dup");
         assert!(checker.check_handshake(b"dup"));
     }
-    
+
     #[test]
     fn test_replay_checker_expiration() {
         let checker = ReplayChecker::new(100, Duration::from_millis(50));
@@ -2182,7 +2552,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(!checker.check_handshake(b"expire"));
     }
-    
+
     #[test]
     fn test_replay_checker_stats() {
         let checker = ReplayChecker::new(100, Duration::from_secs(60));
@@ -2195,16 +2565,155 @@ mod tests {
         assert_eq!(stats.total_checks, 4);
         assert_eq!(stats.total_hits, 1);
     }
-    
+
     #[test]
     fn test_replay_checker_many_keys() {
         let checker = ReplayChecker::new(10_000, Duration::from_secs(60));
         for i in 0..500u32 {
-            checker.add_only(&i.to_le_bytes());
+            checker.add_handshake(&i.to_le_bytes());
         }
         for i in 0..500u32 {
             assert!(checker.check_handshake(&i.to_le_bytes()));
         }
         assert_eq!(checker.stats().total_entries, 500);
     }
+
+    #[test]
+    fn test_quota_reserve_under_contention_hits_limit_exactly() {
+        let user_stats = Arc::new(UserStats::default());
+        let successes = Arc::new(AtomicU64::new(0));
+        let limit = 8_192u64;
+        let mut workers = Vec::new();
+
+        for _ in 0..8 {
+            let user_stats = user_stats.clone();
+            let successes = successes.clone();
+            workers.push(std::thread::spawn(move || {
+                loop {
+                    match user_stats.quota_try_reserve(1, limit) {
+                        Ok(_) => {
+                            successes.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(QuotaReserveError::Contended) => {
+                            std::hint::spin_loop();
+                        }
+                        Err(QuotaReserveError::LimitExceeded) => {
+                            break;
+                        }
+                    }
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().expect("worker thread must finish");
+        }
+
+        assert_eq!(
+            successes.load(Ordering::Relaxed),
+            limit,
+            "successful reservations must stop exactly at limit"
+        );
+        assert_eq!(user_stats.quota_used(), limit);
+    }
+
+    #[test]
+    fn test_quota_reserve_200x_1k_reaches_100k_without_overshoot() {
+        let user_stats = Arc::new(UserStats::default());
+        let successes = Arc::new(AtomicU64::new(0));
+        let failures = Arc::new(AtomicU64::new(0));
+        let attempts = 200usize;
+        let reserve_bytes = 1_024u64;
+        let limit = 100 * 1_024u64;
+        let mut workers = Vec::with_capacity(attempts);
+
+        for _ in 0..attempts {
+            let user_stats = user_stats.clone();
+            let successes = successes.clone();
+            let failures = failures.clone();
+            workers.push(std::thread::spawn(move || {
+                loop {
+                    match user_stats.quota_try_reserve(reserve_bytes, limit) {
+                        Ok(_) => {
+                            successes.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                        Err(QuotaReserveError::LimitExceeded) => {
+                            failures.fetch_add(1, Ordering::Relaxed);
+                            return;
+                        }
+                        Err(QuotaReserveError::Contended) => {
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().expect("reservation worker must finish");
+        }
+
+        assert_eq!(
+            successes.load(Ordering::Relaxed),
+            100,
+            "exactly 100 reservations of 1 KiB must fit into a 100 KiB quota"
+        );
+        assert_eq!(
+            failures.load(Ordering::Relaxed),
+            100,
+            "remaining workers must fail once quota is fully reserved"
+        );
+        assert_eq!(user_stats.quota_used(), limit);
+    }
+
+    #[test]
+    fn test_quota_used_is_authoritative_and_independent_from_octets_telemetry() {
+        let stats = Stats::new();
+        let user = "quota-authoritative-user";
+        let user_stats = stats.get_or_create_user_stats_handle(user);
+
+        stats.add_user_octets_to_handle(&user_stats, 5);
+        assert_eq!(stats.get_user_total_octets(user), 5);
+        assert_eq!(stats.get_user_quota_used(user), 0);
+
+        stats.quota_charge_post_write(&user_stats, 7);
+        assert_eq!(stats.get_user_total_octets(user), 5);
+        assert_eq!(stats.get_user_quota_used(user), 7);
+    }
+
+    #[test]
+    fn test_cached_handle_survives_map_cleanup_until_last_drop() {
+        let stats = Stats::new();
+        let user = "quota-handle-lifetime-user";
+        let user_stats = stats.get_or_create_user_stats_handle(user);
+        let weak = Arc::downgrade(&user_stats);
+
+        stats.user_stats.remove(user);
+        assert!(
+            stats.user_stats.get(user).is_none(),
+            "map cleanup should remove idle entry"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "cached handle must keep user stats object alive after map removal"
+        );
+
+        stats.quota_charge_post_write(user_stats.as_ref(), 3);
+        assert_eq!(user_stats.quota_used(), 3);
+
+        drop(user_stats);
+        assert!(
+            weak.upgrade().is_none(),
+            "user stats object must be dropped after the last cached handle is released"
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "tests/connection_lease_security_tests.rs"]
+mod connection_lease_security_tests;
+
+#[cfg(test)]
+#[path = "tests/replay_checker_security_tests.rs"]
+mod replay_checker_security_tests;

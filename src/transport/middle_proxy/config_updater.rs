@@ -11,17 +11,19 @@ use tracing::{debug, info, warn};
 
 use crate::config::ProxyConfig;
 use crate::error::Result;
+use crate::transport::UpstreamManager;
 
 use super::MePool;
+use super::http_fetch::https_get;
 use super::rotation::{MeReinitTrigger, enqueue_reinit_trigger};
-use super::secret::download_proxy_secret_with_max_len;
+use super::secret::download_proxy_secret_with_max_len_via_upstream;
 use super::selftest::record_timeskew_sample;
 use std::time::SystemTime;
 
-async fn retry_fetch(url: &str) -> Option<ProxyConfigData> {
+async fn retry_fetch(url: &str, upstream: Option<Arc<UpstreamManager>>) -> Option<ProxyConfigData> {
     let delays = [1u64, 5, 15];
     for (i, d) in delays.iter().enumerate() {
-        match fetch_proxy_config(url).await {
+        match fetch_proxy_config_via_upstream(url, upstream.clone()).await {
             Ok(cfg) => return Some(cfg),
             Err(e) => {
                 if i == delays.len() - 1 {
@@ -95,33 +97,40 @@ pub async fn save_proxy_config_cache(path: &str, raw_text: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn fetch_proxy_config_with_raw(url: &str) -> Result<(ProxyConfigData, String)> {
-    let resp = reqwest::get(url)
-        .await
-        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config GET failed: {e}")))?
-        ;
-    let http_status = resp.status().as_u16();
+    fetch_proxy_config_with_raw_via_upstream(url, None).await
+}
 
-    if let Some(date) = resp.headers().get(reqwest::header::DATE)
-        && let Ok(date_str) = date.to_str()
+pub async fn fetch_proxy_config_with_raw_via_upstream(
+    url: &str,
+    upstream: Option<Arc<UpstreamManager>>,
+) -> Result<(ProxyConfigData, String)> {
+    let resp = https_get(url, upstream).await?;
+    let http_status = resp.status;
+
+    if let Some(date_str) = resp.date_header.as_deref()
         && let Ok(server_time) = httpdate::parse_http_date(date_str)
-        && let Ok(skew) = SystemTime::now().duration_since(server_time).or_else(|e| {
-            server_time.duration_since(SystemTime::now()).map_err(|_| e)
-        })
+        && let Ok(skew) = SystemTime::now()
+            .duration_since(server_time)
+            .or_else(|e| server_time.duration_since(SystemTime::now()).map_err(|_| e))
     {
         let skew_secs = skew.as_secs();
         record_timeskew_sample("proxy_config_date_header", skew_secs);
         if skew_secs > 60 {
-            warn!(skew_secs, "Time skew >60s detected from fetch_proxy_config Date header");
+            warn!(
+                skew_secs,
+                "Time skew >60s detected from fetch_proxy_config Date header"
+            );
         } else if skew_secs > 30 {
-            warn!(skew_secs, "Time skew >30s detected from fetch_proxy_config Date header");
+            warn!(
+                skew_secs,
+                "Time skew >30s detected from fetch_proxy_config Date header"
+            );
         }
     }
 
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| crate::error::ProxyError::Proxy(format!("fetch_proxy_config read failed: {e}")))?;
+    let text = String::from_utf8_lossy(&resp.body).into_owned();
     let parsed = parse_proxy_config_text(&text, http_status);
     Ok((parsed, text))
 }
@@ -165,8 +174,11 @@ fn hash_proxy_config(cfg: &ProxyConfigData) -> u64 {
     let mut hasher = DefaultHasher::new();
     cfg.default_dc.hash(&mut hasher);
 
-    let mut by_dc: Vec<(i32, Vec<(IpAddr, u16)>)> =
-        cfg.map.iter().map(|(dc, addrs)| (*dc, addrs.clone())).collect();
+    let mut by_dc: Vec<(i32, Vec<(IpAddr, u16)>)> = cfg
+        .map
+        .iter()
+        .map(|(dc, addrs)| (*dc, addrs.clone()))
+        .collect();
     by_dc.sort_by_key(|(dc, _)| *dc);
     for (dc, mut addrs) in by_dc {
         dc.hash(&mut hasher);
@@ -253,8 +265,16 @@ fn parse_proxy_line(line: &str) -> Option<(i32, IpAddr, u16)> {
     Some((dc, ip, port))
 }
 
+#[allow(dead_code)]
 pub async fn fetch_proxy_config(url: &str) -> Result<ProxyConfigData> {
-    fetch_proxy_config_with_raw(url)
+    fetch_proxy_config_via_upstream(url, None).await
+}
+
+pub async fn fetch_proxy_config_via_upstream(
+    url: &str,
+    upstream: Option<Arc<UpstreamManager>>,
+) -> Result<ProxyConfigData> {
+    fetch_proxy_config_with_raw_via_upstream(url, upstream)
         .await
         .map(|(parsed, _raw)| parsed)
 }
@@ -264,9 +284,7 @@ fn snapshot_passes_guards(
     snapshot: &ProxyConfigData,
     snapshot_name: &'static str,
 ) -> bool {
-    if cfg.general.me_snapshot_require_http_2xx
-        && !(200..=299).contains(&snapshot.http_status)
-    {
+    if cfg.general.me_snapshot_require_http_2xx && !(200..=299).contains(&snapshot.http_status) {
         warn!(
             snapshot = snapshot_name,
             http_status = snapshot.http_status,
@@ -295,51 +313,7 @@ async fn run_update_cycle(
     state: &mut UpdaterState,
     reinit_tx: &mpsc::Sender<MeReinitTrigger>,
 ) {
-    pool.update_runtime_reinit_policy(
-        cfg.general.hardswap,
-        cfg.general.me_pool_drain_ttl_secs,
-        cfg.general.me_instadrain,
-        cfg.general.me_pool_drain_threshold,
-        cfg.general.me_pool_drain_soft_evict_enabled,
-        cfg.general.me_pool_drain_soft_evict_grace_secs,
-        cfg.general.me_pool_drain_soft_evict_per_writer,
-        cfg.general.me_pool_drain_soft_evict_budget_per_core,
-        cfg.general.me_pool_drain_soft_evict_cooldown_ms,
-        cfg.general.effective_me_pool_force_close_secs(),
-        cfg.general.me_pool_min_fresh_ratio,
-        cfg.general.me_hardswap_warmup_delay_min_ms,
-        cfg.general.me_hardswap_warmup_delay_max_ms,
-        cfg.general.me_hardswap_warmup_extra_passes,
-        cfg.general.me_hardswap_warmup_pass_backoff_base_ms,
-        cfg.general.me_bind_stale_mode,
-        cfg.general.me_bind_stale_ttl_secs,
-        cfg.general.me_secret_atomic_snapshot,
-        cfg.general.me_deterministic_writer_sort,
-        cfg.general.me_writer_pick_mode,
-        cfg.general.me_writer_pick_sample_size,
-        cfg.general.me_single_endpoint_shadow_writers,
-        cfg.general.me_single_endpoint_outage_mode_enabled,
-        cfg.general.me_single_endpoint_outage_disable_quarantine,
-        cfg.general.me_single_endpoint_outage_backoff_min_ms,
-        cfg.general.me_single_endpoint_outage_backoff_max_ms,
-        cfg.general.me_single_endpoint_shadow_rotate_every_secs,
-        cfg.general.me_floor_mode,
-        cfg.general.me_adaptive_floor_idle_secs,
-        cfg.general.me_adaptive_floor_min_writers_single_endpoint,
-        cfg.general.me_adaptive_floor_min_writers_multi_endpoint,
-        cfg.general.me_adaptive_floor_recover_grace_secs,
-        cfg.general.me_adaptive_floor_writers_per_core_total,
-        cfg.general.me_adaptive_floor_cpu_cores_override,
-        cfg.general.me_adaptive_floor_max_extra_writers_single_per_core,
-        cfg.general.me_adaptive_floor_max_extra_writers_multi_per_core,
-        cfg.general.me_adaptive_floor_max_active_writers_per_core,
-        cfg.general.me_adaptive_floor_max_warm_writers_per_core,
-        cfg.general.me_adaptive_floor_max_active_writers_global,
-        cfg.general.me_adaptive_floor_max_warm_writers_global,
-        cfg.general.me_health_interval_ms_unhealthy,
-        cfg.general.me_health_interval_ms_healthy,
-        cfg.general.me_warn_rate_limit_ms,
-    );
+    let upstream = pool.upstream.clone();
 
     let required_cfg_snapshots = cfg.general.me_config_stable_snapshots.max(1);
     let required_secret_snapshots = cfg.general.proxy_secret_stable_snapshots.max(1);
@@ -347,50 +321,54 @@ async fn run_update_cycle(
     let mut maps_changed = false;
 
     let mut ready_v4: Option<(ProxyConfigData, u64)> = None;
-    let cfg_v4 = retry_fetch("https://core.telegram.org/getProxyConfig").await;
-    if let Some(cfg_v4) = cfg_v4 {
-        if snapshot_passes_guards(cfg, &cfg_v4, "getProxyConfig") {
-            let cfg_v4_hash = hash_proxy_config(&cfg_v4);
-            let stable_hits = state.config_v4.observe(cfg_v4_hash);
-            if stable_hits < required_cfg_snapshots {
-                debug!(
-                    stable_hits,
-                    required_cfg_snapshots,
-                    snapshot = format_args!("0x{cfg_v4_hash:016x}"),
-                    "ME config v4 candidate observed"
-                );
-            } else if state.config_v4.is_applied(cfg_v4_hash) {
-                debug!(
-                    snapshot = format_args!("0x{cfg_v4_hash:016x}"),
-                    "ME config v4 stable snapshot already applied"
-                );
-            } else {
-                ready_v4 = Some((cfg_v4, cfg_v4_hash));
-            }
+    let cfg_v4 = retry_fetch("https://core.telegram.org/getProxyConfig", upstream.clone()).await;
+    if let Some(cfg_v4) = cfg_v4
+        && snapshot_passes_guards(cfg, &cfg_v4, "getProxyConfig")
+    {
+        let cfg_v4_hash = hash_proxy_config(&cfg_v4);
+        let stable_hits = state.config_v4.observe(cfg_v4_hash);
+        if stable_hits < required_cfg_snapshots {
+            debug!(
+                stable_hits,
+                required_cfg_snapshots,
+                snapshot = format_args!("0x{cfg_v4_hash:016x}"),
+                "ME config v4 candidate observed"
+            );
+        } else if state.config_v4.is_applied(cfg_v4_hash) {
+            debug!(
+                snapshot = format_args!("0x{cfg_v4_hash:016x}"),
+                "ME config v4 stable snapshot already applied"
+            );
+        } else {
+            ready_v4 = Some((cfg_v4, cfg_v4_hash));
         }
     }
 
     let mut ready_v6: Option<(ProxyConfigData, u64)> = None;
-    let cfg_v6 = retry_fetch("https://core.telegram.org/getProxyConfigV6").await;
-    if let Some(cfg_v6) = cfg_v6 {
-        if snapshot_passes_guards(cfg, &cfg_v6, "getProxyConfigV6") {
-            let cfg_v6_hash = hash_proxy_config(&cfg_v6);
-            let stable_hits = state.config_v6.observe(cfg_v6_hash);
-            if stable_hits < required_cfg_snapshots {
-                debug!(
-                    stable_hits,
-                    required_cfg_snapshots,
-                    snapshot = format_args!("0x{cfg_v6_hash:016x}"),
-                    "ME config v6 candidate observed"
-                );
-            } else if state.config_v6.is_applied(cfg_v6_hash) {
-                debug!(
-                    snapshot = format_args!("0x{cfg_v6_hash:016x}"),
-                    "ME config v6 stable snapshot already applied"
-                );
-            } else {
-                ready_v6 = Some((cfg_v6, cfg_v6_hash));
-            }
+    let cfg_v6 = retry_fetch(
+        "https://core.telegram.org/getProxyConfigV6",
+        upstream.clone(),
+    )
+    .await;
+    if let Some(cfg_v6) = cfg_v6
+        && snapshot_passes_guards(cfg, &cfg_v6, "getProxyConfigV6")
+    {
+        let cfg_v6_hash = hash_proxy_config(&cfg_v6);
+        let stable_hits = state.config_v6.observe(cfg_v6_hash);
+        if stable_hits < required_cfg_snapshots {
+            debug!(
+                stable_hits,
+                required_cfg_snapshots,
+                snapshot = format_args!("0x{cfg_v6_hash:016x}"),
+                "ME config v6 candidate observed"
+            );
+        } else if state.config_v6.is_applied(cfg_v6_hash) {
+            debug!(
+                snapshot = format_args!("0x{cfg_v6_hash:016x}"),
+                "ME config v6 stable snapshot already applied"
+            );
+        } else {
+            ready_v6 = Some((cfg_v6, cfg_v6_hash));
         }
     }
 
@@ -400,9 +378,7 @@ async fn run_update_cycle(
                 .as_ref()
                 .map(|(snapshot, _)| snapshot.map.clone())
                 .unwrap_or_default();
-            let update_v6 = ready_v6
-                .as_ref()
-                .map(|(snapshot, _)| snapshot.map.clone());
+            let update_v6 = ready_v6.as_ref().map(|(snapshot, _)| snapshot.map.clone());
             let update_is_empty =
                 update_v4.is_empty() && update_v6.as_ref().is_none_or(|v| v.is_empty());
             let apply_outcome = if update_is_empty && !cfg.general.me_snapshot_reject_empty_map {
@@ -440,10 +416,7 @@ async fn run_update_cycle(
             }
         } else if let Some(last) = state.last_map_apply_at {
             let wait_secs = map_apply_cooldown_remaining_secs(last, apply_cooldown);
-            debug!(
-                wait_secs,
-                "ME config stable snapshot deferred by cooldown"
-            );
+            debug!(wait_secs, "ME config stable snapshot deferred by cooldown");
         }
     }
 
@@ -454,7 +427,12 @@ async fn run_update_cycle(
     pool.reset_stun_state();
 
     if cfg.general.proxy_secret_rotate_runtime {
-        match download_proxy_secret_with_max_len(cfg.general.proxy_secret_len_max).await {
+        match download_proxy_secret_with_max_len_via_upstream(
+            cfg.general.proxy_secret_len_max,
+            upstream,
+        )
+        .await
+        {
             Ok(secret) => {
                 let secret_hash = hash_secret(&secret);
                 let stable_hits = state.secret.observe(secret_hash);

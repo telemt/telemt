@@ -22,7 +22,7 @@ impl FrameExtra {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Create with quickack flag set
     pub fn with_quickack() -> Self {
         Self {
@@ -30,7 +30,7 @@ impl FrameExtra {
             ..Default::default()
         }
     }
-    
+
     /// Create with simple_ack flag set
     pub fn with_simple_ack() -> Self {
         Self {
@@ -38,7 +38,7 @@ impl FrameExtra {
             ..Default::default()
         }
     }
-    
+
     /// Check if any flags are set
     pub fn has_flags(&self) -> bool {
         self.quickack || self.simple_ack || self.skip_send
@@ -76,22 +76,22 @@ impl FrameMode {
             FrameMode::Abridged => 4,
             FrameMode::Intermediate => 4,
             FrameMode::SecureIntermediate => 4 + 3, // length + padding
-            FrameMode::Full => 12 + 16, // header + max CBC padding
+            FrameMode::Full => 12 + 16,             // header + max CBC padding
         }
     }
 }
 
 /// Validate message length for MTProto
 pub fn validate_message_length(len: usize) -> bool {
-    use super::constants::{MIN_MSG_LEN, MAX_MSG_LEN, PADDING_FILLER};
-    
+    use super::constants::{MAX_MSG_LEN, MIN_MSG_LEN, PADDING_FILLER};
+
     (MIN_MSG_LEN..=MAX_MSG_LEN).contains(&len) && len.is_multiple_of(PADDING_FILLER.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_frame_extra_default() {
         let extra = FrameExtra::default();
@@ -100,18 +100,18 @@ mod tests {
         assert!(!extra.skip_send);
         assert!(!extra.has_flags());
     }
-    
+
     #[test]
     fn test_frame_extra_flags() {
         let extra = FrameExtra::with_quickack();
         assert!(extra.quickack);
         assert!(extra.has_flags());
-        
+
         let extra = FrameExtra::with_simple_ack();
         assert!(extra.simple_ack);
         assert!(extra.has_flags());
     }
-    
+
     #[test]
     fn test_validate_message_length() {
         assert!(validate_message_length(12)); // MIN_MSG_LEN

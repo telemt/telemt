@@ -27,12 +27,12 @@ chmod +x /bin/telemt
 
 **0. Check port and generate secrets**
 
-The port you have selected for use should be MISSING from the list, when:
+The port you have selected for use should not be in the list:
 ```bash
 netstat -lnp
 ```
 
-Generate 16 bytes/32 characters HEX with OpenSSL or another way:
+Generate 16 bytes/32 characters in HEX format with OpenSSL or another way:
 ```bash
 openssl rand -hex 16
 ```
@@ -50,7 +50,7 @@ Save the obtained result somewhere. You will need it later!
 
 **1. Place your config to /etc/telemt/telemt.toml**
 
-Create config directory:
+Create the config directory:
 ```bash
 mkdir /etc/telemt
 ```
@@ -59,7 +59,7 @@ Open nano
 ```bash
 nano /etc/telemt/telemt.toml
 ```
-paste your config
+Insert your configuration:
 
 ```toml
 # === General Settings ===
@@ -93,8 +93,9 @@ hello = "00000000000000000000000000000000"
 then Ctrl+S -> Ctrl+X to save
 
 > [!WARNING]
-> Replace the value of the hello parameter with the value you obtained in step 0. 
-> Replace the value of the tls_domain parameter with another website.
+> Replace the value of the hello parameter with the value you obtained in step 0.  
+> Additionally, change the value of the tls_domain parameter to a different website.
+> Changing the tls_domain parameter will break all links that use the old domain!
 
 ---
 
@@ -105,14 +106,14 @@ useradd -d /opt/telemt -m -r -U telemt
 chown -R telemt:telemt /etc/telemt
 ```
 
-**3. Create service on /etc/systemd/system/telemt.service**
+**3. Create service in /etc/systemd/system/telemt.service**
 
 Open nano
 ```bash
 nano /etc/systemd/system/telemt.service
 ```
 
-paste this Systemd Module
+Insert this Systemd module:
 ```bash
 [Unit]
 Description=Telemt
@@ -147,12 +148,15 @@ systemctl daemon-reload
 
 **6.** For automatic startup at system boot, enter `systemctl enable telemt`
 
-**7.** To get the link(s), enter
+**7.** To get the link(s), enter:
 ```bash
 curl -s http://127.0.0.1:9091/v1/users | jq
 ```
 
 > Any number of people can use one link.
+
+> [!WARNING]
+> Only the command from step 7 can provide a working link. Do not try to create it yourself or copy it from anywhere if you are not sure what you are doing!
 
 ---
 

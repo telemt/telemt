@@ -23,12 +23,12 @@ impl FrameMeta {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn with_quickack(mut self) -> Self {
         self.quickack = true;
         self
     }
-    
+
     pub fn with_simple_ack(mut self) -> Self {
         self.simple_ack = true;
         self
@@ -48,10 +48,10 @@ pub enum ReadFrameResult {
 pub trait LayeredStream<U> {
     /// Get reference to upstream
     fn upstream(&self) -> &U;
-    
+
     /// Get mutable reference to upstream
     fn upstream_mut(&mut self) -> &mut U;
-    
+
     /// Consume self and return upstream
     fn into_upstream(self) -> U;
 }
@@ -65,7 +65,7 @@ impl<R> ReadHalf<R> {
     pub fn new(inner: R) -> Self {
         Self { inner }
     }
-    
+
     pub fn into_inner(self) -> R {
         self.inner
     }
@@ -90,7 +90,7 @@ impl<W> WriteHalf<W> {
     pub fn new(inner: W) -> Self {
         Self { inner }
     }
-    
+
     pub fn into_inner(self) -> W {
         self.inner
     }
@@ -104,11 +104,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for WriteHalf<W> {
     ) -> Poll<Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
-    
+
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
     }
-    
+
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }

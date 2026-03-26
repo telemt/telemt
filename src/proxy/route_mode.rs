@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
 
-pub(crate) const ROUTE_SWITCH_ERROR_MSG: &str = "Route mode switched by cutover";
+pub(crate) const ROUTE_SWITCH_ERROR_MSG: &str = "Session terminated";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -14,17 +14,6 @@ pub(crate) enum RelayRouteMode {
 }
 
 impl RelayRouteMode {
-    pub(crate) fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    pub(crate) fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Middle,
-            _ => Self::Direct,
-        }
-    }
-
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
@@ -41,8 +30,6 @@ pub(crate) struct RouteCutoverState {
 
 #[derive(Clone)]
 pub(crate) struct RouteRuntimeController {
-    mode: Arc<AtomicU8>,
-    generation: Arc<AtomicU64>,
     direct_since_epoch_secs: Arc<AtomicU64>,
     tx: watch::Sender<RouteCutoverState>,
 }
@@ -60,18 +47,13 @@ impl RouteRuntimeController {
             0
         };
         Self {
-            mode: Arc::new(AtomicU8::new(initial_mode.as_u8())),
-            generation: Arc::new(AtomicU64::new(0)),
             direct_since_epoch_secs: Arc::new(AtomicU64::new(direct_since_epoch_secs)),
             tx,
         }
     }
 
     pub(crate) fn snapshot(&self) -> RouteCutoverState {
-        RouteCutoverState {
-            mode: RelayRouteMode::from_u8(self.mode.load(Ordering::Relaxed)),
-            generation: self.generation.load(Ordering::Relaxed),
-        }
+        *self.tx.borrow()
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<RouteCutoverState> {
@@ -84,20 +66,28 @@ impl RouteRuntimeController {
     }
 
     pub(crate) fn set_mode(&self, mode: RelayRouteMode) -> Option<RouteCutoverState> {
-        let previous = self.mode.swap(mode.as_u8(), Ordering::Relaxed);
-        if previous == mode.as_u8() {
+        let mut next = None;
+        let changed = self.tx.send_if_modified(|state| {
+            if state.mode == mode {
+                return false;
+            }
+            if matches!(mode, RelayRouteMode::Direct) {
+                self.direct_since_epoch_secs
+                    .store(now_epoch_secs(), Ordering::Relaxed);
+            } else {
+                self.direct_since_epoch_secs.store(0, Ordering::Relaxed);
+            }
+            state.mode = mode;
+            state.generation = state.generation.saturating_add(1);
+            next = Some(*state);
+            true
+        });
+
+        if !changed {
             return None;
         }
-        if matches!(mode, RelayRouteMode::Direct) {
-            self.direct_since_epoch_secs
-                .store(now_epoch_secs(), Ordering::Relaxed);
-        } else {
-            self.direct_since_epoch_secs.store(0, Ordering::Relaxed);
-        }
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let next = RouteCutoverState { mode, generation };
-        self.tx.send_replace(next);
-        Some(next)
+
+        next
     }
 }
 
@@ -110,10 +100,10 @@ fn now_epoch_secs() -> u64 {
 
 pub(crate) fn is_session_affected_by_cutover(
     current: RouteCutoverState,
-    _session_mode: RelayRouteMode,
+    session_mode: RelayRouteMode,
     session_generation: u64,
 ) -> bool {
-    current.generation > session_generation
+    current.generation > session_generation && current.mode != session_mode
 }
 
 pub(crate) fn affected_cutover_state(
@@ -129,9 +119,7 @@ pub(crate) fn affected_cutover_state(
 }
 
 pub(crate) fn cutover_stagger_delay(session_id: u64, generation: u64) -> Duration {
-    let mut value = session_id
-        ^ generation.rotate_left(17)
-        ^ 0x9e37_79b9_7f4a_7c15;
+    let mut value = session_id ^ generation.rotate_left(17) ^ 0x9e37_79b9_7f4a_7c15;
     value ^= value >> 30;
     value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value ^= value >> 27;
@@ -140,3 +128,11 @@ pub(crate) fn cutover_stagger_delay(session_id: u64, generation: u64) -> Duratio
     let ms = 1000 + (value % 1000);
     Duration::from_millis(ms)
 }
+
+#[cfg(test)]
+#[path = "tests/route_mode_security_tests.rs"]
+mod security_tests;
+
+#[cfg(test)]
+#[path = "tests/route_mode_coherence_adversarial_tests.rs"]
+mod coherence_adversarial_tests;

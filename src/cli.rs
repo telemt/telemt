@@ -1,9 +1,9 @@
 //! CLI commands: --init (fire-and-forget setup)
 
+use rand::RngExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use rand::Rng;
 
 /// Options for the init command
 pub struct InitOptions {
@@ -35,10 +35,10 @@ pub fn parse_init_args(args: &[String]) -> Option<InitOptions> {
     if !args.iter().any(|a| a == "--init") {
         return None;
     }
-    
+
     let mut opts = InitOptions::default();
     let mut i = 0;
-    
+
     while i < args.len() {
         match args[i].as_str() {
             "--port" => {
@@ -78,7 +78,7 @@ pub fn parse_init_args(args: &[String]) -> Option<InitOptions> {
         }
         i += 1;
     }
-    
+
     Some(opts)
 }
 
@@ -86,7 +86,7 @@ pub fn parse_init_args(args: &[String]) -> Option<InitOptions> {
 pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[telemt] Fire-and-forget setup");
     eprintln!();
-    
+
     // 1. Generate or validate secret
     let secret = match opts.secret {
         Some(s) => {
@@ -98,28 +98,28 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
         None => generate_secret(),
     };
-    
+
     eprintln!("[+] Secret: {}", secret);
     eprintln!("[+] User:   {}", opts.username);
     eprintln!("[+] Port:   {}", opts.port);
     eprintln!("[+] Domain: {}", opts.domain);
-    
+
     // 2. Create config directory
     fs::create_dir_all(&opts.config_dir)?;
     let config_path = opts.config_dir.join("config.toml");
-    
+
     // 3. Write config
     let config_content = generate_config(&opts.username, &secret, opts.port, &opts.domain);
     fs::write(&config_path, &config_content)?;
     eprintln!("[+] Config written to {}", config_path.display());
-    
+
     // 4. Write systemd unit
-    let exe_path = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/telemt"));
-    
+    let exe_path =
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/telemt"));
+
     let unit_path = Path::new("/etc/systemd/system/telemt.service");
     let unit_content = generate_systemd_unit(&exe_path, &config_path);
-    
+
     match fs::write(unit_path, &unit_content) {
         Ok(()) => {
             eprintln!("[+] Systemd unit written to {}", unit_path.display());
@@ -128,31 +128,31 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("[!] Cannot write systemd unit (run as root?): {}", e);
             eprintln!("[!] Manual unit file content:");
             eprintln!("{}", unit_content);
-            
+
             // Still print links and config
             print_links(&opts.username, &secret, opts.port, &opts.domain);
             return Ok(());
         }
     }
-    
+
     // 5. Reload systemd
     run_cmd("systemctl", &["daemon-reload"]);
-    
+
     // 6. Enable service
     run_cmd("systemctl", &["enable", "telemt.service"]);
     eprintln!("[+] Service enabled");
-    
+
     // 7. Start service (unless --no-start)
     if !opts.no_start {
         run_cmd("systemctl", &["start", "telemt.service"]);
         eprintln!("[+] Service started");
-        
+
         // Brief delay then check status
         std::thread::sleep(std::time::Duration::from_secs(1));
         let status = Command::new("systemctl")
             .args(["is-active", "telemt.service"])
             .output();
-        
+
         match status {
             Ok(out) if out.status.success() => {
                 eprintln!("[+] Service is running");
@@ -166,12 +166,12 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[+] Service not started (--no-start)");
         eprintln!("[+] Start manually: systemctl start telemt.service");
     }
-    
+
     eprintln!();
-    
+
     // 8. Print links
     print_links(&opts.username, &secret, opts.port, &opts.domain);
-    
+
     Ok(())
 }
 
@@ -183,7 +183,7 @@ fn generate_secret() -> String {
 
 fn generate_config(username: &str, secret: &str, port: u16, domain: &str) -> String {
     format!(
-r#"# Telemt MTProxy — auto-generated config
+        r#"# Telemt MTProxy — auto-generated config
 # Re-run `telemt --init` to regenerate
 
 show_link = ["{username}"]
@@ -246,7 +246,7 @@ tls_full_cert_ttl_secs = 90
 
 [access]
 replay_check_len = 65536
-replay_window_secs = 1800
+replay_window_secs = 120
 ignore_time_skew = false
 
 [access.users]
@@ -266,7 +266,7 @@ weight = 10
 
 fn generate_systemd_unit(exe_path: &Path, config_path: &Path) -> String {
     format!(
-r#"[Unit]
+        r#"[Unit]
 Description=Telemt MTProxy
 Documentation=https://github.com/telemt/telemt
 After=network-online.target
@@ -309,11 +309,13 @@ fn run_cmd(cmd: &str, args: &[&str]) {
 
 fn print_links(username: &str, secret: &str, port: u16, domain: &str) {
     let domain_hex = hex::encode(domain);
-    
+
     println!("=== Proxy Links ===");
     println!("[{}]", username);
-    println!("  EE-TLS:  tg://proxy?server=YOUR_SERVER_IP&port={}&secret=ee{}{}", 
-        port, secret, domain_hex);
+    println!(
+        "  EE-TLS:  tg://proxy?server=YOUR_SERVER_IP&port={}&secret=ee{}{}",
+        port, secret, domain_hex
+    );
     println!();
     println!("Replace YOUR_SERVER_IP with your server's public IP.");
     println!("The proxy will auto-detect and display the correct link on startup.");

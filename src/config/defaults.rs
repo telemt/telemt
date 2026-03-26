@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use ipnetwork::IpNetwork;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 // Helper defaults kept private to the config module.
 const DEFAULT_NETWORK_IPV6: Option<bool> = Some(false);
@@ -29,6 +29,8 @@ const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_FRAMES: usize = 32;
 const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_BYTES: usize = 128 * 1024;
 const DEFAULT_ME_D2C_FLUSH_BATCH_MAX_DELAY_US: u64 = 500;
 const DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE: bool = true;
+const DEFAULT_ME_QUOTA_SOFT_OVERSHOOT_BYTES: u64 = 64 * 1024;
+const DEFAULT_ME_D2C_FRAME_BUF_SHRINK_THRESHOLD_BYTES: usize = 256 * 1024;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_C2S_BYTES: usize = 64 * 1024;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_S2C_BYTES: usize = 256 * 1024;
 const DEFAULT_ME_WRITER_PICK_SAMPLE_SIZE: u8 = 3;
@@ -69,6 +71,22 @@ pub(crate) fn default_tls_fetch_scope() -> String {
     String::new()
 }
 
+pub(crate) fn default_tls_fetch_attempt_timeout_ms() -> u64 {
+    5_000
+}
+
+pub(crate) fn default_tls_fetch_total_budget_ms() -> u64 {
+    15_000
+}
+
+pub(crate) fn default_tls_fetch_strict_route() -> bool {
+    true
+}
+
+pub(crate) fn default_tls_fetch_profile_cache_ttl_secs() -> u64 {
+    600
+}
+
 pub(crate) fn default_mask_port() -> u16 {
     443
 }
@@ -86,10 +104,28 @@ pub(crate) fn default_replay_check_len() -> usize {
 }
 
 pub(crate) fn default_replay_window_secs() -> u64 {
-    1800
+    // Keep replay cache TTL tight by default to reduce replay surface.
+    // Deployments with higher RTT or longer reconnect jitter can override this in config.
+    120
 }
 
 pub(crate) fn default_handshake_timeout() -> u64 {
+    30
+}
+
+pub(crate) fn default_relay_idle_policy_v2_enabled() -> bool {
+    true
+}
+
+pub(crate) fn default_relay_client_idle_soft_secs() -> u64 {
+    120
+}
+
+pub(crate) fn default_relay_client_idle_hard_secs() -> u64 {
+    360
+}
+
+pub(crate) fn default_relay_idle_grace_after_downstream_activity_secs() -> u64 {
     30
 }
 
@@ -125,10 +161,7 @@ pub(crate) fn default_weight() -> u16 {
 }
 
 pub(crate) fn default_metrics_whitelist() -> Vec<IpNetwork> {
-    vec![
-        "127.0.0.1/32".parse().unwrap(),
-        "::1/128".parse().unwrap(),
-    ]
+    vec!["127.0.0.1/32".parse().unwrap(), "::1/128".parse().unwrap()]
 }
 
 pub(crate) fn default_api_listen() -> String {
@@ -151,13 +184,25 @@ pub(crate) fn default_api_minimal_runtime_cache_ttl_ms() -> u64 {
     1000
 }
 
-pub(crate) fn default_api_runtime_edge_enabled() -> bool { false }
-pub(crate) fn default_api_runtime_edge_cache_ttl_ms() -> u64 { 1000 }
-pub(crate) fn default_api_runtime_edge_top_n() -> usize { 10 }
-pub(crate) fn default_api_runtime_edge_events_capacity() -> usize { 256 }
+pub(crate) fn default_api_runtime_edge_enabled() -> bool {
+    false
+}
+pub(crate) fn default_api_runtime_edge_cache_ttl_ms() -> u64 {
+    1000
+}
+pub(crate) fn default_api_runtime_edge_top_n() -> usize {
+    10
+}
+pub(crate) fn default_api_runtime_edge_events_capacity() -> usize {
+    256
+}
 
 pub(crate) fn default_proxy_protocol_header_timeout_ms() -> u64 {
     500
+}
+
+pub(crate) fn default_proxy_protocol_trusted_cidrs() -> Vec<IpNetwork> {
+    vec!["0.0.0.0/0".parse().unwrap(), "::/0".parse().unwrap()]
 }
 
 pub(crate) fn default_server_max_connections() -> u32 {
@@ -226,6 +271,10 @@ pub(crate) fn default_me_init_retry_attempts() -> u32 {
 
 pub(crate) fn default_me2dc_fallback() -> bool {
     true
+}
+
+pub(crate) fn default_me2dc_fast() -> bool {
+    false
 }
 
 pub(crate) fn default_keepalive_interval() -> u64 {
@@ -364,6 +413,14 @@ pub(crate) fn default_me_d2c_ack_flush_immediate() -> bool {
     DEFAULT_ME_D2C_ACK_FLUSH_IMMEDIATE
 }
 
+pub(crate) fn default_me_quota_soft_overshoot_bytes() -> u64 {
+    DEFAULT_ME_QUOTA_SOFT_OVERSHOOT_BYTES
+}
+
+pub(crate) fn default_me_d2c_frame_buf_shrink_threshold_bytes() -> usize {
+    DEFAULT_ME_D2C_FRAME_BUF_SHRINK_THRESHOLD_BYTES
+}
+
 pub(crate) fn default_direct_relay_copy_buf_c2s_bytes() -> usize {
     DEFAULT_DIRECT_RELAY_COPY_BUF_C2S_BYTES
 }
@@ -485,15 +542,65 @@ pub(crate) fn default_tls_full_cert_ttl_secs() -> u64 {
 }
 
 pub(crate) fn default_server_hello_delay_min_ms() -> u64 {
-    0
+    8
 }
 
 pub(crate) fn default_server_hello_delay_max_ms() -> u64 {
-    0
+    24
 }
 
 pub(crate) fn default_alpn_enforce() -> bool {
     true
+}
+
+pub(crate) fn default_mask_shape_hardening() -> bool {
+    true
+}
+
+pub(crate) fn default_mask_shape_hardening_aggressive_mode() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_shape_bucket_floor_bytes() -> usize {
+    512
+}
+
+pub(crate) fn default_mask_shape_bucket_cap_bytes() -> usize {
+    4096
+}
+
+pub(crate) fn default_mask_shape_above_cap_blur() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_shape_above_cap_blur_max_bytes() -> usize {
+    512
+}
+
+#[cfg(not(test))]
+pub(crate) fn default_mask_relay_max_bytes() -> usize {
+    5 * 1024 * 1024
+}
+
+#[cfg(test)]
+pub(crate) fn default_mask_relay_max_bytes() -> usize {
+    32 * 1024
+}
+
+pub(crate) fn default_mask_classifier_prefetch_timeout_ms() -> u64 {
+    5
+}
+
+pub(crate) fn default_mask_timing_normalization_enabled() -> bool {
+    false
+}
+
+pub(crate) fn default_mask_timing_normalization_floor_ms() -> u64 {
+    0
+}
+
+pub(crate) fn default_mask_timing_normalization_ceiling_ms() -> u64 {
+    0
 }
 
 pub(crate) fn default_stun_servers() -> Vec<String> {

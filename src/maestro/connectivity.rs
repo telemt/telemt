@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,10 +13,10 @@ use crate::startup::{
     COMPONENT_DC_CONNECTIVITY_PING, COMPONENT_ME_CONNECTIVITY_PING, COMPONENT_RUNTIME_READY,
     StartupTracker,
 };
+use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::{
     MePingFamily, MePingSample, MePool, format_me_route, format_sample_line, run_me_ping,
 };
-use crate::transport::UpstreamManager;
 
 pub(crate) async fn run_startup_connectivity(
     config: &Arc<ProxyConfig>,
@@ -47,11 +49,15 @@ pub(crate) async fn run_startup_connectivity(
 
         let v4_ok = me_results.iter().any(|r| {
             matches!(r.family, MePingFamily::V4)
-                && r.samples.iter().any(|s| s.error.is_none() && s.handshake_ms.is_some())
+                && r.samples
+                    .iter()
+                    .any(|s| s.error.is_none() && s.handshake_ms.is_some())
         });
         let v6_ok = me_results.iter().any(|r| {
             matches!(r.family, MePingFamily::V6)
-                && r.samples.iter().any(|s| s.error.is_none() && s.handshake_ms.is_some())
+                && r.samples
+                    .iter()
+                    .any(|s| s.error.is_none() && s.handshake_ms.is_some())
         });
 
         info!("================= Telegram ME Connectivity =================");
@@ -131,8 +137,14 @@ pub(crate) async fn run_startup_connectivity(
         .await;
 
     for upstream_result in &ping_results {
-        let v6_works = upstream_result.v6_results.iter().any(|r| r.rtt_ms.is_some());
-        let v4_works = upstream_result.v4_results.iter().any(|r| r.rtt_ms.is_some());
+        let v6_works = upstream_result
+            .v6_results
+            .iter()
+            .any(|r| r.rtt_ms.is_some());
+        let v4_works = upstream_result
+            .v4_results
+            .iter()
+            .any(|r| r.rtt_ms.is_some());
 
         if upstream_result.both_available {
             if prefer_ipv6 {

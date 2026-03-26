@@ -1,9 +1,11 @@
 use std::net::IpAddr;
+use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
 use hyper::StatusCode;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
+
+use crate::crypto::SecureRandom;
 
 const MAX_USERNAME_LEN: usize = 64;
 
@@ -172,6 +174,24 @@ pub(super) struct ZeroMiddleProxyData {
     pub(super) route_drop_queue_full_total: u64,
     pub(super) route_drop_queue_full_base_total: u64,
     pub(super) route_drop_queue_full_high_total: u64,
+    pub(super) d2c_batches_total: u64,
+    pub(super) d2c_batch_frames_total: u64,
+    pub(super) d2c_batch_bytes_total: u64,
+    pub(super) d2c_flush_reason_queue_drain_total: u64,
+    pub(super) d2c_flush_reason_batch_frames_total: u64,
+    pub(super) d2c_flush_reason_batch_bytes_total: u64,
+    pub(super) d2c_flush_reason_max_delay_total: u64,
+    pub(super) d2c_flush_reason_ack_immediate_total: u64,
+    pub(super) d2c_flush_reason_close_total: u64,
+    pub(super) d2c_data_frames_total: u64,
+    pub(super) d2c_ack_frames_total: u64,
+    pub(super) d2c_payload_bytes_total: u64,
+    pub(super) d2c_write_mode_coalesced_total: u64,
+    pub(super) d2c_write_mode_split_total: u64,
+    pub(super) d2c_quota_reject_pre_write_total: u64,
+    pub(super) d2c_quota_reject_post_write_total: u64,
+    pub(super) d2c_frame_buf_shrink_total: u64,
+    pub(super) d2c_frame_buf_shrink_bytes_total: u64,
     pub(super) socks_kdf_strict_reject_total: u64,
     pub(super) socks_kdf_compat_fallback_total: u64,
     pub(super) endpoint_quarantine_total: u64,
@@ -196,8 +216,6 @@ pub(super) struct ZeroPoolData {
     pub(super) pool_swap_total: u64,
     pub(super) pool_drain_active: u64,
     pub(super) pool_force_close_total: u64,
-    pub(super) pool_drain_soft_evict_total: u64,
-    pub(super) pool_drain_soft_evict_writer_total: u64,
     pub(super) pool_stale_pick_total: u64,
     pub(super) writer_removed_total: u64,
     pub(super) writer_removed_unexpected_total: u64,
@@ -206,16 +224,6 @@ pub(super) struct ZeroPoolData {
     pub(super) refill_failed_total: u64,
     pub(super) writer_restored_same_endpoint_total: u64,
     pub(super) writer_restored_fallback_total: u64,
-    pub(super) teardown_attempt_total_normal: u64,
-    pub(super) teardown_attempt_total_hard_detach: u64,
-    pub(super) teardown_success_total_normal: u64,
-    pub(super) teardown_success_total_hard_detach: u64,
-    pub(super) teardown_timeout_total: u64,
-    pub(super) teardown_escalation_total: u64,
-    pub(super) teardown_noop_total: u64,
-    pub(super) teardown_cleanup_side_effect_failures_total: u64,
-    pub(super) teardown_duration_count_total: u64,
-    pub(super) teardown_duration_sum_seconds_total: f64,
 }
 
 #[derive(Serialize, Clone)]
@@ -248,7 +256,6 @@ pub(super) struct MeWritersSummary {
     pub(super) available_pct: f64,
     pub(super) required_writers: usize,
     pub(super) alive_writers: usize,
-    pub(super) coverage_ratio: f64,
     pub(super) coverage_pct: f64,
     pub(super) fresh_alive_writers: usize,
     pub(super) fresh_coverage_pct: f64,
@@ -297,7 +304,6 @@ pub(super) struct DcStatus {
     pub(super) floor_max: usize,
     pub(super) floor_capped: bool,
     pub(super) alive_writers: usize,
-    pub(super) coverage_ratio: f64,
     pub(super) coverage_pct: f64,
     pub(super) fresh_alive_writers: usize,
     pub(super) fresh_coverage_pct: f64,
@@ -375,12 +381,6 @@ pub(super) struct MinimalMeRuntimeData {
     pub(super) me_reconnect_backoff_cap_ms: u64,
     pub(super) me_reconnect_fast_retry_count: u32,
     pub(super) me_pool_drain_ttl_secs: u64,
-    pub(super) me_instadrain: bool,
-    pub(super) me_pool_drain_soft_evict_enabled: bool,
-    pub(super) me_pool_drain_soft_evict_grace_secs: u64,
-    pub(super) me_pool_drain_soft_evict_per_writer: u8,
-    pub(super) me_pool_drain_soft_evict_budget_per_core: u16,
-    pub(super) me_pool_drain_soft_evict_cooldown_ms: u64,
     pub(super) me_pool_force_close_secs: u64,
     pub(super) me_pool_min_fresh_ratio: f32,
     pub(super) me_bind_stale_mode: &'static str,
@@ -502,7 +502,9 @@ pub(super) fn is_valid_username(user: &str) -> bool {
 }
 
 pub(super) fn random_user_secret() -> String {
+    static API_SECRET_RNG: OnceLock<SecureRandom> = OnceLock::new();
+    let rng = API_SECRET_RNG.get_or_init(SecureRandom::new);
     let mut bytes = [0u8; 16];
-    rand::rng().fill(&mut bytes);
+    rng.fill(&mut bytes);
     hex::encode(bytes)
 }

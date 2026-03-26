@@ -8,8 +8,8 @@
 use bytes::BytesMut;
 use crossbeam_queue::ArrayQueue;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ============= Configuration =============
 
@@ -42,7 +42,7 @@ impl BufferPool {
     pub fn new() -> Self {
         Self::with_config(DEFAULT_BUFFER_SIZE, DEFAULT_MAX_BUFFERS)
     }
-    
+
     /// Create a buffer pool with custom configuration
     pub fn with_config(buffer_size: usize, max_buffers: usize) -> Self {
         Self {
@@ -54,7 +54,7 @@ impl BufferPool {
             hits: AtomicUsize::new(0),
         }
     }
-    
+
     /// Get a buffer from the pool, or create a new one if empty
     pub fn get(self: &Arc<Self>) -> PooledBuffer {
         match self.buffers.pop() {
@@ -76,7 +76,7 @@ impl BufferPool {
             }
         }
     }
-    
+
     /// Try to get a buffer, returns None if pool is empty
     pub fn try_get(self: &Arc<Self>) -> Option<PooledBuffer> {
         self.buffers.pop().map(|mut buffer| {
@@ -88,12 +88,12 @@ impl BufferPool {
             }
         })
     }
-    
+
     /// Return a buffer to the pool
     fn return_buffer(&self, mut buffer: BytesMut) {
         // Clear the buffer but keep capacity
         buffer.clear();
-        
+
         // Only return if we haven't exceeded max and buffer is right size
         if buffer.capacity() >= self.buffer_size {
             // Try to push to pool, if full just drop
@@ -103,7 +103,7 @@ impl BufferPool {
         // Actually we don't decrement here because the buffer might have been
         // grown beyond our size - we just let it go
     }
-    
+
     /// Get pool statistics
     pub fn stats(&self) -> PoolStats {
         PoolStats {
@@ -115,17 +115,21 @@ impl BufferPool {
             misses: self.misses.load(Ordering::Relaxed),
         }
     }
-    
+
     /// Get buffer size
     pub fn buffer_size(&self) -> usize {
         self.buffer_size
     }
-    
+
     /// Preallocate buffers to fill the pool
     pub fn preallocate(&self, count: usize) {
         let to_alloc = count.min(self.max_buffers);
         for _ in 0..to_alloc {
-            if self.buffers.push(BytesMut::with_capacity(self.buffer_size)).is_err() {
+            if self
+                .buffers
+                .push(BytesMut::with_capacity(self.buffer_size))
+                .is_err()
+            {
                 break;
             }
             self.allocated.fetch_add(1, Ordering::Relaxed);
@@ -183,22 +187,22 @@ impl PooledBuffer {
     pub fn take(mut self) -> BytesMut {
         self.buffer.take().unwrap()
     }
-    
+
     /// Get the capacity of the buffer
     pub fn capacity(&self) -> usize {
         self.buffer.as_ref().map(|b| b.capacity()).unwrap_or(0)
     }
-    
+
     /// Check if buffer is empty
     pub fn is_empty(&self) -> bool {
         self.buffer.as_ref().map(|b| b.is_empty()).unwrap_or(true)
     }
-    
+
     /// Get the length of data in buffer
     pub fn len(&self) -> usize {
         self.buffer.as_ref().map(|b| b.len()).unwrap_or(0)
     }
-    
+
     /// Clear the buffer
     pub fn clear(&mut self) {
         if let Some(ref mut b) = self.buffer {
@@ -209,7 +213,7 @@ impl PooledBuffer {
 
 impl Deref for PooledBuffer {
     type Target = BytesMut;
-    
+
     fn deref(&self) -> &Self::Target {
         self.buffer.as_ref().expect("buffer taken")
     }
@@ -259,7 +263,7 @@ impl<'a> ScopedBuffer<'a> {
 
 impl<'a> Deref for ScopedBuffer<'a> {
     type Target = BytesMut;
-    
+
     fn deref(&self) -> &Self::Target {
         self.buffer.deref()
     }
@@ -280,108 +284,108 @@ impl<'a> Drop for ScopedBuffer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_pool_basic() {
         let pool = Arc::new(BufferPool::with_config(1024, 10));
-        
+
         // Get a buffer
         let mut buf1 = pool.get();
         buf1.extend_from_slice(b"hello");
         assert_eq!(&buf1[..], b"hello");
-        
+
         // Drop returns to pool
         drop(buf1);
-        
+
         let stats = pool.stats();
         assert_eq!(stats.pooled, 1);
         assert_eq!(stats.hits, 0);
         assert_eq!(stats.misses, 1);
-        
+
         // Get again - should reuse
         let buf2 = pool.get();
         assert!(buf2.is_empty()); // Buffer was cleared
-        
+
         let stats = pool.stats();
         assert_eq!(stats.pooled, 0);
         assert_eq!(stats.hits, 1);
     }
-    
+
     #[test]
     fn test_pool_multiple_buffers() {
         let pool = Arc::new(BufferPool::with_config(1024, 10));
-        
+
         // Get multiple buffers
         let buf1 = pool.get();
         let buf2 = pool.get();
         let buf3 = pool.get();
-        
+
         let stats = pool.stats();
         assert_eq!(stats.allocated, 3);
         assert_eq!(stats.pooled, 0);
-        
+
         // Return all
         drop(buf1);
         drop(buf2);
         drop(buf3);
-        
+
         let stats = pool.stats();
         assert_eq!(stats.pooled, 3);
     }
-    
+
     #[test]
     fn test_pool_overflow() {
         let pool = Arc::new(BufferPool::with_config(1024, 2));
-        
+
         // Get 3 buffers (more than max)
         let buf1 = pool.get();
         let buf2 = pool.get();
         let buf3 = pool.get();
-        
+
         // Return all - only 2 should be pooled
         drop(buf1);
         drop(buf2);
         drop(buf3);
-        
+
         let stats = pool.stats();
         assert_eq!(stats.pooled, 2);
     }
-    
+
     #[test]
     fn test_pool_take() {
         let pool = Arc::new(BufferPool::with_config(1024, 10));
-        
+
         let mut buf = pool.get();
         buf.extend_from_slice(b"data");
-        
+
         // Take ownership, buffer should not return to pool
         let taken = buf.take();
         assert_eq!(&taken[..], b"data");
-        
+
         let stats = pool.stats();
         assert_eq!(stats.pooled, 0);
     }
-    
+
     #[test]
     fn test_pool_preallocate() {
         let pool = Arc::new(BufferPool::with_config(1024, 10));
         pool.preallocate(5);
-        
+
         let stats = pool.stats();
         assert_eq!(stats.pooled, 5);
         assert_eq!(stats.allocated, 5);
     }
-    
+
     #[test]
     fn test_pool_try_get() {
         let pool = Arc::new(BufferPool::with_config(1024, 10));
-        
+
         // Pool is empty, try_get returns None
         assert!(pool.try_get().is_none());
-        
+
         // Add a buffer to pool
         pool.preallocate(1);
-        
+
         // Now try_get should succeed once while the buffer is held
         let buf = pool.try_get();
         assert!(buf.is_some());
@@ -391,50 +395,50 @@ mod tests {
         drop(buf);
         assert!(pool.try_get().is_some());
     }
-    
+
     #[test]
     fn test_hit_rate() {
         let pool = Arc::new(BufferPool::with_config(1024, 10));
-        
+
         // First get is a miss
         let buf1 = pool.get();
         drop(buf1);
-        
+
         // Second get is a hit
         let buf2 = pool.get();
         drop(buf2);
-        
+
         // Third get is a hit
         let _buf3 = pool.get();
-        
+
         let stats = pool.stats();
         assert_eq!(stats.hits, 2);
         assert_eq!(stats.misses, 1);
         assert!((stats.hit_rate() - 66.67).abs() < 1.0);
     }
-    
+
     #[test]
     fn test_scoped_buffer() {
         let pool = Arc::new(BufferPool::with_config(1024, 10));
         let mut buf = pool.get();
-        
+
         {
             let mut scoped = ScopedBuffer::new(&mut buf);
             scoped.extend_from_slice(b"scoped data");
             assert_eq!(&scoped[..], b"scoped data");
         }
-        
+
         // After scoped is dropped, buffer is cleared
         assert!(buf.is_empty());
     }
-    
+
     #[test]
     fn test_concurrent_access() {
         use std::thread;
-        
+
         let pool = Arc::new(BufferPool::with_config(1024, 100));
         let mut handles = vec![];
-        
+
         for _ in 0..10 {
             let pool_clone = Arc::clone(&pool);
             handles.push(thread::spawn(move || {
@@ -445,11 +449,11 @@ mod tests {
                 }
             }));
         }
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         let stats = pool.stats();
         // All buffers should be returned
         assert!(stats.pooled > 0);

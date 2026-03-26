@@ -94,9 +94,9 @@ impl MePool {
 
     pub(crate) async fn api_nat_stun_snapshot(&self) -> MeApiNatStunSnapshot {
         let now = Instant::now();
-        let mut configured_servers = if !self.nat_stun_servers.is_empty() {
-            self.nat_stun_servers.clone()
-        } else if let Some(stun) = &self.nat_stun {
+        let mut configured_servers = if !self.nat_runtime.nat_stun_servers.is_empty() {
+            self.nat_runtime.nat_stun_servers.clone()
+        } else if let Some(stun) = &self.nat_runtime.nat_stun {
             if stun.trim().is_empty() {
                 Vec::new()
             } else {
@@ -108,11 +108,11 @@ impl MePool {
         configured_servers.sort();
         configured_servers.dedup();
 
-        let mut live_servers = self.nat_stun_live_servers.read().await.clone();
+        let mut live_servers = self.nat_runtime.nat_stun_live_servers.read().await.clone();
         live_servers.sort();
         live_servers.dedup();
 
-        let reflection = self.nat_reflection_cache.lock().await;
+        let reflection = self.nat_runtime.nat_reflection_cache.lock().await;
         let reflection_v4 = reflection.v4.map(|(ts, addr)| MeApiNatReflectionSnapshot {
             addr,
             age_secs: now.saturating_duration_since(ts).as_secs(),
@@ -123,17 +123,19 @@ impl MePool {
         });
         drop(reflection);
 
-        let backoff_until = *self.stun_backoff_until.read().await;
+        let backoff_until = *self.nat_runtime.stun_backoff_until.read().await;
         let stun_backoff_remaining_ms = backoff_until.and_then(|until| {
             (until > now).then_some(until.duration_since(now).as_millis() as u64)
         });
 
         MeApiNatStunSnapshot {
-            nat_probe_enabled: self.nat_probe,
+            nat_probe_enabled: self.nat_runtime.nat_probe,
             nat_probe_disabled_runtime: self
+                .nat_runtime
                 .nat_probe_disabled
                 .load(std::sync::atomic::Ordering::Relaxed),
             nat_probe_attempts: self
+                .nat_runtime
                 .nat_probe_attempts
                 .load(std::sync::atomic::Ordering::Relaxed),
             configured_servers,
@@ -157,7 +159,8 @@ impl MePool {
                     },
                     state: state.as_str(),
                     state_since_epoch_secs: self.family_runtime_state_since_epoch_secs(family),
-                    suppressed_until_epoch_secs: (suppressed_until != 0).then_some(suppressed_until),
+                    suppressed_until_epoch_secs: (suppressed_until != 0)
+                        .then_some(suppressed_until),
                     fail_streak: self.family_fail_streak(family),
                     recover_success_streak: self.family_recover_success_streak(family),
                 }

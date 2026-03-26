@@ -1,14 +1,14 @@
 //! TCP Socket Configuration
 
+use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 #[cfg(target_os = "linux")]
 use std::fs;
 use std::io::Result;
-use std::net::{SocketAddr, IpAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use socket2::{Socket, TcpKeepalive, Domain, Type, Protocol};
 use tracing::debug;
 
 const DEFAULT_SOCKET_BUFFER_BYTES: usize = 256 * 1024;
@@ -21,26 +21,25 @@ pub fn configure_tcp_socket(
     keepalive_interval: Duration,
 ) -> Result<()> {
     let socket = socket2::SockRef::from(stream);
-    
+
     // Disable Nagle's algorithm for lower latency
-    socket.set_nodelay(true)?;
-    
+    socket.set_tcp_nodelay(true)?;
+
     // Set keepalive if enabled
     if keepalive {
-        let keepalive = TcpKeepalive::new()
-            .with_time(keepalive_interval);
-        
+        let keepalive = TcpKeepalive::new().with_time(keepalive_interval);
+
         // Platform-specific keepalive settings
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
         let keepalive = keepalive.with_interval(keepalive_interval);
-        
+
         socket.set_tcp_keepalive(&keepalive)?;
     }
 
     // Use explicit baseline buffers to reduce slow-start stalls on high RTT links.
     socket.set_recv_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
     socket.set_send_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
-    
+
     Ok(())
 }
 
@@ -48,29 +47,27 @@ pub fn configure_tcp_socket(
 pub fn configure_client_socket(
     stream: &TcpStream,
     keepalive_secs: u64,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    ack_timeout_secs: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] ack_timeout_secs: u64,
 ) -> Result<()> {
     let socket = socket2::SockRef::from(stream);
-    
+
     // Disable Nagle's algorithm
-    socket.set_nodelay(true)?;
-    
+    socket.set_tcp_nodelay(true)?;
+
     // Set keepalive
-    let keepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(keepalive_secs));
-    
+    let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(keepalive_secs));
+
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
     let keepalive = keepalive.with_interval(Duration::from_secs(keepalive_secs));
-    
+
     socket.set_tcp_keepalive(&keepalive)?;
 
     // Keep explicit baseline buffers for predictable throughput across busy hosts.
     socket.set_recv_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
     socket.set_send_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
-    
+
     // Set TCP user timeout (Linux only)
-    // NOTE: iOS does not support TCP_USER_TIMEOUT - application-level timeout 
+    // NOTE: iOS does not support TCP_USER_TIMEOUT - application-level timeout
     // is implemented in relay_bidirectional instead
     #[cfg(target_os = "linux")]
     {
@@ -81,8 +78,12 @@ pub fn configure_client_socket(
         let timeout_ms_u64 = ack_timeout_secs
             .checked_mul(1000)
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "ack_timeout_secs is too large"))?;
-        let timeout_ms = i32::try_from(timeout_ms_u64)
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "ack_timeout_secs exceeds TCP_USER_TIMEOUT range"))?;
+        let timeout_ms = i32::try_from(timeout_ms_u64).map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "ack_timeout_secs exceeds TCP_USER_TIMEOUT range",
+            )
+        })?;
 
         let rc = unsafe {
             libc::setsockopt(
@@ -97,7 +98,7 @@ pub fn configure_client_socket(
             return Err(Error::last_os_error());
         }
     }
-    
+
     Ok(())
 }
 
@@ -122,14 +123,14 @@ pub fn create_outgoing_socket_bound(addr: SocketAddr, bind_addr: Option<IpAddr>)
     } else {
         Domain::IPV6
     };
-    
+
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    
+
     // Set non-blocking
     socket.set_nonblocking(true)?;
-    
+
     // Disable Nagle
-    socket.set_nodelay(true)?;
+    socket.set_tcp_nodelay(true)?;
     socket.set_recv_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
     socket.set_send_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
 
@@ -138,10 +139,9 @@ pub fn create_outgoing_socket_bound(addr: SocketAddr, bind_addr: Option<IpAddr>)
         socket.bind(&bind_sock_addr.into())?;
         debug!("Bound outgoing socket to {}", bind_ip);
     }
-    
+
     Ok(socket)
 }
-
 
 /// Get local address of a socket
 #[allow(dead_code)]
@@ -238,28 +238,28 @@ pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Sock
     } else {
         Domain::IPV6
     };
-    
+
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-    
+
     if options.reuse_addr {
         socket.set_reuse_address(true)?;
     }
-    
+
     #[cfg(unix)]
     if options.reuse_port {
         socket.set_reuse_port(true)?;
     }
-    
+
     if addr.is_ipv6() && options.ipv6_only {
         socket.set_only_v6(true)?;
     }
-    
+
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
     socket.listen(options.backlog as i32)?;
-    
+
     debug!(addr = %addr, "Created listening socket");
-    
+
     Ok(socket)
 }
 
@@ -396,7 +396,7 @@ mod tests {
     use std::io::ErrorKind;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    
+
     #[tokio::test]
     async fn test_configure_socket() {
         let listener = match TcpListener::bind("127.0.0.1:0").await {
@@ -405,7 +405,7 @@ mod tests {
             Err(e) => panic!("bind failed: {e}"),
         };
         let addr = listener.local_addr().unwrap();
-        
+
         let stream = match TcpStream::connect(addr).await {
             Ok(s) => s,
             Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
@@ -554,18 +554,18 @@ mod tests {
         };
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }
-    
+
     #[test]
     fn test_normalize_ip() {
         // IPv4 stays IPv4
         let v4: SocketAddr = "192.168.1.1:8080".parse().unwrap();
         assert_eq!(normalize_ip(v4), v4);
-        
+
         // Pure IPv6 stays IPv6
         let v6: SocketAddr = "[::1]:8080".parse().unwrap();
         assert_eq!(normalize_ip(v6), v6);
     }
-    
+
     #[test]
     fn test_listen_options_default() {
         let opts = ListenOptions::default();

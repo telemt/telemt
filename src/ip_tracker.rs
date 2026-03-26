@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::config::UserMaxUniqueIpsMode;
 
@@ -21,6 +22,8 @@ pub struct UserIpTracker {
     limit_mode: Arc<RwLock<UserMaxUniqueIpsMode>>,
     limit_window: Arc<RwLock<Duration>>,
     last_compact_epoch_secs: Arc<AtomicU64>,
+    cleanup_queue: Arc<Mutex<Vec<(String, IpAddr)>>>,
+    cleanup_drain_lock: Arc<AsyncMutex<()>>,
 }
 
 impl UserIpTracker {
@@ -33,6 +36,79 @@ impl UserIpTracker {
             limit_mode: Arc::new(RwLock::new(UserMaxUniqueIpsMode::ActiveWindow)),
             limit_window: Arc::new(RwLock::new(Duration::from_secs(30))),
             last_compact_epoch_secs: Arc::new(AtomicU64::new(0)),
+            cleanup_queue: Arc::new(Mutex::new(Vec::new())),
+            cleanup_drain_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub fn enqueue_cleanup(&self, user: String, ip: IpAddr) {
+        match self.cleanup_queue.lock() {
+            Ok(mut queue) => queue.push((user, ip)),
+            Err(poisoned) => {
+                let mut queue = poisoned.into_inner();
+                queue.push((user.clone(), ip));
+                self.cleanup_queue.clear_poison();
+                tracing::warn!(
+                    "UserIpTracker cleanup_queue lock poisoned; recovered and enqueued IP cleanup for {} ({})",
+                    user,
+                    ip
+                );
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_queue_len_for_tests(&self) -> usize {
+        self.cleanup_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_queue_mutex_for_tests(&self) -> Arc<Mutex<Vec<(String, IpAddr)>>> {
+        Arc::clone(&self.cleanup_queue)
+    }
+
+    pub(crate) async fn drain_cleanup_queue(&self) {
+        // Serialize queue draining and active-IP mutation so check-and-add cannot
+        // observe stale active entries that are already queued for removal.
+        let _drain_guard = self.cleanup_drain_lock.lock().await;
+        let to_remove = {
+            match self.cleanup_queue.lock() {
+                Ok(mut queue) => {
+                    if queue.is_empty() {
+                        return;
+                    }
+                    std::mem::take(&mut *queue)
+                }
+                Err(poisoned) => {
+                    let mut queue = poisoned.into_inner();
+                    if queue.is_empty() {
+                        self.cleanup_queue.clear_poison();
+                        return;
+                    }
+                    let drained = std::mem::take(&mut *queue);
+                    self.cleanup_queue.clear_poison();
+                    drained
+                }
+            }
+        };
+
+        let mut active_ips = self.active_ips.write().await;
+        for (user, ip) in to_remove {
+            if let Some(user_ips) = active_ips.get_mut(&user) {
+                if let Some(count) = user_ips.get_mut(&ip) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        user_ips.remove(&ip);
+                    }
+                }
+                if user_ips.is_empty() {
+                    active_ips.remove(&user);
+                }
+            }
         }
     }
 
@@ -65,7 +141,8 @@ impl UserIpTracker {
 
         let mut active_ips = self.active_ips.write().await;
         let mut recent_ips = self.recent_ips.write().await;
-        let mut users = Vec::<String>::with_capacity(active_ips.len().saturating_add(recent_ips.len()));
+        let mut users =
+            Vec::<String>::with_capacity(active_ips.len().saturating_add(recent_ips.len()));
         users.extend(active_ips.keys().cloned());
         for user in recent_ips.keys() {
             if !active_ips.contains_key(user) {
@@ -74,8 +151,14 @@ impl UserIpTracker {
         }
 
         for user in users {
-            let active_empty = active_ips.get(&user).map(|ips| ips.is_empty()).unwrap_or(true);
-            let recent_empty = recent_ips.get(&user).map(|ips| ips.is_empty()).unwrap_or(true);
+            let active_empty = active_ips
+                .get(&user)
+                .map(|ips| ips.is_empty())
+                .unwrap_or(true);
+            let recent_empty = recent_ips
+                .get(&user)
+                .map(|ips| ips.is_empty())
+                .unwrap_or(true);
             if active_empty && recent_empty {
                 active_ips.remove(&user);
                 recent_ips.remove(&user);
@@ -118,6 +201,7 @@ impl UserIpTracker {
     }
 
     pub async fn check_and_add(&self, username: &str, ip: IpAddr) -> Result<(), String> {
+        self.drain_cleanup_queue().await;
         self.maybe_compact_empty_users().await;
         let default_max_ips = *self.default_max_ips.read().await;
         let limit = {
@@ -194,6 +278,7 @@ impl UserIpTracker {
     }
 
     pub async fn get_recent_counts_for_users(&self, users: &[String]) -> HashMap<String, usize> {
+        self.drain_cleanup_queue().await;
         let window = *self.limit_window.read().await;
         let now = Instant::now();
         let recent_ips = self.recent_ips.read().await;
@@ -214,6 +299,7 @@ impl UserIpTracker {
     }
 
     pub async fn get_active_ips_for_users(&self, users: &[String]) -> HashMap<String, Vec<IpAddr>> {
+        self.drain_cleanup_queue().await;
         let active_ips = self.active_ips.read().await;
         let mut out = HashMap::with_capacity(users.len());
         for user in users {
@@ -228,6 +314,7 @@ impl UserIpTracker {
     }
 
     pub async fn get_recent_ips_for_users(&self, users: &[String]) -> HashMap<String, Vec<IpAddr>> {
+        self.drain_cleanup_queue().await;
         let window = *self.limit_window.read().await;
         let now = Instant::now();
         let recent_ips = self.recent_ips.read().await;
@@ -250,11 +337,13 @@ impl UserIpTracker {
     }
 
     pub async fn get_active_ip_count(&self, username: &str) -> usize {
+        self.drain_cleanup_queue().await;
         let active_ips = self.active_ips.read().await;
         active_ips.get(username).map(|ips| ips.len()).unwrap_or(0)
     }
 
     pub async fn get_active_ips(&self, username: &str) -> Vec<IpAddr> {
+        self.drain_cleanup_queue().await;
         let active_ips = self.active_ips.read().await;
         active_ips
             .get(username)
@@ -263,6 +352,7 @@ impl UserIpTracker {
     }
 
     pub async fn get_stats(&self) -> Vec<(String, usize, usize)> {
+        self.drain_cleanup_queue().await;
         let active_ips = self.active_ips.read().await;
         let max_ips = self.max_ips.read().await;
         let default_max_ips = *self.default_max_ips.read().await;
@@ -301,6 +391,7 @@ impl UserIpTracker {
     }
 
     pub async fn is_ip_active(&self, username: &str, ip: IpAddr) -> bool {
+        self.drain_cleanup_queue().await;
         let active_ips = self.active_ips.read().await;
         active_ips
             .get(username)

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -6,7 +8,6 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, warn};
 
@@ -14,45 +15,24 @@ use crate::config::{MeRouteNoWriterMode, MeWriterPickMode};
 use crate::error::{ProxyError, Result};
 use crate::network::IpFamily;
 use crate::protocol::constants::{RPC_CLOSE_CONN_U32, RPC_CLOSE_EXT_U32};
-use crate::stats::MeWriterTeardownReason;
 
 use super::MePool;
 use super::codec::WriterCommand;
 use super::pool::WriterContour;
+use super::registry::ConnMeta;
 use super::wire::build_proxy_req_payload;
 use rand::seq::SliceRandom;
-use super::registry::ConnMeta;
 
 const IDLE_WRITER_PENALTY_MID_SECS: u64 = 45;
 const IDLE_WRITER_PENALTY_HIGH_SECS: u64 = 55;
 const HYBRID_GLOBAL_BURST_PERIOD_ROUNDS: u32 = 4;
+const HYBRID_RECENT_SUCCESS_WINDOW_MS: u64 = 120_000;
+const HYBRID_TIMEOUT_WARN_RATE_LIMIT_MS: u64 = 5_000;
+const HYBRID_RECOVERY_TRIGGER_MIN_INTERVAL_MS: u64 = 5_000;
 const PICK_PENALTY_WARM: u64 = 200;
 const PICK_PENALTY_DRAINING: u64 = 600;
 const PICK_PENALTY_STALE: u64 = 300;
 const PICK_PENALTY_DEGRADED: u64 = 250;
-
-enum TimedSendError<T> {
-    Closed(T),
-    Timeout(T),
-}
-
-async fn send_writer_command_with_timeout(
-    tx: &mpsc::Sender<WriterCommand>,
-    cmd: WriterCommand,
-    timeout: Duration,
-) -> std::result::Result<(), TimedSendError<WriterCommand>> {
-    if timeout.is_zero() {
-        return tx.send(cmd).await.map_err(|err| TimedSendError::Closed(err.0));
-    }
-    match tokio::time::timeout(timeout, tx.reserve()).await {
-        Ok(Ok(permit)) => {
-            permit.send(cmd);
-            Ok(())
-        }
-        Ok(Err(_)) => Err(TimedSendError::Closed(cmd)),
-        Err(_) => Err(TimedSendError::Timeout(cmd)),
-    }
-}
 
 impl MePool {
     /// Send RPC_PROXY_REQ. `tag_override`: per-user ad_tag (from access.user_ad_tags); if None, uses pool default.
@@ -91,30 +71,26 @@ impl MePool {
                 },
             )
         };
-        let no_writer_mode =
-            MeRouteNoWriterMode::from_u8(self.me_route_no_writer_mode.load(Ordering::Relaxed));
-        let (routed_dc, unknown_target_dc) = self
-            .resolve_target_dc_for_routing(target_dc as i32)
-            .await;
+        let no_writer_mode = MeRouteNoWriterMode::from_u8(
+            self.route_runtime
+                .me_route_no_writer_mode
+                .load(Ordering::Relaxed),
+        );
+        let (routed_dc, unknown_target_dc) =
+            self.resolve_target_dc_for_routing(target_dc as i32).await;
         let mut no_writer_deadline: Option<Instant> = None;
         let mut emergency_attempts = 0u32;
         let mut async_recovery_triggered = false;
         let mut hybrid_recovery_round = 0u32;
         let mut hybrid_last_recovery_at: Option<Instant> = None;
-        let hybrid_wait_step = self.me_route_no_writer_wait.max(Duration::from_millis(50));
+        let mut hybrid_total_deadline: Option<Instant> = None;
+        let hybrid_wait_step = self
+            .route_runtime
+            .me_route_no_writer_wait
+            .max(Duration::from_millis(50));
         let mut hybrid_wait_current = hybrid_wait_step;
-        let hybrid_deadline = Instant::now() + self.me_route_hybrid_max_wait;
 
         loop {
-            if matches!(no_writer_mode, MeRouteNoWriterMode::HybridAsyncPersistent)
-                && Instant::now() >= hybrid_deadline
-            {
-                self.stats.increment_me_no_writer_failfast_total();
-                return Err(ProxyError::Proxy(
-                    "No ME writer available in hybrid wait window".into(),
-                ));
-            }
-            let mut skip_writer_id: Option<u64> = None;
             let current_meta = self
                 .registry
                 .get_meta(conn_id)
@@ -122,45 +98,28 @@ impl MePool {
                 .unwrap_or_else(|| fallback_meta.clone());
             let (current_payload, _) = build_routed_payload(current_meta.our_addr);
             if let Some(current) = self.registry.get_writer(conn_id).await {
-                match current.tx.try_send(WriterCommand::Data(current_payload.clone())) {
-                    Ok(()) => return Ok(()),
+                match current
+                    .tx
+                    .try_send(WriterCommand::Data(current_payload.clone()))
+                {
+                    Ok(()) => {
+                        self.note_hybrid_route_success();
+                        return Ok(());
+                    }
                     Err(TrySendError::Full(cmd)) => {
-                        match send_writer_command_with_timeout(
-                            &current.tx,
-                            cmd,
-                            self.me_route_blocking_send_timeout,
-                        )
-                        .await
-                        {
-                            Ok(()) => return Ok(()),
-                            Err(TimedSendError::Closed(_)) => {
-                                warn!(writer_id = current.writer_id, "ME writer channel closed");
-                                self.remove_writer_and_close_clients(
-                                    current.writer_id,
-                                    MeWriterTeardownReason::RouteChannelClosed,
-                                )
-                                .await;
-                                continue;
-                            }
-                            Err(TimedSendError::Timeout(_)) => {
-                                debug!(
-                                    conn_id,
-                                    writer_id = current.writer_id,
-                                    timeout_ms = self.me_route_blocking_send_timeout.as_millis()
-                                        as u64,
-                                    "ME writer send timed out for bound writer, trying reroute"
-                                );
-                                skip_writer_id = Some(current.writer_id);
-                            }
+                        if current.tx.send(cmd).await.is_ok() {
+                            self.note_hybrid_route_success();
+                            return Ok(());
                         }
+                        warn!(writer_id = current.writer_id, "ME writer channel closed");
+                        self.remove_writer_and_close_clients(current.writer_id)
+                            .await;
+                        continue;
                     }
                     Err(TrySendError::Closed(_)) => {
                         warn!(writer_id = current.writer_id, "ME writer channel closed");
-                        self.remove_writer_and_close_clients(
-                            current.writer_id,
-                            MeWriterTeardownReason::RouteChannelClosed,
-                        )
-                        .await;
+                        self.remove_writer_and_close_clients(current.writer_id)
+                            .await;
                         continue;
                     }
                 }
@@ -173,7 +132,7 @@ impl MePool {
                     match no_writer_mode {
                         MeRouteNoWriterMode::AsyncRecoveryFailfast => {
                             let deadline = *no_writer_deadline.get_or_insert_with(|| {
-                                Instant::now() + self.me_route_no_writer_wait
+                                Instant::now() + self.route_runtime.me_route_no_writer_wait
                             });
                             if !async_recovery_triggered && !unknown_target_dc {
                                 let triggered =
@@ -194,7 +153,9 @@ impl MePool {
                         MeRouteNoWriterMode::InlineRecoveryLegacy => {
                             self.stats.increment_me_inline_recovery_total();
                             if !unknown_target_dc {
-                                for _ in 0..self.me_route_inline_recovery_attempts.max(1) {
+                                for _ in
+                                    0..self.route_runtime.me_route_inline_recovery_attempts.max(1)
+                                {
                                     for family in self.family_order() {
                                         let map = match family {
                                             IpFamily::V4 => self.proxy_map_v4.read().await.clone(),
@@ -204,7 +165,11 @@ impl MePool {
                                             for (ip, port) in addrs {
                                                 let addr = SocketAddr::new(*ip, *port);
                                                 let _ = self
-                                                    .connect_one_for_dc(addr, *dc, self.rng.as_ref())
+                                                    .connect_one_for_dc(
+                                                        addr,
+                                                        *dc,
+                                                        self.rng.as_ref(),
+                                                    )
                                                     .await;
                                             }
                                         }
@@ -218,8 +183,9 @@ impl MePool {
                             if !self.writers.read().await.is_empty() {
                                 continue;
                             }
-                            let deadline = *no_writer_deadline
-                                .get_or_insert_with(|| Instant::now() + self.me_route_inline_recovery_wait);
+                            let deadline = *no_writer_deadline.get_or_insert_with(|| {
+                                Instant::now() + self.route_runtime.me_route_inline_recovery_wait
+                            });
                             if !self.wait_for_writer_until(deadline).await {
                                 if !self.writers.read().await.is_empty() {
                                     continue;
@@ -232,6 +198,15 @@ impl MePool {
                             continue;
                         }
                         MeRouteNoWriterMode::HybridAsyncPersistent => {
+                            let total_deadline = *hybrid_total_deadline.get_or_insert_with(|| {
+                                Instant::now() + self.hybrid_total_wait_budget()
+                            });
+                            if Instant::now() >= total_deadline {
+                                self.on_hybrid_timeout(total_deadline, routed_dc);
+                                return Err(ProxyError::Proxy(
+                                    "ME writer not available within hybrid timeout".into(),
+                                ));
+                            }
                             if !unknown_target_dc {
                                 self.maybe_trigger_hybrid_recovery(
                                     routed_dc,
@@ -243,9 +218,8 @@ impl MePool {
                             }
                             let deadline = Instant::now() + hybrid_wait_current;
                             let _ = self.wait_for_writer_until(deadline).await;
-                            hybrid_wait_current =
-                                (hybrid_wait_current.saturating_mul(2))
-                                    .min(Duration::from_millis(400));
+                            hybrid_wait_current = (hybrid_wait_current.saturating_mul(2))
+                                .min(Duration::from_millis(400));
                             continue;
                         }
                     }
@@ -261,18 +235,16 @@ impl MePool {
                     .candidate_indices_for_dc(&writers_snapshot, routed_dc, true)
                     .await;
             }
-            if let Some(skip_writer_id) = skip_writer_id {
-                candidate_indices.retain(|idx| writers_snapshot[*idx].id != skip_writer_id);
-            }
             if candidate_indices.is_empty() {
                 let pick_mode = self.writer_pick_mode();
                 match no_writer_mode {
                     MeRouteNoWriterMode::AsyncRecoveryFailfast => {
                         let deadline = *no_writer_deadline.get_or_insert_with(|| {
-                            Instant::now() + self.me_route_no_writer_wait
+                            Instant::now() + self.route_runtime.me_route_no_writer_wait
                         });
                         if !async_recovery_triggered && !unknown_target_dc {
-                            let triggered = self.trigger_async_recovery_for_target_dc(routed_dc).await;
+                            let triggered =
+                                self.trigger_async_recovery_for_target_dc(routed_dc).await;
                             if !triggered {
                                 self.trigger_async_recovery_global().await;
                             }
@@ -281,7 +253,8 @@ impl MePool {
                         if self.wait_for_candidate_until(routed_dc, deadline).await {
                             continue;
                         }
-                        self.stats.increment_me_writer_pick_no_candidate_total(pick_mode);
+                        self.stats
+                            .increment_me_writer_pick_no_candidate_total(pick_mode);
                         self.stats.increment_me_no_writer_failfast_total();
                         return Err(ProxyError::Proxy(
                             "No ME writers available for target DC in failfast window".into(),
@@ -290,29 +263,43 @@ impl MePool {
                     MeRouteNoWriterMode::InlineRecoveryLegacy => {
                         self.stats.increment_me_inline_recovery_total();
                         if unknown_target_dc {
-                            let deadline = *no_writer_deadline
-                                .get_or_insert_with(|| Instant::now() + self.me_route_inline_recovery_wait);
+                            let deadline = *no_writer_deadline.get_or_insert_with(|| {
+                                Instant::now() + self.route_runtime.me_route_inline_recovery_wait
+                            });
                             if self.wait_for_candidate_until(routed_dc, deadline).await {
                                 continue;
                             }
-                            self.stats.increment_me_writer_pick_no_candidate_total(pick_mode);
+                            self.stats
+                                .increment_me_writer_pick_no_candidate_total(pick_mode);
                             self.stats.increment_me_no_writer_failfast_total();
-                            return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
+                            return Err(ProxyError::Proxy(
+                                "No ME writers available for target DC".into(),
+                            ));
                         }
-                        if emergency_attempts >= self.me_route_inline_recovery_attempts.max(1) {
-                            self.stats.increment_me_writer_pick_no_candidate_total(pick_mode);
+                        if emergency_attempts
+                            >= self.route_runtime.me_route_inline_recovery_attempts.max(1)
+                        {
+                            self.stats
+                                .increment_me_writer_pick_no_candidate_total(pick_mode);
                             self.stats.increment_me_no_writer_failfast_total();
-                            return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
+                            return Err(ProxyError::Proxy(
+                                "No ME writers available for target DC".into(),
+                            ));
                         }
                         emergency_attempts += 1;
                         let mut endpoints = self.endpoint_candidates_for_target_dc(routed_dc).await;
                         endpoints.shuffle(&mut rand::rng());
                         for addr in endpoints {
-                            if self.connect_one_for_dc(addr, routed_dc, self.rng.as_ref()).await.is_ok() {
+                            if self
+                                .connect_one_for_dc(addr, routed_dc, self.rng.as_ref())
+                                .await
+                                .is_ok()
+                            {
                                 break;
                             }
                         }
-                        tokio::time::sleep(Duration::from_millis(100 * emergency_attempts as u64)).await;
+                        tokio::time::sleep(Duration::from_millis(100 * emergency_attempts as u64))
+                            .await;
                         let ws2 = self.writers.read().await;
                         writers_snapshot = ws2.clone();
                         drop(ws2);
@@ -325,11 +312,24 @@ impl MePool {
                                 .await;
                         }
                         if candidate_indices.is_empty() {
-                            self.stats.increment_me_writer_pick_no_candidate_total(pick_mode);
-                            return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
+                            self.stats
+                                .increment_me_writer_pick_no_candidate_total(pick_mode);
+                            return Err(ProxyError::Proxy(
+                                "No ME writers available for target DC".into(),
+                            ));
                         }
                     }
                     MeRouteNoWriterMode::HybridAsyncPersistent => {
+                        let total_deadline = *hybrid_total_deadline.get_or_insert_with(|| {
+                            Instant::now() + self.hybrid_total_wait_budget()
+                        });
+                        if Instant::now() >= total_deadline {
+                            self.on_hybrid_timeout(total_deadline, routed_dc);
+                            return Err(ProxyError::Proxy(
+                                "No ME writers available for target DC within hybrid timeout"
+                                    .into(),
+                            ));
+                        }
                         if !unknown_target_dc {
                             self.maybe_trigger_hybrid_recovery(
                                 routed_dc,
@@ -341,8 +341,8 @@ impl MePool {
                         }
                         let deadline = Instant::now() + hybrid_wait_current;
                         let _ = self.wait_for_candidate_until(routed_dc, deadline).await;
-                        hybrid_wait_current = (hybrid_wait_current.saturating_mul(2))
-                            .min(Duration::from_millis(400));
+                        hybrid_wait_current =
+                            (hybrid_wait_current.saturating_mul(2)).min(Duration::from_millis(400));
                         continue;
                     }
                 }
@@ -370,7 +370,11 @@ impl MePool {
                     pick_sample_size,
                 )
             } else {
-                if self.me_deterministic_writer_sort.load(Ordering::Relaxed) {
+                if self
+                    .writer_selection_policy
+                    .me_deterministic_writer_sort
+                    .load(Ordering::Relaxed)
+                {
                     candidate_indices.sort_by(|lhs, rhs| {
                         let left = &writers_snapshot[*lhs];
                         let right = &writers_snapshot[*rhs];
@@ -436,17 +440,21 @@ impl MePool {
                 }
                 let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
                 let (payload, meta) = build_routed_payload(effective_our_addr);
-                match w.tx.try_send(WriterCommand::Data(payload.clone())) {
-                    Ok(()) => {
-                        self.stats.increment_me_writer_pick_success_try_total(pick_mode);
+                match w.tx.clone().try_reserve_owned() {
+                    Ok(permit) => {
                         if !self.registry.bind_writer(conn_id, w.id, meta).await {
                             debug!(
                                 conn_id,
                                 writer_id = w.id,
-                                "ME writer disappeared before bind commit, retrying"
+                                "ME writer disappeared before bind commit, pruning stale writer"
                             );
+                            drop(permit);
+                            self.remove_writer_and_close_clients(w.id).await;
                             continue;
                         }
+                        permit.send(WriterCommand::Data(payload.clone()));
+                        self.stats
+                            .increment_me_writer_pick_success_try_total(pick_mode);
                         if w.generation < self.current_generation() {
                             self.stats.increment_pool_stale_pick_total();
                             debug!(
@@ -457,6 +465,7 @@ impl MePool {
                                 "Selected stale ME writer for fallback bind"
                             );
                         }
+                        self.note_hybrid_route_success();
                         return Ok(());
                     }
                     Err(TrySendError::Full(_)) => {
@@ -467,11 +476,7 @@ impl MePool {
                     Err(TrySendError::Closed(_)) => {
                         self.stats.increment_me_writer_pick_closed_total(pick_mode);
                         warn!(writer_id = w.id, "ME writer channel closed");
-                        self.remove_writer_and_close_clients(
-                            w.id,
-                            MeWriterTeardownReason::RouteChannelClosed,
-                        )
-                        .await;
+                        self.remove_writer_and_close_clients(w.id).await;
                         continue;
                     }
                 }
@@ -487,56 +492,54 @@ impl MePool {
                 self.stats.increment_me_writer_pick_full_total(pick_mode);
                 continue;
             }
-            self.stats.increment_me_writer_pick_blocking_fallback_total();
+            self.stats
+                .increment_me_writer_pick_blocking_fallback_total();
             let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
             let (payload, meta) = build_routed_payload(effective_our_addr);
-            match send_writer_command_with_timeout(
-                &w.tx,
-                WriterCommand::Data(payload.clone()),
-                self.me_route_blocking_send_timeout,
-            )
-            .await
-            {
-                Ok(()) => {
-                    self.stats
-                        .increment_me_writer_pick_success_fallback_total(pick_mode);
+            let reserve_result =
+                if let Some(timeout) = self.route_runtime.me_route_blocking_send_timeout {
+                    match tokio::time::timeout(timeout, w.tx.clone().reserve_owned()).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            self.stats.increment_me_writer_pick_full_total(pick_mode);
+                            continue;
+                        }
+                    }
+                } else {
+                    w.tx.clone().reserve_owned().await
+                };
+            match reserve_result {
+                Ok(permit) => {
                     if !self.registry.bind_writer(conn_id, w.id, meta).await {
                         debug!(
                             conn_id,
                             writer_id = w.id,
-                            "ME writer disappeared before fallback bind commit, retrying"
+                            "ME writer disappeared before fallback bind commit, pruning stale writer"
                         );
+                        drop(permit);
+                        self.remove_writer_and_close_clients(w.id).await;
                         continue;
                     }
+                    permit.send(WriterCommand::Data(payload.clone()));
+                    self.stats
+                        .increment_me_writer_pick_success_fallback_total(pick_mode);
                     if w.generation < self.current_generation() {
                         self.stats.increment_pool_stale_pick_total();
                     }
+                    self.note_hybrid_route_success();
                     return Ok(());
                 }
-                Err(TimedSendError::Closed(_)) => {
+                Err(_) => {
                     self.stats.increment_me_writer_pick_closed_total(pick_mode);
                     warn!(writer_id = w.id, "ME writer channel closed (blocking)");
-                    self.remove_writer_and_close_clients(
-                        w.id,
-                        MeWriterTeardownReason::RouteChannelClosed,
-                    )
-                    .await;
-                }
-                Err(TimedSendError::Timeout(_)) => {
-                    self.stats.increment_me_writer_pick_full_total(pick_mode);
-                    debug!(
-                        conn_id,
-                        writer_id = w.id,
-                        timeout_ms = self.me_route_blocking_send_timeout.as_millis() as u64,
-                        "ME writer blocking fallback send timed out"
-                    );
+                    self.remove_writer_and_close_clients(w.id).await;
                 }
             }
         }
     }
 
     async fn wait_for_writer_until(&self, deadline: Instant) -> bool {
-        let waiter = self.writer_available.notified();
+        let mut rx = self.writer_epoch.subscribe();
         if !self.writers.read().await.is_empty() {
             return true;
         }
@@ -545,13 +548,14 @@ impl MePool {
             return !self.writers.read().await.is_empty();
         }
         let timeout = deadline.saturating_duration_since(now);
-        if tokio::time::timeout(timeout, waiter).await.is_ok() {
-            return true;
+        if tokio::time::timeout(timeout, rx.changed()).await.is_ok() {
+            return !self.writers.read().await.is_empty();
         }
         !self.writers.read().await.is_empty()
     }
 
     async fn wait_for_candidate_until(&self, routed_dc: i32, deadline: Instant) -> bool {
+        let mut rx = self.writer_epoch.subscribe();
         loop {
             if self.has_candidate_for_target_dc(routed_dc).await {
                 return true;
@@ -562,7 +566,6 @@ impl MePool {
                 return self.has_candidate_for_target_dc(routed_dc).await;
             }
 
-            let waiter = self.writer_available.notified();
             if self.has_candidate_for_target_dc(routed_dc).await {
                 return true;
             }
@@ -570,7 +573,7 @@ impl MePool {
             if remaining.is_zero() {
                 return self.has_candidate_for_target_dc(routed_dc).await;
             }
-            if tokio::time::timeout(remaining, waiter).await.is_err() {
+            if tokio::time::timeout(remaining, rx.changed()).await.is_err() {
                 return self.has_candidate_for_target_dc(routed_dc).await;
             }
         }
@@ -640,6 +643,9 @@ impl MePool {
         hybrid_last_recovery_at: &mut Option<Instant>,
         hybrid_wait_step: Duration,
     ) {
+        if !self.try_consume_hybrid_recovery_trigger_slot(HYBRID_RECOVERY_TRIGGER_MIN_INTERVAL_MS) {
+            return;
+        }
         if let Some(last) = *hybrid_last_recovery_at
             && last.elapsed() < hybrid_wait_step
         {
@@ -648,11 +654,83 @@ impl MePool {
 
         let round = *hybrid_recovery_round;
         let target_triggered = self.trigger_async_recovery_for_target_dc(routed_dc).await;
-        if !target_triggered || round % HYBRID_GLOBAL_BURST_PERIOD_ROUNDS == 0 {
+        if !target_triggered || round.is_multiple_of(HYBRID_GLOBAL_BURST_PERIOD_ROUNDS) {
             self.trigger_async_recovery_global().await;
         }
         *hybrid_recovery_round = round.saturating_add(1);
         *hybrid_last_recovery_at = Some(Instant::now());
+    }
+
+    fn hybrid_total_wait_budget(&self) -> Duration {
+        let base = self
+            .route_runtime
+            .me_route_hybrid_max_wait
+            .max(Duration::from_millis(50));
+        let now_ms = Self::now_epoch_millis();
+        let last_success_ms = self
+            .route_runtime
+            .me_route_last_success_epoch_ms
+            .load(Ordering::Relaxed);
+        if last_success_ms != 0
+            && now_ms.saturating_sub(last_success_ms) <= HYBRID_RECENT_SUCCESS_WINDOW_MS
+        {
+            return base.saturating_mul(2);
+        }
+        base
+    }
+
+    fn note_hybrid_route_success(&self) {
+        self.route_runtime
+            .me_route_last_success_epoch_ms
+            .store(Self::now_epoch_millis(), Ordering::Relaxed);
+    }
+
+    fn on_hybrid_timeout(&self, deadline: Instant, routed_dc: i32) {
+        self.stats.increment_me_hybrid_timeout_total();
+        let now_ms = Self::now_epoch_millis();
+        let mut last_warn_ms = self
+            .route_runtime
+            .me_route_hybrid_timeout_warn_epoch_ms
+            .load(Ordering::Relaxed);
+        while now_ms.saturating_sub(last_warn_ms) >= HYBRID_TIMEOUT_WARN_RATE_LIMIT_MS {
+            match self
+                .route_runtime
+                .me_route_hybrid_timeout_warn_epoch_ms
+                .compare_exchange_weak(last_warn_ms, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    warn!(
+                        routed_dc,
+                        budget_ms = self.hybrid_total_wait_budget().as_millis() as u64,
+                        elapsed_ms = deadline.elapsed().as_millis() as u64,
+                        "ME hybrid route timeout reached"
+                    );
+                    break;
+                }
+                Err(actual) => last_warn_ms = actual,
+            }
+        }
+    }
+
+    fn try_consume_hybrid_recovery_trigger_slot(&self, min_interval_ms: u64) -> bool {
+        let now_ms = Self::now_epoch_millis();
+        let mut last_trigger_ms = self
+            .route_runtime
+            .me_async_recovery_last_trigger_epoch_ms
+            .load(Ordering::Relaxed);
+        loop {
+            if now_ms.saturating_sub(last_trigger_ms) < min_interval_ms {
+                return false;
+            }
+            match self
+                .route_runtime
+                .me_async_recovery_last_trigger_epoch_ms
+                .compare_exchange_weak(last_trigger_ms, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+            {
+                Ok(_) => return true,
+                Err(actual) => last_trigger_ms = actual,
+            }
+        }
     }
 
     pub async fn send_close(self: &Arc<Self>, conn_id: u64) -> Result<()> {
@@ -660,23 +738,13 @@ impl MePool {
             let mut p = Vec::with_capacity(12);
             p.extend_from_slice(&RPC_CLOSE_EXT_U32.to_le_bytes());
             p.extend_from_slice(&conn_id.to_le_bytes());
-            match w.tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    debug!(
-                        conn_id,
-                        writer_id = w.writer_id,
-                        "ME close skipped: writer command channel is full"
-                    );
-                }
-                Err(TrySendError::Closed(_)) => {
-                    debug!("ME close write failed");
-                    self.remove_writer_and_close_clients(
-                        w.writer_id,
-                        MeWriterTeardownReason::CloseRpcChannelClosed,
-                    )
-                    .await;
-                }
+            if w.tx
+                .send(WriterCommand::DataAndFlush(Bytes::from(p)))
+                .await
+                .is_err()
+            {
+                debug!("ME close write failed");
+                self.remove_writer_and_close_clients(w.writer_id).await;
             }
         } else {
             debug!(conn_id, "ME close skipped (writer missing)");
@@ -693,12 +761,8 @@ impl MePool {
             p.extend_from_slice(&conn_id.to_le_bytes());
             match w.tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
                 Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    debug!(
-                        conn_id,
-                        writer_id = w.writer_id,
-                        "ME close_conn skipped: writer command channel is full"
-                    );
+                Err(TrySendError::Full(cmd)) => {
+                    let _ = tokio::time::timeout(Duration::from_millis(50), w.tx.send(cmd)).await;
                 }
                 Err(TrySendError::Closed(_)) => {
                     debug!(conn_id, "ME close_conn skipped: writer channel closed");
@@ -724,7 +788,7 @@ impl MePool {
     pub fn connection_count(&self) -> usize {
         self.conn_count.load(Ordering::Relaxed)
     }
-    
+
     pub(super) async fn candidate_indices_for_dc(
         &self,
         writers: &[super::pool::MeWriter],
@@ -741,7 +805,7 @@ impl MePool {
             if !self.writer_eligible_for_selection(w, include_warm) {
                 continue;
             }
-            if w.writer_dc == routed_dc && preferred.iter().any(|endpoint| *endpoint == w.addr) {
+            if w.writer_dc == routed_dc && preferred.contains(&w.addr) {
                 out.push(idx);
             }
         }
@@ -813,15 +877,17 @@ impl MePool {
             0
         };
         let idle_penalty =
-            (self.writer_idle_rank_for_selection(writer, idle_since_by_writer, now_epoch_secs) as u64)
+            (self.writer_idle_rank_for_selection(writer, idle_since_by_writer, now_epoch_secs)
+                as u64)
                 * 100;
-        let queue_cap = self.writer_cmd_channel_capacity.max(1) as u64;
+        let queue_cap = self.writer_lifecycle.writer_cmd_channel_capacity.max(1) as u64;
         let queue_remaining = writer.tx.capacity() as u64;
         let queue_used = queue_cap.saturating_sub(queue_remaining.min(queue_cap));
         let queue_util_pct = queue_used.saturating_mul(100) / queue_cap;
         let queue_penalty = queue_util_pct.saturating_mul(4);
-        let rtt_penalty = ((writer.rtt_ema_ms_x10.load(Ordering::Relaxed) as u64).saturating_add(5) / 10)
-            .min(400);
+        let rtt_penalty =
+            ((writer.rtt_ema_ms_x10.load(Ordering::Relaxed) as u64).saturating_add(5) / 10)
+                .min(400);
 
         contour_penalty
             .saturating_add(stale_penalty)

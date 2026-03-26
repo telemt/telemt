@@ -46,7 +46,9 @@ pub(super) async fn create_user(
         None => random_user_secret(),
     };
 
-    if let Some(ad_tag) = body.user_ad_tag.as_ref() && !is_valid_ad_tag(ad_tag) {
+    if let Some(ad_tag) = body.user_ad_tag.as_ref()
+        && !is_valid_ad_tag(ad_tag)
+    {
         return Err(ApiFailure::bad_request(
             "user_ad_tag must be exactly 32 hex characters",
         ));
@@ -65,12 +67,18 @@ pub(super) async fn create_user(
         ));
     }
 
-    cfg.access.users.insert(body.username.clone(), secret.clone());
+    cfg.access
+        .users
+        .insert(body.username.clone(), secret.clone());
     if let Some(ad_tag) = body.user_ad_tag {
-        cfg.access.user_ad_tags.insert(body.username.clone(), ad_tag);
+        cfg.access
+            .user_ad_tags
+            .insert(body.username.clone(), ad_tag);
     }
     if let Some(limit) = body.max_tcp_conns {
-        cfg.access.user_max_tcp_conns.insert(body.username.clone(), limit);
+        cfg.access
+            .user_max_tcp_conns
+            .insert(body.username.clone(), limit);
     }
     if let Some(expiration) = expiration {
         cfg.access
@@ -78,7 +86,9 @@ pub(super) async fn create_user(
             .insert(body.username.clone(), expiration);
     }
     if let Some(quota) = body.data_quota_bytes {
-        cfg.access.user_data_quota.insert(body.username.clone(), quota);
+        cfg.access
+            .user_data_quota
+            .insert(body.username.clone(), quota);
     }
 
     let updated_limit = body.max_unique_ips;
@@ -108,11 +118,15 @@ pub(super) async fn create_user(
         touched_sections.push(AccessSection::UserMaxUniqueIps);
     }
 
-    let revision = save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+    let revision =
+        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
     drop(_guard);
 
     if let Some(limit) = updated_limit {
-        shared.ip_tracker.set_user_limit(&body.username, limit).await;
+        shared
+            .ip_tracker
+            .set_user_limit(&body.username, limit)
+            .await;
     }
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
 
@@ -140,12 +154,7 @@ pub(super) async fn create_user(
             recent_unique_ips: 0,
             recent_unique_ips_list: Vec::new(),
             total_octets: 0,
-            links: build_user_links(
-                &cfg,
-                &secret,
-                detected_ip_v4,
-                detected_ip_v6,
-            ),
+            links: build_user_links(&cfg, &secret, detected_ip_v4, detected_ip_v6),
         });
 
     Ok((CreateUserResponse { user, secret }, revision))
@@ -157,12 +166,16 @@ pub(super) async fn patch_user(
     expected_revision: Option<String>,
     shared: &ApiShared,
 ) -> Result<(UserInfo, String), ApiFailure> {
-    if let Some(secret) = body.secret.as_ref() && !is_valid_user_secret(secret) {
+    if let Some(secret) = body.secret.as_ref()
+        && !is_valid_user_secret(secret)
+    {
         return Err(ApiFailure::bad_request(
             "secret must be exactly 32 hex characters",
         ));
     }
-    if let Some(ad_tag) = body.user_ad_tag.as_ref() && !is_valid_ad_tag(ad_tag) {
+    if let Some(ad_tag) = body.user_ad_tag.as_ref()
+        && !is_valid_ad_tag(ad_tag)
+    {
         return Err(ApiFailure::bad_request(
             "user_ad_tag must be exactly 32 hex characters",
         ));
@@ -187,10 +200,14 @@ pub(super) async fn patch_user(
         cfg.access.user_ad_tags.insert(user.to_string(), ad_tag);
     }
     if let Some(limit) = body.max_tcp_conns {
-        cfg.access.user_max_tcp_conns.insert(user.to_string(), limit);
+        cfg.access
+            .user_max_tcp_conns
+            .insert(user.to_string(), limit);
     }
     if let Some(expiration) = expiration {
-        cfg.access.user_expirations.insert(user.to_string(), expiration);
+        cfg.access
+            .user_expirations
+            .insert(user.to_string(), expiration);
     }
     if let Some(quota) = body.data_quota_bytes {
         cfg.access.user_data_quota.insert(user.to_string(), quota);
@@ -198,7 +215,9 @@ pub(super) async fn patch_user(
 
     let mut updated_limit = None;
     if let Some(limit) = body.max_unique_ips {
-        cfg.access.user_max_unique_ips.insert(user.to_string(), limit);
+        cfg.access
+            .user_max_unique_ips
+            .insert(user.to_string(), limit);
         updated_limit = Some(limit);
     }
 
@@ -263,7 +282,8 @@ pub(super) async fn rotate_secret(
         AccessSection::UserDataQuota,
         AccessSection::UserMaxUniqueIps,
     ];
-    let revision = save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+    let revision =
+        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
@@ -330,7 +350,8 @@ pub(super) async fn delete_user(
         AccessSection::UserDataQuota,
         AccessSection::UserMaxUniqueIps,
     ];
-    let revision = save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+    let revision =
+        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
     drop(_guard);
     shared.ip_tracker.remove_user_limit(user).await;
     shared.ip_tracker.clear_user_ips(user).await;
@@ -365,12 +386,7 @@ pub(super) async fn users_from_config(
             .users
             .get(&username)
             .map(|secret| {
-                build_user_links(
-                    cfg,
-                    secret,
-                    startup_detected_ip_v4,
-                    startup_detected_ip_v6,
-                )
+                build_user_links(cfg, secret, startup_detected_ip_v4, startup_detected_ip_v6)
             })
             .unwrap_or(UserLinks {
                 classic: Vec::new(),
@@ -392,10 +408,8 @@ pub(super) async fn users_from_config(
                 .get(&username)
                 .copied()
                 .filter(|limit| *limit > 0)
-                .or(
-                    (cfg.access.user_max_unique_ips_global_each > 0)
-                        .then_some(cfg.access.user_max_unique_ips_global_each),
-                ),
+                .or((cfg.access.user_max_unique_ips_global_each > 0)
+                    .then_some(cfg.access.user_max_unique_ips_global_each)),
             current_connections: stats.get_user_curr_connects(&username),
             active_unique_ips: active_ip_list.len(),
             active_unique_ips_list: active_ip_list,
@@ -481,11 +495,11 @@ fn resolve_link_hosts(
             push_unique_host(&mut hosts, host);
             continue;
         }
-        if let Some(ip) = listener.announce_ip {
-            if !ip.is_unspecified() {
-                push_unique_host(&mut hosts, &ip.to_string());
-                continue;
-            }
+        if let Some(ip) = listener.announce_ip
+            && !ip.is_unspecified()
+        {
+            push_unique_host(&mut hosts, &ip.to_string());
+            continue;
         }
         if listener.ip.is_unspecified() {
             let detected_ip = if listener.ip.is_ipv4() {

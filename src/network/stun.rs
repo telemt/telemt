@@ -2,12 +2,19 @@
 #![allow(dead_code)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::OnceLock;
 
-use tokio::net::{lookup_host, UdpSocket};
-use tokio::time::{timeout, Duration, sleep};
+use tokio::net::{UdpSocket, lookup_host};
+use tokio::time::{Duration, sleep, timeout};
 
+use crate::crypto::SecureRandom;
 use crate::error::{ProxyError, Result};
 use crate::network::dns_overrides::{resolve, split_host_port};
+
+fn stun_rng() -> &'static SecureRandom {
+    static STUN_RNG: OnceLock<SecureRandom> = OnceLock::new();
+    STUN_RNG.get_or_init(SecureRandom::new)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IpFamily {
@@ -34,13 +41,13 @@ pub async fn stun_probe_dual(stun_addr: &str) -> Result<DualStunResult> {
         stun_probe_family(stun_addr, IpFamily::V6),
     );
 
-    Ok(DualStunResult {
-        v4: v4?,
-        v6: v6?,
-    })
+    Ok(DualStunResult { v4: v4?, v6: v6? })
 }
 
-pub async fn stun_probe_family(stun_addr: &str, family: IpFamily) -> Result<Option<StunProbeResult>> {
+pub async fn stun_probe_family(
+    stun_addr: &str,
+    family: IpFamily,
+) -> Result<Option<StunProbeResult>> {
     stun_probe_family_with_bind(stun_addr, family, None).await
 }
 
@@ -49,8 +56,6 @@ pub async fn stun_probe_family_with_bind(
     family: IpFamily,
     bind_ip: Option<IpAddr>,
 ) -> Result<Option<StunProbeResult>> {
-    use rand::RngCore;
-
     let bind_addr = match (family, bind_ip) {
         (IpFamily::V4, Some(IpAddr::V4(ip))) => SocketAddr::new(IpAddr::V4(ip), 0),
         (IpFamily::V6, Some(IpAddr::V6(ip))) => SocketAddr::new(IpAddr::V6(ip), 0),
@@ -71,13 +76,18 @@ pub async fn stun_probe_family_with_bind(
     if let Some(addr) = target_addr {
         match socket.connect(addr).await {
             Ok(()) => {}
-            Err(e) if family == IpFamily::V6 && matches!(
-                e.kind(),
-                std::io::ErrorKind::NetworkUnreachable
-                | std::io::ErrorKind::HostUnreachable
-                | std::io::ErrorKind::Unsupported
-                | std::io::ErrorKind::NetworkDown
-            ) => return Ok(None),
+            Err(e)
+                if family == IpFamily::V6
+                    && matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NetworkUnreachable
+                            | std::io::ErrorKind::HostUnreachable
+                            | std::io::ErrorKind::Unsupported
+                            | std::io::ErrorKind::NetworkDown
+                    ) =>
+            {
+                return Ok(None);
+            }
             Err(e) => return Err(ProxyError::Proxy(format!("STUN connect failed: {e}"))),
         }
     } else {
@@ -88,7 +98,7 @@ pub async fn stun_probe_family_with_bind(
     req[0..2].copy_from_slice(&0x0001u16.to_be_bytes()); // Binding Request
     req[2..4].copy_from_slice(&0u16.to_be_bytes()); // length
     req[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes()); // magic cookie
-    rand::rng().fill_bytes(&mut req[8..20]); // transaction ID
+    stun_rng().fill(&mut req[8..20]); // transaction ID
 
     let mut buf = [0u8; 256];
     let mut attempt = 0;
@@ -120,16 +130,16 @@ pub async fn stun_probe_family_with_bind(
 
         let magic = 0x2112A442u32.to_be_bytes();
         let txid = &req[8..20];
-    let mut idx = 20;
-    while idx + 4 <= n {
-        let atype = u16::from_be_bytes(buf[idx..idx + 2].try_into().unwrap());
-        let alen = u16::from_be_bytes(buf[idx + 2..idx + 4].try_into().unwrap()) as usize;
-        idx += 4;
-        if idx + alen > n {
-            break;
-        }
+        let mut idx = 20;
+        while idx + 4 <= n {
+            let atype = u16::from_be_bytes(buf[idx..idx + 2].try_into().unwrap());
+            let alen = u16::from_be_bytes(buf[idx + 2..idx + 4].try_into().unwrap()) as usize;
+            idx += 4;
+            if idx + alen > n {
+                break;
+            }
 
-        match atype {
+            match atype {
             0x0020 /* XOR-MAPPED-ADDRESS */ | 0x0001 /* MAPPED-ADDRESS */ => {
                 if alen < 8 {
                     break;
@@ -198,9 +208,8 @@ pub async fn stun_probe_family_with_bind(
             _ => {}
         }
 
-        idx += (alen + 3) & !3;
-    }
-
+            idx += (alen + 3) & !3;
+        }
     }
 
     Ok(None)
@@ -228,7 +237,11 @@ async fn resolve_stun_addr(stun_addr: &str, family: IpFamily) -> Result<Option<S
         .await
         .map_err(|e| ProxyError::Proxy(format!("STUN resolve failed: {e}")))?;
 
-    let target = addrs
-        .find(|a| matches!((a.is_ipv4(), family), (true, IpFamily::V4) | (false, IpFamily::V6)));
+    let target = addrs.find(|a| {
+        matches!(
+            (a.is_ipv4(), family),
+            (true, IpFamily::V4) | (false, IpFamily::V6)
+        )
+    });
     Ok(target)
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -19,8 +21,8 @@ use crate::ip_tracker::UserIpTracker;
 use crate::proxy::route_mode::RouteRuntimeController;
 use crate::startup::StartupTracker;
 use crate::stats::Stats;
-use crate::transport::middle_proxy::MePool;
 use crate::transport::UpstreamManager;
+use crate::transport::middle_proxy::MePool;
 
 mod config_store;
 mod events;
@@ -36,8 +38,8 @@ mod runtime_zero;
 mod users;
 
 use config_store::{current_revision, parse_if_match};
-use http_utils::{error_response, read_json, read_optional_json, success_response};
 use events::ApiEventStore;
+use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
     ApiFailure, CreateUserRequest, HealthData, PatchUserRequest, RotateSecretRequest, SummaryData,
 };
@@ -55,11 +57,11 @@ use runtime_stats::{
     MinimalCacheEntry, build_dcs_data, build_me_writers_data, build_minimal_all_data,
     build_upstreams_data, build_zero_all_data,
 };
+use runtime_watch::spawn_runtime_watchers;
 use runtime_zero::{
     build_limits_effective_data, build_runtime_gates_data, build_security_posture_data,
     build_system_info_data,
 };
-use runtime_watch::spawn_runtime_watchers;
 use users::{create_user, delete_user, patch_user, rotate_secret, users_from_config};
 
 pub(super) struct ApiRuntimeState {
@@ -208,15 +210,15 @@ async fn handle(
         ));
     }
 
-    if !api_cfg.whitelist.is_empty()
-        && !api_cfg
-            .whitelist
-            .iter()
-            .any(|net| net.contains(peer.ip()))
+    if !api_cfg.whitelist.is_empty() && !api_cfg.whitelist.iter().any(|net| net.contains(peer.ip()))
     {
         return Ok(error_response(
             request_id,
-            ApiFailure::new(StatusCode::FORBIDDEN, "forbidden", "Source IP is not allowed"),
+            ApiFailure::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Source IP is not allowed",
+            ),
         ));
     }
 
@@ -347,7 +349,8 @@ async fn handle(
             }
             ("GET", "/v1/runtime/connections/summary") => {
                 let revision = current_revision(&shared.config_path).await?;
-                let data = build_runtime_connections_summary_data(shared.as_ref(), cfg.as_ref()).await;
+                let data =
+                    build_runtime_connections_summary_data(shared.as_ref(), cfg.as_ref()).await;
                 Ok(success_response(StatusCode::OK, data, revision))
             }
             ("GET", "/v1/runtime/events/recent") => {
@@ -389,13 +392,16 @@ async fn handle(
                 let (data, revision) = match result {
                     Ok(ok) => ok,
                     Err(error) => {
-                        shared.runtime_events.record("api.user.create.failed", error.code);
+                        shared
+                            .runtime_events
+                            .record("api.user.create.failed", error.code);
                         return Err(error);
                     }
                 };
-                shared
-                    .runtime_events
-                    .record("api.user.create.ok", format!("username={}", data.user.username));
+                shared.runtime_events.record(
+                    "api.user.create.ok",
+                    format!("username={}", data.user.username),
+                );
                 Ok(success_response(StatusCode::CREATED, data, revision))
             }
             _ => {
@@ -414,7 +420,8 @@ async fn handle(
                             detected_ip_v6,
                         )
                         .await;
-                        if let Some(user_info) = users.into_iter().find(|entry| entry.username == user)
+                        if let Some(user_info) =
+                            users.into_iter().find(|entry| entry.username == user)
                         {
                             return Ok(success_response(StatusCode::OK, user_info, revision));
                         }
@@ -435,7 +442,8 @@ async fn handle(
                             ));
                         }
                         let expected_revision = parse_if_match(req.headers());
-                        let body = read_json::<PatchUserRequest>(req.into_body(), body_limit).await?;
+                        let body =
+                            read_json::<PatchUserRequest>(req.into_body(), body_limit).await?;
                         let result = patch_user(user, body, expected_revision, &shared).await;
                         let (data, revision) = match result {
                             Ok(ok) => ok,
@@ -475,10 +483,9 @@ async fn handle(
                                 return Err(error);
                             }
                         };
-                        shared.runtime_events.record(
-                            "api.user.delete.ok",
-                            format!("username={}", deleted_user),
-                        );
+                        shared
+                            .runtime_events
+                            .record("api.user.delete.ok", format!("username={}", deleted_user));
                         return Ok(success_response(StatusCode::OK, deleted_user, revision));
                     }
                     if method == Method::POST

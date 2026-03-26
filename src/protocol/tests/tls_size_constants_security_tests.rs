@@ -1,0 +1,11 @@
+use super::{MAX_TLS_CIPHERTEXT_SIZE, MAX_TLS_PLAINTEXT_SIZE, MIN_TLS_CLIENT_HELLO_SIZE};
+
+#[test]
+fn tls_size_constants_match_rfc_8446() {
+    assert_eq!(MAX_TLS_PLAINTEXT_SIZE, 16_384);
+    assert_eq!(MAX_TLS_CIPHERTEXT_SIZE, 16_640);
+
+    assert!(MIN_TLS_CLIENT_HELLO_SIZE < 512);
+    assert!(MIN_TLS_CLIENT_HELLO_SIZE > 64);
+    assert!(MAX_TLS_CIPHERTEXT_SIZE > MAX_TLS_PLAINTEXT_SIZE);
+}

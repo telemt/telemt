@@ -167,11 +167,7 @@ async fn current_me_pool_stage_progress(shared: &ApiShared) -> Option<f64> {
     let pool = shared.me_pool.read().await.clone()?;
     let status = pool.api_status_snapshot().await;
     let configured_dc_groups = status.configured_dc_groups;
-    let covered_dc_groups = status
-        .dcs
-        .iter()
-        .filter(|dc| dc.alive_writers > 0)
-        .count();
+    let covered_dc_groups = status.dcs.iter().filter(|dc| dc.alive_writers > 0).count();
 
     let dc_coverage = ratio_01(covered_dc_groups, configured_dc_groups);
     let writer_coverage = ratio_01(status.alive_writers, status.required_writers);

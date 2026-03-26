@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::ApiConfig;
-use crate::stats::{MeWriterTeardownMode, Stats};
-use crate::transport::upstream::IpPreference;
+use crate::stats::Stats;
 use crate::transport::UpstreamRouteKind;
+use crate::transport::upstream::IpPreference;
 
 use super::ApiShared;
 use super::model::{
@@ -68,6 +68,25 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             route_drop_queue_full_total: stats.get_me_route_drop_queue_full(),
             route_drop_queue_full_base_total: stats.get_me_route_drop_queue_full_base(),
             route_drop_queue_full_high_total: stats.get_me_route_drop_queue_full_high(),
+            d2c_batches_total: stats.get_me_d2c_batches_total(),
+            d2c_batch_frames_total: stats.get_me_d2c_batch_frames_total(),
+            d2c_batch_bytes_total: stats.get_me_d2c_batch_bytes_total(),
+            d2c_flush_reason_queue_drain_total: stats.get_me_d2c_flush_reason_queue_drain_total(),
+            d2c_flush_reason_batch_frames_total: stats.get_me_d2c_flush_reason_batch_frames_total(),
+            d2c_flush_reason_batch_bytes_total: stats.get_me_d2c_flush_reason_batch_bytes_total(),
+            d2c_flush_reason_max_delay_total: stats.get_me_d2c_flush_reason_max_delay_total(),
+            d2c_flush_reason_ack_immediate_total: stats
+                .get_me_d2c_flush_reason_ack_immediate_total(),
+            d2c_flush_reason_close_total: stats.get_me_d2c_flush_reason_close_total(),
+            d2c_data_frames_total: stats.get_me_d2c_data_frames_total(),
+            d2c_ack_frames_total: stats.get_me_d2c_ack_frames_total(),
+            d2c_payload_bytes_total: stats.get_me_d2c_payload_bytes_total(),
+            d2c_write_mode_coalesced_total: stats.get_me_d2c_write_mode_coalesced_total(),
+            d2c_write_mode_split_total: stats.get_me_d2c_write_mode_split_total(),
+            d2c_quota_reject_pre_write_total: stats.get_me_d2c_quota_reject_pre_write_total(),
+            d2c_quota_reject_post_write_total: stats.get_me_d2c_quota_reject_post_write_total(),
+            d2c_frame_buf_shrink_total: stats.get_me_d2c_frame_buf_shrink_total(),
+            d2c_frame_buf_shrink_bytes_total: stats.get_me_d2c_frame_buf_shrink_bytes_total(),
             socks_kdf_strict_reject_total: stats.get_me_socks_kdf_strict_reject(),
             socks_kdf_compat_fallback_total: stats.get_me_socks_kdf_compat_fallback(),
             endpoint_quarantine_total: stats.get_me_endpoint_quarantine_total(),
@@ -96,8 +115,6 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             pool_swap_total: stats.get_pool_swap_total(),
             pool_drain_active: stats.get_pool_drain_active(),
             pool_force_close_total: stats.get_pool_force_close_total(),
-            pool_drain_soft_evict_total: stats.get_pool_drain_soft_evict_total(),
-            pool_drain_soft_evict_writer_total: stats.get_pool_drain_soft_evict_writer_total(),
             pool_stale_pick_total: stats.get_pool_stale_pick_total(),
             writer_removed_total: stats.get_me_writer_removed_total(),
             writer_removed_unexpected_total: stats.get_me_writer_removed_unexpected_total(),
@@ -106,29 +123,6 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             refill_failed_total: stats.get_me_refill_failed_total(),
             writer_restored_same_endpoint_total: stats.get_me_writer_restored_same_endpoint_total(),
             writer_restored_fallback_total: stats.get_me_writer_restored_fallback_total(),
-            teardown_attempt_total_normal: stats
-                .get_me_writer_teardown_attempt_total_by_mode(MeWriterTeardownMode::Normal),
-            teardown_attempt_total_hard_detach: stats
-                .get_me_writer_teardown_attempt_total_by_mode(MeWriterTeardownMode::HardDetach),
-            teardown_success_total_normal: stats
-                .get_me_writer_teardown_success_total(MeWriterTeardownMode::Normal),
-            teardown_success_total_hard_detach: stats
-                .get_me_writer_teardown_success_total(MeWriterTeardownMode::HardDetach),
-            teardown_timeout_total: stats.get_me_writer_teardown_timeout_total(),
-            teardown_escalation_total: stats.get_me_writer_teardown_escalation_total(),
-            teardown_noop_total: stats.get_me_writer_teardown_noop_total(),
-            teardown_cleanup_side_effect_failures_total: stats
-                .get_me_writer_cleanup_side_effect_failures_total_all(),
-            teardown_duration_count_total: stats
-                .get_me_writer_teardown_duration_count(MeWriterTeardownMode::Normal)
-                .saturating_add(
-                    stats.get_me_writer_teardown_duration_count(MeWriterTeardownMode::HardDetach),
-                ),
-            teardown_duration_sum_seconds_total: stats
-                .get_me_writer_teardown_duration_sum_seconds(MeWriterTeardownMode::Normal)
-                + stats.get_me_writer_teardown_duration_sum_seconds(
-                    MeWriterTeardownMode::HardDetach,
-                ),
         },
         desync: ZeroDesyncData {
             secure_padding_invalid_total: stats.get_secure_padding_invalid(),
@@ -340,7 +334,6 @@ async fn get_minimal_payload_cached(
             available_pct: status.available_pct,
             required_writers: status.required_writers,
             alive_writers: status.alive_writers,
-            coverage_ratio: status.coverage_ratio,
             coverage_pct: status.coverage_pct,
             fresh_alive_writers: status.fresh_alive_writers,
             fresh_coverage_pct: status.fresh_coverage_pct,
@@ -398,7 +391,6 @@ async fn get_minimal_payload_cached(
                 floor_max: entry.floor_max,
                 floor_capped: entry.floor_capped,
                 alive_writers: entry.alive_writers,
-                coverage_ratio: entry.coverage_ratio,
                 coverage_pct: entry.coverage_pct,
                 fresh_alive_writers: entry.fresh_alive_writers,
                 fresh_coverage_pct: entry.fresh_coverage_pct,
@@ -452,12 +444,6 @@ async fn get_minimal_payload_cached(
         me_reconnect_backoff_cap_ms: runtime.me_reconnect_backoff_cap_ms,
         me_reconnect_fast_retry_count: runtime.me_reconnect_fast_retry_count,
         me_pool_drain_ttl_secs: runtime.me_pool_drain_ttl_secs,
-        me_instadrain: runtime.me_instadrain,
-        me_pool_drain_soft_evict_enabled: runtime.me_pool_drain_soft_evict_enabled,
-        me_pool_drain_soft_evict_grace_secs: runtime.me_pool_drain_soft_evict_grace_secs,
-        me_pool_drain_soft_evict_per_writer: runtime.me_pool_drain_soft_evict_per_writer,
-        me_pool_drain_soft_evict_budget_per_core: runtime.me_pool_drain_soft_evict_budget_per_core,
-        me_pool_drain_soft_evict_cooldown_ms: runtime.me_pool_drain_soft_evict_cooldown_ms,
         me_pool_force_close_secs: runtime.me_pool_force_close_secs,
         me_pool_min_fresh_ratio: runtime.me_pool_min_fresh_ratio,
         me_bind_stale_mode: runtime.me_bind_stale_mode,
@@ -526,7 +512,6 @@ fn disabled_me_writers(now_epoch_secs: u64, reason: &'static str) -> MeWritersDa
             available_pct: 0.0,
             required_writers: 0,
             alive_writers: 0,
-            coverage_ratio: 0.0,
             coverage_pct: 0.0,
             fresh_alive_writers: 0,
             fresh_coverage_pct: 0.0,

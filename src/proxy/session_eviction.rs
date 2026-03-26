@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Session eviction is intentionally disabled in runtime.
 ///
 /// The initial `user+dc` single-lease model caused valid parallel client

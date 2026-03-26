@@ -1,3 +1,8 @@
+#![allow(dead_code)]
+
+// Adaptive buffer policy is staged and retained for deterministic rollout.
+// Keep definitions compiled for compatibility and security test scaffolding.
+
 use dashmap::DashMap;
 use std::cmp::max;
 use std::sync::OnceLock;
@@ -170,7 +175,8 @@ impl SessionAdaptiveController {
             return self.promote(TierTransitionReason::SoftConfirmed, 0);
         }
 
-        let demote_candidate = self.throughput_ema_bps < THROUGHPUT_DOWN_BPS && !tier2_now && !hard_now;
+        let demote_candidate =
+            self.throughput_ema_bps < THROUGHPUT_DOWN_BPS && !tier2_now && !hard_now;
         if demote_candidate {
             self.quiet_ticks = self.quiet_ticks.saturating_add(1);
             if self.quiet_ticks >= QUIET_DEMOTE_TICKS {
@@ -253,10 +259,7 @@ pub fn record_user_tier(user: &str, tier: AdaptiveTier) {
         };
         return;
     }
-    profiles().insert(
-        user.to_string(),
-        UserAdaptiveProfile { tier, seen_at: now },
-    );
+    profiles().insert(user.to_string(), UserAdaptiveProfile { tier, seen_at: now });
 }
 
 pub fn direct_copy_buffers_for_tier(
@@ -339,10 +342,7 @@ mod tests {
                 sample(
                     300_000, // ~9.6 Mbps
                     320_000, // incoming > outgoing to confirm tier2
-                    250_000,
-                    10,
-                    0,
-                    0,
+                    250_000, 10, 0, 0,
                 ),
                 tick_secs,
             );
@@ -358,10 +358,7 @@ mod tests {
     fn test_hard_promotion_on_pending_pressure() {
         let mut ctrl = SessionAdaptiveController::new(AdaptiveTier::Base);
         let transition = ctrl
-            .observe(
-                sample(10_000, 20_000, 10_000, 4, 1, 3),
-                0.25,
-            )
+            .observe(sample(10_000, 20_000, 10_000, 4, 1, 3), 0.25)
             .expect("expected hard promotion");
         assert_eq!(transition.reason, TierTransitionReason::HardPressure);
         assert_eq!(transition.to, AdaptiveTier::Tier1);

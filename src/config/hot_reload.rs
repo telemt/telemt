@@ -31,38 +31,30 @@ use notify::{EventKind, RecursiveMode, Watcher, recommended_watcher};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use crate::config::{
-    LogLevel, MeBindStaleMode, MeFloorMode, MeSocksKdfPolicy, MeTelemetryLevel,
-    MeWriterPickMode,
-};
 use super::load::{LoadedConfig, ProxyConfig};
+use crate::config::{
+    LogLevel, MeBindStaleMode, MeFloorMode, MeSocksKdfPolicy, MeTelemetryLevel, MeWriterPickMode,
+};
 
-const HOT_RELOAD_STABLE_SNAPSHOTS: u8 = 2;
 const HOT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(50);
-const HOT_RELOAD_STABLE_RECHECK: Duration = Duration::from_millis(75);
 
 // ── Hot fields ────────────────────────────────────────────────────────────────
 
 /// Fields that are safe to swap without restarting listeners.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HotFields {
-    pub log_level:               LogLevel,
-    pub ad_tag:                  Option<String>,
-    pub dns_overrides:           Vec<String>,
-    pub desync_all_full:         bool,
-    pub update_every_secs:       u64,
-    pub me_reinit_every_secs:    u64,
-    pub me_reinit_singleflight:  bool,
+    pub log_level: LogLevel,
+    pub ad_tag: Option<String>,
+    pub dns_overrides: Vec<String>,
+    pub desync_all_full: bool,
+    pub update_every_secs: u64,
+    pub me_reinit_every_secs: u64,
+    pub me_reinit_singleflight: bool,
     pub me_reinit_coalesce_window_ms: u64,
-    pub hardswap:                bool,
-    pub me_pool_drain_ttl_secs:  u64,
+    pub hardswap: bool,
+    pub me_pool_drain_ttl_secs: u64,
     pub me_instadrain: bool,
     pub me_pool_drain_threshold: u64,
-    pub me_pool_drain_soft_evict_enabled: bool,
-    pub me_pool_drain_soft_evict_grace_secs: u64,
-    pub me_pool_drain_soft_evict_per_writer: u8,
-    pub me_pool_drain_soft_evict_budget_per_core: u16,
-    pub me_pool_drain_soft_evict_cooldown_ms: u64,
     pub me_pool_min_fresh_ratio: f32,
     pub me_reinit_drain_timeout_secs: u64,
     pub me_hardswap_warmup_delay_min_ms: u64,
@@ -114,18 +106,20 @@ pub struct HotFields {
     pub me_d2c_flush_batch_max_bytes: usize,
     pub me_d2c_flush_batch_max_delay_us: u64,
     pub me_d2c_ack_flush_immediate: bool,
+    pub me_quota_soft_overshoot_bytes: u64,
+    pub me_d2c_frame_buf_shrink_threshold_bytes: usize,
     pub direct_relay_copy_buf_c2s_bytes: usize,
     pub direct_relay_copy_buf_s2c_bytes: usize,
     pub me_health_interval_ms_unhealthy: u64,
     pub me_health_interval_ms_healthy: u64,
     pub me_admission_poll_ms: u64,
     pub me_warn_rate_limit_ms: u64,
-    pub users:                   std::collections::HashMap<String, String>,
-    pub user_ad_tags:            std::collections::HashMap<String, String>,
-    pub user_max_tcp_conns:      std::collections::HashMap<String, usize>,
-    pub user_expirations:        std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
-    pub user_data_quota:         std::collections::HashMap<String, u64>,
-    pub user_max_unique_ips:     std::collections::HashMap<String, usize>,
+    pub users: std::collections::HashMap<String, String>,
+    pub user_ad_tags: std::collections::HashMap<String, String>,
+    pub user_max_tcp_conns: std::collections::HashMap<String, usize>,
+    pub user_expirations: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+    pub user_data_quota: std::collections::HashMap<String, u64>,
+    pub user_max_unique_ips: std::collections::HashMap<String, usize>,
     pub user_max_unique_ips_global_each: usize,
     pub user_max_unique_ips_mode: crate::config::UserMaxUniqueIpsMode,
     pub user_max_unique_ips_window_secs: u64,
@@ -134,27 +128,18 @@ pub struct HotFields {
 impl HotFields {
     pub fn from_config(cfg: &ProxyConfig) -> Self {
         Self {
-            log_level:               cfg.general.log_level.clone(),
-            ad_tag:                  cfg.general.ad_tag.clone(),
-            dns_overrides:           cfg.network.dns_overrides.clone(),
-            desync_all_full:         cfg.general.desync_all_full,
-            update_every_secs:       cfg.general.effective_update_every_secs(),
-            me_reinit_every_secs:    cfg.general.me_reinit_every_secs,
-            me_reinit_singleflight:  cfg.general.me_reinit_singleflight,
+            log_level: cfg.general.log_level.clone(),
+            ad_tag: cfg.general.ad_tag.clone(),
+            dns_overrides: cfg.network.dns_overrides.clone(),
+            desync_all_full: cfg.general.desync_all_full,
+            update_every_secs: cfg.general.effective_update_every_secs(),
+            me_reinit_every_secs: cfg.general.me_reinit_every_secs,
+            me_reinit_singleflight: cfg.general.me_reinit_singleflight,
             me_reinit_coalesce_window_ms: cfg.general.me_reinit_coalesce_window_ms,
-            hardswap:                cfg.general.hardswap,
-            me_pool_drain_ttl_secs:  cfg.general.me_pool_drain_ttl_secs,
+            hardswap: cfg.general.hardswap,
+            me_pool_drain_ttl_secs: cfg.general.me_pool_drain_ttl_secs,
             me_instadrain: cfg.general.me_instadrain,
             me_pool_drain_threshold: cfg.general.me_pool_drain_threshold,
-            me_pool_drain_soft_evict_enabled: cfg.general.me_pool_drain_soft_evict_enabled,
-            me_pool_drain_soft_evict_grace_secs: cfg.general.me_pool_drain_soft_evict_grace_secs,
-            me_pool_drain_soft_evict_per_writer: cfg.general.me_pool_drain_soft_evict_per_writer,
-            me_pool_drain_soft_evict_budget_per_core: cfg
-                .general
-                .me_pool_drain_soft_evict_budget_per_core,
-            me_pool_drain_soft_evict_cooldown_ms: cfg
-                .general
-                .me_pool_drain_soft_evict_cooldown_ms,
             me_pool_min_fresh_ratio: cfg.general.me_pool_min_fresh_ratio,
             me_reinit_drain_timeout_secs: cfg.general.me_reinit_drain_timeout_secs,
             me_hardswap_warmup_delay_min_ms: cfg.general.me_hardswap_warmup_delay_min_ms,
@@ -205,15 +190,11 @@ impl HotFields {
             me_adaptive_floor_min_writers_multi_endpoint: cfg
                 .general
                 .me_adaptive_floor_min_writers_multi_endpoint,
-            me_adaptive_floor_recover_grace_secs: cfg
-                .general
-                .me_adaptive_floor_recover_grace_secs,
+            me_adaptive_floor_recover_grace_secs: cfg.general.me_adaptive_floor_recover_grace_secs,
             me_adaptive_floor_writers_per_core_total: cfg
                 .general
                 .me_adaptive_floor_writers_per_core_total,
-            me_adaptive_floor_cpu_cores_override: cfg
-                .general
-                .me_adaptive_floor_cpu_cores_override,
+            me_adaptive_floor_cpu_cores_override: cfg.general.me_adaptive_floor_cpu_cores_override,
             me_adaptive_floor_max_extra_writers_single_per_core: cfg
                 .general
                 .me_adaptive_floor_max_extra_writers_single_per_core,
@@ -232,26 +213,36 @@ impl HotFields {
             me_adaptive_floor_max_warm_writers_global: cfg
                 .general
                 .me_adaptive_floor_max_warm_writers_global,
-            me_route_backpressure_base_timeout_ms: cfg.general.me_route_backpressure_base_timeout_ms,
-            me_route_backpressure_high_timeout_ms: cfg.general.me_route_backpressure_high_timeout_ms,
-            me_route_backpressure_high_watermark_pct: cfg.general.me_route_backpressure_high_watermark_pct,
+            me_route_backpressure_base_timeout_ms: cfg
+                .general
+                .me_route_backpressure_base_timeout_ms,
+            me_route_backpressure_high_timeout_ms: cfg
+                .general
+                .me_route_backpressure_high_timeout_ms,
+            me_route_backpressure_high_watermark_pct: cfg
+                .general
+                .me_route_backpressure_high_watermark_pct,
             me_reader_route_data_wait_ms: cfg.general.me_reader_route_data_wait_ms,
             me_d2c_flush_batch_max_frames: cfg.general.me_d2c_flush_batch_max_frames,
             me_d2c_flush_batch_max_bytes: cfg.general.me_d2c_flush_batch_max_bytes,
             me_d2c_flush_batch_max_delay_us: cfg.general.me_d2c_flush_batch_max_delay_us,
             me_d2c_ack_flush_immediate: cfg.general.me_d2c_ack_flush_immediate,
+            me_quota_soft_overshoot_bytes: cfg.general.me_quota_soft_overshoot_bytes,
+            me_d2c_frame_buf_shrink_threshold_bytes: cfg
+                .general
+                .me_d2c_frame_buf_shrink_threshold_bytes,
             direct_relay_copy_buf_c2s_bytes: cfg.general.direct_relay_copy_buf_c2s_bytes,
             direct_relay_copy_buf_s2c_bytes: cfg.general.direct_relay_copy_buf_s2c_bytes,
             me_health_interval_ms_unhealthy: cfg.general.me_health_interval_ms_unhealthy,
             me_health_interval_ms_healthy: cfg.general.me_health_interval_ms_healthy,
             me_admission_poll_ms: cfg.general.me_admission_poll_ms,
             me_warn_rate_limit_ms: cfg.general.me_warn_rate_limit_ms,
-            users:                   cfg.access.users.clone(),
-            user_ad_tags:            cfg.access.user_ad_tags.clone(),
-            user_max_tcp_conns:      cfg.access.user_max_tcp_conns.clone(),
-            user_expirations:        cfg.access.user_expirations.clone(),
-            user_data_quota:         cfg.access.user_data_quota.clone(),
-            user_max_unique_ips:     cfg.access.user_max_unique_ips.clone(),
+            users: cfg.access.users.clone(),
+            user_ad_tags: cfg.access.user_ad_tags.clone(),
+            user_max_tcp_conns: cfg.access.user_max_tcp_conns.clone(),
+            user_expirations: cfg.access.user_expirations.clone(),
+            user_data_quota: cfg.access.user_data_quota.clone(),
+            user_max_unique_ips: cfg.access.user_max_unique_ips.clone(),
             user_max_unique_ips_global_each: cfg.access.user_max_unique_ips_global_each,
             user_max_unique_ips_mode: cfg.access.user_max_unique_ips_mode,
             user_max_unique_ips_window_secs: cfg.access.user_max_unique_ips_window_secs,
@@ -346,16 +337,12 @@ impl WatchManifest {
 #[derive(Debug, Default)]
 struct ReloadState {
     applied_snapshot_hash: Option<u64>,
-    candidate_snapshot_hash: Option<u64>,
-    candidate_hits: u8,
 }
 
 impl ReloadState {
     fn new(applied_snapshot_hash: Option<u64>) -> Self {
         Self {
             applied_snapshot_hash,
-            candidate_snapshot_hash: None,
-            candidate_hits: 0,
         }
     }
 
@@ -363,32 +350,8 @@ impl ReloadState {
         self.applied_snapshot_hash == Some(hash)
     }
 
-    fn observe_candidate(&mut self, hash: u64) -> u8 {
-        if self.candidate_snapshot_hash == Some(hash) {
-            self.candidate_hits = self.candidate_hits.saturating_add(1);
-        } else {
-            self.candidate_snapshot_hash = Some(hash);
-            self.candidate_hits = 1;
-        }
-        self.candidate_hits
-    }
-
-    fn reset_candidate(&mut self) {
-        self.candidate_snapshot_hash = None;
-        self.candidate_hits = 0;
-    }
-
     fn mark_applied(&mut self, hash: u64) {
         self.applied_snapshot_hash = Some(hash);
-        self.reset_candidate();
-    }
-
-    fn pending_candidate(&self) -> Option<(u64, u8)> {
-        let hash = self.candidate_snapshot_hash?;
-        if self.candidate_hits < HOT_RELOAD_STABLE_SNAPSHOTS {
-            return Some((hash, self.candidate_hits));
-        }
-        None
     }
 }
 
@@ -481,15 +444,6 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.general.me_pool_drain_ttl_secs = new.general.me_pool_drain_ttl_secs;
     cfg.general.me_instadrain = new.general.me_instadrain;
     cfg.general.me_pool_drain_threshold = new.general.me_pool_drain_threshold;
-    cfg.general.me_pool_drain_soft_evict_enabled = new.general.me_pool_drain_soft_evict_enabled;
-    cfg.general.me_pool_drain_soft_evict_grace_secs =
-        new.general.me_pool_drain_soft_evict_grace_secs;
-    cfg.general.me_pool_drain_soft_evict_per_writer =
-        new.general.me_pool_drain_soft_evict_per_writer;
-    cfg.general.me_pool_drain_soft_evict_budget_per_core =
-        new.general.me_pool_drain_soft_evict_budget_per_core;
-    cfg.general.me_pool_drain_soft_evict_cooldown_ms =
-        new.general.me_pool_drain_soft_evict_cooldown_ms;
     cfg.general.me_pool_min_fresh_ratio = new.general.me_pool_min_fresh_ratio;
     cfg.general.me_reinit_drain_timeout_secs = new.general.me_reinit_drain_timeout_secs;
     cfg.general.me_hardswap_warmup_delay_min_ms = new.general.me_hardswap_warmup_delay_min_ms;
@@ -536,10 +490,14 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
         new.general.me_adaptive_floor_writers_per_core_total;
     cfg.general.me_adaptive_floor_cpu_cores_override =
         new.general.me_adaptive_floor_cpu_cores_override;
-    cfg.general.me_adaptive_floor_max_extra_writers_single_per_core =
-        new.general.me_adaptive_floor_max_extra_writers_single_per_core;
-    cfg.general.me_adaptive_floor_max_extra_writers_multi_per_core =
-        new.general.me_adaptive_floor_max_extra_writers_multi_per_core;
+    cfg.general
+        .me_adaptive_floor_max_extra_writers_single_per_core = new
+        .general
+        .me_adaptive_floor_max_extra_writers_single_per_core;
+    cfg.general
+        .me_adaptive_floor_max_extra_writers_multi_per_core = new
+        .general
+        .me_adaptive_floor_max_extra_writers_multi_per_core;
     cfg.general.me_adaptive_floor_max_active_writers_per_core =
         new.general.me_adaptive_floor_max_active_writers_per_core;
     cfg.general.me_adaptive_floor_max_warm_writers_per_core =
@@ -559,6 +517,9 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.general.me_d2c_flush_batch_max_bytes = new.general.me_d2c_flush_batch_max_bytes;
     cfg.general.me_d2c_flush_batch_max_delay_us = new.general.me_d2c_flush_batch_max_delay_us;
     cfg.general.me_d2c_ack_flush_immediate = new.general.me_d2c_ack_flush_immediate;
+    cfg.general.me_quota_soft_overshoot_bytes = new.general.me_quota_soft_overshoot_bytes;
+    cfg.general.me_d2c_frame_buf_shrink_threshold_bytes =
+        new.general.me_d2c_frame_buf_shrink_threshold_bytes;
     cfg.general.direct_relay_copy_buf_c2s_bytes = new.general.direct_relay_copy_buf_c2s_bytes;
     cfg.general.direct_relay_copy_buf_s2c_bytes = new.general.direct_relay_copy_buf_s2c_bytes;
     cfg.general.me_health_interval_ms_unhealthy = new.general.me_health_interval_ms_unhealthy;
@@ -598,8 +559,7 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         || old.server.api.minimal_runtime_cache_ttl_ms
             != new.server.api.minimal_runtime_cache_ttl_ms
         || old.server.api.runtime_edge_enabled != new.server.api.runtime_edge_enabled
-        || old.server.api.runtime_edge_cache_ttl_ms
-            != new.server.api.runtime_edge_cache_ttl_ms
+        || old.server.api.runtime_edge_cache_ttl_ms != new.server.api.runtime_edge_cache_ttl_ms
         || old.server.api.runtime_edge_top_n != new.server.api.runtime_edge_top_n
         || old.server.api.runtime_edge_events_capacity
             != new.server.api.runtime_edge_events_capacity
@@ -615,8 +575,6 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         || old.server.listen_tcp != new.server.listen_tcp
         || old.server.listen_unix_sock != new.server.listen_unix_sock
         || old.server.listen_unix_sock_perm != new.server.listen_unix_sock_perm
-        || old.server.max_connections != new.server.max_connections
-        || old.server.accept_permit_timeout_ms != new.server.accept_permit_timeout_ms
     {
         warned = true;
         warn!("config reload: server listener settings changed; restart required");
@@ -637,6 +595,22 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         || old.censorship.tls_full_cert_ttl_secs != new.censorship.tls_full_cert_ttl_secs
         || old.censorship.alpn_enforce != new.censorship.alpn_enforce
         || old.censorship.mask_proxy_protocol != new.censorship.mask_proxy_protocol
+        || old.censorship.mask_shape_hardening != new.censorship.mask_shape_hardening
+        || old.censorship.mask_shape_bucket_floor_bytes
+            != new.censorship.mask_shape_bucket_floor_bytes
+        || old.censorship.mask_shape_bucket_cap_bytes != new.censorship.mask_shape_bucket_cap_bytes
+        || old.censorship.mask_shape_above_cap_blur != new.censorship.mask_shape_above_cap_blur
+        || old.censorship.mask_shape_above_cap_blur_max_bytes
+            != new.censorship.mask_shape_above_cap_blur_max_bytes
+        || old.censorship.mask_relay_max_bytes != new.censorship.mask_relay_max_bytes
+        || old.censorship.mask_classifier_prefetch_timeout_ms
+            != new.censorship.mask_classifier_prefetch_timeout_ms
+        || old.censorship.mask_timing_normalization_enabled
+            != new.censorship.mask_timing_normalization_enabled
+        || old.censorship.mask_timing_normalization_floor_ms
+            != new.censorship.mask_timing_normalization_floor_ms
+        || old.censorship.mask_timing_normalization_ceiling_ms
+            != new.censorship.mask_timing_normalization_ceiling_ms
     {
         warned = true;
         warn!("config reload: censorship settings changed; restart required");
@@ -688,10 +662,6 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         warned = true;
         warn!("config reload: general.me_route_no_writer_* changed; restart required");
     }
-    if old.general.me_c2me_send_timeout_ms != new.general.me_c2me_send_timeout_ms {
-        warned = true;
-        warn!("config reload: general.me_c2me_send_timeout_ms changed; restart required");
-    }
     if old.general.unknown_dc_log_path != new.general.unknown_dc_log_path
         || old.general.unknown_dc_file_log_enabled != new.general.unknown_dc_file_log_enabled
     {
@@ -702,9 +672,11 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         warned = true;
         warn!("config reload: general.me_init_retry_attempts changed; restart required");
     }
-    if old.general.me2dc_fallback != new.general.me2dc_fallback {
+    if old.general.me2dc_fallback != new.general.me2dc_fallback
+        || old.general.me2dc_fast != new.general.me2dc_fast
+    {
         warned = true;
-        warn!("config reload: general.me2dc_fallback changed; restart required");
+        warn!("config reload: general.me2dc_fallback/me2dc_fast changed; restart required");
     }
     if old.general.proxy_config_v4_cache_path != new.general.proxy_config_v4_cache_path
         || old.general.proxy_config_v6_cache_path != new.general.proxy_config_v6_cache_path
@@ -886,25 +858,6 @@ fn log_changes(
             old_hot.me_pool_drain_threshold, new_hot.me_pool_drain_threshold,
         );
     }
-    if old_hot.me_pool_drain_soft_evict_enabled != new_hot.me_pool_drain_soft_evict_enabled
-        || old_hot.me_pool_drain_soft_evict_grace_secs
-            != new_hot.me_pool_drain_soft_evict_grace_secs
-        || old_hot.me_pool_drain_soft_evict_per_writer
-            != new_hot.me_pool_drain_soft_evict_per_writer
-        || old_hot.me_pool_drain_soft_evict_budget_per_core
-            != new_hot.me_pool_drain_soft_evict_budget_per_core
-        || old_hot.me_pool_drain_soft_evict_cooldown_ms
-            != new_hot.me_pool_drain_soft_evict_cooldown_ms
-    {
-        info!(
-            "config reload: me_pool_drain_soft_evict: enabled={} grace={}s per_writer={} budget_per_core={} cooldown={}ms",
-            new_hot.me_pool_drain_soft_evict_enabled,
-            new_hot.me_pool_drain_soft_evict_grace_secs,
-            new_hot.me_pool_drain_soft_evict_per_writer,
-            new_hot.me_pool_drain_soft_evict_budget_per_core,
-            new_hot.me_pool_drain_soft_evict_cooldown_ms
-        );
-    }
 
     if (old_hot.me_pool_min_fresh_ratio - new_hot.me_pool_min_fresh_ratio).abs() > f32::EPSILON {
         info!(
@@ -938,8 +891,7 @@ fn log_changes(
     {
         info!(
             "config reload: me_bind_stale: mode={:?} ttl={}s",
-            new_hot.me_bind_stale_mode,
-            new_hot.me_bind_stale_ttl_secs
+            new_hot.me_bind_stale_mode, new_hot.me_bind_stale_ttl_secs
         );
     }
     if old_hot.me_secret_atomic_snapshot != new_hot.me_secret_atomic_snapshot
@@ -1019,8 +971,7 @@ fn log_changes(
     if old_hot.me_socks_kdf_policy != new_hot.me_socks_kdf_policy {
         info!(
             "config reload: me_socks_kdf_policy: {:?} → {:?}",
-            old_hot.me_socks_kdf_policy,
-            new_hot.me_socks_kdf_policy,
+            old_hot.me_socks_kdf_policy, new_hot.me_socks_kdf_policy,
         );
     }
 
@@ -1074,8 +1025,7 @@ fn log_changes(
         || old_hot.me_route_backpressure_high_watermark_pct
             != new_hot.me_route_backpressure_high_watermark_pct
         || old_hot.me_reader_route_data_wait_ms != new_hot.me_reader_route_data_wait_ms
-        || old_hot.me_health_interval_ms_unhealthy
-            != new_hot.me_health_interval_ms_unhealthy
+        || old_hot.me_health_interval_ms_unhealthy != new_hot.me_health_interval_ms_unhealthy
         || old_hot.me_health_interval_ms_healthy != new_hot.me_health_interval_ms_healthy
         || old_hot.me_admission_poll_ms != new_hot.me_admission_poll_ms
         || old_hot.me_warn_rate_limit_ms != new_hot.me_warn_rate_limit_ms
@@ -1097,34 +1047,47 @@ fn log_changes(
         || old_hot.me_d2c_flush_batch_max_bytes != new_hot.me_d2c_flush_batch_max_bytes
         || old_hot.me_d2c_flush_batch_max_delay_us != new_hot.me_d2c_flush_batch_max_delay_us
         || old_hot.me_d2c_ack_flush_immediate != new_hot.me_d2c_ack_flush_immediate
+        || old_hot.me_quota_soft_overshoot_bytes != new_hot.me_quota_soft_overshoot_bytes
+        || old_hot.me_d2c_frame_buf_shrink_threshold_bytes
+            != new_hot.me_d2c_frame_buf_shrink_threshold_bytes
         || old_hot.direct_relay_copy_buf_c2s_bytes != new_hot.direct_relay_copy_buf_c2s_bytes
         || old_hot.direct_relay_copy_buf_s2c_bytes != new_hot.direct_relay_copy_buf_s2c_bytes
     {
         info!(
-            "config reload: relay_tuning: me_d2c_frames={} me_d2c_bytes={} me_d2c_delay_us={} me_ack_flush_immediate={} direct_buf_c2s={} direct_buf_s2c={}",
+            "config reload: relay_tuning: me_d2c_frames={} me_d2c_bytes={} me_d2c_delay_us={} me_ack_flush_immediate={} me_quota_soft_overshoot_bytes={} me_d2c_frame_buf_shrink_threshold_bytes={} direct_buf_c2s={} direct_buf_s2c={}",
             new_hot.me_d2c_flush_batch_max_frames,
             new_hot.me_d2c_flush_batch_max_bytes,
             new_hot.me_d2c_flush_batch_max_delay_us,
             new_hot.me_d2c_ack_flush_immediate,
+            new_hot.me_quota_soft_overshoot_bytes,
+            new_hot.me_d2c_frame_buf_shrink_threshold_bytes,
             new_hot.direct_relay_copy_buf_c2s_bytes,
             new_hot.direct_relay_copy_buf_s2c_bytes,
         );
     }
 
     if old_hot.users != new_hot.users {
-        let mut added: Vec<&String> = new_hot.users.keys()
+        let mut added: Vec<&String> = new_hot
+            .users
+            .keys()
             .filter(|u| !old_hot.users.contains_key(*u))
             .collect();
         added.sort();
 
-        let mut removed: Vec<&String> = old_hot.users.keys()
+        let mut removed: Vec<&String> = old_hot
+            .users
+            .keys()
             .filter(|u| !new_hot.users.contains_key(*u))
             .collect();
         removed.sort();
 
-        let mut changed: Vec<&String> = new_hot.users.keys()
+        let mut changed: Vec<&String> = new_hot
+            .users
+            .keys()
             .filter(|u| {
-                old_hot.users.get(*u)
+                old_hot
+                    .users
+                    .get(*u)
                     .map(|s| s != &new_hot.users[*u])
                     .unwrap_or(false)
             })
@@ -1134,10 +1097,18 @@ fn log_changes(
         if !added.is_empty() {
             info!(
                 "config reload: users added: [{}]",
-                added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                added
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             let host = resolve_link_host(new_cfg, detected_ip_v4, detected_ip_v6);
-            let port = new_cfg.general.links.public_port.unwrap_or(new_cfg.server.port);
+            let port = new_cfg
+                .general
+                .links
+                .public_port
+                .unwrap_or(new_cfg.server.port);
             for user in &added {
                 if let Some(secret) = new_hot.users.get(*user) {
                     print_user_links(user, secret, &host, port, new_cfg);
@@ -1147,13 +1118,21 @@ fn log_changes(
         if !removed.is_empty() {
             info!(
                 "config reload: users removed: [{}]",
-                removed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                removed
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         if !changed.is_empty() {
             info!(
                 "config reload: users secret changed: [{}]",
-                changed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                changed
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
     }
@@ -1184,8 +1163,7 @@ fn log_changes(
     }
     if old_hot.user_max_unique_ips_global_each != new_hot.user_max_unique_ips_global_each
         || old_hot.user_max_unique_ips_mode != new_hot.user_max_unique_ips_mode
-        || old_hot.user_max_unique_ips_window_secs
-            != new_hot.user_max_unique_ips_window_secs
+        || old_hot.user_max_unique_ips_window_secs != new_hot.user_max_unique_ips_window_secs
     {
         info!(
             "config reload: user_max_unique_ips policy global_each={} mode={:?} window={}s",
@@ -1208,7 +1186,6 @@ fn reload_config(
     let loaded = match ProxyConfig::load_with_metadata(config_path) {
         Ok(loaded) => loaded,
         Err(e) => {
-            reload_state.reset_candidate();
             error!("config reload: failed to parse {:?}: {}", config_path, e);
             return None;
         }
@@ -1221,23 +1198,14 @@ fn reload_config(
     let next_manifest = WatchManifest::from_source_files(&source_files);
 
     if let Err(e) = new_cfg.validate() {
-        reload_state.reset_candidate();
-        error!("config reload: validation failed: {}; keeping old config", e);
+        error!(
+            "config reload: validation failed: {}; keeping old config",
+            e
+        );
         return Some(next_manifest);
     }
 
     if reload_state.is_applied(rendered_hash) {
-        return Some(next_manifest);
-    }
-
-    let candidate_hits = reload_state.observe_candidate(rendered_hash);
-    if candidate_hits < HOT_RELOAD_STABLE_SNAPSHOTS {
-        info!(
-            snapshot_hash = rendered_hash,
-            candidate_hits,
-            required_hits = HOT_RELOAD_STABLE_SNAPSHOTS,
-            "config reload: candidate snapshot observed but not stable yet"
-        );
         return Some(next_manifest);
     }
 
@@ -1260,7 +1228,6 @@ fn reload_config(
     if old_hot.dns_overrides != applied_hot.dns_overrides
         && let Err(e) = crate::network::dns_overrides::install_entries(&applied_hot.dns_overrides)
     {
-        reload_state.reset_candidate();
         error!(
             "config reload: invalid network.dns_overrides: {}; keeping old config",
             e
@@ -1281,73 +1248,6 @@ fn reload_config(
     Some(next_manifest)
 }
 
-async fn reload_with_internal_stable_rechecks(
-    config_path: &PathBuf,
-    config_tx: &watch::Sender<Arc<ProxyConfig>>,
-    log_tx: &watch::Sender<LogLevel>,
-    detected_ip_v4: Option<IpAddr>,
-    detected_ip_v6: Option<IpAddr>,
-    reload_state: &mut ReloadState,
-) -> Option<WatchManifest> {
-    let mut next_manifest = reload_config(
-        config_path,
-        config_tx,
-        log_tx,
-        detected_ip_v4,
-        detected_ip_v6,
-        reload_state,
-    );
-    let mut rechecks_left = HOT_RELOAD_STABLE_SNAPSHOTS.saturating_sub(1);
-
-    while rechecks_left > 0 {
-        let Some((snapshot_hash, candidate_hits)) = reload_state.pending_candidate() else {
-            break;
-        };
-
-        info!(
-            snapshot_hash,
-            candidate_hits,
-            required_hits = HOT_RELOAD_STABLE_SNAPSHOTS,
-            rechecks_left,
-            recheck_delay_ms = HOT_RELOAD_STABLE_RECHECK.as_millis(),
-            "config reload: scheduling internal stable recheck"
-        );
-        tokio::time::sleep(HOT_RELOAD_STABLE_RECHECK).await;
-
-        let recheck_manifest = reload_config(
-            config_path,
-            config_tx,
-            log_tx,
-            detected_ip_v4,
-            detected_ip_v6,
-            reload_state,
-        );
-        if recheck_manifest.is_some() {
-            next_manifest = recheck_manifest;
-        }
-
-        if reload_state.is_applied(snapshot_hash) {
-            info!(
-                snapshot_hash,
-                "config reload: applied after internal stable recheck"
-            );
-            break;
-        }
-
-        if reload_state.pending_candidate().is_none() {
-            info!(
-                snapshot_hash,
-                "config reload: internal stable recheck aborted"
-            );
-            break;
-        }
-
-        rechecks_left = rechecks_left.saturating_sub(1);
-    }
-
-    next_manifest
-}
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Spawn the hot-reload watcher task.
@@ -1366,7 +1266,7 @@ pub fn spawn_config_watcher(
 ) -> (watch::Receiver<Arc<ProxyConfig>>, watch::Receiver<LogLevel>) {
     let initial_level = initial.general.log_level.clone();
     let (config_tx, config_rx) = watch::channel(initial);
-    let (log_tx, log_rx)       = watch::channel(initial_level);
+    let (log_tx, log_rx) = watch::channel(initial_level);
 
     let config_path = normalize_watch_path(&config_path);
     let initial_loaded = ProxyConfig::load_with_metadata(&config_path).ok();
@@ -1383,25 +1283,29 @@ pub fn spawn_config_watcher(
 
         let tx_inotify = notify_tx.clone();
         let manifest_for_inotify = manifest_state.clone();
-        let mut inotify_watcher = match recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let Ok(event) = res else { return };
-            if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
-                return;
-            }
-            let is_our_file = manifest_for_inotify
-                .read()
-                .map(|manifest| manifest.matches_event_paths(&event.paths))
-                .unwrap_or(false);
-            if is_our_file {
-                let _ = tx_inotify.try_send(());
-            }
-        }) {
-            Ok(watcher) => Some(watcher),
-            Err(e) => {
-                warn!("config watcher: inotify unavailable: {}", e);
-                None
-            }
-        };
+        let mut inotify_watcher =
+            match recommended_watcher(move |res: notify::Result<notify::Event>| {
+                let Ok(event) = res else { return };
+                if !matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
+                    return;
+                }
+                let is_our_file = manifest_for_inotify
+                    .read()
+                    .map(|manifest| manifest.matches_event_paths(&event.paths))
+                    .unwrap_or(false);
+                if is_our_file {
+                    let _ = tx_inotify.try_send(());
+                }
+            }) {
+                Ok(watcher) => Some(watcher),
+                Err(e) => {
+                    warn!("config watcher: inotify unavailable: {}", e);
+                    None
+                }
+            };
         apply_watch_manifest(
             inotify_watcher.as_mut(),
             Option::<&mut notify::poll::PollWatcher>::None,
@@ -1417,7 +1321,10 @@ pub fn spawn_config_watcher(
         let mut poll_watcher = match notify::poll::PollWatcher::new(
             move |res: notify::Result<notify::Event>| {
                 let Ok(event) = res else { return };
-                if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+                if !matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
                     return;
                 }
                 let is_our_file = manifest_for_poll
@@ -1465,22 +1372,36 @@ pub fn spawn_config_watcher(
                 }
             }
             #[cfg(not(unix))]
-            if notify_rx.recv().await.is_none() { break; }
+            if notify_rx.recv().await.is_none() {
+                break;
+            }
 
             // Debounce: drain extra events that arrive within a short quiet window.
             tokio::time::sleep(HOT_RELOAD_DEBOUNCE).await;
             while notify_rx.try_recv().is_ok() {}
 
-            if let Some(next_manifest) = reload_with_internal_stable_rechecks(
+            let mut next_manifest = reload_config(
                 &config_path,
                 &config_tx,
                 &log_tx,
                 detected_ip_v4,
                 detected_ip_v6,
                 &mut reload_state,
-            )
-            .await
-            {
+            );
+            if next_manifest.is_none() {
+                tokio::time::sleep(HOT_RELOAD_DEBOUNCE).await;
+                while notify_rx.try_recv().is_ok() {}
+                next_manifest = reload_config(
+                    &config_path,
+                    &config_tx,
+                    &log_tx,
+                    detected_ip_v4,
+                    detected_ip_v6,
+                    &mut reload_state,
+                );
+            }
+
+            if let Some(next_manifest) = next_manifest {
                 apply_watch_manifest(
                     inotify_watcher.as_mut(),
                     poll_watcher.as_mut(),
@@ -1555,7 +1476,10 @@ mod tests {
         new.server.port = old.server.port.saturating_add(1);
 
         let applied = overlay_hot_fields(&old, &new);
-        assert_eq!(HotFields::from_config(&old), HotFields::from_config(&applied));
+        assert_eq!(
+            HotFields::from_config(&old),
+            HotFields::from_config(&applied)
+        );
         assert_eq!(applied.server.port, old.server.port);
     }
 
@@ -1574,7 +1498,10 @@ mod tests {
             applied.general.me_bind_stale_mode,
             new.general.me_bind_stale_mode
         );
-        assert_ne!(HotFields::from_config(&old), HotFields::from_config(&applied));
+        assert_ne!(
+            HotFields::from_config(&old),
+            HotFields::from_config(&applied)
+        );
     }
 
     #[test]
@@ -1588,7 +1515,10 @@ mod tests {
             applied.general.me_keepalive_interval_secs,
             old.general.me_keepalive_interval_secs
         );
-        assert_eq!(HotFields::from_config(&old), HotFields::from_config(&applied));
+        assert_eq!(
+            HotFields::from_config(&old),
+            HotFields::from_config(&applied)
+        );
     }
 
     #[test]
@@ -1600,69 +1530,35 @@ mod tests {
 
         let applied = overlay_hot_fields(&old, &new);
         assert_eq!(applied.general.hardswap, new.general.hardswap);
-        assert_eq!(applied.general.use_middle_proxy, old.general.use_middle_proxy);
+        assert_eq!(
+            applied.general.use_middle_proxy,
+            old.general.use_middle_proxy
+        );
         assert!(!config_equal(&applied, &new));
     }
 
     #[test]
-    fn reload_requires_stable_snapshot_before_hot_apply() {
+    fn reload_applies_hot_change_on_first_observed_snapshot() {
         let initial_tag = "11111111111111111111111111111111";
         let final_tag = "22222222222222222222222222222222";
         let path = temp_config_path("telemt_hot_reload_stable");
 
         write_reload_config(&path, Some(initial_tag), None);
         let initial_cfg = Arc::new(ProxyConfig::load(&path).unwrap());
-        let initial_hash = ProxyConfig::load_with_metadata(&path).unwrap().rendered_hash;
-        let (config_tx, _config_rx) = watch::channel(initial_cfg.clone());
-        let (log_tx, _log_rx) = watch::channel(initial_cfg.general.log_level.clone());
-        let mut reload_state = ReloadState::new(Some(initial_hash));
-
-        write_reload_config(&path, None, None);
-        reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
-        assert_eq!(
-            config_tx.borrow().general.ad_tag.as_deref(),
-            Some(initial_tag)
-        );
-
-        write_reload_config(&path, Some(final_tag), None);
-        reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
-        assert_eq!(
-            config_tx.borrow().general.ad_tag.as_deref(),
-            Some(initial_tag)
-        );
-
-        reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
-        assert_eq!(config_tx.borrow().general.ad_tag.as_deref(), Some(final_tag));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[tokio::test]
-    async fn reload_cycle_applies_after_single_external_event() {
-        let initial_tag = "10101010101010101010101010101010";
-        let final_tag = "20202020202020202020202020202020";
-        let path = temp_config_path("telemt_hot_reload_single_event");
-
-        write_reload_config(&path, Some(initial_tag), None);
-        let initial_cfg = Arc::new(ProxyConfig::load(&path).unwrap());
-        let initial_hash = ProxyConfig::load_with_metadata(&path).unwrap().rendered_hash;
+        let initial_hash = ProxyConfig::load_with_metadata(&path)
+            .unwrap()
+            .rendered_hash;
         let (config_tx, _config_rx) = watch::channel(initial_cfg.clone());
         let (log_tx, _log_rx) = watch::channel(initial_cfg.general.log_level.clone());
         let mut reload_state = ReloadState::new(Some(initial_hash));
 
         write_reload_config(&path, Some(final_tag), None);
-        reload_with_internal_stable_rechecks(
-            &path,
-            &config_tx,
-            &log_tx,
-            None,
-            None,
-            &mut reload_state,
-        )
-        .await
-        .unwrap();
+        reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
+        assert_eq!(
+            config_tx.borrow().general.ad_tag.as_deref(),
+            Some(final_tag)
+        );
 
-        assert_eq!(config_tx.borrow().general.ad_tag.as_deref(), Some(final_tag));
         let _ = std::fs::remove_file(path);
     }
 
@@ -1674,18 +1570,51 @@ mod tests {
 
         write_reload_config(&path, Some(initial_tag), None);
         let initial_cfg = Arc::new(ProxyConfig::load(&path).unwrap());
-        let initial_hash = ProxyConfig::load_with_metadata(&path).unwrap().rendered_hash;
+        let initial_hash = ProxyConfig::load_with_metadata(&path)
+            .unwrap()
+            .rendered_hash;
         let (config_tx, _config_rx) = watch::channel(initial_cfg.clone());
         let (log_tx, _log_rx) = watch::channel(initial_cfg.general.log_level.clone());
         let mut reload_state = ReloadState::new(Some(initial_hash));
 
         write_reload_config(&path, Some(final_tag), Some(initial_cfg.server.port + 1));
         reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
-        reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
 
         let applied = config_tx.borrow().clone();
         assert_eq!(applied.general.ad_tag.as_deref(), Some(final_tag));
         assert_eq!(applied.server.port, initial_cfg.server.port);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reload_recovers_after_parse_error_on_next_attempt() {
+        let initial_tag = "cccccccccccccccccccccccccccccccc";
+        let final_tag = "dddddddddddddddddddddddddddddddd";
+        let path = temp_config_path("telemt_hot_reload_parse_recovery");
+
+        write_reload_config(&path, Some(initial_tag), None);
+        let initial_cfg = Arc::new(ProxyConfig::load(&path).unwrap());
+        let initial_hash = ProxyConfig::load_with_metadata(&path)
+            .unwrap()
+            .rendered_hash;
+        let (config_tx, _config_rx) = watch::channel(initial_cfg.clone());
+        let (log_tx, _log_rx) = watch::channel(initial_cfg.general.log_level.clone());
+        let mut reload_state = ReloadState::new(Some(initial_hash));
+
+        std::fs::write(&path, "[access.users\nuser = \"broken\"\n").unwrap();
+        assert!(reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).is_none());
+        assert_eq!(
+            config_tx.borrow().general.ad_tag.as_deref(),
+            Some(initial_tag)
+        );
+
+        write_reload_config(&path, Some(final_tag), None);
+        reload_config(&path, &config_tx, &log_tx, None, None, &mut reload_state).unwrap();
+        assert_eq!(
+            config_tx.borrow().general.ad_tag.as_deref(),
+            Some(final_tag)
+        );
 
         let _ = std::fs::remove_file(path);
     }

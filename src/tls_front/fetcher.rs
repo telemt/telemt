@@ -1,5 +1,9 @@
+#![allow(clippy::too_many_arguments)]
+
+use dashmap::DashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -19,7 +23,8 @@ use rustls::{DigitallySignedStruct, Error as RustlsError};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
 
-use crate::crypto::SecureRandom;
+use crate::config::TlsFetchProfile;
+use crate::crypto::{SecureRandom, sha256};
 use crate::network::dns_overrides::resolve_socket_addr;
 use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
@@ -76,6 +81,199 @@ impl ServerCertVerifier for NoVerify {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TlsFetchStrategy {
+    pub profiles: Vec<TlsFetchProfile>,
+    pub strict_route: bool,
+    pub attempt_timeout: Duration,
+    pub total_budget: Duration,
+    pub grease_enabled: bool,
+    pub deterministic: bool,
+    pub profile_cache_ttl: Duration,
+}
+
+impl TlsFetchStrategy {
+    #[allow(dead_code)]
+    pub fn single_attempt(connect_timeout: Duration) -> Self {
+        Self {
+            profiles: vec![TlsFetchProfile::CompatTls12],
+            strict_route: false,
+            attempt_timeout: connect_timeout.max(Duration::from_millis(1)),
+            total_budget: connect_timeout.max(Duration::from_millis(1)),
+            grease_enabled: false,
+            deterministic: false,
+            profile_cache_ttl: Duration::ZERO,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProfileCacheKey {
+    host: String,
+    port: u16,
+    sni: String,
+    scope: Option<String>,
+    proxy_protocol: u8,
+    route_hint: RouteHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RouteHint {
+    Direct,
+    Upstream,
+    Unix,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProfileCacheValue {
+    profile: TlsFetchProfile,
+    updated_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchErrorKind {
+    Connect,
+    Route,
+    EarlyEof,
+    Timeout,
+    ServerHelloMissing,
+    TlsAlert,
+    Parse,
+    Other,
+}
+
+static PROFILE_CACHE: OnceLock<DashMap<ProfileCacheKey, ProfileCacheValue>> = OnceLock::new();
+
+fn profile_cache() -> &'static DashMap<ProfileCacheKey, ProfileCacheValue> {
+    PROFILE_CACHE.get_or_init(DashMap::new)
+}
+
+fn route_hint(
+    upstream: Option<&std::sync::Arc<crate::transport::UpstreamManager>>,
+    unix_sock: Option<&str>,
+) -> RouteHint {
+    if unix_sock.is_some() {
+        RouteHint::Unix
+    } else if upstream.is_some() {
+        RouteHint::Upstream
+    } else {
+        RouteHint::Direct
+    }
+}
+
+fn profile_cache_key(
+    host: &str,
+    port: u16,
+    sni: &str,
+    upstream: Option<&std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
+    proxy_protocol: u8,
+    unix_sock: Option<&str>,
+) -> ProfileCacheKey {
+    ProfileCacheKey {
+        host: host.to_string(),
+        port,
+        sni: sni.to_string(),
+        scope: scope.map(ToString::to_string),
+        proxy_protocol,
+        route_hint: route_hint(upstream, unix_sock),
+    }
+}
+
+fn classify_fetch_error(err: &anyhow::Error) -> FetchErrorKind {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return match io.kind() {
+                std::io::ErrorKind::TimedOut => FetchErrorKind::Timeout,
+                std::io::ErrorKind::UnexpectedEof => FetchErrorKind::EarlyEof,
+                std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::AddrNotAvailable => FetchErrorKind::Connect,
+                _ => FetchErrorKind::Other,
+            };
+        }
+    }
+
+    let message = err.to_string().to_lowercase();
+    if message.contains("upstream route") {
+        FetchErrorKind::Route
+    } else if message.contains("serverhello not received") {
+        FetchErrorKind::ServerHelloMissing
+    } else if message.contains("alert") {
+        FetchErrorKind::TlsAlert
+    } else if message.contains("parse") {
+        FetchErrorKind::Parse
+    } else if message.contains("timed out") || message.contains("deadline has elapsed") {
+        FetchErrorKind::Timeout
+    } else if message.contains("eof") {
+        FetchErrorKind::EarlyEof
+    } else {
+        FetchErrorKind::Other
+    }
+}
+
+fn order_profiles(
+    strategy: &TlsFetchStrategy,
+    cache_key: Option<&ProfileCacheKey>,
+    now: Instant,
+) -> Vec<TlsFetchProfile> {
+    let mut ordered = if strategy.profiles.is_empty() {
+        vec![TlsFetchProfile::CompatTls12]
+    } else {
+        strategy.profiles.clone()
+    };
+
+    if strategy.profile_cache_ttl.is_zero() {
+        return ordered;
+    }
+
+    let Some(key) = cache_key else {
+        return ordered;
+    };
+
+    if let Some(cached) = profile_cache().get(key) {
+        let age = now.saturating_duration_since(cached.updated_at);
+        if age > strategy.profile_cache_ttl {
+            drop(cached);
+            profile_cache().remove(key);
+            return ordered;
+        }
+
+        if let Some(pos) = ordered
+            .iter()
+            .position(|profile| *profile == cached.profile)
+            && pos != 0
+        {
+            ordered.swap(0, pos);
+        }
+    }
+
+    ordered
+}
+
+fn remember_profile_success(
+    strategy: &TlsFetchStrategy,
+    cache_key: Option<ProfileCacheKey>,
+    profile: TlsFetchProfile,
+    now: Instant,
+) {
+    if strategy.profile_cache_ttl.is_zero() {
+        return;
+    }
+    let Some(key) = cache_key else {
+        return;
+    };
+    profile_cache().insert(
+        key,
+        ProfileCacheValue {
+            profile,
+            updated_at: now,
+        },
+    );
+}
+
 fn build_client_config() -> Arc<ClientConfig> {
     let root = rustls::RootCertStore::empty();
 
@@ -93,7 +291,114 @@ fn build_client_config() -> Arc<ClientConfig> {
     Arc::new(config)
 }
 
-fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
+fn deterministic_bytes(seed: &str, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut counter: u32 = 0;
+    while out.len() < len {
+        let mut chunk_seed = Vec::with_capacity(seed.len() + std::mem::size_of::<u32>());
+        chunk_seed.extend_from_slice(seed.as_bytes());
+        chunk_seed.extend_from_slice(&counter.to_le_bytes());
+        out.extend_from_slice(&sha256(&chunk_seed));
+        counter = counter.wrapping_add(1);
+    }
+    out.truncate(len);
+    out
+}
+
+fn profile_cipher_suites(profile: TlsFetchProfile) -> &'static [u16] {
+    const MODERN_CHROME: &[u16] = &[
+        0x1301, 0x1302, 0x1303, 0xc02b, 0xc02c, 0xcca9, 0xc02f, 0xc030, 0xcca8, 0x009e, 0x00ff,
+    ];
+    const MODERN_FIREFOX: &[u16] = &[
+        0x1301, 0x1303, 0x1302, 0xc02b, 0xcca9, 0xc02c, 0xc02f, 0xcca8, 0xc030, 0x009e, 0x00ff,
+    ];
+    const COMPAT_TLS12: &[u16] = &[
+        0xc02b, 0xc02c, 0xc02f, 0xc030, 0xcca9, 0xcca8, 0x1301, 0x1302, 0x1303, 0x009e, 0x00ff,
+    ];
+    const LEGACY_MINIMAL: &[u16] = &[0xc02b, 0xc02f, 0x1301, 0x1302, 0x00ff];
+
+    match profile {
+        TlsFetchProfile::ModernChromeLike => MODERN_CHROME,
+        TlsFetchProfile::ModernFirefoxLike => MODERN_FIREFOX,
+        TlsFetchProfile::CompatTls12 => COMPAT_TLS12,
+        TlsFetchProfile::LegacyMinimal => LEGACY_MINIMAL,
+    }
+}
+
+fn profile_groups(profile: TlsFetchProfile) -> &'static [u16] {
+    const MODERN: &[u16] = &[0x001d, 0x0017, 0x0018]; // x25519, secp256r1, secp384r1
+    const COMPAT: &[u16] = &[0x001d, 0x0017];
+    const LEGACY: &[u16] = &[0x0017];
+
+    match profile {
+        TlsFetchProfile::ModernChromeLike | TlsFetchProfile::ModernFirefoxLike => MODERN,
+        TlsFetchProfile::CompatTls12 => COMPAT,
+        TlsFetchProfile::LegacyMinimal => LEGACY,
+    }
+}
+
+fn profile_sig_algs(profile: TlsFetchProfile) -> &'static [u16] {
+    const MODERN: &[u16] = &[0x0804, 0x0805, 0x0403, 0x0503, 0x0806];
+    const COMPAT: &[u16] = &[0x0403, 0x0503, 0x0804, 0x0805];
+    const LEGACY: &[u16] = &[0x0403, 0x0804];
+
+    match profile {
+        TlsFetchProfile::ModernChromeLike | TlsFetchProfile::ModernFirefoxLike => MODERN,
+        TlsFetchProfile::CompatTls12 => COMPAT,
+        TlsFetchProfile::LegacyMinimal => LEGACY,
+    }
+}
+
+fn profile_alpn(profile: TlsFetchProfile) -> &'static [&'static [u8]] {
+    const H2_HTTP11: &[&[u8]] = &[b"h2", b"http/1.1"];
+    const HTTP11: &[&[u8]] = &[b"http/1.1"];
+    match profile {
+        TlsFetchProfile::ModernChromeLike | TlsFetchProfile::ModernFirefoxLike => H2_HTTP11,
+        TlsFetchProfile::CompatTls12 | TlsFetchProfile::LegacyMinimal => HTTP11,
+    }
+}
+
+fn profile_supported_versions(profile: TlsFetchProfile) -> &'static [u16] {
+    const MODERN: &[u16] = &[0x0304, 0x0303];
+    const COMPAT: &[u16] = &[0x0303, 0x0304];
+    const LEGACY: &[u16] = &[0x0303];
+    match profile {
+        TlsFetchProfile::ModernChromeLike | TlsFetchProfile::ModernFirefoxLike => MODERN,
+        TlsFetchProfile::CompatTls12 => COMPAT,
+        TlsFetchProfile::LegacyMinimal => LEGACY,
+    }
+}
+
+fn profile_padding_target(profile: TlsFetchProfile) -> usize {
+    match profile {
+        TlsFetchProfile::ModernChromeLike => 220,
+        TlsFetchProfile::ModernFirefoxLike => 200,
+        TlsFetchProfile::CompatTls12 => 180,
+        TlsFetchProfile::LegacyMinimal => 64,
+    }
+}
+
+fn grease_value(rng: &SecureRandom, deterministic: bool, seed: &str) -> u16 {
+    const GREASE_VALUES: [u16; 16] = [
+        0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a, 0x5a5a, 0x6a6a, 0x7a7a, 0x8a8a, 0x9a9a, 0xaaaa,
+        0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
+    ];
+    if deterministic {
+        let idx = deterministic_bytes(seed, 1)[0] as usize % GREASE_VALUES.len();
+        GREASE_VALUES[idx]
+    } else {
+        let idx = (rng.bytes(1)[0] as usize) % GREASE_VALUES.len();
+        GREASE_VALUES[idx]
+    }
+}
+
+fn build_client_hello(
+    sni: &str,
+    rng: &SecureRandom,
+    profile: TlsFetchProfile,
+    grease_enabled: bool,
+    deterministic: bool,
+) -> Vec<u8> {
     // === ClientHello body ===
     let mut body = Vec::new();
 
@@ -101,21 +406,24 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     body.extend_from_slice(&[0x03, 0x03]);
 
     // Random
-    body.extend_from_slice(&rng.bytes(32));
+    if deterministic {
+        body.extend_from_slice(&deterministic_bytes(&format!("tls-fetch-random:{sni}"), 32));
+    } else {
+        body.extend_from_slice(&rng.bytes(32));
+    }
 
     // Session ID: empty
     body.push(0);
 
-    // Cipher suites (common minimal set, TLS1.3 + a few 1.2 fallbacks)
-    let cipher_suites: [u8; 10] = [
-        0x13, 0x01, // TLS_AES_128_GCM_SHA256
-        0x13, 0x02, // TLS_AES_256_GCM_SHA384
-        0x13, 0x03, // TLS_CHACHA20_POLY1305_SHA256
-        0x00, 0x2f, // TLS_RSA_WITH_AES_128_CBC_SHA (legacy)
-        0x00, 0xff, // RENEGOTIATION_INFO_SCSV
-    ];
-    body.extend_from_slice(&(cipher_suites.len() as u16).to_be_bytes());
-    body.extend_from_slice(&cipher_suites);
+    let mut cipher_suites = profile_cipher_suites(profile).to_vec();
+    if grease_enabled {
+        let grease = grease_value(rng, deterministic, &format!("cipher:{sni}"));
+        cipher_suites.insert(0, grease);
+    }
+    body.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
+    for suite in cipher_suites {
+        body.extend_from_slice(&suite.to_be_bytes());
+    }
 
     // Compression methods: null only
     body.push(1);
@@ -136,7 +444,11 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     exts.extend_from_slice(&sni_ext);
 
     // supported_groups
-    let groups: [u16; 2] = [0x001d, 0x0017]; // x25519, secp256r1
+    let mut groups = profile_groups(profile).to_vec();
+    if grease_enabled {
+        let grease = grease_value(rng, deterministic, &format!("group:{sni}"));
+        groups.insert(0, grease);
+    }
     exts.extend_from_slice(&0x000au16.to_be_bytes());
     exts.extend_from_slice(&((2 + groups.len() * 2) as u16).to_be_bytes());
     exts.extend_from_slice(&(groups.len() as u16 * 2).to_be_bytes());
@@ -145,7 +457,11 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     }
 
     // signature_algorithms
-    let sig_algs: [u16; 4] = [0x0804, 0x0805, 0x0403, 0x0503]; // rsa_pss_rsae_sha256/384, ecdsa_secp256r1_sha256, rsa_pkcs1_sha256
+    let mut sig_algs = profile_sig_algs(profile).to_vec();
+    if grease_enabled {
+        let grease = grease_value(rng, deterministic, &format!("sigalg:{sni}"));
+        sig_algs.insert(0, grease);
+    }
     exts.extend_from_slice(&0x000du16.to_be_bytes());
     exts.extend_from_slice(&((2 + sig_algs.len() * 2) as u16).to_be_bytes());
     exts.extend_from_slice(&(sig_algs.len() as u16 * 2).to_be_bytes());
@@ -153,8 +469,12 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
         exts.extend_from_slice(&a.to_be_bytes());
     }
 
-    // supported_versions (TLS1.3 + TLS1.2)
-    let versions: [u16; 2] = [0x0304, 0x0303];
+    // supported_versions
+    let mut versions = profile_supported_versions(profile).to_vec();
+    if grease_enabled {
+        let grease = grease_value(rng, deterministic, &format!("version:{sni}"));
+        versions.insert(0, grease);
+    }
     exts.extend_from_slice(&0x002bu16.to_be_bytes());
     exts.extend_from_slice(&((1 + versions.len() * 2) as u16).to_be_bytes());
     exts.push((versions.len() * 2) as u8);
@@ -163,7 +483,14 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     }
 
     // key_share (x25519)
-    let key = gen_key_share(rng);
+    let key = if deterministic {
+        let det = deterministic_bytes(&format!("keyshare:{sni}"), 32);
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&det);
+        key
+    } else {
+        gen_key_share(rng)
+    };
     let mut keyshare = Vec::with_capacity(4 + key.len());
     keyshare.extend_from_slice(&0x001du16.to_be_bytes()); // group
     keyshare.extend_from_slice(&(key.len() as u16).to_be_bytes());
@@ -173,18 +500,29 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     exts.extend_from_slice(&(keyshare.len() as u16).to_be_bytes());
     exts.extend_from_slice(&keyshare);
 
-    // ALPN (http/1.1)
-    let alpn_proto = b"http/1.1";
-    exts.extend_from_slice(&0x0010u16.to_be_bytes());
-    exts.extend_from_slice(&((2 + 1 + alpn_proto.len()) as u16).to_be_bytes());
-    exts.extend_from_slice(&((1 + alpn_proto.len()) as u16).to_be_bytes());
-    exts.push(alpn_proto.len() as u8);
-    exts.extend_from_slice(alpn_proto);
+    // ALPN
+    let mut alpn_list = Vec::new();
+    for proto in profile_alpn(profile) {
+        alpn_list.push(proto.len() as u8);
+        alpn_list.extend_from_slice(proto);
+    }
+    if !alpn_list.is_empty() {
+        exts.extend_from_slice(&0x0010u16.to_be_bytes());
+        exts.extend_from_slice(&((2 + alpn_list.len()) as u16).to_be_bytes());
+        exts.extend_from_slice(&(alpn_list.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&alpn_list);
+    }
+
+    if grease_enabled {
+        let grease = grease_value(rng, deterministic, &format!("ext:{sni}"));
+        exts.extend_from_slice(&grease.to_be_bytes());
+        exts.extend_from_slice(&0u16.to_be_bytes());
+    }
 
     // padding to reduce recognizability and keep length ~500 bytes
-    const TARGET_EXT_LEN: usize = 180;
-    if exts.len() < TARGET_EXT_LEN {
-        let remaining = TARGET_EXT_LEN - exts.len();
+    let target_ext_len = profile_padding_target(profile);
+    if exts.len() < target_ext_len {
+        let remaining = target_ext_len - exts.len();
         if remaining > 4 {
             let pad_len = remaining - 4; // minus type+len
             exts.extend_from_slice(&0x0015u16.to_be_bytes()); // padding extension
@@ -400,12 +738,41 @@ async fn connect_tcp_with_upstream(
     connect_timeout: Duration,
     upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
     scope: Option<&str>,
+    strict_route: bool,
 ) -> Result<UpstreamStream> {
     if let Some(manager) = upstream {
-        if let Some(addr) = resolve_socket_addr(host, port) {
+        let resolved = if let Some(addr) = resolve_socket_addr(host, port) {
+            Some(addr)
+        } else {
+            match tokio::net::lookup_host((host, port)).await {
+                Ok(mut addrs) => addrs.find(|a| a.is_ipv4()),
+                Err(e) => {
+                    if strict_route {
+                        return Err(anyhow!(
+                            "upstream route DNS resolution failed for {host}:{port}: {e}"
+                        ));
+                    }
+                    warn!(
+                        host = %host,
+                        port = port,
+                        scope = ?scope,
+                        error = %e,
+                        "Upstream DNS resolution failed, using direct connect"
+                    );
+                    None
+                }
+            }
+        };
+
+        if let Some(addr) = resolved {
             match manager.connect(addr, None, scope).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
+                    if strict_route {
+                        return Err(anyhow!(
+                            "upstream route connect failed for {host}:{port}: {e}"
+                        ));
+                    }
                     warn!(
                         host = %host,
                         port = port,
@@ -415,21 +782,10 @@ async fn connect_tcp_with_upstream(
                     );
                 }
             }
-        } else if let Ok(mut addrs) = tokio::net::lookup_host((host, port)).await
-            && let Some(addr) = addrs.find(|a| a.is_ipv4())
-        {
-            match manager.connect(addr, None, scope).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) => {
-                    warn!(
-                        host = %host,
-                        port = port,
-                        scope = ?scope,
-                        error = %e,
-                        "Upstream connect failed, using direct connect"
-                    );
-                }
-            }
+        } else if strict_route {
+            return Err(anyhow!(
+                "upstream route resolution produced no usable address for {host}:{port}"
+            ));
         }
     }
     Ok(UpstreamStream::Tcp(
@@ -469,12 +825,15 @@ async fn fetch_via_raw_tls_stream<S>(
     sni: &str,
     connect_timeout: Duration,
     proxy_protocol: u8,
+    profile: TlsFetchProfile,
+    grease_enabled: bool,
+    deterministic: bool,
 ) -> Result<TlsFetchResult>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let rng = SecureRandom::new();
-    let client_hello = build_client_hello(sni, &rng);
+    let client_hello = build_client_hello(sni, &rng, profile, grease_enabled, deterministic);
     timeout(connect_timeout, async {
         if proxy_protocol > 0 {
             let header = match proxy_protocol {
@@ -548,6 +907,10 @@ async fn fetch_via_raw_tls(
     scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
+    strict_route: bool,
+    profile: TlsFetchProfile,
+    grease_enabled: bool,
+    deterministic: bool,
 ) -> Result<TlsFetchResult> {
     #[cfg(unix)]
     if let Some(sock_path) = unix_sock {
@@ -558,8 +921,16 @@ async fn fetch_via_raw_tls(
                     sock = %sock_path,
                     "Raw TLS fetch using mask unix socket"
                 );
-                return fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol)
-                    .await;
+                return fetch_via_raw_tls_stream(
+                    stream,
+                    sni,
+                    connect_timeout,
+                    proxy_protocol,
+                    profile,
+                    grease_enabled,
+                    deterministic,
+                )
+                .await;
             }
             Ok(Err(e)) => {
                 warn!(
@@ -582,8 +953,19 @@ async fn fetch_via_raw_tls(
     #[cfg(not(unix))]
     let _ = unix_sock;
 
-    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope).await?;
-    fetch_via_raw_tls_stream(stream, sni, connect_timeout, proxy_protocol).await
+    let stream =
+        connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope, strict_route)
+            .await?;
+    fetch_via_raw_tls_stream(
+        stream,
+        sni,
+        connect_timeout,
+        proxy_protocol,
+        profile,
+        grease_enabled,
+        deterministic,
+    )
+    .await
 }
 
 async fn fetch_via_rustls_stream<S>(
@@ -689,6 +1071,7 @@ async fn fetch_via_rustls(
     scope: Option<&str>,
     proxy_protocol: u8,
     unix_sock: Option<&str>,
+    strict_route: bool,
 ) -> Result<TlsFetchResult> {
     #[cfg(unix)]
     if let Some(sock_path) = unix_sock {
@@ -722,16 +1105,153 @@ async fn fetch_via_rustls(
     #[cfg(not(unix))]
     let _ = unix_sock;
 
-    let stream = connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope).await?;
+    let stream =
+        connect_tcp_with_upstream(host, port, connect_timeout, upstream, scope, strict_route)
+            .await?;
     fetch_via_rustls_stream(stream, host, sni, proxy_protocol).await
 }
 
-/// Fetch real TLS metadata for the given SNI.
-///
-/// Strategy:
-/// 1) Probe raw TLS for realistic ServerHello and ApplicationData record sizes.
-/// 2) Fetch certificate chain via rustls to build cert payload.
-/// 3) Merge both when possible; otherwise auto-fallback to whichever succeeded.
+/// Fetch real TLS metadata with an adaptive multi-profile strategy.
+pub async fn fetch_real_tls_with_strategy(
+    host: &str,
+    port: u16,
+    sni: &str,
+    strategy: &TlsFetchStrategy,
+    upstream: Option<std::sync::Arc<crate::transport::UpstreamManager>>,
+    scope: Option<&str>,
+    proxy_protocol: u8,
+    unix_sock: Option<&str>,
+) -> Result<TlsFetchResult> {
+    let attempt_timeout = strategy.attempt_timeout.max(Duration::from_millis(1));
+    let total_budget = strategy.total_budget.max(Duration::from_millis(1));
+    let started_at = Instant::now();
+    let cache_key = profile_cache_key(
+        host,
+        port,
+        sni,
+        upstream.as_ref(),
+        scope,
+        proxy_protocol,
+        unix_sock,
+    );
+    let profiles = order_profiles(strategy, Some(&cache_key), started_at);
+
+    let mut raw_result = None;
+    let mut raw_last_error: Option<anyhow::Error> = None;
+    let mut raw_last_error_kind = FetchErrorKind::Other;
+    let mut selected_profile = None;
+
+    for profile in profiles {
+        let elapsed = started_at.elapsed();
+        if elapsed >= total_budget {
+            break;
+        }
+        let timeout_for_attempt = attempt_timeout.min(total_budget - elapsed);
+
+        match fetch_via_raw_tls(
+            host,
+            port,
+            sni,
+            timeout_for_attempt,
+            upstream.clone(),
+            scope,
+            proxy_protocol,
+            unix_sock,
+            strategy.strict_route,
+            profile,
+            strategy.grease_enabled,
+            strategy.deterministic,
+        )
+        .await
+        {
+            Ok(res) => {
+                selected_profile = Some(profile);
+                raw_result = Some(res);
+                break;
+            }
+            Err(err) => {
+                let kind = classify_fetch_error(&err);
+                warn!(
+                    sni = %sni,
+                    profile = profile.as_str(),
+                    error_kind = ?kind,
+                    error = %err,
+                    "Raw TLS fetch attempt failed"
+                );
+                raw_last_error_kind = kind;
+                raw_last_error = Some(err);
+                if strategy.strict_route && matches!(kind, FetchErrorKind::Route) {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(profile) = selected_profile {
+        remember_profile_success(strategy, Some(cache_key), profile, Instant::now());
+    }
+
+    if raw_result.is_none()
+        && strategy.strict_route
+        && matches!(raw_last_error_kind, FetchErrorKind::Route)
+    {
+        if let Some(err) = raw_last_error {
+            return Err(err);
+        }
+        return Err(anyhow!("TLS fetch strict-route failure"));
+    }
+
+    let elapsed = started_at.elapsed();
+    if elapsed >= total_budget {
+        return match raw_result {
+            Some(raw) => Ok(raw),
+            None => {
+                Err(raw_last_error.unwrap_or_else(|| anyhow!("TLS fetch total budget exhausted")))
+            }
+        };
+    }
+
+    let rustls_timeout = attempt_timeout.min(total_budget - elapsed);
+    let rustls_result = fetch_via_rustls(
+        host,
+        port,
+        sni,
+        rustls_timeout,
+        upstream,
+        scope,
+        proxy_protocol,
+        unix_sock,
+        strategy.strict_route,
+    )
+    .await;
+
+    match rustls_result {
+        Ok(rustls) => {
+            if let Some(mut raw) = raw_result {
+                raw.cert_info = rustls.cert_info;
+                raw.cert_payload = rustls.cert_payload;
+                raw.behavior_profile.source = TlsProfileSource::Merged;
+                debug!(sni = %sni, "Fetched TLS metadata via adaptive raw probe + rustls cert chain");
+                Ok(raw)
+            } else {
+                Ok(rustls)
+            }
+        }
+        Err(err) => {
+            if let Some(raw) = raw_result {
+                warn!(sni = %sni, error = %err, "Rustls cert fetch failed, using raw TLS metadata only");
+                Ok(raw)
+            } else if let Some(raw_err) = raw_last_error {
+                Err(anyhow!("TLS fetch failed (raw: {raw_err}; rustls: {err})"))
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Fetch real TLS metadata for the given SNI using a single-attempt compatibility strategy.
+#[allow(dead_code)]
 pub async fn fetch_real_tls(
     host: &str,
     port: u16,
@@ -742,62 +1262,30 @@ pub async fn fetch_real_tls(
     proxy_protocol: u8,
     unix_sock: Option<&str>,
 ) -> Result<TlsFetchResult> {
-    let raw_result = match fetch_via_raw_tls(
+    let strategy = TlsFetchStrategy::single_attempt(connect_timeout);
+    fetch_real_tls_with_strategy(
         host,
         port,
         sni,
-        connect_timeout,
-        upstream.clone(),
-        scope,
-        proxy_protocol,
-        unix_sock,
-    )
-    .await
-    {
-        Ok(res) => Some(res),
-        Err(e) => {
-            warn!(sni = %sni, error = %e, "Raw TLS fetch failed");
-            None
-        }
-    };
-
-    match fetch_via_rustls(
-        host,
-        port,
-        sni,
-        connect_timeout,
+        &strategy,
         upstream,
         scope,
         proxy_protocol,
         unix_sock,
     )
     .await
-    {
-        Ok(rustls_result) => {
-            if let Some(mut raw) = raw_result {
-                raw.cert_info = rustls_result.cert_info;
-                raw.cert_payload = rustls_result.cert_payload;
-                raw.behavior_profile.source = TlsProfileSource::Merged;
-                debug!(sni = %sni, "Fetched TLS metadata via raw probe + rustls cert chain");
-                Ok(raw)
-            } else {
-                Ok(rustls_result)
-            }
-        }
-        Err(e) => {
-            if let Some(raw) = raw_result {
-                warn!(sni = %sni, error = %e, "Rustls cert fetch failed, using raw TLS metadata only");
-                Ok(raw)
-            } else {
-                Err(e)
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_behavior_profile, encode_tls13_certificate_message};
+    use std::time::{Duration, Instant};
+
+    use super::{
+        ProfileCacheValue, TlsFetchStrategy, build_client_hello, derive_behavior_profile,
+        encode_tls13_certificate_message, order_profiles, profile_cache, profile_cache_key,
+    };
+    use crate::config::TlsFetchProfile;
+    use crate::crypto::SecureRandom;
     use crate::protocol::constants::{
         TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
     };
@@ -810,7 +1298,8 @@ mod tests {
     #[test]
     fn test_encode_tls13_certificate_message_single_cert() {
         let cert = vec![0x30, 0x03, 0x02, 0x01, 0x01];
-        let message = encode_tls13_certificate_message(&[cert.clone()]).expect("message");
+        let message =
+            encode_tls13_certificate_message(std::slice::from_ref(&cert)).expect("message");
 
         assert_eq!(message[0], 0x0b);
         assert_eq!(read_u24(&message[1..4]), message.len() - 4);
@@ -844,5 +1333,94 @@ mod tests {
         assert_eq!(profile.app_data_record_sizes, vec![1400]);
         assert_eq!(profile.ticket_record_sizes, vec![220, 180]);
         assert_eq!(profile.source, TlsProfileSource::Raw);
+    }
+
+    #[test]
+    fn test_order_profiles_prioritizes_fresh_cached_winner() {
+        let strategy = TlsFetchStrategy {
+            profiles: vec![
+                TlsFetchProfile::ModernChromeLike,
+                TlsFetchProfile::CompatTls12,
+                TlsFetchProfile::LegacyMinimal,
+            ],
+            strict_route: true,
+            attempt_timeout: Duration::from_secs(1),
+            total_budget: Duration::from_secs(2),
+            grease_enabled: false,
+            deterministic: false,
+            profile_cache_ttl: Duration::from_secs(60),
+        };
+        let cache_key = profile_cache_key(
+            "mask.example",
+            443,
+            "tls.example",
+            None,
+            Some("tls"),
+            0,
+            None,
+        );
+        profile_cache().remove(&cache_key);
+        profile_cache().insert(
+            cache_key.clone(),
+            ProfileCacheValue {
+                profile: TlsFetchProfile::CompatTls12,
+                updated_at: Instant::now(),
+            },
+        );
+
+        let ordered = order_profiles(&strategy, Some(&cache_key), Instant::now());
+        assert_eq!(ordered[0], TlsFetchProfile::CompatTls12);
+        profile_cache().remove(&cache_key);
+    }
+
+    #[test]
+    fn test_order_profiles_drops_expired_cached_winner() {
+        let strategy = TlsFetchStrategy {
+            profiles: vec![
+                TlsFetchProfile::ModernFirefoxLike,
+                TlsFetchProfile::CompatTls12,
+            ],
+            strict_route: true,
+            attempt_timeout: Duration::from_secs(1),
+            total_budget: Duration::from_secs(2),
+            grease_enabled: false,
+            deterministic: false,
+            profile_cache_ttl: Duration::from_secs(5),
+        };
+        let cache_key =
+            profile_cache_key("mask2.example", 443, "tls2.example", None, None, 0, None);
+        profile_cache().remove(&cache_key);
+        profile_cache().insert(
+            cache_key.clone(),
+            ProfileCacheValue {
+                profile: TlsFetchProfile::CompatTls12,
+                updated_at: Instant::now() - Duration::from_secs(6),
+            },
+        );
+
+        let ordered = order_profiles(&strategy, Some(&cache_key), Instant::now());
+        assert_eq!(ordered[0], TlsFetchProfile::ModernFirefoxLike);
+        assert!(profile_cache().get(&cache_key).is_none());
+    }
+
+    #[test]
+    fn test_deterministic_client_hello_is_stable() {
+        let rng = SecureRandom::new();
+        let first = build_client_hello(
+            "stable.example",
+            &rng,
+            TlsFetchProfile::ModernChromeLike,
+            true,
+            true,
+        );
+        let second = build_client_hello(
+            "stable.example",
+            &rng,
+            TlsFetchProfile::ModernChromeLike,
+            true,
+            true,
+        );
+
+        assert_eq!(first, second);
     }
 }

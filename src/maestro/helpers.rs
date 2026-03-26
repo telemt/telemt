@@ -1,14 +1,31 @@
-use std::time::Duration;
+#![allow(clippy::items_after_test_module)]
+
 use std::path::PathBuf;
+use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::cli;
 use crate::config::ProxyConfig;
+use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::{
-    ProxyConfigData, fetch_proxy_config_with_raw, load_proxy_config_cache, save_proxy_config_cache,
+    ProxyConfigData, fetch_proxy_config_with_raw_via_upstream, load_proxy_config_cache,
+    save_proxy_config_cache,
 };
+
+pub(crate) fn resolve_runtime_config_path(
+    config_path_cli: &str,
+    startup_cwd: &std::path::Path,
+) -> PathBuf {
+    let raw = PathBuf::from(config_path_cli);
+    let absolute = if raw.is_absolute() {
+        raw
+    } else {
+        startup_cwd.join(raw)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
 
 pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
     let mut config_path = "config.toml".to_string();
@@ -40,7 +57,9 @@ pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
                 }
             }
             s if s.starts_with("--data-path=") => {
-                data_path = Some(PathBuf::from(s.trim_start_matches("--data-path=").to_string()));
+                data_path = Some(PathBuf::from(
+                    s.trim_start_matches("--data-path=").to_string(),
+                ));
             }
             "--silent" | "-s" => {
                 silent = true;
@@ -58,7 +77,9 @@ pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
                 eprintln!("Usage: telemt [config.toml] [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --data-path <DIR>       Set data directory (absolute path; overrides config value)");
+                eprintln!(
+                    "  --data-path <DIR>       Set data directory (absolute path; overrides config value)"
+                );
                 eprintln!("  --silent, -s            Suppress info logs");
                 eprintln!("  --log-level <LEVEL>     debug|verbose|normal|silent");
                 eprintln!("  --help, -h              Show this help");
@@ -96,9 +117,52 @@ pub(crate) fn parse_cli() -> (String, Option<PathBuf>, bool, Option<String>) {
     (config_path, data_path, silent, log_level)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::resolve_runtime_config_path;
+
+    #[test]
+    fn resolve_runtime_config_path_anchors_relative_to_startup_cwd() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let startup_cwd = std::env::temp_dir().join(format!("telemt_cfg_path_{nonce}"));
+        std::fs::create_dir_all(&startup_cwd).unwrap();
+        let target = startup_cwd.join("config.toml");
+        std::fs::write(&target, " ").unwrap();
+
+        let resolved = resolve_runtime_config_path("config.toml", &startup_cwd);
+        assert_eq!(resolved, target.canonicalize().unwrap());
+
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_dir(&startup_cwd);
+    }
+
+    #[test]
+    fn resolve_runtime_config_path_keeps_absolute_for_missing_file() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let startup_cwd = std::env::temp_dir().join(format!("telemt_cfg_path_missing_{nonce}"));
+        std::fs::create_dir_all(&startup_cwd).unwrap();
+
+        let resolved = resolve_runtime_config_path("missing.toml", &startup_cwd);
+        assert_eq!(resolved, startup_cwd.join("missing.toml"));
+
+        let _ = std::fs::remove_dir(&startup_cwd);
+    }
+}
+
 pub(crate) fn print_proxy_links(host: &str, port: u16, config: &ProxyConfig) {
     info!(target: "telemt::links", "--- Proxy Links ({}) ---", host);
-    for user_name in config.general.links.show.resolve_users(&config.access.users) {
+    for user_name in config
+        .general
+        .links
+        .show
+        .resolve_users(&config.access.users)
+    {
         if let Some(secret) = config.access.users.get(user_name) {
             info!(target: "telemt::links", "User: {}", user_name);
             if config.general.modes.classic {
@@ -226,9 +290,10 @@ pub(crate) async fn load_startup_proxy_config_snapshot(
     cache_path: Option<&str>,
     me2dc_fallback: bool,
     label: &'static str,
+    upstream: Option<std::sync::Arc<UpstreamManager>>,
 ) -> Option<ProxyConfigData> {
     loop {
-        match fetch_proxy_config_with_raw(url).await {
+        match fetch_proxy_config_with_raw_via_upstream(url, upstream.clone()).await {
             Ok((cfg, raw)) => {
                 if !cfg.map.is_empty() {
                     if let Some(path) = cache_path
@@ -239,7 +304,10 @@ pub(crate) async fn load_startup_proxy_config_snapshot(
                     return Some(cfg);
                 }
 
-                warn!(snapshot = label, url, "Startup proxy-config is empty; trying disk cache");
+                warn!(
+                    snapshot = label,
+                    url, "Startup proxy-config is empty; trying disk cache"
+                );
                 if let Some(path) = cache_path {
                     match load_proxy_config_cache(path).await {
                         Ok(cached) if !cached.map.is_empty() => {
@@ -254,8 +322,7 @@ pub(crate) async fn load_startup_proxy_config_snapshot(
                         Ok(_) => {
                             warn!(
                                 snapshot = label,
-                                path,
-                                "Startup proxy-config cache is empty; ignoring cache file"
+                                path, "Startup proxy-config cache is empty; ignoring cache file"
                             );
                         }
                         Err(cache_err) => {
@@ -299,8 +366,7 @@ pub(crate) async fn load_startup_proxy_config_snapshot(
                         Ok(_) => {
                             warn!(
                                 snapshot = label,
-                                path,
-                                "Startup proxy-config cache is empty; ignoring cache file"
+                                path, "Startup proxy-config cache is empty; ignoring cache file"
                             );
                         }
                         Err(cache_err) => {

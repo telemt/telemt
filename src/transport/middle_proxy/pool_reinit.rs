@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use rand::seq::SliceRandom;
-use tracing::{debug, info, warn};
 use std::collections::hash_map::DefaultHasher;
+use tracing::{debug, info, warn};
 
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
@@ -37,16 +37,23 @@ impl MePool {
     }
 
     fn clear_pending_hardswap_state(&self) {
-        self.pending_hardswap_generation.store(0, Ordering::Relaxed);
-        self.pending_hardswap_started_at_epoch_secs
+        self.reinit
+            .pending_hardswap_generation
             .store(0, Ordering::Relaxed);
-        self.pending_hardswap_map_hash.store(0, Ordering::Relaxed);
-        self.warm_generation.store(0, Ordering::Relaxed);
+        self.reinit
+            .pending_hardswap_started_at_epoch_secs
+            .store(0, Ordering::Relaxed);
+        self.reinit
+            .pending_hardswap_map_hash
+            .store(0, Ordering::Relaxed);
+        self.reinit.warm_generation.store(0, Ordering::Relaxed);
     }
 
     async fn promote_warm_generation_to_active(&self, generation: u64) {
-        self.active_generation.store(generation, Ordering::Relaxed);
-        self.warm_generation.store(0, Ordering::Relaxed);
+        self.reinit
+            .active_generation
+            .store(generation, Ordering::Relaxed);
+        self.reinit.warm_generation.store(0, Ordering::Relaxed);
 
         let ws = self.writers.read().await;
         for writer in ws.iter() {
@@ -104,7 +111,11 @@ impl MePool {
                     .map(|(ip, port)| SocketAddr::new(*ip, *port))
                     .collect();
                 let dc_endpoints: HashSet<SocketAddr> = dc_addrs.iter().copied().collect();
-                if self.active_writer_count_for_dc_endpoints(*dc, &dc_endpoints).await == 0 {
+                if self
+                    .active_writer_count_for_dc_endpoints(*dc, &dc_endpoints)
+                    .await
+                    == 0
+                {
                     let mut shuffled = dc_addrs.clone();
                     shuffled.shuffle(&mut rand::rng());
                     for addr in shuffled {
@@ -147,9 +158,47 @@ impl MePool {
         out
     }
 
+    pub(super) async fn has_non_draining_writer_per_desired_dc_group(&self) -> bool {
+        let desired_by_dc = self.desired_dc_endpoints().await;
+        let required_dcs: HashSet<i32> = desired_by_dc
+            .iter()
+            .filter_map(|(dc, endpoints)| {
+                if endpoints.is_empty() {
+                    None
+                } else {
+                    Some(*dc)
+                }
+            })
+            .collect();
+        if required_dcs.is_empty() {
+            return true;
+        }
+
+        let ws = self.writers.read().await;
+        let mut covered_dcs = HashSet::<i32>::with_capacity(required_dcs.len());
+        for writer in ws.iter() {
+            if writer.draining.load(Ordering::Relaxed) {
+                continue;
+            }
+            if required_dcs.contains(&writer.writer_dc) {
+                covered_dcs.insert(writer.writer_dc);
+                if covered_dcs.len() == required_dcs.len() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn hardswap_warmup_connect_delay_ms(&self) -> u64 {
-        let min_ms = self.me_hardswap_warmup_delay_min_ms.load(Ordering::Relaxed);
-        let max_ms = self.me_hardswap_warmup_delay_max_ms.load(Ordering::Relaxed);
+        let min_ms = self
+            .reinit
+            .me_hardswap_warmup_delay_min_ms
+            .load(Ordering::Relaxed);
+        let max_ms = self
+            .reinit
+            .me_hardswap_warmup_delay_max_ms
+            .load(Ordering::Relaxed);
         let (min_ms, max_ms) = if min_ms <= max_ms {
             (min_ms, max_ms)
         } else {
@@ -163,9 +212,11 @@ impl MePool {
 
     fn hardswap_warmup_backoff_ms(&self, pass_idx: usize) -> u64 {
         let base_ms = self
+            .reinit
             .me_hardswap_warmup_pass_backoff_base_ms
             .load(Ordering::Relaxed);
-        let cap_ms = (self.me_reconnect_backoff_cap.as_millis() as u64).max(base_ms);
+        let cap_ms =
+            (self.reconnect_runtime.me_reconnect_backoff_cap.as_millis() as u64).max(base_ms);
         let shift = (pass_idx as u32).min(20);
         let scaled = base_ms.saturating_mul(1u64 << shift);
         let core = scaled.min(cap_ms);
@@ -208,6 +259,7 @@ impl MePool {
         desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>,
     ) {
         let extra_passes = self
+            .reinit
             .me_hardswap_warmup_extra_passes
             .load(Ordering::Relaxed)
             .min(10) as usize;
@@ -333,15 +385,23 @@ impl MePool {
 
         let desired_map_hash = Self::desired_map_hash(&desired_by_dc);
         let previous_generation = self.current_generation();
-        let hardswap = self.hardswap.load(Ordering::Relaxed);
+        let hardswap = self.reinit.hardswap.load(Ordering::Relaxed);
         let generation = if hardswap {
-            let pending_generation = self.pending_hardswap_generation.load(Ordering::Relaxed);
+            let pending_generation = self
+                .reinit
+                .pending_hardswap_generation
+                .load(Ordering::Relaxed);
             let pending_started_at = self
+                .reinit
                 .pending_hardswap_started_at_epoch_secs
                 .load(Ordering::Relaxed);
-            let pending_map_hash = self.pending_hardswap_map_hash.load(Ordering::Relaxed);
+            let pending_map_hash = self
+                .reinit
+                .pending_hardswap_map_hash
+                .load(Ordering::Relaxed);
             let pending_age_secs = now_epoch_secs.saturating_sub(pending_started_at);
-            let pending_ttl_expired = pending_started_at > 0 && pending_age_secs > ME_HARDSWAP_PENDING_TTL_SECS;
+            let pending_ttl_expired =
+                pending_started_at > 0 && pending_age_secs > ME_HARDSWAP_PENDING_TTL_SECS;
             let pending_matches_map = pending_map_hash != 0 && pending_map_hash == desired_map_hash;
 
             if pending_generation != 0
@@ -368,23 +428,30 @@ impl MePool {
                         "ME hardswap pending generation expired by TTL; starting fresh generation"
                     );
                 }
-                let next_generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-                self.pending_hardswap_generation
+                let next_generation = self.reinit.generation.fetch_add(1, Ordering::Relaxed) + 1;
+                self.reinit
+                    .pending_hardswap_generation
                     .store(next_generation, Ordering::Relaxed);
-                self.pending_hardswap_started_at_epoch_secs
+                self.reinit
+                    .pending_hardswap_started_at_epoch_secs
                     .store(now_epoch_secs, Ordering::Relaxed);
-                self.pending_hardswap_map_hash
+                self.reinit
+                    .pending_hardswap_map_hash
                     .store(desired_map_hash, Ordering::Relaxed);
-                self.warm_generation.store(next_generation, Ordering::Relaxed);
+                self.reinit
+                    .warm_generation
+                    .store(next_generation, Ordering::Relaxed);
                 next_generation
             }
         } else {
             self.clear_pending_hardswap_state();
-            self.generation.fetch_add(1, Ordering::Relaxed) + 1
+            self.reinit.generation.fetch_add(1, Ordering::Relaxed) + 1
         };
 
         if hardswap {
-            self.warm_generation.store(generation, Ordering::Relaxed);
+            self.reinit
+                .warm_generation
+                .store(generation, Ordering::Relaxed);
             self.warmup_generation_for_all_dcs(rng, generation, &desired_by_dc)
                 .await;
         } else {
@@ -398,10 +465,12 @@ impl MePool {
             .map(|w| (w.writer_dc, w.addr))
             .collect();
         let min_ratio = Self::permille_to_ratio(
-            self.me_pool_min_fresh_ratio_permille
+            self.drain_runtime
+                .me_pool_min_fresh_ratio_permille
                 .load(Ordering::Relaxed),
         );
-        let (coverage_ratio, missing_dc) = Self::coverage_ratio(&desired_by_dc, &active_writer_addrs);
+        let (coverage_ratio, missing_dc) =
+            Self::coverage_ratio(&desired_by_dc, &active_writer_addrs);
         let mut route_quorum_ok = coverage_ratio >= min_ratio;
         let mut redundancy_ok = missing_dc.is_empty();
         let mut redundancy_missing_dc = missing_dc.clone();
@@ -455,7 +524,12 @@ impl MePool {
             }
         }
 
-        self.set_last_drain_gate(route_quorum_ok, redundancy_ok, MeDrainGateReason::Open, now_epoch_secs);
+        self.set_last_drain_gate(
+            route_quorum_ok,
+            redundancy_ok,
+            MeDrainGateReason::Open,
+            now_epoch_secs,
+        );
         if !redundancy_ok {
             warn!(
                 missing_dc = ?redundancy_missing_dc,
@@ -506,12 +580,28 @@ impl MePool {
             coverage_ratio = format_args!("{coverage_ratio:.3}"),
             min_ratio = format_args!("{min_ratio:.3}"),
             drain_timeout_secs,
-            "ME reinit cycle covered; draining stale writers"
+            "ME reinit cycle covered; processing stale writers"
         );
         self.stats.increment_pool_swap_total();
+        let can_drop_with_replacement = self.has_non_draining_writer_per_desired_dc_group().await;
+        if can_drop_with_replacement {
+            info!(
+                stale_writers = stale_writer_ids.len(),
+                "ME reinit stale writers: replacement coverage ready, force-closing clients for fast rebind"
+            );
+        } else {
+            warn!(
+                stale_writers = stale_writer_ids.len(),
+                "ME reinit stale writers: replacement coverage incomplete, keeping draining fallback"
+            );
+        }
         for writer_id in stale_writer_ids {
             self.mark_writer_draining_with_timeout(writer_id, drain_timeout, !hardswap)
                 .await;
+            if can_drop_with_replacement {
+                self.stats.increment_pool_force_close_total();
+                self.remove_writer_and_close_clients(writer_id).await;
+            }
         }
         if hardswap {
             self.clear_pending_hardswap_state();

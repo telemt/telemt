@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -11,6 +13,8 @@ use crate::transport::shadowsocks::sanitize_shadowsocks_url;
 use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind};
 
 use super::MePool;
+
+type MePingGroup = (MePingFamily, i32, Vec<(IpAddr, u16)>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MePingFamily {
@@ -137,14 +141,14 @@ fn detect_interface_for_ip(ip: IpAddr) -> Option<String> {
     if let Ok(addrs) = getifaddrs() {
         for iface in addrs {
             if let Some(address) = iface.address {
-                if let Some(v4) = address.as_sockaddr_in() {
-                    if IpAddr::V4(v4.ip()) == ip {
-                        return Some(iface.interface_name);
-                    }
-                } else if let Some(v6) = address.as_sockaddr_in6() {
-                    if IpAddr::V6(v6.ip()) == ip {
-                        return Some(iface.interface_name);
-                    }
+                if let Some(v4) = address.as_sockaddr_in()
+                    && IpAddr::V4(v4.ip()) == ip
+                {
+                    return Some(iface.interface_name);
+                } else if let Some(v6) = address.as_sockaddr_in6()
+                    && IpAddr::V6(v6.ip()) == ip
+                {
+                    return Some(iface.interface_name);
                 }
             }
         }
@@ -329,7 +333,7 @@ pub async fn run_me_ping(pool: &Arc<MePool>, rng: &SecureRandom) -> Vec<MePingRe
         HashMap::new()
     };
 
-    let mut grouped: Vec<(MePingFamily, i32, Vec<(IpAddr, u16)>)> = Vec::new();
+    let mut grouped: Vec<MePingGroup> = Vec::new();
     for (dc, addrs) in v4_map {
         grouped.push((MePingFamily::V4, dc, addrs));
     }

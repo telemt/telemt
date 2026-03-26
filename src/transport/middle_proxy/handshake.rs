@@ -1,19 +1,19 @@
-use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use socket2::{SockRef, TcpKeepalive};
 #[cfg(target_os = "linux")]
 use libc;
+use socket2::{SockRef, TcpKeepalive};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, SocketAddr};
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::raw::c_int;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::net::{TcpStream, TcpSocket};
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -28,14 +28,16 @@ use crate::protocol::constants::{
 };
 use crate::transport::{UpstreamEgressInfo, UpstreamRouteKind};
 
+use super::MePool;
 use super::codec::{
     RpcChecksumMode, build_handshake_payload, build_nonce_payload, build_rpc_frame,
     cbc_decrypt_inplace, cbc_encrypt_padded, parse_handshake_flags, parse_nonce_payload,
     read_rpc_frame_plaintext, rpc_crc,
 };
-use super::selftest::{BndAddrStatus, BndPortStatus, record_bnd_status, record_upstream_bnd_status};
-use super::wire::{extract_ip_material, IpMaterial};
-use super::MePool;
+use super::selftest::{
+    BndAddrStatus, BndPortStatus, record_bnd_status, record_upstream_bnd_status,
+};
+use super::wire::{IpMaterial, extract_ip_material};
 
 const ME_KDF_DRIFT_STRICT: bool = false;
 
@@ -159,7 +161,7 @@ impl MePool {
         } else {
             let connect_fut = async {
                 if addr.is_ipv6()
-                    && let Some(v6) = self.detected_ipv6
+                    && let Some(v6) = self.nat_runtime.detected_ipv6
                 {
                     match TcpSocket::new_v6() {
                         Ok(sock) => {
@@ -168,11 +170,15 @@ impl MePool {
                             } else {
                                 match sock.connect(addr).await {
                                     Ok(stream) => return Ok(stream),
-                                    Err(e) => debug!(error = %e, target = %addr, "ME IPv6 bound connect failed, retrying default connect"),
+                                    Err(e) => {
+                                        debug!(error = %e, target = %addr, "ME IPv6 bound connect failed, retrying default connect")
+                                    }
                                 }
                             }
                         }
-                        Err(e) => debug!(error = %e, "ME IPv6 socket creation failed, falling back to default connect"),
+                        Err(e) => {
+                            debug!(error = %e, "ME IPv6 socket creation failed, falling back to default connect")
+                        }
                     }
                 }
                 TcpStream::connect(addr).await
@@ -299,7 +305,7 @@ impl MePool {
                 }
                 MeSocksKdfPolicy::Compat => {
                     self.stats.increment_me_socks_kdf_compat_fallback();
-                    if self.nat_probe {
+                    if self.nat_runtime.nat_probe {
                         let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
                         self.maybe_reflect_public_addr(family, bind_ip).await
                     } else {
@@ -307,7 +313,7 @@ impl MePool {
                     }
                 }
             }
-        } else if self.nat_probe {
+        } else if self.nat_runtime.nat_probe {
             let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
             self.maybe_reflect_public_addr(family, bind_ip).await
         } else {
@@ -315,7 +321,8 @@ impl MePool {
         };
 
         let local_addr_nat = self.translate_our_addr_with_reflection(local_addr, reflected);
-        let peer_addr_nat = SocketAddr::new(self.translate_ip_for_nat(peer_addr.ip()), peer_addr.port());
+        let peer_addr_nat =
+            SocketAddr::new(self.translate_ip_for_nat(peer_addr.ip()), peer_addr.port());
         if let Some(upstream_info) = upstream_egress {
             let client_ip_for_kdf = socks_bound_addr
                 .map(|value| value.ip())
@@ -336,7 +343,10 @@ impl MePool {
             .unwrap_or_default()
             .as_secs() as u32;
 
-        let secret_atomic_snapshot = self.secret_atomic_snapshot.load(Ordering::Relaxed);
+        let secret_atomic_snapshot = self
+            .writer_selection_policy
+            .secret_atomic_snapshot
+            .load(Ordering::Relaxed);
         let (ks, secret) = if secret_atomic_snapshot {
             let snapshot = self.secret_snapshot().await;
             (snapshot.key_selector, snapshot.secret)
@@ -367,12 +377,17 @@ impl MePool {
         .map_err(|_| ProxyError::TgHandshakeTimeout)??;
 
         if srv_seq != -2 {
-            return Err(ProxyError::InvalidHandshake(format!("Expected seq=-2, got {srv_seq}")));
+            return Err(ProxyError::InvalidHandshake(format!(
+                "Expected seq=-2, got {srv_seq}"
+            )));
         }
 
         let (srv_key_select, schema, srv_ts, srv_nonce) = parse_nonce_payload(&srv_nonce_payload)?;
         if schema != RPC_CRYPTO_AES_U32 {
-            warn!(schema = format_args!("0x{schema:08x}"), "Unsupported ME crypto schema");
+            warn!(
+                schema = format_args!("0x{schema:08x}"),
+                "Unsupported ME crypto schema"
+            );
             return Err(ProxyError::InvalidHandshake(format!(
                 "Unsupported crypto schema: 0x{schema:x}"
             )));
@@ -423,8 +438,7 @@ impl MePool {
             let kdf_fingerprint_guard = self.kdf_material_fingerprint.read().await;
             kdf_fingerprint_guard.get(&peer_addr_nat).copied()
         };
-        if let Some((prev_fingerprint, prev_client_port)) = previous_kdf_fingerprint
-        {
+        if let Some((prev_fingerprint, prev_client_port)) = previous_kdf_fingerprint {
             if prev_fingerprint != kdf_fingerprint {
                 self.stats.increment_me_kdf_drift_total();
                 warn!(
@@ -461,24 +475,29 @@ impl MePool {
         let server_ip = extract_ip_material(peer_addr_nat);
         let client_ip = extract_ip_material(local_addr_nat);
 
-        let (srv_ip_opt, clt_ip_opt, clt_v6_opt, srv_v6_opt, hs_our_ip, hs_peer_ip) = match (server_ip, client_ip) {
-            (IpMaterial::V4(mut srv), IpMaterial::V4(mut clt)) => {
-                srv.reverse();
-                clt.reverse();
-                (Some(srv), Some(clt), None, None, clt, srv)
-            }
-            (IpMaterial::V6(srv), IpMaterial::V6(clt)) => {
-                let zero = [0u8; 4];
-                (None, None, Some(clt), Some(srv), zero, zero)
-            }
-            _ => {
-                return Err(ProxyError::InvalidHandshake(
-                    "mixed IPv4/IPv6 endpoints are not supported for ME key derivation".to_string(),
-                ));
-            }
-        };
+        let (srv_ip_opt, clt_ip_opt, clt_v6_opt, srv_v6_opt, hs_our_ip, hs_peer_ip) =
+            match (server_ip, client_ip) {
+                (IpMaterial::V4(mut srv), IpMaterial::V4(mut clt)) => {
+                    srv.reverse();
+                    clt.reverse();
+                    (Some(srv), Some(clt), None, None, clt, srv)
+                }
+                (IpMaterial::V6(srv), IpMaterial::V6(clt)) => {
+                    let zero = [0u8; 4];
+                    (None, None, Some(clt), Some(srv), zero, zero)
+                }
+                _ => {
+                    return Err(ProxyError::InvalidHandshake(
+                        "mixed IPv4/IPv6 endpoints are not supported for ME key derivation"
+                            .to_string(),
+                    ));
+                }
+            };
 
-        let diag_level: u8 = std::env::var("ME_DIAG").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let diag_level: u8 = std::env::var("ME_DIAG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         let prekey_client = build_middleproxy_prekey(
             &srv_nonce,

@@ -1,0 +1,139 @@
+name: Check
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+# ==========================
+# Formatting
+# ==========================
+  fmt:
+    name: Fmt
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - run: cargo fmt -- --check
+
+# ==========================
+# Tests
+# ==========================
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      actions: write
+      checks: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nextest-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nextest-
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-nextest
+        run: cargo install --locked cargo-nextest || true
+
+      - name: Run tests with nextest
+        run: cargo nextest run -j "$(nproc)"
+
+# ==========================
+# Clippy
+# ==========================
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+            ${{ runner.os }}-cargo-
+
+      - name: Run clippy
+        run: cargo clippy -j "$(nproc)" -- --cap-lints warn
+
+# ==========================
+# Udeps
+# ==========================
+  udeps:
+    name: Udeps
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-udeps-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-udeps-
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-udeps
+        run: cargo install --locked cargo-udeps || true
+
+      - name: Run udeps
+        run: cargo udeps -j "$(nproc)" || true

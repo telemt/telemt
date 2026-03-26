@@ -24,10 +24,7 @@ pub(super) fn success_response<T: Serialize>(
         .unwrap()
 }
 
-pub(super) fn error_response(
-    request_id: u64,
-    failure: ApiFailure,
-) -> hyper::Response<Full<Bytes>> {
+pub(super) fn error_response(request_id: u64, failure: ApiFailure) -> hyper::Response<Full<Bytes>> {
     let payload = ErrorResponse {
         ok: false,
         error: ErrorBody {

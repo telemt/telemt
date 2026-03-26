@@ -1,8 +1,8 @@
 # Code of Conduct
 
-## 1. Purpose
+## Purpose
 
-Telemt exists to solve technical problems.
+**Telemt exists to solve technical problems.**
 
 Telemt is open to contributors who want to learn, improve and build meaningful systems together.
 
@@ -18,27 +18,34 @@ Technology has consequences. Responsibility is inherent.
 
 ---
 
-## 2. Principles
+## Principles
 
 * **Technical over emotional**
+
   Arguments are grounded in data, logs, reproducible cases, or clear reasoning.
 
 * **Clarity over noise**
+
   Communication is structured, concise, and relevant.
 
 * **Openness with standards**
+
   Participation is open. The work remains disciplined.
 
 * **Independence of judgment**
+
   Claims are evaluated on technical merit, not affiliation or posture.
 
 * **Responsibility over capability**
+
   Capability does not justify careless use.
 
 * **Cooperation over friction**
+
   Progress depends on coordination, mutual support, and honest review.
 
 * **Good intent, rigorous method**
+
   Assume good intent, but require rigor.
 
 > **Aussagen gelten nach ihrer Begründung.**
@@ -47,7 +54,7 @@ Technology has consequences. Responsibility is inherent.
 
 ---
 
-## 3. Expected Behavior
+## Expected Behavior
 
 Participants are expected to:
 
@@ -69,7 +76,7 @@ New contributors are welcome. They are expected to grow into these standards. Ex
 
 ---
 
-## 4. Unacceptable Behavior
+## Unacceptable Behavior
 
 The following is not allowed:
 
@@ -89,7 +96,7 @@ Such discussions may be closed, removed, or redirected.
 
 ---
 
-## 5. Security and Misuse
+## Security and Misuse
 
 Telemt is intended for responsible use.
 
@@ -109,15 +116,13 @@ Security is both technical and behavioral.
 
 Telemt is open to contributors of different backgrounds, experience levels, and working styles.
 
-Standards are public, legible, and applied to the work itself.
-
-Questions are welcome. Careful disagreement is welcome. Honest correction is welcome.
-
-Gatekeeping by obscurity, status signaling, or hostility is not.
+- Standards are public, legible, and applied to the work itself.
+- Questions are welcome. Careful disagreement is welcome. Honest correction is welcome.
+- Gatekeeping by obscurity, status signaling, or hostility is not.
 
 ---
 
-## 7. Scope
+## Scope
 
 This Code of Conduct applies to all official spaces:
 
@@ -127,16 +132,19 @@ This Code of Conduct applies to all official spaces:
 
 ---
 
-## 8. Maintainer Stewardship
+## Maintainer Stewardship
 
 Maintainers are responsible for final decisions in matters of conduct, scope, and direction.
 
-This responsibility is stewardship: preserving continuity, protecting signal, maintaining standards, and keeping Telemt workable for others.
+This responsibility is stewardship: 
+- preserving continuity, 
+- protecting signal, 
+- maintaining standards, 
+- keeping Telemt workable for others.
 
 Judgment should be exercised with restraint, consistency, and institutional responsibility.
-
-Not every decision requires extended debate.
-Not every intervention requires public explanation.
+- Not every decision requires extended debate.
+- Not every intervention requires public explanation.
 
 All decisions are expected to serve the durability, clarity, and integrity of Telemt.
 
@@ -146,7 +154,7 @@ All decisions are expected to serve the durability, clarity, and integrity of Te
 
 ---
 
-## 9. Enforcement
+## Enforcement
 
 Maintainers may act to preserve the integrity of Telemt, including by:
 
@@ -156,44 +164,40 @@ Maintainers may act to preserve the integrity of Telemt, including by:
 * Restricting or banning participants
 
 Actions are taken to maintain function, continuity, and signal quality.
-
-Where possible, correction is preferred to exclusion.
-
-Where necessary, exclusion is preferred to decay.
+- Where possible, correction is preferred to exclusion.
+- Where necessary, exclusion is preferred to decay.
 
 ---
 
-## 10. Final
+## Final
 
 Telemt is built on discipline, structure, and shared intent.
+- Signal over noise.
+- Facts over opinion.
+- Systems over rhetoric.
 
-Signal over noise.
-Facts over opinion.
-Systems over rhetoric.
+- Work is collective.
+- Outcomes are shared.
+- Responsibility is distributed.
 
-Work is collective.
-Outcomes are shared.
-Responsibility is distributed.
-
-Precision is learned.
-Rigor is expected.
-Help is part of the work.
+- Precision is learned.
+- Rigor is expected.
+- Help is part of the work.
 
 > **Ordnung ist Voraussetzung der Freiheit.**
 
-If you contribute — contribute with care.
-If you speak — speak with substance.
-If you engage — engage constructively.
+- If you contribute — contribute with care.
+- If you speak — speak with substance.
+- If you engage — engage constructively.
 
 ---
 
-## 11. After All
+## After All
 
 Systems outlive intentions.
-
-What is built will be used.
-What is released will propagate.
-What is maintained will define the future state.
+- What is built will be used.
+- What is released will propagate.
+- What is maintained will define the future state.
 
 There is no neutral infrastructure, only infrastructure shaped well or poorly.
 
@@ -201,8 +205,8 @@ There is no neutral infrastructure, only infrastructure shaped well or poorly.
 
 > Every system carries responsibility.
 
-Stability requires discipline.
-Freedom requires structure.
-Trust requires honesty.
+- Stability requires discipline.
+- Freedom requires structure.
+- Trust requires honesty.
 
-In the end, the system reflects its contributors.
+In the end: the system reflects its contributors.

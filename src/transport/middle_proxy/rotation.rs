@@ -24,17 +24,20 @@ impl MeReinitTrigger {
     }
 }
 
-pub fn enqueue_reinit_trigger(
-    tx: &mpsc::Sender<MeReinitTrigger>,
-    trigger: MeReinitTrigger,
-) {
+pub fn enqueue_reinit_trigger(tx: &mpsc::Sender<MeReinitTrigger>, trigger: MeReinitTrigger) {
     match tx.try_send(trigger) {
         Ok(()) => {}
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            debug!(trigger = trigger.as_str(), "ME reinit trigger dropped (queue full)");
+            debug!(
+                trigger = trigger.as_str(),
+                "ME reinit trigger dropped (queue full)"
+            );
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            warn!(trigger = trigger.as_str(), "ME reinit trigger dropped (scheduler closed)");
+            warn!(
+                trigger = trigger.as_str(),
+                "ME reinit trigger dropped (scheduler closed)"
+            );
         }
     }
 }
@@ -98,7 +101,6 @@ pub async fn me_reinit_scheduler(
                     .await;
             });
         }
-
     }
 }
 

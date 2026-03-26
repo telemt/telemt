@@ -4,7 +4,7 @@
 
 #![allow(deprecated)]
 
-use rand::Rng;
+use rand::RngExt;
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -600,7 +600,7 @@ impl UpstreamManager {
             return self.connect_retry_backoff;
         }
         let jitter_cap_ms = (base_ms / 2).max(1);
-        let jitter_ms = rand::rng().gen_range(0..=jitter_cap_ms);
+        let jitter_ms = rand::rng().random_range(0..=jitter_cap_ms);
         Duration::from_millis(base_ms.saturating_add(jitter_ms))
     }
 
@@ -667,7 +667,7 @@ impl UpstreamManager {
                     "No healthy upstreams available! Using random."
                 );
             }
-            return Some(filtered_upstreams[rand::rng().gen_range(0..filtered_upstreams.len())]);
+            return Some(filtered_upstreams[rand::rng().random_range(0..filtered_upstreams.len())]);
         }
 
         if healthy.len() == 1 {
@@ -690,10 +690,10 @@ impl UpstreamManager {
         let total: f64 = weights.iter().map(|(_, w)| w).sum();
 
         if total <= 0.0 {
-            return Some(healthy[rand::rng().gen_range(0..healthy.len())]);
+            return Some(healthy[rand::rng().random_range(0..healthy.len())]);
         }
 
-        let mut choice: f64 = rand::rng().gen_range(0.0..total);
+        let mut choice: f64 = rand::rng().random_range(0.0..total);
 
         for &(idx, weight) in &weights {
             if choice < weight {
@@ -1165,9 +1165,9 @@ impl UpstreamManager {
             UpstreamType::Shadowsocks { url, interface } => {
                 let stream = connect_shadowsocks(url, interface, target, connect_timeout).await?;
                 let local_addr = stream.get_ref().local_addr().ok();
-                    Ok((
-                        UpstreamStream::Shadowsocks(Box::new(stream)),
-                        UpstreamEgressInfo {
+                Ok((
+                    UpstreamStream::Shadowsocks(Box::new(stream)),
+                    UpstreamEgressInfo {
                         upstream_id,
                         route_kind: UpstreamRouteKind::Shadowsocks,
                         local_addr,

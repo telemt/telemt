@@ -5,37 +5,87 @@ on:
     tags:
       - '[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (example: 3.3.15)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref_name }}-${{ github.event.inputs.tag || 'auto' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
-  packages: write
 
 env:
   CARGO_TERM_COLOR: always
+  BINARY_NAME: telemt
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      prerelease: ${{ steps.vars.outputs.prerelease }}
+
+    steps:
+      - name: Resolve version
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+
+          VERSION="${VERSION#refs/tags/}"
+
+          if [ -z "${VERSION}" ]; then
+            echo "Release version is empty" >&2
+            exit 1
+          fi
+
+          if [[ "${VERSION}" == *-* ]]; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${PRERELEASE}" >> "${GITHUB_OUTPUT}"
+
+  # ==========================
+  # GNU / glibc
+  # ==========================
+  build-gnu:
+    name: GNU ${{ matrix.asset }}
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    container:
+      image: rust:slim-bookworm
 
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            artifact_name: telemt
-            asset_name: telemt-x86_64-linux-gnu
+            asset: telemt-x86_64-linux-gnu
+            cpu: baseline
+
+          - target: x86_64-unknown-linux-gnu
+            asset: telemt-x86_64-v3-linux-gnu
+            cpu: v3
+
           - target: aarch64-unknown-linux-gnu
-            artifact_name: telemt
-            asset_name: telemt-aarch64-linux-gnu
-          - target: x86_64-unknown-linux-musl
-            artifact_name: telemt
-            asset_name: telemt-x86_64-linux-musl
-          - target: aarch64-unknown-linux-musl
-            artifact_name: telemt
-            asset_name: telemt-aarch64-linux-musl
+            asset: telemt-aarch64-linux-gnu
+            cpu: generic
 
     steps:
       - uses: actions/checkout@v4
@@ -43,47 +93,245 @@ jobs:
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
+          targets: |
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
 
-      - name: Install cross-compilation tools
+      - name: Install deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          apt-get update
+          apt-get install -y \
+            build-essential \
+            clang \
+            lld \
+            pkg-config \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu
 
       - uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: gnu-${{ matrix.asset }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
+            gnu-${{ matrix.asset }}-
+            gnu-
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build Release
-        env:
-          RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=+crt-static' || '' }}
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Package binary
+      - name: Build
+        shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          tar -czvf ${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
-          sha256sum ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.sha256
+          set -euo pipefail
+
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CC=aarch64-linux-gnu-gcc
+            export CXX=aarch64-linux-gnu-g++
+            export RUSTFLAGS="-C linker=aarch64-linux-gnu-gcc -C lto=fat -C panic=abort"
+          else
+            export CC=clang
+            export CXX=clang++
+
+            if [ "${{ matrix.cpu }}" = "v3" ]; then
+              CPU_FLAGS="-C target-cpu=x86-64-v3"
+            else
+              CPU_FLAGS="-C target-cpu=x86-64"
+            fi
+
+            export RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld -C lto=fat -C panic=abort ${CPU_FLAGS}"
+          fi
+
+          cargo build --release --target ${{ matrix.target }} -j "$(nproc)"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}" dist/telemt
+
+          cd dist
+          tar -czf "${{ matrix.asset }}.tar.gz" \
+            --owner=0 --group=0 --numeric-owner \
+            telemt
+
+          sha256sum "${{ matrix.asset }}.tar.gz" > "${{ matrix.asset }}.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: |
-            target/${{ matrix.target }}/release/${{ matrix.asset_name }}.tar.gz
-            target/${{ matrix.target }}/release/${{ matrix.asset_name }}.sha256
+          name: ${{ matrix.asset }}
+          path: dist/*
 
-  build-docker-image:
-    needs: build
+  # ==========================
+  # MUSL
+  # ==========================
+  build-musl:
+    name: MUSL ${{ matrix.asset }}
     runs-on: ubuntu-latest
+    needs: prepare
+
+    container:
+      image: rust:slim-bookworm
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset: telemt-x86_64-linux-musl
+            cpu: baseline
+
+          - target: x86_64-unknown-linux-musl
+            asset: telemt-x86_64-v3-linux-musl
+            cpu: v3
+
+          - target: aarch64-unknown-linux-musl
+            asset: telemt-aarch64-linux-musl
+            cpu: generic
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          apt-get update
+          apt-get install -y \
+            musl-tools \
+            pkg-config \
+            curl
+
+      - uses: actions/cache@v4
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        with:
+          path: ~/.musl-aarch64
+          key: musl-toolchain-aarch64-v1
+
+      - name: Install aarch64 musl toolchain
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TOOLCHAIN_DIR="$HOME/.musl-aarch64"
+          ARCHIVE="aarch64-linux-musl-cross.tgz"
+          URL="https://github.com/telemt/telemt/releases/download/toolchains/${ARCHIVE}"
+
+          if [ -x "${TOOLCHAIN_DIR}/bin/aarch64-linux-musl-gcc" ]; then
+            echo "MUSL toolchain cached"
+          else
+            curl -fL \
+              --retry 5 \
+              --retry-delay 3 \
+              --connect-timeout 10 \
+              --max-time 120 \
+              -o "${ARCHIVE}" "${URL}"
+
+            mkdir -p "${TOOLCHAIN_DIR}"
+            tar -xzf "${ARCHIVE}" --strip-components=1 -C "${TOOLCHAIN_DIR}"
+          fi
+
+          echo "${TOOLCHAIN_DIR}/bin" >> "${GITHUB_PATH}"
+
+      - name: Add rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          key: musl-${{ matrix.asset }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            musl-${{ matrix.asset }}-
+            musl-
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            export CC=aarch64-linux-musl-gcc
+            export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
+            export RUSTFLAGS="-C target-feature=+crt-static -C linker=aarch64-linux-musl-gcc -C lto=fat -C panic=abort"
+          else
+            export CC=musl-gcc
+            export CC_x86_64_unknown_linux_musl=musl-gcc
+
+            if [ "${{ matrix.cpu }}" = "v3" ]; then
+              CPU_FLAGS="-C target-cpu=x86-64-v3"
+            else
+              CPU_FLAGS="-C target-cpu=x86-64"
+            fi
+
+            export RUSTFLAGS="-C target-feature=+crt-static -C lto=fat -C panic=abort ${CPU_FLAGS}"
+          fi
+
+          cargo build --release --target ${{ matrix.target }} -j "$(nproc)"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}" dist/telemt
+
+          cd dist
+          tar -czf "${{ matrix.asset }}.tar.gz" \
+            --owner=0 --group=0 --numeric-owner \
+            telemt
+
+          sha256sum "${{ matrix.asset }}.tar.gz" > "${{ matrix.asset }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+
+  # ==========================
+  # Release
+  # ==========================
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [prepare, build-gnu, build-musl]
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          overwrite_files: true
+
+  # ==========================
+  # Docker
+  # ==========================
+  docker:
+    name: Docker
+    runs-on: ubuntu-latest
+    needs: [prepare, release]
+
     permissions:
       contents: read
       packages: write
@@ -92,48 +340,66 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version
-        id: vars
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      - name: Probe release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
 
-      - name: Build and push
+          for asset in \
+            telemt-x86_64-linux-musl.tar.gz \
+            telemt-x86_64-linux-musl.tar.gz.sha256 \
+            telemt-aarch64-linux-musl.tar.gz \
+            telemt-aarch64-linux-musl.tar.gz.sha256
+          do
+            curl -fsIL \
+              --retry 10 \
+              --retry-delay 3 \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/${asset}" \
+              > /dev/null
+          done
+
+      - name: Compute image tags
+        id: meta
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          TAGS="${IMAGE}:${VERSION}"
+
+          if [[ "${VERSION}" != *-* ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
+          fi
+
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "${TAGS}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build & Push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.vars.outputs.VERSION }}
-            ghcr.io/${{ github.repository }}:latest
-
-  release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          pull: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            TELEMT_REPOSITORY=${{ github.repository }}
+            TELEMT_VERSION=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

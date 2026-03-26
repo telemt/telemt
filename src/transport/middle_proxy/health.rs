@@ -1,19 +1,22 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::RngExt;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::config::MeFloorMode;
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
-use crate::stats::MeWriterTeardownReason;
 
 use super::MePool;
-use super::pool::{MeFamilyRuntimeState, MeWriter};
+use super::pool::MeFamilyRuntimeState;
 
 const JITTER_FRAC_NUM: u64 = 2; // jitter up to 50% of backoff
 #[allow(dead_code)]
@@ -27,40 +30,13 @@ const HEALTH_RECONNECT_BUDGET_PER_CORE: usize = 2;
 const HEALTH_RECONNECT_BUDGET_PER_DC: usize = 1;
 const HEALTH_RECONNECT_BUDGET_MIN: usize = 4;
 const HEALTH_RECONNECT_BUDGET_MAX: usize = 128;
+const FAMILY_SUPPRESS_FAIL_STREAK_THRESHOLD: u32 = 5;
+const FAMILY_SUPPRESS_DURATION_SECS: u64 = 60;
+const FAMILY_RECOVER_SUCCESS_STREAK_TARGET: u32 = 2;
 const HEALTH_DRAIN_CLOSE_BUDGET_PER_CORE: usize = 16;
 const HEALTH_DRAIN_CLOSE_BUDGET_MIN: usize = 16;
 const HEALTH_DRAIN_CLOSE_BUDGET_MAX: usize = 256;
-const HEALTH_DRAIN_SOFT_EVICT_BUDGET_MIN: usize = 8;
-const HEALTH_DRAIN_SOFT_EVICT_BUDGET_MAX: usize = 256;
-const HEALTH_DRAIN_REAP_OPPORTUNISTIC_INTERVAL_SECS: u64 = 1;
 const HEALTH_DRAIN_TIMEOUT_ENFORCER_INTERVAL_SECS: u64 = 1;
-const FAMILY_SUPPRESS_FAIL_STREAK_THRESHOLD: u32 = 6;
-const FAMILY_SUPPRESS_WINDOW_SECS: u64 = 120;
-const FAMILY_RECOVER_PROBE_INTERVAL_SECS: u64 = 5;
-const FAMILY_RECOVER_SUCCESS_STREAK_REQUIRED: u32 = 3;
-
-#[derive(Debug, Clone)]
-struct FamilyCircuitState {
-    state: MeFamilyRuntimeState,
-    state_since_at: Instant,
-    suppressed_until: Option<Instant>,
-    next_probe_at: Instant,
-    fail_streak: u32,
-    recover_success_streak: u32,
-}
-
-impl FamilyCircuitState {
-    fn new(now: Instant) -> Self {
-        Self {
-            state: MeFamilyRuntimeState::Healthy,
-            state_since_at: now,
-            suppressed_until: None,
-            next_probe_at: now,
-            fail_streak: 0,
-            recover_success_streak: 0,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 struct DcFloorPlanEntry {
@@ -86,6 +62,17 @@ struct FamilyFloorPlan {
     target_writers_total: usize,
 }
 
+#[derive(Debug)]
+struct FamilyReconnectOutcome {
+    key: (i32, IpFamily),
+    dc: i32,
+    family: IpFamily,
+    alive: usize,
+    required: usize,
+    endpoint_count: usize,
+    restored: usize,
+}
+
 pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize) {
     let mut backoff: HashMap<(i32, IpFamily), u64> = HashMap::new();
     let mut next_attempt: HashMap<(i32, IpFamily), Instant> = HashMap::new();
@@ -99,26 +86,6 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
     let mut adaptive_recover_until: HashMap<(i32, IpFamily), Instant> = HashMap::new();
     let mut floor_warn_next_allowed: HashMap<(i32, IpFamily), Instant> = HashMap::new();
     let mut drain_warn_next_allowed: HashMap<u64, Instant> = HashMap::new();
-    let mut drain_soft_evict_next_allowed: HashMap<u64, Instant> = HashMap::new();
-    let mut family_v4_circuit = FamilyCircuitState::new(Instant::now());
-    let mut family_v6_circuit = FamilyCircuitState::new(Instant::now());
-    let init_epoch_secs = MePool::now_epoch_secs();
-    pool.set_family_runtime_state(
-        IpFamily::V4,
-        family_v4_circuit.state,
-        init_epoch_secs,
-        0,
-        family_v4_circuit.fail_streak,
-        family_v4_circuit.recover_success_streak,
-    );
-    pool.set_family_runtime_state(
-        IpFamily::V6,
-        family_v6_circuit.state,
-        init_epoch_secs,
-        0,
-        family_v6_circuit.fail_streak,
-        family_v6_circuit.recover_success_streak,
-    );
     let mut degraded_interval = true;
     loop {
         let interval = if degraded_interval {
@@ -128,15 +95,9 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
         };
         tokio::time::sleep(interval).await;
         pool.prune_closed_writers().await;
-        reap_draining_writers(
-            &pool,
-            &mut drain_warn_next_allowed,
-            &mut drain_soft_evict_next_allowed,
-        )
-        .await;
-        let now = Instant::now();
-        let now_epoch_secs = MePool::now_epoch_secs();
-        let v4_degraded_raw = check_family(
+        pool.sweep_endpoint_quarantine().await;
+        reap_draining_writers(&pool, &mut drain_warn_next_allowed).await;
+        let v4_degraded = check_family(
             IpFamily::V4,
             &pool,
             &rng,
@@ -151,275 +112,63 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
             &mut adaptive_idle_since,
             &mut adaptive_recover_until,
             &mut floor_warn_next_allowed,
-            &mut drain_warn_next_allowed,
-            &mut drain_soft_evict_next_allowed,
         )
         .await;
-        let v4_degraded = apply_family_circuit_result(
-            &pool,
-            IpFamily::V4,
-            &mut family_v4_circuit,
-            Some(v4_degraded_raw),
-            false,
-            now,
-            now_epoch_secs,
-        );
-
-        let v6_check_ran = should_run_family_check(&mut family_v6_circuit, now);
-        let v6_degraded_raw = if v6_check_ran {
-            check_family(
-                IpFamily::V6,
-                &pool,
-                &rng,
-                &mut backoff,
-                &mut next_attempt,
-                &mut inflight,
-                &mut outage_backoff,
-                &mut outage_next_attempt,
-                &mut single_endpoint_outage,
-                &mut shadow_rotate_deadline,
-                &mut idle_refresh_next_attempt,
-                &mut adaptive_idle_since,
-                &mut adaptive_recover_until,
-                &mut floor_warn_next_allowed,
-                &mut drain_warn_next_allowed,
-                &mut drain_soft_evict_next_allowed,
-            )
-            .await
-        } else {
-            false
-        };
-        let v6_degraded = apply_family_circuit_result(
-            &pool,
+        let v6_degraded = check_family(
             IpFamily::V6,
-            &mut family_v6_circuit,
-            if v6_check_ran {
-                Some(v6_degraded_raw)
-            } else {
-                None
-            },
-            true,
-            now,
-            now_epoch_secs,
-        );
+            &pool,
+            &rng,
+            &mut backoff,
+            &mut next_attempt,
+            &mut inflight,
+            &mut outage_backoff,
+            &mut outage_next_attempt,
+            &mut single_endpoint_outage,
+            &mut shadow_rotate_deadline,
+            &mut idle_refresh_next_attempt,
+            &mut adaptive_idle_since,
+            &mut adaptive_recover_until,
+            &mut floor_warn_next_allowed,
+        )
+        .await;
+        update_family_runtime_state(&pool, IpFamily::V4, v4_degraded);
+        update_family_runtime_state(&pool, IpFamily::V6, v6_degraded);
         degraded_interval = v4_degraded || v6_degraded;
     }
 }
 
 pub async fn me_drain_timeout_enforcer(pool: Arc<MePool>) {
     let mut drain_warn_next_allowed: HashMap<u64, Instant> = HashMap::new();
-    let mut drain_soft_evict_next_allowed: HashMap<u64, Instant> = HashMap::new();
     loop {
         tokio::time::sleep(Duration::from_secs(
             HEALTH_DRAIN_TIMEOUT_ENFORCER_INTERVAL_SECS,
         ))
         .await;
-        reap_draining_writers(
-            &pool,
-            &mut drain_warn_next_allowed,
-            &mut drain_soft_evict_next_allowed,
-        )
-        .await;
+        reap_draining_writers(&pool, &mut drain_warn_next_allowed).await;
     }
-}
-
-fn should_run_family_check(circuit: &mut FamilyCircuitState, now: Instant) -> bool {
-    match circuit.state {
-        MeFamilyRuntimeState::Suppressed => {
-            if now < circuit.next_probe_at {
-                return false;
-            }
-            circuit.next_probe_at =
-                now + Duration::from_secs(FAMILY_RECOVER_PROBE_INTERVAL_SECS);
-            true
-        }
-        _ => true,
-    }
-}
-
-fn apply_family_circuit_result(
-    pool: &Arc<MePool>,
-    family: IpFamily,
-    circuit: &mut FamilyCircuitState,
-    degraded: Option<bool>,
-    allow_suppress: bool,
-    now: Instant,
-    now_epoch_secs: u64,
-) -> bool {
-    let Some(degraded) = degraded else {
-        // Preserve suppression state when probe tick is intentionally skipped.
-        return false;
-    };
-
-    let previous_state = circuit.state;
-    match circuit.state {
-        MeFamilyRuntimeState::Suppressed => {
-            if degraded {
-                circuit.fail_streak = circuit.fail_streak.saturating_add(1);
-                circuit.recover_success_streak = 0;
-                let until = now + Duration::from_secs(FAMILY_SUPPRESS_WINDOW_SECS);
-                circuit.suppressed_until = Some(until);
-                circuit.state_since_at = now;
-                warn!(
-                    ?family,
-                    fail_streak = circuit.fail_streak,
-                    suppress_secs = FAMILY_SUPPRESS_WINDOW_SECS,
-                    "ME family remains suppressed due to ongoing failures"
-                );
-            } else {
-                circuit.fail_streak = 0;
-                circuit.recover_success_streak = 1;
-                circuit.state = MeFamilyRuntimeState::Recovering;
-            }
-        }
-        MeFamilyRuntimeState::Recovering => {
-            if degraded {
-                circuit.fail_streak = circuit.fail_streak.saturating_add(1);
-                if allow_suppress {
-                    circuit.state = MeFamilyRuntimeState::Suppressed;
-                    let until = now + Duration::from_secs(FAMILY_SUPPRESS_WINDOW_SECS);
-                    circuit.suppressed_until = Some(until);
-                    circuit.next_probe_at =
-                        now + Duration::from_secs(FAMILY_RECOVER_PROBE_INTERVAL_SECS);
-                    warn!(
-                        ?family,
-                        fail_streak = circuit.fail_streak,
-                        suppress_secs = FAMILY_SUPPRESS_WINDOW_SECS,
-                        "ME family temporarily suppressed after repeated degradation"
-                    );
-                } else {
-                    circuit.state = MeFamilyRuntimeState::Degraded;
-                }
-            } else {
-                circuit.recover_success_streak = circuit.recover_success_streak.saturating_add(1);
-                if circuit.recover_success_streak >= FAMILY_RECOVER_SUCCESS_STREAK_REQUIRED {
-                    circuit.fail_streak = 0;
-                    circuit.recover_success_streak = 0;
-                    circuit.suppressed_until = None;
-                    circuit.state = MeFamilyRuntimeState::Healthy;
-                    info!(
-                        ?family,
-                        "ME family suppression lifted after stable recovery probes"
-                    );
-                }
-            }
-        }
-        _ => {
-            if degraded {
-                circuit.fail_streak = circuit.fail_streak.saturating_add(1);
-                circuit.recover_success_streak = 0;
-                circuit.state = MeFamilyRuntimeState::Degraded;
-                if allow_suppress && circuit.fail_streak >= FAMILY_SUPPRESS_FAIL_STREAK_THRESHOLD {
-                    circuit.state = MeFamilyRuntimeState::Suppressed;
-                    let until = now + Duration::from_secs(FAMILY_SUPPRESS_WINDOW_SECS);
-                    circuit.suppressed_until = Some(until);
-                    circuit.next_probe_at =
-                        now + Duration::from_secs(FAMILY_RECOVER_PROBE_INTERVAL_SECS);
-                    warn!(
-                        ?family,
-                        fail_streak = circuit.fail_streak,
-                        suppress_secs = FAMILY_SUPPRESS_WINDOW_SECS,
-                        "ME family temporarily suppressed after repeated degradation"
-                    );
-                }
-            } else {
-                circuit.fail_streak = 0;
-                circuit.recover_success_streak = 0;
-                circuit.suppressed_until = None;
-                circuit.state = MeFamilyRuntimeState::Healthy;
-            }
-        }
-    }
-
-    if previous_state != circuit.state {
-        circuit.state_since_at = now;
-    }
-
-    let suppressed_until_epoch_secs = circuit
-        .suppressed_until
-        .and_then(|until| {
-            if until > now {
-                Some(
-                    now_epoch_secs
-                        .saturating_add(until.saturating_duration_since(now).as_secs()),
-                )
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0);
-    let state_since_epoch_secs = if previous_state == circuit.state {
-        pool.family_runtime_state_since_epoch_secs(family)
-    } else {
-        now_epoch_secs
-    };
-    pool.set_family_runtime_state(
-        family,
-        circuit.state,
-        state_since_epoch_secs,
-        suppressed_until_epoch_secs,
-        circuit.fail_streak,
-        circuit.recover_success_streak,
-    );
-
-    !matches!(circuit.state, MeFamilyRuntimeState::Suppressed) && degraded
-}
-
-fn draining_writer_timeout_expired(
-    pool: &MePool,
-    writer: &MeWriter,
-    now_epoch_secs: u64,
-    drain_ttl_secs: u64,
-) -> bool {
-    if pool
-        .me_instadrain
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        return true;
-    }
-
-    let deadline_epoch_secs = writer
-        .drain_deadline_epoch_secs
-        .load(std::sync::atomic::Ordering::Relaxed);
-    if deadline_epoch_secs != 0 {
-        return now_epoch_secs >= deadline_epoch_secs;
-    }
-
-    if drain_ttl_secs == 0 {
-        return false;
-    }
-    let drain_started_at_epoch_secs = writer
-        .draining_started_at_epoch_secs
-        .load(std::sync::atomic::Ordering::Relaxed);
-    if drain_started_at_epoch_secs == 0 {
-        return false;
-    }
-    now_epoch_secs.saturating_sub(drain_started_at_epoch_secs) > drain_ttl_secs
 }
 
 pub(super) async fn reap_draining_writers(
     pool: &Arc<MePool>,
     warn_next_allowed: &mut HashMap<u64, Instant>,
-    soft_evict_next_allowed: &mut HashMap<u64, Instant>,
 ) {
     let now_epoch_secs = MePool::now_epoch_secs();
     let now = Instant::now();
-    let drain_ttl_secs = pool.me_pool_drain_ttl_secs.load(std::sync::atomic::Ordering::Relaxed);
+    let drain_ttl_secs = pool
+        .drain_runtime
+        .me_pool_drain_ttl_secs
+        .load(std::sync::atomic::Ordering::Relaxed);
     let drain_threshold = pool
+        .drain_runtime
         .me_pool_drain_threshold
         .load(std::sync::atomic::Ordering::Relaxed);
-    let writers = pool.writers.read().await.clone();
     let activity = pool.registry.writer_activity_snapshot().await;
-    let mut draining_writers = Vec::new();
+    let mut draining_writers = Vec::<DrainingWriterSnapshot>::new();
     let mut empty_writer_ids = Vec::<u64>::new();
-    let mut timeout_expired_writer_ids = Vec::<u64>::new();
     let mut force_close_writer_ids = Vec::<u64>::new();
-    for writer in writers {
+    let writers = pool.writers.read().await;
+    for writer in writers.iter() {
         if !writer.draining.load(std::sync::atomic::Ordering::Relaxed) {
-            continue;
-        }
-        if draining_writer_timeout_expired(pool, &writer, now_epoch_secs, drain_ttl_secs) {
-            timeout_expired_writer_ids.push(writer.id);
             continue;
         }
         if activity
@@ -432,23 +181,40 @@ pub(super) async fn reap_draining_writers(
             empty_writer_ids.push(writer.id);
             continue;
         }
-        draining_writers.push(writer);
+        draining_writers.push(DrainingWriterSnapshot {
+            id: writer.id,
+            writer_dc: writer.writer_dc,
+            addr: writer.addr,
+            generation: writer.generation,
+            created_at: writer.created_at,
+            draining_started_at_epoch_secs: writer
+                .draining_started_at_epoch_secs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            drain_deadline_epoch_secs: writer
+                .drain_deadline_epoch_secs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            allow_drain_fallback: writer
+                .allow_drain_fallback
+                .load(std::sync::atomic::Ordering::Relaxed),
+        });
     }
+    drop(writers);
 
-    if drain_threshold > 0 && draining_writers.len() > drain_threshold as usize {
+    let overflow = if drain_threshold > 0 && draining_writers.len() > drain_threshold as usize {
+        draining_writers
+            .len()
+            .saturating_sub(drain_threshold as usize)
+    } else {
+        0
+    };
+
+    if overflow > 0 {
         draining_writers.sort_by(|left, right| {
-            let left_started = left
-                .draining_started_at_epoch_secs
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let right_started = right
-                .draining_started_at_epoch_secs
-                .load(std::sync::atomic::Ordering::Relaxed);
-            left_started
-                .cmp(&right_started)
+            left.draining_started_at_epoch_secs
+                .cmp(&right.draining_started_at_epoch_secs)
                 .then_with(|| left.created_at.cmp(&right.created_at))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let overflow = draining_writers.len().saturating_sub(drain_threshold as usize);
         warn!(
             draining_writers = draining_writers.len(),
             me_pool_drain_threshold = drain_threshold,
@@ -460,15 +226,10 @@ pub(super) async fn reap_draining_writers(
         }
     }
 
-    let mut active_draining_writer_ids = HashSet::with_capacity(draining_writers.len());
-    for writer in &draining_writers {
-        active_draining_writer_ids.insert(writer.id);
-        let drain_started_at_epoch_secs = writer
-            .draining_started_at_epoch_secs
-            .load(std::sync::atomic::Ordering::Relaxed);
+    for writer in draining_writers {
         if drain_ttl_secs > 0
-            && drain_started_at_epoch_secs != 0
-            && now_epoch_secs.saturating_sub(drain_started_at_epoch_secs) > drain_ttl_secs
+            && writer.draining_started_at_epoch_secs != 0
+            && now_epoch_secs.saturating_sub(writer.draining_started_at_epoch_secs) > drain_ttl_secs
             && should_emit_writer_warn(
                 warn_next_allowed,
                 writer.id,
@@ -482,111 +243,27 @@ pub(super) async fn reap_draining_writers(
                 endpoint = %writer.addr,
                 generation = writer.generation,
                 drain_ttl_secs,
-                force_close_secs = pool.me_pool_force_close_secs.load(std::sync::atomic::Ordering::Relaxed),
-                allow_drain_fallback = writer.allow_drain_fallback.load(std::sync::atomic::Ordering::Relaxed),
+                force_close_secs = pool
+                    .drain_runtime
+                    .me_pool_force_close_secs
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                allow_drain_fallback = writer.allow_drain_fallback,
                 "ME draining writer remains non-empty past drain TTL"
             );
         }
-    }
-
-    warn_next_allowed.retain(|writer_id, _| active_draining_writer_ids.contains(writer_id));
-    soft_evict_next_allowed.retain(|writer_id, _| active_draining_writer_ids.contains(writer_id));
-
-    if pool.drain_soft_evict_enabled() && drain_ttl_secs > 0 && !draining_writers.is_empty() {
-        let mut force_close_ids = HashSet::<u64>::with_capacity(force_close_writer_ids.len());
-        for writer_id in &force_close_writer_ids {
-            force_close_ids.insert(*writer_id);
-        }
-        let soft_grace_secs = pool.drain_soft_evict_grace_secs();
-        let soft_trigger_age_secs = drain_ttl_secs.saturating_add(soft_grace_secs);
-        let per_writer_limit = pool.drain_soft_evict_per_writer();
-        let soft_budget = health_drain_soft_evict_budget(pool);
-        let soft_cooldown = pool.drain_soft_evict_cooldown();
-        let mut soft_evicted_total = 0usize;
-
-        for writer in &draining_writers {
-            if soft_evicted_total >= soft_budget {
-                break;
-            }
-            if force_close_ids.contains(&writer.id) {
-                continue;
-            }
-            if pool.writer_accepts_new_binding(writer) {
-                continue;
-            }
-            let started_epoch_secs = writer
-                .draining_started_at_epoch_secs
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if started_epoch_secs == 0
-                || now_epoch_secs.saturating_sub(started_epoch_secs) < soft_trigger_age_secs
-            {
-                continue;
-            }
-            if !should_emit_writer_warn(
-                soft_evict_next_allowed,
-                writer.id,
-                now,
-                soft_cooldown,
-            ) {
-                continue;
-            }
-
-            let remaining_budget = soft_budget.saturating_sub(soft_evicted_total);
-            let limit = per_writer_limit.min(remaining_budget);
-            if limit == 0 {
-                break;
-            }
-            let conn_ids = pool
-                .registry
-                .bound_conn_ids_for_writer_limited(writer.id, limit)
-                .await;
-            if conn_ids.is_empty() {
-                continue;
-            }
-
-            let mut evicted_for_writer = 0usize;
-            for conn_id in conn_ids {
-                if pool.registry.evict_bound_conn_if_writer(conn_id, writer.id).await {
-                    evicted_for_writer = evicted_for_writer.saturating_add(1);
-                    soft_evicted_total = soft_evicted_total.saturating_add(1);
-                    pool.stats.increment_pool_drain_soft_evict_total();
-                    if soft_evicted_total >= soft_budget {
-                        break;
-                    }
-                }
-            }
-
-            if evicted_for_writer > 0 {
-                pool.stats.increment_pool_drain_soft_evict_writer_total();
-                info!(
-                    writer_id = writer.id,
-                    writer_dc = writer.writer_dc,
-                    endpoint = %writer.addr,
-                    drained_connections = evicted_for_writer,
-                    soft_budget,
-                    soft_trigger_age_secs,
-                    "ME draining writer soft-evicted bound clients"
-                );
-            }
+        if writer.drain_deadline_epoch_secs != 0
+            && now_epoch_secs >= writer.drain_deadline_epoch_secs
+        {
+            warn!(writer_id = writer.id, "Drain timeout, force-closing");
+            force_close_writer_ids.push(writer.id);
         }
     }
 
-    let mut closed_writer_ids = HashSet::<u64>::new();
-    for writer_id in timeout_expired_writer_ids {
-        if !closed_writer_ids.insert(writer_id) {
-            continue;
-        }
-        pool.stats.increment_pool_force_close_total();
-        pool.remove_writer_and_close_clients(writer_id, MeWriterTeardownReason::ReapTimeoutExpired)
-            .await;
-        pool.stats
-            .increment_me_draining_writers_reap_progress_total();
-    }
-
+    let close_budget = health_drain_close_budget();
     let requested_force_close = force_close_writer_ids.len();
     let requested_empty_close = empty_writer_ids.len();
     let requested_close_total = requested_force_close.saturating_add(requested_empty_close);
-    let close_budget = health_drain_close_budget();
+    let mut closed_writer_ids = HashSet::<u64>::new();
     let mut closed_total = 0usize;
     for writer_id in force_close_writer_ids {
         if closed_total >= close_budget {
@@ -596,10 +273,7 @@ pub(super) async fn reap_draining_writers(
             continue;
         }
         pool.stats.increment_pool_force_close_total();
-        pool.remove_writer_and_close_clients(writer_id, MeWriterTeardownReason::ReapThresholdForce)
-            .await;
-        pool.stats
-            .increment_me_draining_writers_reap_progress_total();
+        pool.remove_writer_and_close_clients(writer_id).await;
         closed_total = closed_total.saturating_add(1);
     }
     for writer_id in empty_writer_ids {
@@ -609,10 +283,7 @@ pub(super) async fn reap_draining_writers(
         if !closed_writer_ids.insert(writer_id) {
             continue;
         }
-        pool.remove_writer_and_close_clients(writer_id, MeWriterTeardownReason::ReapEmpty)
-            .await;
-        pool.stats
-            .increment_me_draining_writers_reap_progress_total();
+        pool.remove_writer_and_close_clients(writer_id).await;
         closed_total = closed_total.saturating_add(1);
     }
 
@@ -625,6 +296,18 @@ pub(super) async fn reap_draining_writers(
             "ME draining close backlog deferred to next health cycle"
         );
     }
+
+    // Keep warn cooldown state for draining writers still present in the pool;
+    // drop state only once a writer is actually removed.
+    let active_draining_writer_ids = {
+        let writers = pool.writers.read().await;
+        writers
+            .iter()
+            .filter(|writer| writer.draining.load(std::sync::atomic::Ordering::Relaxed))
+            .map(|writer| writer.id)
+            .collect::<HashSet<u64>>()
+    };
+    warn_next_allowed.retain(|writer_id, _| active_draining_writer_ids.contains(writer_id));
 }
 
 pub(super) fn health_drain_close_budget() -> usize {
@@ -636,17 +319,16 @@ pub(super) fn health_drain_close_budget() -> usize {
         .clamp(HEALTH_DRAIN_CLOSE_BUDGET_MIN, HEALTH_DRAIN_CLOSE_BUDGET_MAX)
 }
 
-pub(super) fn health_drain_soft_evict_budget(pool: &MePool) -> usize {
-    let cpu_cores = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let per_core = pool.drain_soft_evict_budget_per_core();
-    cpu_cores
-        .saturating_mul(per_core)
-        .clamp(
-            HEALTH_DRAIN_SOFT_EVICT_BUDGET_MIN,
-            HEALTH_DRAIN_SOFT_EVICT_BUDGET_MAX,
-        )
+#[derive(Debug, Clone)]
+struct DrainingWriterSnapshot {
+    id: u64,
+    writer_dc: i32,
+    addr: SocketAddr,
+    generation: u64,
+    created_at: Instant,
+    draining_started_at_epoch_secs: u64,
+    drain_deadline_epoch_secs: u64,
+    allow_drain_fallback: bool,
 }
 
 fn should_emit_writer_warn(
@@ -681,8 +363,6 @@ async fn check_family(
     adaptive_idle_since: &mut HashMap<(i32, IpFamily), Instant>,
     adaptive_recover_until: &mut HashMap<(i32, IpFamily), Instant>,
     floor_warn_next_allowed: &mut HashMap<(i32, IpFamily), Instant>,
-    drain_warn_next_allowed: &mut HashMap<u64, Instant>,
-    drain_soft_evict_next_allowed: &mut HashMap<u64, Instant>,
 ) -> bool {
     let enabled = match family {
         IpFamily::V4 => pool.decision.ipv4_me,
@@ -710,7 +390,8 @@ async fn check_family(
         endpoints.sort_unstable();
         endpoints.dedup();
     }
-    let mut reconnect_budget = health_reconnect_budget(pool, dc_endpoints.len());
+    let reconnect_budget = health_reconnect_budget(pool, dc_endpoints.len());
+    let reconnect_sem = Arc::new(Semaphore::new(reconnect_budget));
 
     if pool.floor_mode() == MeFloorMode::Static {
         adaptive_idle_since.clear();
@@ -719,9 +400,13 @@ async fn check_family(
 
     let mut live_addr_counts = HashMap::<(i32, SocketAddr), usize>::new();
     let mut live_writer_ids_by_addr = HashMap::<(i32, SocketAddr), Vec<u64>>::new();
-    for writer in pool.writers.read().await.iter().filter(|w| {
-        !w.draining.load(std::sync::atomic::Ordering::Relaxed)
-    }) {
+    for writer in pool
+        .writers
+        .read()
+        .await
+        .iter()
+        .filter(|w| !w.draining.load(std::sync::atomic::Ordering::Relaxed))
+    {
         if !matches!(
             super::pool::WriterContour::from_u8(
                 writer.contour.load(std::sync::atomic::Ordering::Relaxed),
@@ -763,15 +448,12 @@ async fn check_family(
         floor_plan.active_writers_current,
         floor_plan.warm_writers_current,
     );
-    let mut next_drain_reap_at = Instant::now();
+    let live_writer_ids_by_addr = Arc::new(live_writer_ids_by_addr);
+    let writer_idle_since = Arc::new(writer_idle_since);
+    let bound_clients_by_writer = Arc::new(bound_clients_by_writer);
+    let mut reconnect_set = JoinSet::<FamilyReconnectOutcome>::new();
 
     for (dc, endpoints) in dc_endpoints {
-        if Instant::now() >= next_drain_reap_at {
-            reap_draining_writers(pool, drain_warn_next_allowed, drain_soft_evict_next_allowed)
-                .await;
-            next_drain_reap_at = Instant::now()
-                + Duration::from_secs(HEALTH_DRAIN_REAP_OPPORTUNISTIC_INTERVAL_SECS);
-        }
         if endpoints.is_empty() {
             continue;
         }
@@ -809,7 +491,7 @@ async fn check_family(
                 required,
                 outage_backoff,
                 outage_next_attempt,
-                &mut reconnect_budget,
+                &reconnect_sem,
             )
             .await;
             continue;
@@ -843,9 +525,9 @@ async fn check_family(
                 &endpoints,
                 alive,
                 required,
-                &live_writer_ids_by_addr,
-                &writer_idle_since,
-                &bound_clients_by_writer,
+                live_writer_ids_by_addr.as_ref(),
+                writer_idle_since.as_ref(),
+                bound_clients_by_writer.as_ref(),
                 idle_refresh_next_attempt,
             )
             .await;
@@ -858,8 +540,8 @@ async fn check_family(
                 &endpoints,
                 alive,
                 required,
-                &live_writer_ids_by_addr,
-                &bound_clients_by_writer,
+                live_writer_ids_by_addr.as_ref(),
+                bound_clients_by_writer.as_ref(),
                 shadow_rotate_deadline,
             )
             .await;
@@ -869,8 +551,8 @@ async fn check_family(
         family_degraded = true;
 
         let now = Instant::now();
-        if reconnect_budget == 0 {
-            let base_ms = pool.me_reconnect_backoff_base.as_millis() as u64;
+        if reconnect_sem.available_permits() == 0 {
+            let base_ms = pool.reconnect_runtime.me_reconnect_backoff_base.as_millis() as u64;
             let next_ms = (*backoff.get(&key).unwrap_or(&base_ms)).max(base_ms);
             let jitter = next_ms / JITTER_FRAC_NUM;
             let wait = Duration::from_millis(next_ms)
@@ -893,7 +575,10 @@ async fn check_family(
             continue;
         }
 
-        let max_concurrent = pool.me_reconnect_max_concurrent_per_dc.max(1) as usize;
+        let max_concurrent = pool
+            .reconnect_runtime
+            .me_reconnect_max_concurrent_per_dc
+            .max(1) as usize;
         if *inflight.get(&key).unwrap_or(&0) >= max_concurrent {
             continue;
         }
@@ -912,125 +597,165 @@ async fn check_family(
             continue;
         }
         *inflight.entry(key).or_insert(0) += 1;
-
-        let mut restored = 0usize;
-        for _ in 0..missing {
-            if Instant::now() >= next_drain_reap_at {
-                reap_draining_writers(pool, drain_warn_next_allowed, drain_soft_evict_next_allowed)
+        let pool_for_reconnect = pool.clone();
+        let rng_for_reconnect = rng.clone();
+        let reconnect_sem_for_dc = reconnect_sem.clone();
+        let endpoints_for_dc = endpoints.clone();
+        let live_writer_ids_by_addr_for_dc = live_writer_ids_by_addr.clone();
+        let writer_idle_since_for_dc = writer_idle_since.clone();
+        let bound_clients_by_writer_for_dc = bound_clients_by_writer.clone();
+        let active_cap_effective_total = floor_plan.active_cap_effective_total;
+        reconnect_set.spawn(async move {
+            let mut restored = 0usize;
+            for _ in 0..missing {
+                let Ok(reconnect_permit) = reconnect_sem_for_dc.clone().try_acquire_owned() else {
+                    break;
+                };
+                if pool_for_reconnect.active_contour_writer_count_total().await
+                    >= active_cap_effective_total
+                {
+                    let swapped = maybe_swap_idle_writer_for_cap(
+                        &pool_for_reconnect,
+                        &rng_for_reconnect,
+                        dc,
+                        family,
+                        &endpoints_for_dc,
+                        live_writer_ids_by_addr_for_dc.as_ref(),
+                        writer_idle_since_for_dc.as_ref(),
+                        bound_clients_by_writer_for_dc.as_ref(),
+                    )
                     .await;
-                next_drain_reap_at = Instant::now()
-                    + Duration::from_secs(HEALTH_DRAIN_REAP_OPPORTUNISTIC_INTERVAL_SECS);
-            }
-            if reconnect_budget == 0 {
-                break;
-            }
-            reconnect_budget = reconnect_budget.saturating_sub(1);
-            if pool.active_contour_writer_count_total().await
-                >= floor_plan.active_cap_effective_total
-            {
-                let swapped = maybe_swap_idle_writer_for_cap(
-                    pool,
-                    rng,
-                    dc,
-                    family,
-                    &endpoints,
-                    &live_writer_ids_by_addr,
-                    &writer_idle_since,
-                    &bound_clients_by_writer,
+                    if swapped {
+                        pool_for_reconnect
+                            .stats
+                            .increment_me_floor_swap_idle_total();
+                        restored += 1;
+                        continue;
+                    }
+                    pool_for_reconnect
+                        .stats
+                        .increment_me_floor_cap_block_total();
+                    pool_for_reconnect
+                        .stats
+                        .increment_me_floor_swap_idle_failed_total();
+                    debug!(
+                        dc = %dc,
+                        ?family,
+                        alive,
+                        required,
+                        active_cap_effective_total,
+                        "Adaptive floor cap reached, reconnect attempt blocked"
+                    );
+                    break;
+                }
+                let res = tokio::time::timeout(
+                    pool_for_reconnect.reconnect_runtime.me_one_timeout,
+                    pool_for_reconnect.connect_endpoints_round_robin(
+                        dc,
+                        &endpoints_for_dc,
+                        rng_for_reconnect.as_ref(),
+                    ),
                 )
                 .await;
-                if swapped {
-                    pool.stats.increment_me_floor_swap_idle_total();
-                    restored += 1;
-                    continue;
+                match res {
+                    Ok(true) => {
+                        restored += 1;
+                        pool_for_reconnect.stats.increment_me_reconnect_success();
+                    }
+                    Ok(false) => {
+                        pool_for_reconnect.stats.increment_me_reconnect_attempt();
+                        debug!(dc = %dc, ?family, "ME round-robin reconnect failed")
+                    }
+                    Err(_) => {
+                        pool_for_reconnect.stats.increment_me_reconnect_attempt();
+                        debug!(dc = %dc, ?family, "ME reconnect timed out");
+                    }
                 }
-                pool.stats.increment_me_floor_cap_block_total();
-                pool.stats.increment_me_floor_swap_idle_failed_total();
-                debug!(
-                    dc = %dc,
-                    ?family,
-                    alive,
-                    required,
-                    active_cap_effective_total = floor_plan.active_cap_effective_total,
-                    "Adaptive floor cap reached, reconnect attempt blocked"
-                );
-                break;
+                drop(reconnect_permit);
             }
-            let res = tokio::time::timeout(
-                pool.me_one_timeout,
-                pool.connect_endpoints_round_robin(dc, &endpoints, rng.as_ref()),
-            )
-            .await;
-            match res {
-                Ok(true) => {
-                    restored += 1;
-                    pool.stats.increment_me_reconnect_success();
-                }
-                Ok(false) => {
-                    pool.stats.increment_me_reconnect_attempt();
-                    debug!(dc = %dc, ?family, "ME round-robin reconnect failed")
-                }
-                Err(_) => {
-                    pool.stats.increment_me_reconnect_attempt();
-                    debug!(dc = %dc, ?family, "ME reconnect timed out");
-                }
-            }
-        }
 
-        let now_alive = alive + restored;
-        if now_alive >= required {
-            info!(
-                dc = %dc,
-                ?family,
-                alive = now_alive,
+            FamilyReconnectOutcome {
+                key,
+                dc,
+                family,
+                alive,
                 required,
-                endpoint_count = endpoints.len(),
+                endpoint_count: endpoints_for_dc.len(),
+                restored,
+            }
+        });
+    }
+
+    while let Some(joined) = reconnect_set.join_next().await {
+        let outcome = match joined {
+            Ok(outcome) => outcome,
+            Err(join_error) => {
+                debug!(error = %join_error, "Health reconnect task failed");
+                continue;
+            }
+        };
+        let now = Instant::now();
+        let now_alive = outcome.alive + outcome.restored;
+        if now_alive >= outcome.required {
+            info!(
+                dc = %outcome.dc,
+                family = ?outcome.family,
+                alive = now_alive,
+                required = outcome.required,
+                endpoint_count = outcome.endpoint_count,
                 "ME writer floor restored for DC"
             );
-            backoff.insert(key, pool.me_reconnect_backoff_base.as_millis() as u64);
-            let jitter = pool.me_reconnect_backoff_base.as_millis() as u64 / JITTER_FRAC_NUM;
-            let wait = pool.me_reconnect_backoff_base
+            backoff.insert(
+                outcome.key,
+                pool.reconnect_runtime.me_reconnect_backoff_base.as_millis() as u64,
+            );
+            let jitter = pool.reconnect_runtime.me_reconnect_backoff_base.as_millis() as u64
+                / JITTER_FRAC_NUM;
+            let wait = pool.reconnect_runtime.me_reconnect_backoff_base
                 + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
-            next_attempt.insert(key, now + wait);
+            next_attempt.insert(outcome.key, now + wait);
         } else {
-            let curr = *backoff.get(&key).unwrap_or(&(pool.me_reconnect_backoff_base.as_millis() as u64));
-            let next_ms = (curr.saturating_mul(2)).min(pool.me_reconnect_backoff_cap.as_millis() as u64);
-            backoff.insert(key, next_ms);
+            let curr = *backoff
+                .get(&outcome.key)
+                .unwrap_or(&(pool.reconnect_runtime.me_reconnect_backoff_base.as_millis() as u64));
+            let next_ms = (curr.saturating_mul(2))
+                .min(pool.reconnect_runtime.me_reconnect_backoff_cap.as_millis() as u64);
+            backoff.insert(outcome.key, next_ms);
             let jitter = next_ms / JITTER_FRAC_NUM;
             let wait = Duration::from_millis(next_ms)
                 + Duration::from_millis(rand::rng().random_range(0..=jitter.max(1)));
-            next_attempt.insert(key, now + wait);
+            next_attempt.insert(outcome.key, now + wait);
             if pool.is_runtime_ready() {
                 let warn_cooldown = pool.warn_rate_limit_duration();
                 if should_emit_rate_limited_warn(
                     floor_warn_next_allowed,
-                    key,
+                    outcome.key,
                     now,
                     warn_cooldown,
                 ) {
                     warn!(
-                        dc = %dc,
-                        ?family,
+                        dc = %outcome.dc,
+                        family = ?outcome.family,
                         alive = now_alive,
-                        required,
-                        endpoint_count = endpoints.len(),
+                        required = outcome.required,
+                        endpoint_count = outcome.endpoint_count,
                         backoff_ms = next_ms,
                         "DC writer floor is below required level, scheduled reconnect"
                     );
                 }
             } else {
                 info!(
-                    dc = %dc,
-                    ?family,
+                    dc = %outcome.dc,
+                    family = ?outcome.family,
                     alive = now_alive,
-                    required,
-                    endpoint_count = endpoints.len(),
+                    required = outcome.required,
+                    endpoint_count = outcome.endpoint_count,
                     backoff_ms = next_ms,
                     "DC writer floor is below required level during startup, scheduled reconnect"
                 );
             }
         }
-        if let Some(v) = inflight.get_mut(&key) {
+        if let Some(v) = inflight.get_mut(&outcome.key) {
             *v = v.saturating_sub(1);
         }
     }
@@ -1045,6 +770,68 @@ fn health_reconnect_budget(pool: &Arc<MePool>, dc_groups: usize) -> usize {
     by_cpu
         .saturating_add(by_dc)
         .clamp(HEALTH_RECONNECT_BUDGET_MIN, HEALTH_RECONNECT_BUDGET_MAX)
+}
+
+fn update_family_runtime_state(pool: &Arc<MePool>, family: IpFamily, degraded: bool) {
+    let now_epoch_secs = MePool::now_epoch_secs();
+    let previous_state = pool.family_runtime_state(family);
+    let mut state_since_epoch_secs = pool.family_runtime_state_since_epoch_secs(family);
+    let previous_suppressed_until_epoch_secs = pool.family_suppressed_until_epoch_secs(family);
+    let previous_fail_streak = pool.family_fail_streak(family);
+    let previous_recover_success_streak = pool.family_recover_success_streak(family);
+
+    let (next_state, suppressed_until_epoch_secs, fail_streak, recover_success_streak) =
+        if previous_suppressed_until_epoch_secs > now_epoch_secs {
+            let fail_streak = if degraded {
+                previous_fail_streak.saturating_add(1)
+            } else {
+                previous_fail_streak
+            };
+            (
+                MeFamilyRuntimeState::Suppressed,
+                previous_suppressed_until_epoch_secs,
+                fail_streak,
+                0,
+            )
+        } else if degraded {
+            let fail_streak = previous_fail_streak.saturating_add(1);
+            if fail_streak >= FAMILY_SUPPRESS_FAIL_STREAK_THRESHOLD {
+                (
+                    MeFamilyRuntimeState::Suppressed,
+                    now_epoch_secs.saturating_add(FAMILY_SUPPRESS_DURATION_SECS),
+                    fail_streak,
+                    0,
+                )
+            } else {
+                (MeFamilyRuntimeState::Degraded, 0, fail_streak, 0)
+            }
+        } else if matches!(previous_state, MeFamilyRuntimeState::Healthy) {
+            (MeFamilyRuntimeState::Healthy, 0, 0, 0)
+        } else {
+            let recover_success_streak = previous_recover_success_streak.saturating_add(1);
+            if recover_success_streak >= FAMILY_RECOVER_SUCCESS_STREAK_TARGET {
+                (MeFamilyRuntimeState::Healthy, 0, 0, 0)
+            } else {
+                (
+                    MeFamilyRuntimeState::Recovering,
+                    0,
+                    0,
+                    recover_success_streak,
+                )
+            }
+        };
+
+    if next_state != previous_state || state_since_epoch_secs == 0 {
+        state_since_epoch_secs = now_epoch_secs;
+    }
+    pool.set_family_runtime_state(
+        family,
+        next_state,
+        state_since_epoch_secs,
+        suppressed_until_epoch_secs,
+        fail_streak,
+        recover_success_streak,
+    );
 }
 
 fn should_emit_rate_limited_warn(
@@ -1071,6 +858,7 @@ fn adaptive_floor_class_min(
 ) -> usize {
     if endpoint_count <= 1 {
         let min_single = (pool
+            .floor_runtime
             .me_adaptive_floor_min_writers_single_endpoint
             .load(std::sync::atomic::Ordering::Relaxed) as usize)
             .max(1);
@@ -1167,7 +955,12 @@ async fn build_family_floor_plan(
         let target_required = desired_raw.clamp(min_required, max_required);
         let alive = endpoints
             .iter()
-            .map(|endpoint| live_addr_counts.get(&(*dc, *endpoint)).copied().unwrap_or(0))
+            .map(|endpoint| {
+                live_addr_counts
+                    .get(&(*dc, *endpoint))
+                    .copied()
+                    .unwrap_or(0)
+            })
             .sum::<usize>();
         family_active_total = family_active_total.saturating_add(alive);
         let writer_ids = list_writer_ids_for_endpoints(*dc, endpoints, live_writer_ids_by_addr);
@@ -1322,7 +1115,7 @@ async fn maybe_swap_idle_writer_for_cap(
     };
 
     let connected = match tokio::time::timeout(
-        pool.me_one_timeout,
+        pool.reconnect_runtime.me_one_timeout,
         pool.connect_one_for_dc(endpoint, dc, rng.as_ref()),
     )
     .await
@@ -1428,7 +1221,7 @@ async fn maybe_refresh_idle_writer_for_dc(
     };
 
     let rotate_ok = match tokio::time::timeout(
-        pool.me_one_timeout,
+        pool.reconnect_runtime.me_one_timeout,
         pool.connect_one_for_dc(endpoint, dc, rng.as_ref()),
     )
     .await
@@ -1539,7 +1332,7 @@ async fn recover_single_endpoint_outage(
     required: usize,
     outage_backoff: &mut HashMap<(i32, IpFamily), u64>,
     outage_next_attempt: &mut HashMap<(i32, IpFamily), Instant>,
-    reconnect_budget: &mut usize,
+    reconnect_sem: &Arc<Semaphore>,
 ) {
     let now = Instant::now();
     if let Some(ts) = outage_next_attempt.get(&key)
@@ -1549,7 +1342,7 @@ async fn recover_single_endpoint_outage(
     }
 
     let (min_backoff_ms, max_backoff_ms) = pool.single_endpoint_outage_backoff_bounds_ms();
-    if *reconnect_budget == 0 {
+    if reconnect_sem.available_permits() == 0 {
         outage_next_attempt.insert(key, now + Duration::from_millis(min_backoff_ms.max(250)));
         debug!(
             dc = %key.0,
@@ -1560,7 +1353,17 @@ async fn recover_single_endpoint_outage(
         );
         return;
     }
-    *reconnect_budget = (*reconnect_budget).saturating_sub(1);
+    let Ok(_reconnect_permit) = reconnect_sem.clone().try_acquire_owned() else {
+        outage_next_attempt.insert(key, now + Duration::from_millis(min_backoff_ms.max(250)));
+        debug!(
+            dc = %key.0,
+            family = ?key.1,
+            %endpoint,
+            required,
+            "Single-endpoint outage reconnect deferred by semaphore saturation"
+        );
+        return;
+    };
     pool.stats
         .increment_me_single_endpoint_outage_reconnect_attempt_total();
 
@@ -1569,7 +1372,7 @@ async fn recover_single_endpoint_outage(
         pool.stats
             .increment_me_single_endpoint_quarantine_bypass_total();
         match tokio::time::timeout(
-            pool.me_one_timeout,
+            pool.reconnect_runtime.me_one_timeout,
             pool.connect_one_for_dc(endpoint, key.0, rng.as_ref()),
         )
         .await
@@ -1598,7 +1401,7 @@ async fn recover_single_endpoint_outage(
     } else {
         let one_endpoint = [endpoint];
         match tokio::time::timeout(
-            pool.me_one_timeout,
+            pool.reconnect_runtime.me_one_timeout,
             pool.connect_endpoints_round_robin(key.0, &one_endpoint, rng.as_ref()),
         )
         .await
@@ -1723,7 +1526,7 @@ async fn maybe_rotate_single_endpoint_shadow(
     };
 
     let rotate_ok = match tokio::time::timeout(
-        pool.me_one_timeout,
+        pool.reconnect_runtime.me_one_timeout,
         pool.connect_one_for_dc(endpoint, dc, rng.as_ref()),
     )
     .await
@@ -1760,7 +1563,8 @@ async fn maybe_rotate_single_endpoint_shadow(
 
     pool.mark_writer_draining_with_timeout(old_writer_id, pool.force_close_timeout(), false)
         .await;
-    pool.stats.increment_me_single_endpoint_shadow_rotate_total();
+    pool.stats
+        .increment_me_single_endpoint_shadow_rotate_total();
     shadow_rotate_deadline.insert(key, now + interval);
     info!(
         dc = %dc,
@@ -1807,11 +1611,9 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
 
         // Phase 1: collect zombie IDs under a short read-lock with timeout.
         let zombie_ids_with_meta: Vec<(u64, bool)> = {
-            let Ok(ws) = tokio::time::timeout(
-                Duration::from_secs(LOCK_TIMEOUT_SECS),
-                pool.writers.read(),
-            )
-            .await
+            let Ok(ws) =
+                tokio::time::timeout(Duration::from_secs(LOCK_TIMEOUT_SECS), pool.writers.read())
+                    .await
             else {
                 warn!("zombie_watchdog: writers read-lock timeout, skipping tick");
                 continue;
@@ -1868,34 +1670,16 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
         for (writer_id, had_clients) in &zombie_ids_with_meta {
             let result = tokio::time::timeout(
                 Duration::from_secs(REMOVE_TIMEOUT_SECS),
-                pool.remove_writer_and_close_clients(
-                    *writer_id,
-                    MeWriterTeardownReason::WatchdogStuckDraining,
-                ),
+                pool.remove_writer_and_close_clients(*writer_id),
             )
             .await;
             match result {
-                Ok(true) => {
+                Ok(()) => {
                     removal_timeout_streak.remove(writer_id);
                     pool.stats.increment_pool_force_close_total();
-                    pool.stats
-                        .increment_me_draining_writers_reap_progress_total();
-                    info!(
-                        writer_id,
-                        had_clients,
-                        "Zombie writer removed by watchdog"
-                    );
-                }
-                Ok(false) => {
-                    removal_timeout_streak.remove(writer_id);
-                    debug!(
-                        writer_id,
-                        had_clients,
-                        "Zombie writer watchdog removal became no-op"
-                    );
+                    info!(writer_id, had_clients, "Zombie writer removed by watchdog");
                 }
                 Err(_) => {
-                    pool.stats.increment_me_writer_teardown_timeout_total();
                     let streak = removal_timeout_streak
                         .entry(*writer_id)
                         .and_modify(|value| *value = value.saturating_add(1))
@@ -1909,26 +1693,19 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
                     if *streak < HARD_DETACH_TIMEOUT_STREAK {
                         continue;
                     }
-                    pool.stats.increment_me_writer_teardown_escalation_total();
 
                     let hard_detach = tokio::time::timeout(
                         Duration::from_secs(REMOVE_TIMEOUT_SECS),
-                        pool.remove_draining_writer_hard_detach(
-                            *writer_id,
-                            MeWriterTeardownReason::WatchdogStuckDraining,
-                        ),
+                        pool.remove_draining_writer_hard_detach(*writer_id),
                     )
                     .await;
                     match hard_detach {
                         Ok(true) => {
                             removal_timeout_streak.remove(writer_id);
                             pool.stats.increment_pool_force_close_total();
-                            pool.stats
-                                .increment_me_draining_writers_reap_progress_total();
                             info!(
                                 writer_id,
-                                had_clients,
-                                "Zombie writer hard-detached after repeated timeouts"
+                                had_clients, "Zombie writer hard-detached after repeated timeouts"
                             );
                         }
                         Ok(false) => {
@@ -1940,11 +1717,9 @@ pub async fn me_zombie_writer_watchdog(pool: Arc<MePool>) {
                             );
                         }
                         Err(_) => {
-                            pool.stats.increment_me_writer_teardown_timeout_total();
                             warn!(
                                 writer_id,
-                                had_clients,
-                                "Zombie hard-detach timed out, will retry next tick"
+                                had_clients, "Zombie hard-detach timed out, will retry next tick"
                             );
                         }
                     }
@@ -1964,25 +1739,25 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    use super::{
-        FamilyCircuitState, apply_family_circuit_result, reap_draining_writers,
-        should_run_family_check,
-    };
+    use super::reap_draining_writers;
     use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
     use crate::crypto::SecureRandom;
-    use crate::network::IpFamily;
     use crate::network::probe::NetworkDecision;
     use crate::stats::Stats;
     use crate::transport::middle_proxy::codec::WriterCommand;
-    use crate::transport::middle_proxy::pool::{
-        MeFamilyRuntimeState, MePool, MeWriter, WriterContour,
-    };
+    use crate::transport::middle_proxy::pool::{MePool, MeWriter, WriterContour};
     use crate::transport::middle_proxy::registry::ConnMeta;
 
     async fn make_pool(me_pool_drain_threshold: u64) -> Arc<MePool> {
         let general = GeneralConfig {
             me_pool_drain_threshold,
             ..GeneralConfig::default()
+        };
+        let mut proxy_map_v4 = HashMap::new();
+        proxy_map_v4.insert(2, vec![(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 443)]);
+        let decision = NetworkDecision {
+            ipv4_me: true,
+            ..NetworkDecision::default()
         };
         MePool::new(
             None,
@@ -1995,10 +1770,10 @@ mod tests {
             None,
             12,
             1200,
-            HashMap::new(),
+            proxy_map_v4,
             HashMap::new(),
             None,
-            NetworkDecision::default(),
+            decision,
             None,
             Arc::new(SecureRandom::new()),
             Arc::new(Stats::default()),
@@ -2117,23 +1892,99 @@ mod tests {
         conn_id
     }
 
+    async fn insert_live_writer(pool: &Arc<MePool>, writer_id: u64, writer_dc: i32) {
+        let (tx, _writer_rx) = mpsc::channel::<WriterCommand>(8);
+        let writer = MeWriter {
+            id: writer_id,
+            addr: SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(
+                    203,
+                    0,
+                    113,
+                    (writer_id as u8).saturating_add(1),
+                )),
+                4000 + writer_id as u16,
+            ),
+            source_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            writer_dc,
+            generation: 2,
+            contour: Arc::new(AtomicU8::new(WriterContour::Active.as_u8())),
+            created_at: Instant::now(),
+            tx: tx.clone(),
+            cancel: CancellationToken::new(),
+            degraded: Arc::new(AtomicBool::new(false)),
+            rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
+            draining: Arc::new(AtomicBool::new(false)),
+            draining_started_at_epoch_secs: Arc::new(AtomicU64::new(0)),
+            drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
+            allow_drain_fallback: Arc::new(AtomicBool::new(false)),
+        };
+        pool.writers.write().await.push(writer);
+        pool.registry.register_writer(writer_id, tx).await;
+        pool.conn_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     #[tokio::test]
     async fn reap_draining_writers_force_closes_oldest_over_threshold() {
+        let pool = make_pool(2).await;
+        insert_live_writer(&pool, 1, 2).await;
+        let now_epoch_secs = MePool::now_epoch_secs();
+        let conn_a = insert_draining_writer(&pool, 10, now_epoch_secs.saturating_sub(30)).await;
+        let conn_b = insert_draining_writer(&pool, 20, now_epoch_secs.saturating_sub(20)).await;
+        let conn_c = insert_draining_writer(&pool, 30, now_epoch_secs.saturating_sub(10)).await;
+        let mut warn_next_allowed = HashMap::new();
+
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
+
+        let mut writer_ids: Vec<u64> = pool
+            .writers
+            .read()
+            .await
+            .iter()
+            .map(|writer| writer.id)
+            .collect();
+        writer_ids.sort_unstable();
+        assert_eq!(writer_ids, vec![1, 20, 30]);
+        assert!(pool.registry.get_writer(conn_a).await.is_none());
+        assert_eq!(
+            pool.registry.get_writer(conn_b).await.unwrap().writer_id,
+            20
+        );
+        assert_eq!(
+            pool.registry.get_writer(conn_c).await.unwrap().writer_id,
+            30
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_draining_writers_force_closes_overflow_without_replacement() {
         let pool = make_pool(2).await;
         let now_epoch_secs = MePool::now_epoch_secs();
         let conn_a = insert_draining_writer(&pool, 10, now_epoch_secs.saturating_sub(30)).await;
         let conn_b = insert_draining_writer(&pool, 20, now_epoch_secs.saturating_sub(20)).await;
         let conn_c = insert_draining_writer(&pool, 30, now_epoch_secs.saturating_sub(10)).await;
         let mut warn_next_allowed = HashMap::new();
-        let mut soft_evict_next_allowed = HashMap::new();
 
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
 
-        let writer_ids: Vec<u64> = pool.writers.read().await.iter().map(|writer| writer.id).collect();
+        let mut writer_ids: Vec<u64> = pool
+            .writers
+            .read()
+            .await
+            .iter()
+            .map(|writer| writer.id)
+            .collect();
+        writer_ids.sort_unstable();
         assert_eq!(writer_ids, vec![20, 30]);
         assert!(pool.registry.get_writer(conn_a).await.is_none());
-        assert_eq!(pool.registry.get_writer(conn_b).await.unwrap().writer_id, 20);
-        assert_eq!(pool.registry.get_writer(conn_c).await.unwrap().writer_id, 30);
+        assert_eq!(
+            pool.registry.get_writer(conn_b).await.unwrap().writer_id,
+            20
+        );
+        assert_eq!(
+            pool.registry.get_writer(conn_c).await.unwrap().writer_id,
+            30
+        );
     }
 
     #[tokio::test]
@@ -2144,57 +1995,28 @@ mod tests {
         let conn_b = insert_draining_writer(&pool, 20, now_epoch_secs.saturating_sub(20)).await;
         let conn_c = insert_draining_writer(&pool, 30, now_epoch_secs.saturating_sub(10)).await;
         let mut warn_next_allowed = HashMap::new();
-        let mut soft_evict_next_allowed = HashMap::new();
 
-        reap_draining_writers(&pool, &mut warn_next_allowed, &mut soft_evict_next_allowed).await;
+        reap_draining_writers(&pool, &mut warn_next_allowed).await;
 
-        let writer_ids: Vec<u64> = pool.writers.read().await.iter().map(|writer| writer.id).collect();
+        let writer_ids: Vec<u64> = pool
+            .writers
+            .read()
+            .await
+            .iter()
+            .map(|writer| writer.id)
+            .collect();
         assert_eq!(writer_ids, vec![10, 20, 30]);
-        assert_eq!(pool.registry.get_writer(conn_a).await.unwrap().writer_id, 10);
-        assert_eq!(pool.registry.get_writer(conn_b).await.unwrap().writer_id, 20);
-        assert_eq!(pool.registry.get_writer(conn_c).await.unwrap().writer_id, 30);
-    }
-
-    #[tokio::test]
-    async fn suppressed_family_probe_skip_preserves_suppressed_state() {
-        let pool = make_pool(0).await;
-        let now = Instant::now();
-        let now_epoch_secs = MePool::now_epoch_secs();
-        let suppressed_until_epoch_secs = now_epoch_secs.saturating_add(60);
-        pool.set_family_runtime_state(
-            IpFamily::V6,
-            MeFamilyRuntimeState::Suppressed,
-            now_epoch_secs,
-            suppressed_until_epoch_secs,
-            7,
-            0,
-        );
-
-        let mut circuit = FamilyCircuitState {
-            state: MeFamilyRuntimeState::Suppressed,
-            state_since_at: now,
-            suppressed_until: Some(now + Duration::from_secs(60)),
-            next_probe_at: now + Duration::from_secs(5),
-            fail_streak: 7,
-            recover_success_streak: 0,
-        };
-
-        assert!(!should_run_family_check(&mut circuit, now));
-        assert!(!apply_family_circuit_result(
-            &pool,
-            IpFamily::V6,
-            &mut circuit,
-            None,
-            true,
-            now,
-            now_epoch_secs,
-        ));
-        assert_eq!(circuit.state, MeFamilyRuntimeState::Suppressed);
-        assert_eq!(circuit.fail_streak, 7);
-        assert_eq!(circuit.recover_success_streak, 0);
         assert_eq!(
-            pool.family_runtime_state(IpFamily::V6),
-            MeFamilyRuntimeState::Suppressed,
+            pool.registry.get_writer(conn_a).await.unwrap().writer_id,
+            10
+        );
+        assert_eq!(
+            pool.registry.get_writer(conn_b).await.unwrap().writer_id,
+            20
+        );
+        assert_eq!(
+            pool.registry.get_writer(conn_c).await.unwrap().writer_id,
+            30
         );
     }
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::sync::Arc;
@@ -7,8 +9,8 @@ use std::time::Instant;
 use bytes::{Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
@@ -30,10 +32,10 @@ pub(crate) async fn reader_loop(
     enc_leftover: BytesMut,
     mut dec: BytesMut,
     tx: mpsc::Sender<WriterCommand>,
-    ping_tracker: Arc<Mutex<HashMap<i64, (Instant, u64)>>>,
+    ping_tracker: Arc<Mutex<HashMap<i64, Instant>>>,
     rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
     stats: Arc<Stats>,
-    _writer_id: u64,
+    writer_id: u64,
     degraded: Arc<AtomicBool>,
     writer_rtt_ema_ms_x10: Arc<AtomicU32>,
     reader_route_data_wait_ms: Arc<AtomicU64>,
@@ -43,7 +45,7 @@ pub(crate) async fn reader_loop(
     let mut expected_seq: i32 = 0;
 
     loop {
-        let mut tmp = [0u8; 16_384];
+        let mut tmp = [0u8; 65_536];
         let n = tokio::select! {
             res = rd.read(&mut tmp) => res.map_err(ProxyError::Io)?,
             _ = cancel.cancelled() => return Ok(()),
@@ -124,17 +126,16 @@ pub(crate) async fn reader_loop(
                 let data = body.slice(12..);
                 trace!(cid, flags, len = data.len(), "RPC_PROXY_ANS");
 
-                let data_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
-                let routed = if data_wait_ms == 0 {
-                    reg.route_nowait(cid, MeResponse::Data { flags, data }).await
-                } else {
-                    reg.route_with_timeout(cid, MeResponse::Data { flags, data }, data_wait_ms)
-                        .await
-                };
+                let route_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
+                let routed = reg
+                    .route_with_timeout(cid, MeResponse::Data { flags, data }, route_wait_ms)
+                    .await;
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
-                        RouteResult::ChannelClosed => stats.increment_me_route_drop_channel_closed(),
+                        RouteResult::ChannelClosed => {
+                            stats.increment_me_route_drop_channel_closed()
+                        }
                         RouteResult::QueueFullBase => {
                             stats.increment_me_route_drop_queue_full();
                             stats.increment_me_route_drop_queue_full_base();
@@ -157,7 +158,9 @@ pub(crate) async fn reader_loop(
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
-                        RouteResult::ChannelClosed => stats.increment_me_route_drop_channel_closed(),
+                        RouteResult::ChannelClosed => {
+                            stats.increment_me_route_drop_channel_closed()
+                        }
                         RouteResult::QueueFullBase => {
                             stats.increment_me_route_drop_queue_full();
                             stats.increment_me_route_drop_queue_full_base();
@@ -200,13 +203,13 @@ pub(crate) async fn reader_loop(
             } else if pt == RPC_PONG_U32 && body.len() >= 8 {
                 let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
                 stats.increment_me_keepalive_pong();
-                if let Some((sent, wid)) = {
+                if let Some(sent) = {
                     let mut guard = ping_tracker.lock().await;
                     guard.remove(&ping_id)
                 } {
                     let rtt = sent.elapsed().as_secs_f64() * 1000.0;
                     let mut stats = rtt_stats.lock().await;
-                    let entry = stats.entry(wid).or_insert((rtt, rtt));
+                    let entry = stats.entry(writer_id).or_insert((rtt, rtt));
                     entry.1 = entry.1 * 0.8 + rtt * 0.2;
                     if rtt < entry.0 {
                         entry.0 = rtt;
@@ -216,9 +219,18 @@ pub(crate) async fn reader_loop(
                     }
                     let degraded_now = entry.1 > entry.0 * 2.0;
                     degraded.store(degraded_now, Ordering::Relaxed);
-                    writer_rtt_ema_ms_x10
-                        .store((entry.1 * 10.0).clamp(0.0, u32::MAX as f64) as u32, Ordering::Relaxed);
-                    trace!(writer_id = wid, rtt_ms = rtt, ema_ms = entry.1, base_ms = entry.0, degraded = degraded_now, "ME RTT sample");
+                    writer_rtt_ema_ms_x10.store(
+                        (entry.1 * 10.0).clamp(0.0, u32::MAX as f64) as u32,
+                        Ordering::Relaxed,
+                    );
+                    trace!(
+                        writer_id,
+                        rtt_ms = rtt,
+                        ema_ms = entry.1,
+                        base_ms = entry.0,
+                        degraded = degraded_now,
+                        "ME RTT sample"
+                    );
                 }
             } else {
                 debug!(
@@ -238,10 +250,16 @@ async fn send_close_conn(tx: &mpsc::Sender<WriterCommand>, conn_id: u64) {
     match tx.try_send(WriterCommand::DataAndFlush(Bytes::from(p))) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
-            debug!(conn_id, "ME close_conn signal skipped: writer command channel is full");
+            debug!(
+                conn_id,
+                "ME close_conn signal skipped: writer command channel is full"
+            );
         }
         Err(TrySendError::Closed(_)) => {
-            debug!(conn_id, "ME close_conn signal skipped: writer command channel is closed");
+            debug!(
+                conn_id,
+                "ME close_conn signal skipped: writer command channel is closed"
+            );
         }
     }
 }

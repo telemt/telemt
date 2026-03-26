@@ -120,20 +120,18 @@ pub async fn detect_ip() -> IpInfo {
             }
         }
     }
-    
+
     if !info.has_any() {
         warn!("Failed to detect public IP address");
     }
-    
+
     info
 }
 
 #[allow(dead_code)]
 fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ipv4) => {
-            ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local()
-        }
+        IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local(),
         IpAddr::V6(ipv6) => {
             ipv6.is_loopback() || (ipv6.segments()[0] & 0xfe00) == 0xfc00 // Unique Local
         }
@@ -163,12 +161,12 @@ pub fn detect_ip_sync() -> IpInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_ip_info() {
         let info = IpInfo::default();
         assert!(!info.has_any());
-        
+
         let info = IpInfo {
             ipv4: Some("1.2.3.4".parse().unwrap()),
             ipv6: None,
@@ -176,7 +174,7 @@ mod tests {
         assert!(info.has_any());
         assert_eq!(info.preferred(false), Some("1.2.3.4".parse().unwrap()));
         assert_eq!(info.preferred(true), Some("1.2.3.4".parse().unwrap()));
-        
+
         let info = IpInfo {
             ipv4: Some("1.2.3.4".parse().unwrap()),
             ipv6: Some("::1".parse().unwrap()),

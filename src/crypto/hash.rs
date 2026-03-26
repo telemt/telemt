@@ -12,10 +12,10 @@
 //! usages are intentional and protocol-mandated.
 
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use md5::Md5;
 use sha1::Sha1;
 use sha2::Digest;
+use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -28,8 +28,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// SHA-256 HMAC
 pub fn sha256_hmac(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -124,27 +123,18 @@ pub fn derive_middleproxy_keys(
     srv_ipv6: Option<&[u8; 16]>,
 ) -> ([u8; 32], [u8; 16]) {
     let s = build_middleproxy_prekey(
-        nonce_srv,
-        nonce_clt,
-        clt_ts,
-        srv_ip,
-        clt_port,
-        purpose,
-        clt_ip,
-        srv_port,
-        secret,
-        clt_ipv6,
-        srv_ipv6,
+        nonce_srv, nonce_clt, clt_ts, srv_ip, clt_port, purpose, clt_ip, srv_port, secret,
+        clt_ipv6, srv_ipv6,
     );
 
     let md5_1 = md5(&s[1..]);
     let sha1_sum = sha1(&s);
     let md5_2 = md5(&s[2..]);
-    
+
     let mut key = [0u8; 32];
     key[..12].copy_from_slice(&md5_1[..12]);
     key[12..].copy_from_slice(&sha1_sum);
-    
+
     (key, md5_2)
 }
 
@@ -164,17 +154,8 @@ mod tests {
         let secret = vec![0x55u8; 128];
 
         let prekey = build_middleproxy_prekey(
-            &nonce_srv,
-            &nonce_clt,
-            &clt_ts,
-            srv_ip,
-            &clt_port,
-            b"CLIENT",
-            clt_ip,
-            &srv_port,
-            &secret,
-            None,
-            None,
+            &nonce_srv, &nonce_clt, &clt_ts, srv_ip, &clt_port, b"CLIENT", clt_ip, &srv_port,
+            &secret, None, None,
         );
         let digest = sha256(&prekey);
         assert_eq!(

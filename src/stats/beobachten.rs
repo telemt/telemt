@@ -110,8 +110,8 @@ impl BeobachtenStore {
     }
 
     fn cleanup(inner: &mut BeobachtenInner, now: Instant, ttl: Duration) {
-        inner.entries.retain(|_, entry| {
-            now.saturating_duration_since(entry.last_seen) <= ttl
-        });
+        inner
+            .entries
+            .retain(|_, entry| now.saturating_duration_since(entry.last_seen) <= ttl);
     }
 }

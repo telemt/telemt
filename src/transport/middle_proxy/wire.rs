@@ -1,5 +1,5 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use bytes::Bytes;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::protocol::constants::*;
 

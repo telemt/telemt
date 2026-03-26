@@ -1,24 +1,27 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
-use tracing_subscriber::reload;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::reload;
 
-use crate::config::{LogLevel, ProxyConfig};
 use crate::config::hot_reload::spawn_config_watcher;
+use crate::config::{LogLevel, ProxyConfig};
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::metrics;
 use crate::network::probe::NetworkProbe;
-use crate::startup::{COMPONENT_CONFIG_WATCHER_START, COMPONENT_METRICS_START, COMPONENT_RUNTIME_READY, StartupTracker};
+use crate::startup::{
+    COMPONENT_CONFIG_WATCHER_START, COMPONENT_METRICS_START, COMPONENT_RUNTIME_READY,
+    StartupTracker,
+};
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{ReplayChecker, Stats};
-use crate::transport::middle_proxy::{MePool, MeReinitTrigger};
 use crate::transport::UpstreamManager;
+use crate::transport::middle_proxy::{MePool, MeReinitTrigger};
 
 use super::helpers::write_beobachten_snapshot;
 
@@ -32,7 +35,7 @@ pub(crate) struct RuntimeWatches {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_runtime_tasks(
     config: &Arc<ProxyConfig>,
-    config_path: &str,
+    config_path: &Path,
     probe: &NetworkProbe,
     prefer_ipv6: bool,
     decision_ipv4_dc: bool,
@@ -79,15 +82,13 @@ pub(crate) async fn spawn_runtime_tasks(
             Some("spawn config hot-reload watcher".to_string()),
         )
         .await;
-    let (config_rx, log_level_rx): (
-        watch::Receiver<Arc<ProxyConfig>>,
-        watch::Receiver<LogLevel>,
-    ) = spawn_config_watcher(
-        PathBuf::from(config_path),
-        config.clone(),
-        detected_ip_v4,
-        detected_ip_v6,
-    );
+    let (config_rx, log_level_rx): (watch::Receiver<Arc<ProxyConfig>>, watch::Receiver<LogLevel>) =
+        spawn_config_watcher(
+            config_path.to_path_buf(),
+            config.clone(),
+            detected_ip_v4,
+            detected_ip_v6,
+        );
     startup_tracker
         .complete_component(
             COMPONENT_CONFIG_WATCHER_START,
@@ -114,7 +115,8 @@ pub(crate) async fn spawn_runtime_tasks(
                 break;
             }
             let cfg = config_rx_policy.borrow_and_update().clone();
-            stats_policy.apply_telemetry_policy(TelemetryPolicy::from_config(&cfg.general.telemetry));
+            stats_policy
+                .apply_telemetry_policy(TelemetryPolicy::from_config(&cfg.general.telemetry));
             if let Some(pool) = &me_pool_for_policy {
                 pool.update_runtime_transport_policy(
                     cfg.general.me_socks_kdf_policy,
@@ -130,7 +132,11 @@ pub(crate) async fn spawn_runtime_tasks(
     let ip_tracker_policy = ip_tracker.clone();
     let mut config_rx_ip_limits = config_rx.clone();
     tokio::spawn(async move {
-        let mut prev_limits = config_rx_ip_limits.borrow().access.user_max_unique_ips.clone();
+        let mut prev_limits = config_rx_ip_limits
+            .borrow()
+            .access
+            .user_max_unique_ips
+            .clone();
         let mut prev_global_each = config_rx_ip_limits
             .borrow()
             .access
@@ -183,7 +189,9 @@ pub(crate) async fn spawn_runtime_tasks(
             let sleep_secs = cfg.general.beobachten_flush_secs.max(1);
 
             if cfg.general.beobachten {
-                let ttl = std::time::Duration::from_secs(cfg.general.beobachten_minutes.saturating_mul(60));
+                let ttl = std::time::Duration::from_secs(
+                    cfg.general.beobachten_minutes.saturating_mul(60),
+                );
                 let path = cfg.general.beobachten_file.clone();
                 let snapshot = beobachten_writer.snapshot_text(ttl);
                 if let Err(e) = write_beobachten_snapshot(&path, &snapshot).await {
@@ -227,8 +235,11 @@ pub(crate) async fn spawn_runtime_tasks(
         let config_rx_clone_rot = config_rx.clone();
         let reinit_tx_rotation = reinit_tx.clone();
         tokio::spawn(async move {
-            crate::transport::middle_proxy::me_rotation_task(config_rx_clone_rot, reinit_tx_rotation)
-                .await;
+            crate::transport::middle_proxy::me_rotation_task(
+                config_rx_clone_rot,
+                reinit_tx_rotation,
+            )
+            .await;
         });
     }
 
