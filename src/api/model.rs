@@ -443,6 +443,12 @@ pub(super) struct UserInfo {
 }
 
 #[derive(Serialize)]
+pub(super) struct UserActiveIps {
+    pub(super) username: String,
+    pub(super) active_ips: Vec<IpAddr>,
+}
+
+#[derive(Serialize)]
 pub(super) struct CreateUserResponse {
     pub(super) user: UserInfo,
     pub(super) secret: String,
