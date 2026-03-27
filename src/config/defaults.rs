@@ -209,6 +209,10 @@ pub(crate) fn default_server_max_connections() -> u32 {
     10_000
 }
 
+pub(crate) fn default_listen_backlog() -> u32 {
+    1024
+}
+
 pub(crate) fn default_accept_permit_timeout_ms() -> u64 {
     DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS
 }

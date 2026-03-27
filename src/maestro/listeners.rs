@@ -72,6 +72,7 @@ pub(crate) async fn bind_listeners(
         let options = ListenOptions {
             reuse_port: listener_conf.reuse_allow,
             ipv6_only: listener_conf.ip.is_ipv6(),
+            backlog: config.server.listen_backlog,
             ..Default::default()
         };
 

@@ -570,6 +570,7 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
     }
     if old.server.proxy_protocol != new.server.proxy_protocol
         || !listeners_equal(&old.server.listeners, &new.server.listeners)
+        || old.server.listen_backlog != new.server.listen_backlog
         || old.server.listen_addr_ipv4 != new.server.listen_addr_ipv4
         || old.server.listen_addr_ipv6 != new.server.listen_addr_ipv6
         || old.server.listen_tcp != new.server.listen_tcp

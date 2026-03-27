@@ -323,10 +323,12 @@ pub(crate) async fn spawn_metrics_if_configured(
         let config_rx_metrics = config_rx.clone();
         let ip_tracker_metrics = ip_tracker.clone();
         let whitelist = config.server.metrics_whitelist.clone();
+        let listen_backlog = config.server.listen_backlog;
         tokio::spawn(async move {
             metrics::serve(
                 port,
                 listen,
+                listen_backlog,
                 stats,
                 beobachten,
                 ip_tracker_metrics,

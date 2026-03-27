@@ -1272,6 +1272,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
 
+    /// TCP `listen(2)` backlog for client-facing sockets (also used for the metrics HTTP listener).
+    /// The effective queue is capped by the kernel (for example `somaxconn` on Linux).
+    #[serde(default = "default_listen_backlog")]
+    pub listen_backlog: u32,
+
     /// Maximum number of concurrent client connections.
     /// 0 means unlimited.
     #[serde(default = "default_server_max_connections")]
@@ -1300,6 +1305,7 @@ impl Default for ServerConfig {
             metrics_whitelist: default_metrics_whitelist(),
             api: ApiConfig::default(),
             listeners: Vec::new(),
+            listen_backlog: default_listen_backlog(),
             max_connections: default_server_max_connections(),
             accept_permit_timeout_ms: default_accept_permit_timeout_ms(),
         }

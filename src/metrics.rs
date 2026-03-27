@@ -22,6 +22,7 @@ use crate::transport::{ListenOptions, create_listener};
 pub async fn serve(
     port: u16,
     listen: Option<String>,
+    listen_backlog: u32,
     stats: Arc<Stats>,
     beobachten: Arc<BeobachtenStore>,
     ip_tracker: Arc<UserIpTracker>,
@@ -40,7 +41,7 @@ pub async fn serve(
             }
         };
         let is_ipv6 = addr.is_ipv6();
-        match bind_metrics_listener(addr, is_ipv6) {
+        match bind_metrics_listener(addr, is_ipv6, listen_backlog) {
             Ok(listener) => {
                 info!("Metrics endpoint: http://{}/metrics and /beobachten", addr);
                 serve_listener(
@@ -60,7 +61,7 @@ pub async fn serve(
     let mut listener_v6 = None;
 
     let addr_v4 = SocketAddr::from(([0, 0, 0, 0], port));
-    match bind_metrics_listener(addr_v4, false) {
+    match bind_metrics_listener(addr_v4, false, listen_backlog) {
         Ok(listener) => {
             info!(
                 "Metrics endpoint: http://{}/metrics and /beobachten",
@@ -74,7 +75,7 @@ pub async fn serve(
     }
 
     let addr_v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], port));
-    match bind_metrics_listener(addr_v6, true) {
+    match bind_metrics_listener(addr_v6, true, listen_backlog) {
         Ok(listener) => {
             info!(
                 "Metrics endpoint: http://[::]:{}/metrics and /beobachten",
@@ -122,10 +123,15 @@ pub async fn serve(
     }
 }
 
-fn bind_metrics_listener(addr: SocketAddr, ipv6_only: bool) -> std::io::Result<TcpListener> {
+fn bind_metrics_listener(
+    addr: SocketAddr,
+    ipv6_only: bool,
+    listen_backlog: u32,
+) -> std::io::Result<TcpListener> {
     let options = ListenOptions {
         reuse_port: false,
         ipv6_only,
+        backlog: listen_backlog,
         ..Default::default()
     };
     let socket = create_listener(addr, &options)?;
