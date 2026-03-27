@@ -32,10 +32,10 @@ pub(crate) async fn reader_loop(
     enc_leftover: BytesMut,
     mut dec: BytesMut,
     tx: mpsc::Sender<WriterCommand>,
-    ping_tracker: Arc<Mutex<HashMap<i64, (Instant, u64)>>>,
+    ping_tracker: Arc<Mutex<HashMap<i64, Instant>>>,
     rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
     stats: Arc<Stats>,
-    _writer_id: u64,
+    writer_id: u64,
     degraded: Arc<AtomicBool>,
     writer_rtt_ema_ms_x10: Arc<AtomicU32>,
     reader_route_data_wait_ms: Arc<AtomicU64>,
@@ -45,7 +45,7 @@ pub(crate) async fn reader_loop(
     let mut expected_seq: i32 = 0;
 
     loop {
-        let mut tmp = [0u8; 16_384];
+        let mut tmp = [0u8; 65_536];
         let n = tokio::select! {
             res = rd.read(&mut tmp) => res.map_err(ProxyError::Io)?,
             _ = cancel.cancelled() => return Ok(()),
@@ -126,14 +126,10 @@ pub(crate) async fn reader_loop(
                 let data = body.slice(12..);
                 trace!(cid, flags, len = data.len(), "RPC_PROXY_ANS");
 
-                let data_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
-                let routed = if data_wait_ms == 0 {
-                    reg.route_nowait(cid, MeResponse::Data { flags, data })
-                        .await
-                } else {
-                    reg.route_with_timeout(cid, MeResponse::Data { flags, data }, data_wait_ms)
-                        .await
-                };
+                let route_wait_ms = reader_route_data_wait_ms.load(Ordering::Relaxed);
+                let routed = reg
+                    .route_with_timeout(cid, MeResponse::Data { flags, data }, route_wait_ms)
+                    .await;
                 if !matches!(routed, RouteResult::Routed) {
                     match routed {
                         RouteResult::NoConn => stats.increment_me_route_drop_no_conn(),
@@ -207,13 +203,13 @@ pub(crate) async fn reader_loop(
             } else if pt == RPC_PONG_U32 && body.len() >= 8 {
                 let ping_id = i64::from_le_bytes(body[0..8].try_into().unwrap());
                 stats.increment_me_keepalive_pong();
-                if let Some((sent, wid)) = {
+                if let Some(sent) = {
                     let mut guard = ping_tracker.lock().await;
                     guard.remove(&ping_id)
                 } {
                     let rtt = sent.elapsed().as_secs_f64() * 1000.0;
                     let mut stats = rtt_stats.lock().await;
-                    let entry = stats.entry(wid).or_insert((rtt, rtt));
+                    let entry = stats.entry(writer_id).or_insert((rtt, rtt));
                     entry.1 = entry.1 * 0.8 + rtt * 0.2;
                     if rtt < entry.0 {
                         entry.0 = rtt;
@@ -228,7 +224,7 @@ pub(crate) async fn reader_loop(
                         Ordering::Relaxed,
                     );
                     trace!(
-                        writer_id = wid,
+                        writer_id,
                         rtt_ms = rtt,
                         ema_ms = entry.1,
                         base_ms = entry.0,

@@ -126,6 +126,7 @@ async fn c2me_channel_full_path_yields_then_sends() {
                 payload: make_pooled_payload(&[0xBB, 0xCC]),
                 flags: 2,
             },
+            None,
         )
         .await
     });

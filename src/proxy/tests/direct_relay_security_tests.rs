@@ -773,8 +773,7 @@ fn anchored_open_nix_path_writes_expected_lines() {
         "target/telemt-unknown-dc-anchored-open-ok-{}/unknown-dc.log",
         std::process::id()
     );
-    let sanitized =
-        sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
+    let sanitized = sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
     let _ = fs::remove_file(&sanitized.resolved_path);
 
     let mut first = open_unknown_dc_log_append_anchored(&sanitized)
@@ -787,7 +786,10 @@ fn anchored_open_nix_path_writes_expected_lines() {
 
     let content =
         fs::read_to_string(&sanitized.resolved_path).expect("anchored log file must be readable");
-    let lines: Vec<&str> = content.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     assert_eq!(lines.len(), 2, "expected one line per anchored append call");
     assert!(
         lines.contains(&"dc_idx=31200") && lines.contains(&"dc_idx=31201"),
@@ -811,8 +813,7 @@ fn anchored_open_parallel_appends_preserve_line_integrity() {
         "target/telemt-unknown-dc-anchored-open-parallel-{}/unknown-dc.log",
         std::process::id()
     );
-    let sanitized =
-        sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
+    let sanitized = sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
     let _ = fs::remove_file(&sanitized.resolved_path);
 
     let mut workers = Vec::new();
@@ -831,8 +832,15 @@ fn anchored_open_parallel_appends_preserve_line_integrity() {
 
     let content =
         fs::read_to_string(&sanitized.resolved_path).expect("parallel log file must be readable");
-    let lines: Vec<&str> = content.lines().filter(|line| !line.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 64, "expected one complete line per worker append");
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        64,
+        "expected one complete line per worker append"
+    );
     for line in lines {
         assert!(
             line.starts_with("dc_idx="),
@@ -867,8 +875,7 @@ fn anchored_open_creates_private_0600_file_permissions() {
         "target/telemt-unknown-dc-anchored-perms-{}/unknown-dc.log",
         std::process::id()
     );
-    let sanitized =
-        sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
+    let sanitized = sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
     let _ = fs::remove_file(&sanitized.resolved_path);
 
     let mut file = open_unknown_dc_log_append_anchored(&sanitized)
@@ -905,8 +912,7 @@ fn anchored_open_rejects_existing_symlink_target() {
         "target/telemt-unknown-dc-anchored-symlink-target-{}/unknown-dc.log",
         std::process::id()
     );
-    let sanitized =
-        sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
+    let sanitized = sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
 
     let outside = std::env::temp_dir().join(format!(
         "telemt-unknown-dc-anchored-symlink-outside-{}.log",
@@ -943,8 +949,7 @@ fn anchored_open_high_contention_multi_write_preserves_complete_lines() {
         "target/telemt-unknown-dc-anchored-contention-{}/unknown-dc.log",
         std::process::id()
     );
-    let sanitized =
-        sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
+    let sanitized = sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
     let _ = fs::remove_file(&sanitized.resolved_path);
 
     let workers = 24usize;
@@ -970,7 +975,10 @@ fn anchored_open_high_contention_multi_write_preserves_complete_lines() {
 
     let content = fs::read_to_string(&sanitized.resolved_path)
         .expect("contention output file must be readable");
-    let lines: Vec<&str> = content.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     assert_eq!(
         lines.len(),
         workers * rounds,
@@ -1014,8 +1022,7 @@ fn append_unknown_dc_line_returns_error_for_read_only_descriptor() {
         "target/telemt-unknown-dc-append-ro-{}/unknown-dc.log",
         std::process::id()
     );
-    let sanitized =
-        sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
+    let sanitized = sanitize_unknown_dc_log_path(&rel_candidate).expect("candidate must sanitize");
     fs::write(&sanitized.resolved_path, "seed\n").expect("seed file must be writable");
 
     let mut readonly = std::fs::OpenOptions::new()

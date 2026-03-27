@@ -88,6 +88,7 @@ async fn relay_to_mask_applies_cap_clamped_padding_for_non_power_of_two_cap() {
             false,
             0,
             false,
+            5 * 1024 * 1024,
         )
         .await;
     });

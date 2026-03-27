@@ -161,7 +161,7 @@ impl MePool {
         } else {
             let connect_fut = async {
                 if addr.is_ipv6()
-                    && let Some(v6) = self.detected_ipv6
+                    && let Some(v6) = self.nat_runtime.detected_ipv6
                 {
                     match TcpSocket::new_v6() {
                         Ok(sock) => {
@@ -305,7 +305,7 @@ impl MePool {
                 }
                 MeSocksKdfPolicy::Compat => {
                     self.stats.increment_me_socks_kdf_compat_fallback();
-                    if self.nat_probe {
+                    if self.nat_runtime.nat_probe {
                         let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
                         self.maybe_reflect_public_addr(family, bind_ip).await
                     } else {
@@ -313,7 +313,7 @@ impl MePool {
                     }
                 }
             }
-        } else if self.nat_probe {
+        } else if self.nat_runtime.nat_probe {
             let bind_ip = Self::direct_bind_ip_for_stun(family, upstream_egress);
             self.maybe_reflect_public_addr(family, bind_ip).await
         } else {
@@ -343,7 +343,10 @@ impl MePool {
             .unwrap_or_default()
             .as_secs() as u32;
 
-        let secret_atomic_snapshot = self.secret_atomic_snapshot.load(Ordering::Relaxed);
+        let secret_atomic_snapshot = self
+            .writer_selection_policy
+            .secret_atomic_snapshot
+            .load(Ordering::Relaxed);
         let (ks, secret) = if secret_atomic_snapshot {
             let snapshot = self.secret_snapshot().await;
             (snapshot.key_selector, snapshot.secret)

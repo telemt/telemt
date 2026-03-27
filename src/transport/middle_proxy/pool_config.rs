@@ -72,7 +72,7 @@ impl MePool {
         }
         if changed {
             self.rebuild_endpoint_dc_map().await;
-            self.writer_available.notify_waiters();
+            self.notify_writer_epoch();
         }
         if changed {
             SnapshotApplyOutcome::AppliedChanged
@@ -112,7 +112,7 @@ impl MePool {
 
     pub async fn reconnect_all(self: &Arc<Self>) {
         let ws = self.writers.read().await.clone();
-        for w in ws {
+        for w in ws.iter() {
             if let Ok(()) = self
                 .connect_one_for_dc(w.addr, w.writer_dc, self.rng.as_ref())
                 .await

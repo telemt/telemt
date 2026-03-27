@@ -4,14 +4,23 @@ use crate::config::ProxyConfig;
 use crate::network::dns_overrides::resolve_socket_addr;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
-use rand::{Rng, RngExt};
-use std::net::SocketAddr;
+#[cfg(unix)]
+use nix::ifaddrs::getifaddrs;
+use rand::rngs::StdRng;
+use rand::{Rng, RngExt, SeedableRng};
+use std::net::{IpAddr, SocketAddr};
 use std::str;
-use std::time::Duration;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant as StdInstant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(unix)]
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{Instant, timeout};
 use tracing::debug;
 
@@ -30,28 +39,55 @@ const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const MASK_BUFFER_SIZE: usize = 8192;
+#[cfg(unix)]
+#[cfg(not(test))]
+const LOCAL_INTERFACE_CACHE_TTL: Duration = Duration::from_secs(300);
+#[cfg(all(unix, test))]
+const LOCAL_INTERFACE_CACHE_TTL: Duration = Duration::from_secs(1);
 
 struct CopyOutcome {
     total: usize,
     ended_by_eof: bool,
 }
 
-async fn copy_with_idle_timeout<R, W>(reader: &mut R, writer: &mut W) -> CopyOutcome
+async fn copy_with_idle_timeout<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    byte_cap: usize,
+    shutdown_on_eof: bool,
+) -> CopyOutcome
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut buf = [0u8; MASK_BUFFER_SIZE];
+    let mut buf = Box::new([0u8; MASK_BUFFER_SIZE]);
     let mut total = 0usize;
     let mut ended_by_eof = false;
+
+    if byte_cap == 0 {
+        return CopyOutcome {
+            total,
+            ended_by_eof,
+        };
+    }
+
     loop {
-        let read_res = timeout(MASK_RELAY_IDLE_TIMEOUT, reader.read(&mut buf)).await;
+        let remaining_budget = byte_cap.saturating_sub(total);
+        if remaining_budget == 0 {
+            break;
+        }
+
+        let read_len = remaining_budget.min(MASK_BUFFER_SIZE);
+        let read_res = timeout(MASK_RELAY_IDLE_TIMEOUT, reader.read(&mut buf[..read_len])).await;
         let n = match read_res {
             Ok(Ok(n)) => n,
             Ok(Err(_)) | Err(_) => break,
         };
         if n == 0 {
             ended_by_eof = true;
+            if shutdown_on_eof {
+                let _ = timeout(MASK_RELAY_IDLE_TIMEOUT, writer.shutdown()).await;
+            }
             break;
         }
         total = total.saturating_add(n);
@@ -66,6 +102,31 @@ where
         total,
         ended_by_eof,
     }
+}
+
+fn is_http_probe(data: &[u8]) -> bool {
+    // RFC 7540 section 3.5: HTTP/2 client preface starts with "PRI ".
+    const HTTP_METHODS: [&[u8]; 10] = [
+        b"GET ", b"POST", b"HEAD", b"PUT ", b"DELETE", b"OPTIONS", b"CONNECT", b"TRACE", b"PATCH",
+        b"PRI ",
+    ];
+
+    if data.is_empty() {
+        return false;
+    }
+
+    let window = &data[..data.len().min(16)];
+    for method in HTTP_METHODS {
+        if data.len() >= method.len() && window.starts_with(method) {
+            return true;
+        }
+
+        if (2..=3).contains(&window.len()) && method.starts_with(window) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn next_mask_shape_bucket(total: usize, floor: usize, cap: usize) -> usize {
@@ -125,6 +186,11 @@ async fn maybe_write_shape_padding<W>(
     let mut remaining = target_total - total_sent;
     let mut pad_chunk = [0u8; 1024];
     let deadline = Instant::now() + MASK_TIMEOUT;
+    // Use a Send RNG so relay futures remain spawn-safe under Tokio.
+    let mut rng = {
+        let mut seed_source = rand::rng();
+        StdRng::from_rng(&mut seed_source)
+    };
 
     while remaining > 0 {
         let now = Instant::now();
@@ -133,10 +199,7 @@ async fn maybe_write_shape_padding<W>(
         }
 
         let write_len = remaining.min(pad_chunk.len());
-        {
-            let mut rng = rand::rng();
-            rng.fill_bytes(&mut pad_chunk[..write_len]);
-        }
+        rng.fill_bytes(&mut pad_chunk[..write_len]);
         let write_budget = deadline.saturating_duration_since(now);
         match timeout(write_budget, mask_write.write_all(&pad_chunk[..write_len])).await {
             Ok(Ok(())) => {}
@@ -167,11 +230,11 @@ where
     }
 }
 
-async fn consume_client_data_with_timeout<R>(reader: R)
+async fn consume_client_data_with_timeout_and_cap<R>(reader: R, byte_cap: usize)
 where
     R: AsyncRead + Unpin,
 {
-    if timeout(MASK_RELAY_TIMEOUT, consume_client_data(reader))
+    if timeout(MASK_RELAY_TIMEOUT, consume_client_data(reader, byte_cap))
         .await
         .is_err()
     {
@@ -190,6 +253,13 @@ fn mask_outcome_target_budget(config: &ProxyConfig) -> Duration {
     if config.censorship.mask_timing_normalization_enabled {
         let floor = config.censorship.mask_timing_normalization_floor_ms;
         let ceiling = config.censorship.mask_timing_normalization_ceiling_ms;
+        if floor == 0 {
+            if ceiling == 0 {
+                return Duration::from_millis(0);
+            }
+            let mut rng = rand::rng();
+            return Duration::from_millis(rng.random_range(0..=ceiling));
+        }
         if ceiling > floor {
             let mut rng = rand::rng();
             return Duration::from_millis(rng.random_range(floor..=ceiling));
@@ -219,14 +289,7 @@ async fn wait_mask_outcome_budget(started: Instant, config: &ProxyConfig) {
 /// Detect client type based on initial data
 fn detect_client_type(data: &[u8]) -> &'static str {
     // Check for HTTP request
-    if data.len() > 4
-        && (data.starts_with(b"GET ")
-            || data.starts_with(b"POST")
-            || data.starts_with(b"HEAD")
-            || data.starts_with(b"PUT ")
-            || data.starts_with(b"DELETE")
-            || data.starts_with(b"OPTIONS"))
-    {
+    if is_http_probe(data) {
         return "HTTP";
     }
 
@@ -246,6 +309,247 @@ fn detect_client_type(data: &[u8]) -> &'static str {
     }
 
     "unknown"
+}
+
+fn parse_mask_host_ip_literal(host: &str) -> Option<IpAddr> {
+    if host.starts_with('[') && host.ends_with(']') {
+        return host[1..host.len() - 1].parse::<IpAddr>().ok();
+    }
+    host.parse::<IpAddr>().ok()
+}
+
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+    }
+}
+
+#[cfg(unix)]
+fn collect_local_interface_ips() -> Vec<IpAddr> {
+    #[cfg(test)]
+    LOCAL_INTERFACE_ENUMERATIONS.fetch_add(1, Ordering::Relaxed);
+
+    let mut out = Vec::new();
+    if let Ok(addrs) = getifaddrs() {
+        for iface in addrs {
+            if let Some(address) = iface.address {
+                if let Some(v4) = address.as_sockaddr_in() {
+                    out.push(canonical_ip(IpAddr::V4(v4.ip())));
+                } else if let Some(v6) = address.as_sockaddr_in6() {
+                    out.push(canonical_ip(IpAddr::V6(v6.ip())));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn choose_interface_snapshot(previous: &[IpAddr], refreshed: Vec<IpAddr>) -> Vec<IpAddr> {
+    if refreshed.is_empty() && !previous.is_empty() {
+        return previous.to_vec();
+    }
+
+    refreshed
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct LocalInterfaceCache {
+    ips: Vec<IpAddr>,
+    refreshed_at: Option<StdInstant>,
+}
+
+#[cfg(unix)]
+static LOCAL_INTERFACE_CACHE: OnceLock<Mutex<LocalInterfaceCache>> = OnceLock::new();
+
+#[cfg(unix)]
+static LOCAL_INTERFACE_REFRESH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+#[cfg(all(unix, test))]
+fn local_interface_ips() -> Vec<IpAddr> {
+    let cache = LOCAL_INTERFACE_CACHE.get_or_init(|| Mutex::new(LocalInterfaceCache::default()));
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+
+    let stale = guard
+        .refreshed_at
+        .is_none_or(|at| at.elapsed() >= LOCAL_INTERFACE_CACHE_TTL);
+    if stale {
+        let refreshed = collect_local_interface_ips();
+        guard.ips = choose_interface_snapshot(&guard.ips, refreshed);
+        guard.refreshed_at = Some(StdInstant::now());
+    }
+
+    guard.ips.clone()
+}
+
+#[cfg(unix)]
+async fn local_interface_ips_async() -> Vec<IpAddr> {
+    let cache = LOCAL_INTERFACE_CACHE.get_or_init(|| Mutex::new(LocalInterfaceCache::default()));
+
+    {
+        let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        let stale = guard
+            .refreshed_at
+            .is_none_or(|at| at.elapsed() >= LOCAL_INTERFACE_CACHE_TTL);
+        if !stale {
+            return guard.ips.clone();
+        }
+    }
+
+    let refresh_lock = LOCAL_INTERFACE_REFRESH_LOCK.get_or_init(|| AsyncMutex::new(()));
+    let _refresh_guard = refresh_lock.lock().await;
+
+    {
+        let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        let stale = guard
+            .refreshed_at
+            .is_none_or(|at| at.elapsed() >= LOCAL_INTERFACE_CACHE_TTL);
+        if !stale {
+            return guard.ips.clone();
+        }
+    }
+
+    let refreshed = tokio::task::spawn_blocking(collect_local_interface_ips)
+        .await
+        .unwrap_or_default();
+
+    let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    let stale = guard
+        .refreshed_at
+        .is_none_or(|at| at.elapsed() >= LOCAL_INTERFACE_CACHE_TTL);
+    if stale {
+        guard.ips = choose_interface_snapshot(&guard.ips, refreshed);
+        guard.refreshed_at = Some(StdInstant::now());
+    }
+
+    guard.ips.clone()
+}
+
+#[cfg(all(not(unix), test))]
+fn local_interface_ips() -> Vec<IpAddr> {
+    Vec::new()
+}
+
+#[cfg(not(unix))]
+async fn local_interface_ips_async() -> Vec<IpAddr> {
+    Vec::new()
+}
+
+#[cfg(test)]
+static LOCAL_INTERFACE_ENUMERATIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn reset_local_interface_enumerations_for_tests() {
+    LOCAL_INTERFACE_ENUMERATIONS.store(0, Ordering::Relaxed);
+
+    #[cfg(unix)]
+    if let Some(cache) = LOCAL_INTERFACE_CACHE.get() {
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.ips.clear();
+        guard.refreshed_at = None;
+    }
+}
+
+#[cfg(test)]
+fn local_interface_enumerations_for_tests() -> usize {
+    LOCAL_INTERFACE_ENUMERATIONS.load(Ordering::Relaxed)
+}
+
+fn is_mask_target_local_listener_with_interfaces(
+    mask_host: &str,
+    mask_port: u16,
+    local_addr: SocketAddr,
+    resolved_override: Option<SocketAddr>,
+    interface_ips: &[IpAddr],
+) -> bool {
+    if mask_port != local_addr.port() {
+        return false;
+    }
+
+    let local_ip = canonical_ip(local_addr.ip());
+    let literal_mask_ip = parse_mask_host_ip_literal(mask_host).map(canonical_ip);
+
+    if let Some(addr) = resolved_override {
+        let resolved_ip = canonical_ip(addr.ip());
+        if resolved_ip == local_ip {
+            return true;
+        }
+
+        if local_ip.is_unspecified()
+            && (resolved_ip.is_loopback()
+                || resolved_ip.is_unspecified()
+                || interface_ips.contains(&resolved_ip))
+        {
+            return true;
+        }
+    }
+
+    if let Some(mask_ip) = literal_mask_ip {
+        if mask_ip == local_ip {
+            return true;
+        }
+
+        if local_ip.is_unspecified()
+            && (mask_ip.is_loopback()
+                || mask_ip.is_unspecified()
+                || interface_ips.contains(&mask_ip))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(test)]
+fn is_mask_target_local_listener(
+    mask_host: &str,
+    mask_port: u16,
+    local_addr: SocketAddr,
+    resolved_override: Option<SocketAddr>,
+) -> bool {
+    if mask_port != local_addr.port() {
+        return false;
+    }
+
+    let interfaces = local_interface_ips();
+    is_mask_target_local_listener_with_interfaces(
+        mask_host,
+        mask_port,
+        local_addr,
+        resolved_override,
+        &interfaces,
+    )
+}
+
+async fn is_mask_target_local_listener_async(
+    mask_host: &str,
+    mask_port: u16,
+    local_addr: SocketAddr,
+    resolved_override: Option<SocketAddr>,
+) -> bool {
+    if mask_port != local_addr.port() {
+        return false;
+    }
+
+    let interfaces = local_interface_ips_async().await;
+    is_mask_target_local_listener_with_interfaces(
+        mask_host,
+        mask_port,
+        local_addr,
+        resolved_override,
+        &interfaces,
+    )
+}
+
+fn masking_beobachten_ttl(config: &ProxyConfig) -> Duration {
+    let minutes = config.general.beobachten_minutes;
+    let clamped = minutes.clamp(1, 24 * 60);
+    Duration::from_secs(clamped.saturating_mul(60))
 }
 
 fn build_mask_proxy_header(
@@ -290,13 +594,14 @@ pub async fn handle_bad_client<R, W>(
 {
     let client_type = detect_client_type(initial_data);
     if config.general.beobachten {
-        let ttl = Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60));
+        let ttl = masking_beobachten_ttl(config);
         beobachten.record(client_type, peer.ip(), ttl);
     }
 
     if !config.censorship.mask {
         // Masking disabled, just consume data
-        consume_client_data_with_timeout(reader).await;
+        consume_client_data_with_timeout_and_cap(reader, config.censorship.mask_relay_max_bytes)
+            .await;
         return;
     }
 
@@ -341,6 +646,7 @@ pub async fn handle_bad_client<R, W>(
                         config.censorship.mask_shape_above_cap_blur,
                         config.censorship.mask_shape_above_cap_blur_max_bytes,
                         config.censorship.mask_shape_hardening_aggressive_mode,
+                        config.censorship.mask_relay_max_bytes,
                     ),
                 )
                 .await
@@ -353,12 +659,20 @@ pub async fn handle_bad_client<R, W>(
             Ok(Err(e)) => {
                 wait_mask_connect_budget_if_needed(connect_started, config).await;
                 debug!(error = %e, "Failed to connect to mask unix socket");
-                consume_client_data_with_timeout(reader).await;
+                consume_client_data_with_timeout_and_cap(
+                    reader,
+                    config.censorship.mask_relay_max_bytes,
+                )
+                .await;
                 wait_mask_outcome_budget(outcome_started, config).await;
             }
             Err(_) => {
                 debug!("Timeout connecting to mask unix socket");
-                consume_client_data_with_timeout(reader).await;
+                consume_client_data_with_timeout_and_cap(
+                    reader,
+                    config.censorship.mask_relay_max_bytes,
+                )
+                .await;
                 wait_mask_outcome_budget(outcome_started, config).await;
             }
         }
@@ -372,6 +686,29 @@ pub async fn handle_bad_client<R, W>(
         .unwrap_or(&config.censorship.tls_domain);
     let mask_port = config.censorship.mask_port;
 
+    // Fail closed when fallback points at our own listener endpoint.
+    // Self-referential masking can create recursive proxy loops under
+    // misconfiguration and leak distinguishable load spikes to adversaries.
+    let resolved_mask_addr = resolve_socket_addr(mask_host, mask_port);
+    if is_mask_target_local_listener_async(mask_host, mask_port, local_addr, resolved_mask_addr)
+        .await
+    {
+        let outcome_started = Instant::now();
+        debug!(
+            client_type = client_type,
+            host = %mask_host,
+            port = mask_port,
+            local = %local_addr,
+            "Mask target resolves to local listener; refusing self-referential masking fallback"
+        );
+        consume_client_data_with_timeout_and_cap(reader, config.censorship.mask_relay_max_bytes)
+            .await;
+        wait_mask_outcome_budget(outcome_started, config).await;
+        return;
+    }
+
+    let outcome_started = Instant::now();
+
     debug!(
         client_type = client_type,
         host = %mask_host,
@@ -381,10 +718,9 @@ pub async fn handle_bad_client<R, W>(
     );
 
     // Apply runtime DNS override for mask target when configured.
-    let mask_addr = resolve_socket_addr(mask_host, mask_port)
+    let mask_addr = resolved_mask_addr
         .map(|addr| addr.to_string())
         .unwrap_or_else(|| format!("{}:{}", mask_host, mask_port));
-    let outcome_started = Instant::now();
     let connect_started = Instant::now();
     let connect_result = timeout(MASK_TIMEOUT, TcpStream::connect(&mask_addr)).await;
     match connect_result {
@@ -413,6 +749,7 @@ pub async fn handle_bad_client<R, W>(
                     config.censorship.mask_shape_above_cap_blur,
                     config.censorship.mask_shape_above_cap_blur_max_bytes,
                     config.censorship.mask_shape_hardening_aggressive_mode,
+                    config.censorship.mask_relay_max_bytes,
                 ),
             )
             .await
@@ -425,12 +762,20 @@ pub async fn handle_bad_client<R, W>(
         Ok(Err(e)) => {
             wait_mask_connect_budget_if_needed(connect_started, config).await;
             debug!(error = %e, "Failed to connect to mask host");
-            consume_client_data_with_timeout(reader).await;
+            consume_client_data_with_timeout_and_cap(
+                reader,
+                config.censorship.mask_relay_max_bytes,
+            )
+            .await;
             wait_mask_outcome_budget(outcome_started, config).await;
         }
         Err(_) => {
             debug!("Timeout connecting to mask host");
-            consume_client_data_with_timeout(reader).await;
+            consume_client_data_with_timeout_and_cap(
+                reader,
+                config.censorship.mask_relay_max_bytes,
+            )
+            .await;
             wait_mask_outcome_budget(outcome_started, config).await;
         }
     }
@@ -449,6 +794,7 @@ async fn relay_to_mask<R, W, MR, MW>(
     shape_above_cap_blur: bool,
     shape_above_cap_blur_max_bytes: usize,
     shape_hardening_aggressive_mode: bool,
+    mask_relay_max_bytes: usize,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -464,8 +810,18 @@ async fn relay_to_mask<R, W, MR, MW>(
     }
 
     let (upstream_copy, downstream_copy) = tokio::join!(
-        async { copy_with_idle_timeout(&mut reader, &mut mask_write).await },
-        async { copy_with_idle_timeout(&mut mask_read, &mut writer).await }
+        async {
+            copy_with_idle_timeout(
+                &mut reader,
+                &mut mask_write,
+                mask_relay_max_bytes,
+                !shape_hardening_enabled,
+            )
+            .await
+        },
+        async {
+            copy_with_idle_timeout(&mut mask_read, &mut writer, mask_relay_max_bytes, true).await
+        }
     );
 
     let total_sent = initial_data.len().saturating_add(upstream_copy.total);
@@ -491,11 +847,34 @@ async fn relay_to_mask<R, W, MR, MW>(
     let _ = writer.shutdown().await;
 }
 
-/// Just consume all data from client without responding
-async fn consume_client_data<R: AsyncRead + Unpin>(mut reader: R) {
-    let mut buf = vec![0u8; MASK_BUFFER_SIZE];
-    while let Ok(n) = reader.read(&mut buf).await {
+/// Just consume all data from client without responding.
+async fn consume_client_data<R: AsyncRead + Unpin>(mut reader: R, byte_cap: usize) {
+    if byte_cap == 0 {
+        return;
+    }
+
+    // Keep drain path fail-closed under slow-loris stalls.
+    let mut buf = Box::new([0u8; MASK_BUFFER_SIZE]);
+    let mut total = 0usize;
+
+    loop {
+        let remaining_budget = byte_cap.saturating_sub(total);
+        if remaining_budget == 0 {
+            break;
+        }
+
+        let read_len = remaining_budget.min(MASK_BUFFER_SIZE);
+        let n = match timeout(MASK_RELAY_IDLE_TIMEOUT, reader.read(&mut buf[..read_len])).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) | Err(_) => break,
+        };
+
         if n == 0 {
+            break;
+        }
+
+        total = total.saturating_add(n);
+        if total >= byte_cap {
             break;
         }
     }
@@ -520,6 +899,10 @@ mod masking_shape_above_cap_blur_security_tests;
 #[cfg(test)]
 #[path = "tests/masking_timing_normalization_security_tests.rs"]
 mod masking_timing_normalization_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_timing_budget_coupling_security_tests.rs"]
+mod masking_timing_budget_coupling_security_tests;
 
 #[cfg(test)]
 #[path = "tests/masking_ab_envelope_blur_integration_security_tests.rs"]
@@ -548,3 +931,75 @@ mod masking_aggressive_mode_security_tests;
 #[cfg(test)]
 #[path = "tests/masking_timing_sidechannel_redteam_expected_fail_tests.rs"]
 mod masking_timing_sidechannel_redteam_expected_fail_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_self_target_loop_security_tests.rs"]
+mod masking_self_target_loop_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_classification_completeness_security_tests.rs"]
+mod masking_classification_completeness_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_relay_guardrails_security_tests.rs"]
+mod masking_relay_guardrails_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_connect_failure_close_matrix_security_tests.rs"]
+mod masking_connect_failure_close_matrix_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_additional_hardening_security_tests.rs"]
+mod masking_additional_hardening_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_consume_idle_timeout_security_tests.rs"]
+mod masking_consume_idle_timeout_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_http2_probe_classification_security_tests.rs"]
+mod masking_http2_probe_classification_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_http_probe_boundary_security_tests.rs"]
+mod masking_http_probe_boundary_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_rng_hoist_perf_regression_tests.rs"]
+mod masking_rng_hoist_perf_regression_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_http2_preface_integration_security_tests.rs"]
+mod masking_http2_preface_integration_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_consume_stress_adversarial_tests.rs"]
+mod masking_consume_stress_adversarial_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_interface_cache_security_tests.rs"]
+mod masking_interface_cache_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_interface_cache_defense_in_depth_security_tests.rs"]
+mod masking_interface_cache_defense_in_depth_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_interface_cache_concurrency_security_tests.rs"]
+mod masking_interface_cache_concurrency_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_production_cap_regression_security_tests.rs"]
+mod masking_production_cap_regression_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_extended_attack_surface_security_tests.rs"]
+mod masking_extended_attack_surface_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_padding_timeout_adversarial_tests.rs"]
+mod masking_padding_timeout_adversarial_tests;
+
+#[cfg(all(test, feature = "redteam_offline_expected_fail"))]
+#[path = "tests/masking_offline_target_redteam_expected_fail_tests.rs"]
+mod masking_offline_target_redteam_expected_fail_tests;

@@ -52,13 +52,12 @@
 //! - `SharedCounters` (atomics) let the watchdog read stats without locking
 
 use crate::error::{ProxyError, Result};
-use crate::stats::Stats;
+use crate::stats::{Stats, UserStats};
 use crate::stream::BufferPool;
-use dashmap::DashMap;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional_with_sizes};
@@ -209,12 +208,10 @@ struct StatsIo<S> {
     counters: Arc<SharedCounters>,
     stats: Arc<Stats>,
     user: String,
+    user_stats: Arc<UserStats>,
     quota_limit: Option<u64>,
     quota_exceeded: Arc<AtomicBool>,
-    quota_read_wake_scheduled: bool,
-    quota_write_wake_scheduled: bool,
-    quota_read_retry_active: Arc<AtomicBool>,
-    quota_write_retry_active: Arc<AtomicBool>,
+    quota_bytes_since_check: u64,
     epoch: Instant,
 }
 
@@ -230,27 +227,18 @@ impl<S> StatsIo<S> {
     ) -> Self {
         // Mark initial activity so the watchdog doesn't fire before data flows
         counters.touch(Instant::now(), epoch);
+        let user_stats = stats.get_or_create_user_stats_handle(&user);
         Self {
             inner,
             counters,
             stats,
             user,
+            user_stats,
             quota_limit,
             quota_exceeded,
-            quota_read_wake_scheduled: false,
-            quota_write_wake_scheduled: false,
-            quota_read_retry_active: Arc::new(AtomicBool::new(false)),
-            quota_write_retry_active: Arc::new(AtomicBool::new(false)),
+            quota_bytes_since_check: 0,
             epoch,
         }
-    }
-}
-
-impl<S> Drop for StatsIo<S> {
-    fn drop(&mut self) {
-        self.quota_read_retry_active.store(false, Ordering::Relaxed);
-        self.quota_write_retry_active
-            .store(false, Ordering::Relaxed);
     }
 }
 
@@ -277,84 +265,22 @@ fn is_quota_io_error(err: &io::Error) -> bool {
             .is_some()
 }
 
-#[cfg(test)]
-const QUOTA_CONTENTION_RETRY_INTERVAL: Duration = Duration::from_millis(1);
-#[cfg(not(test))]
-const QUOTA_CONTENTION_RETRY_INTERVAL: Duration = Duration::from_millis(2);
+const QUOTA_NEAR_LIMIT_BYTES: u64 = 64 * 1024;
+const QUOTA_LARGE_CHARGE_BYTES: u64 = 16 * 1024;
+const QUOTA_ADAPTIVE_INTERVAL_MIN_BYTES: u64 = 4 * 1024;
+const QUOTA_ADAPTIVE_INTERVAL_MAX_BYTES: u64 = 64 * 1024;
 
-fn spawn_quota_retry_waker(retry_active: Arc<AtomicBool>, waker: std::task::Waker) {
-    tokio::task::spawn(async move {
-        loop {
-            if !retry_active.load(Ordering::Relaxed) {
-                break;
-            }
-            tokio::time::sleep(QUOTA_CONTENTION_RETRY_INTERVAL).await;
-            if !retry_active.load(Ordering::Relaxed) {
-                break;
-            }
-            waker.wake_by_ref();
-        }
-    });
+#[inline]
+fn quota_adaptive_interval_bytes(remaining_before: u64) -> u64 {
+    remaining_before.saturating_div(2).clamp(
+        QUOTA_ADAPTIVE_INTERVAL_MIN_BYTES,
+        QUOTA_ADAPTIVE_INTERVAL_MAX_BYTES,
+    )
 }
 
-static QUOTA_USER_LOCKS: OnceLock<DashMap<String, Arc<Mutex<()>>>> = OnceLock::new();
-static QUOTA_USER_OVERFLOW_LOCKS: OnceLock<Vec<Arc<Mutex<()>>>> = OnceLock::new();
-
-#[cfg(test)]
-const QUOTA_USER_LOCKS_MAX: usize = 64;
-#[cfg(not(test))]
-const QUOTA_USER_LOCKS_MAX: usize = 4_096;
-#[cfg(test)]
-const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 16;
-#[cfg(not(test))]
-const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 256;
-
-#[cfg(test)]
-fn quota_user_lock_test_guard() -> &'static Mutex<()> {
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(test)]
-fn quota_user_lock_test_scope() -> std::sync::MutexGuard<'static, ()> {
-    quota_user_lock_test_guard()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn quota_overflow_user_lock(user: &str) -> Arc<Mutex<()>> {
-    let stripes = QUOTA_USER_OVERFLOW_LOCKS.get_or_init(|| {
-        (0..QUOTA_OVERFLOW_LOCK_STRIPES)
-            .map(|_| Arc::new(Mutex::new(())))
-            .collect()
-    });
-
-    let hash = crc32fast::hash(user.as_bytes()) as usize;
-    Arc::clone(&stripes[hash % stripes.len()])
-}
-
-fn quota_user_lock(user: &str) -> Arc<Mutex<()>> {
-    let locks = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
-    if let Some(existing) = locks.get(user) {
-        return Arc::clone(existing.value());
-    }
-
-    if locks.len() >= QUOTA_USER_LOCKS_MAX {
-        locks.retain(|_, value| Arc::strong_count(value) > 1);
-    }
-
-    if locks.len() >= QUOTA_USER_LOCKS_MAX {
-        return quota_overflow_user_lock(user);
-    }
-
-    let created = Arc::new(Mutex::new(()));
-    match locks.entry(user.to_string()) {
-        dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
-        dashmap::mapref::entry::Entry::Vacant(entry) => {
-            entry.insert(Arc::clone(&created));
-            created
-        }
-    }
+#[inline]
+fn should_immediate_quota_check(remaining_before: u64, charge_bytes: u64) -> bool {
+    remaining_before <= QUOTA_NEAR_LIMIT_BYTES || charge_bytes >= QUOTA_LARGE_CHARGE_BYTES
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
@@ -364,80 +290,60 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.quota_exceeded.load(Ordering::Relaxed) {
+        if this.quota_exceeded.load(Ordering::Acquire) {
             return Poll::Ready(Err(quota_io_error()));
         }
 
-        let quota_lock = this
-            .quota_limit
-            .is_some()
-            .then(|| quota_user_lock(&this.user));
-        let _quota_guard = if let Some(lock) = quota_lock.as_ref() {
-            match lock.try_lock() {
-                Ok(guard) => {
-                    this.quota_read_wake_scheduled = false;
-                    this.quota_read_retry_active.store(false, Ordering::Relaxed);
-                    Some(guard)
-                }
-                Err(_) => {
-                    if !this.quota_read_wake_scheduled {
-                        this.quota_read_wake_scheduled = true;
-                        this.quota_read_retry_active.store(true, Ordering::Relaxed);
-                        spawn_quota_retry_waker(
-                            Arc::clone(&this.quota_read_retry_active),
-                            cx.waker().clone(),
-                        );
-                    }
-                    return Poll::Pending;
-                }
+        let mut remaining_before = None;
+        if let Some(limit) = this.quota_limit {
+            let used_before = this.user_stats.quota_used();
+            let remaining = limit.saturating_sub(used_before);
+            if remaining == 0 {
+                this.quota_exceeded.store(true, Ordering::Release);
+                return Poll::Ready(Err(quota_io_error()));
             }
-        } else {
-            None
-        };
-
-        if let Some(limit) = this.quota_limit
-            && this.stats.get_user_total_octets(&this.user) >= limit
-        {
-            this.quota_exceeded.store(true, Ordering::Relaxed);
-            return Poll::Ready(Err(quota_io_error()));
+            remaining_before = Some(remaining);
         }
+
         let before = buf.filled().len();
 
         match Pin::new(&mut this.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
                 let n = buf.filled().len() - before;
                 if n > 0 {
-                    let mut reached_quota_boundary = false;
-                    if let Some(limit) = this.quota_limit {
-                        let used = this.stats.get_user_total_octets(&this.user);
-                        if used >= limit {
-                            this.quota_exceeded.store(true, Ordering::Relaxed);
-                            return Poll::Ready(Err(quota_io_error()));
-                        }
-
-                        let remaining = limit - used;
-                        if (n as u64) > remaining {
-                            // Fail closed: when a single read chunk would cross quota,
-                            // stop relay immediately without accounting beyond the cap.
-                            this.quota_exceeded.store(true, Ordering::Relaxed);
-                            return Poll::Ready(Err(quota_io_error()));
-                        }
-
-                        reached_quota_boundary = (n as u64) == remaining;
-                    }
+                    let n_to_charge = n as u64;
 
                     // C→S: client sent data
                     this.counters
                         .c2s_bytes
-                        .fetch_add(n as u64, Ordering::Relaxed);
+                        .fetch_add(n_to_charge, Ordering::Relaxed);
                     this.counters.c2s_ops.fetch_add(1, Ordering::Relaxed);
                     this.counters.touch(Instant::now(), this.epoch);
 
-                    this.stats.add_user_octets_from(&this.user, n as u64);
-                    this.stats.increment_user_msgs_from(&this.user);
+                    this.stats
+                        .add_user_octets_from_handle(this.user_stats.as_ref(), n_to_charge);
+                    this.stats
+                        .increment_user_msgs_from_handle(this.user_stats.as_ref());
 
-                    if reached_quota_boundary {
-                        this.quota_exceeded.store(true, Ordering::Relaxed);
+                    if let (Some(limit), Some(remaining)) = (this.quota_limit, remaining_before) {
+                        this.stats
+                            .quota_charge_post_write(this.user_stats.as_ref(), n_to_charge);
+                        if should_immediate_quota_check(remaining, n_to_charge) {
+                            this.quota_bytes_since_check = 0;
+                            if this.user_stats.quota_used() >= limit {
+                                this.quota_exceeded.store(true, Ordering::Release);
+                            }
+                        } else {
+                            this.quota_bytes_since_check =
+                                this.quota_bytes_since_check.saturating_add(n_to_charge);
+                            let interval = quota_adaptive_interval_bytes(remaining);
+                            if this.quota_bytes_since_check >= interval {
+                                this.quota_bytes_since_check = 0;
+                                if this.user_stats.quota_used() >= limit {
+                                    this.quota_exceeded.store(true, Ordering::Release);
+                                }
+                            }
+                        }
                     }
 
                     trace!(user = %this.user, bytes = n, "C->S");
@@ -456,75 +362,57 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.quota_exceeded.load(Ordering::Relaxed) {
+        if this.quota_exceeded.load(Ordering::Acquire) {
             return Poll::Ready(Err(quota_io_error()));
         }
 
-        let quota_lock = this
-            .quota_limit
-            .is_some()
-            .then(|| quota_user_lock(&this.user));
-        let _quota_guard = if let Some(lock) = quota_lock.as_ref() {
-            match lock.try_lock() {
-                Ok(guard) => {
-                    this.quota_write_wake_scheduled = false;
-                    this.quota_write_retry_active
-                        .store(false, Ordering::Relaxed);
-                    Some(guard)
-                }
-                Err(_) => {
-                    if !this.quota_write_wake_scheduled {
-                        this.quota_write_wake_scheduled = true;
-                        this.quota_write_retry_active.store(true, Ordering::Relaxed);
-                        spawn_quota_retry_waker(
-                            Arc::clone(&this.quota_write_retry_active),
-                            cx.waker().clone(),
-                        );
-                    }
-                    return Poll::Pending;
-                }
-            }
-        } else {
-            None
-        };
-
-        let write_buf = if let Some(limit) = this.quota_limit {
-            let used = this.stats.get_user_total_octets(&this.user);
-            if used >= limit {
-                this.quota_exceeded.store(true, Ordering::Relaxed);
+        let mut remaining_before = None;
+        if let Some(limit) = this.quota_limit {
+            let used_before = this.user_stats.quota_used();
+            let remaining = limit.saturating_sub(used_before);
+            if remaining == 0 {
+                this.quota_exceeded.store(true, Ordering::Release);
                 return Poll::Ready(Err(quota_io_error()));
             }
+            remaining_before = Some(remaining);
+        }
 
-            let remaining = (limit - used) as usize;
-            if buf.len() > remaining {
-                // Fail closed: do not emit partial S->C payload when remaining
-                // quota cannot accommodate the pending write request.
-                this.quota_exceeded.store(true, Ordering::Relaxed);
-                return Poll::Ready(Err(quota_io_error()));
-            }
-            buf
-        } else {
-            buf
-        };
-
-        match Pin::new(&mut this.inner).poll_write(cx, write_buf) {
+        match Pin::new(&mut this.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => {
                 if n > 0 {
+                    let n_to_charge = n as u64;
+
                     // S→C: data written to client
                     this.counters
                         .s2c_bytes
-                        .fetch_add(n as u64, Ordering::Relaxed);
+                        .fetch_add(n_to_charge, Ordering::Relaxed);
                     this.counters.s2c_ops.fetch_add(1, Ordering::Relaxed);
                     this.counters.touch(Instant::now(), this.epoch);
 
-                    this.stats.add_user_octets_to(&this.user, n as u64);
-                    this.stats.increment_user_msgs_to(&this.user);
+                    this.stats
+                        .add_user_octets_to_handle(this.user_stats.as_ref(), n_to_charge);
+                    this.stats
+                        .increment_user_msgs_to_handle(this.user_stats.as_ref());
 
-                    if let Some(limit) = this.quota_limit
-                        && this.stats.get_user_total_octets(&this.user) >= limit
-                    {
-                        this.quota_exceeded.store(true, Ordering::Relaxed);
-                        return Poll::Ready(Err(quota_io_error()));
+                    if let (Some(limit), Some(remaining)) = (this.quota_limit, remaining_before) {
+                        this.stats
+                            .quota_charge_post_write(this.user_stats.as_ref(), n_to_charge);
+                        if should_immediate_quota_check(remaining, n_to_charge) {
+                            this.quota_bytes_since_check = 0;
+                            if this.user_stats.quota_used() >= limit {
+                                this.quota_exceeded.store(true, Ordering::Release);
+                            }
+                        } else {
+                            this.quota_bytes_since_check =
+                                this.quota_bytes_since_check.saturating_add(n_to_charge);
+                            let interval = quota_adaptive_interval_bytes(remaining);
+                            if this.quota_bytes_since_check >= interval {
+                                this.quota_bytes_since_check = 0;
+                                if this.user_stats.quota_used() >= limit {
+                                    this.quota_exceeded.store(true, Ordering::Release);
+                                }
+                            }
+                        }
                     }
 
                     trace!(user = %this.user, bytes = n, "S->C");
@@ -618,7 +506,7 @@ where
             let now = Instant::now();
             let idle = wd_counters.idle_duration(now, epoch);
 
-            if wd_quota_exceeded.load(Ordering::Relaxed) {
+            if wd_quota_exceeded.load(Ordering::Acquire) {
                 warn!(user = %wd_user, "User data quota reached, closing relay");
                 return;
             }
@@ -757,16 +645,8 @@ where
 }
 
 #[cfg(test)]
-#[path = "tests/relay_security_tests.rs"]
-mod security_tests;
-
-#[cfg(test)]
 #[path = "tests/relay_adversarial_tests.rs"]
 mod adversarial_tests;
-
-#[cfg(test)]
-#[path = "tests/relay_quota_lock_pressure_adversarial_tests.rs"]
-mod relay_quota_lock_pressure_adversarial_tests;
 
 #[cfg(test)]
 #[path = "tests/relay_quota_boundary_blackhat_tests.rs"]
@@ -781,13 +661,13 @@ mod relay_quota_model_adversarial_tests;
 mod relay_quota_overflow_regression_tests;
 
 #[cfg(test)]
+#[path = "tests/relay_quota_extended_attack_surface_security_tests.rs"]
+mod relay_quota_extended_attack_surface_security_tests;
+
+#[cfg(test)]
 #[path = "tests/relay_watchdog_delta_security_tests.rs"]
 mod relay_watchdog_delta_security_tests;
 
 #[cfg(test)]
-#[path = "tests/relay_quota_waker_storm_adversarial_tests.rs"]
-mod relay_quota_waker_storm_adversarial_tests;
-
-#[cfg(test)]
-#[path = "tests/relay_quota_wake_liveness_regression_tests.rs"]
-mod relay_quota_wake_liveness_regression_tests;
+#[path = "tests/relay_atomic_quota_invariant_tests.rs"]
+mod relay_atomic_quota_invariant_tests;

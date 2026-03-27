@@ -236,3 +236,57 @@ mask_shape_above_cap_blur_max_bytes = 8
 
     remove_temp_config(&path);
 }
+
+#[test]
+fn load_rejects_zero_mask_relay_max_bytes() {
+    let path = write_temp_config(
+        r#"
+[censorship]
+mask_relay_max_bytes = 0
+"#,
+    );
+
+    let err = ProxyConfig::load(&path).expect_err("mask_relay_max_bytes must be > 0");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("censorship.mask_relay_max_bytes must be > 0"),
+        "error must explain non-zero relay cap invariant, got: {msg}"
+    );
+
+    remove_temp_config(&path);
+}
+
+#[test]
+fn load_rejects_mask_relay_max_bytes_above_upper_bound() {
+    let path = write_temp_config(
+        r#"
+[censorship]
+mask_relay_max_bytes = 67108865
+"#,
+    );
+
+    let err =
+        ProxyConfig::load(&path).expect_err("mask_relay_max_bytes above hard cap must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("censorship.mask_relay_max_bytes must be <= 67108864"),
+        "error must explain relay cap upper bound invariant, got: {msg}"
+    );
+
+    remove_temp_config(&path);
+}
+
+#[test]
+fn load_accepts_valid_mask_relay_max_bytes() {
+    let path = write_temp_config(
+        r#"
+[censorship]
+mask_relay_max_bytes = 8388608
+"#,
+    );
+
+    let cfg = ProxyConfig::load(&path).expect("valid mask_relay_max_bytes must be accepted");
+    assert_eq!(cfg.censorship.mask_relay_max_bytes, 8_388_608);
+
+    remove_temp_config(&path);
+}

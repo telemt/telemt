@@ -429,6 +429,11 @@ pub struct GeneralConfig {
     #[serde(default = "default_me2dc_fallback")]
     pub me2dc_fallback: bool,
 
+    /// Fast ME->Direct fallback mode for new sessions.
+    /// Active only when both `use_middle_proxy=true` and `me2dc_fallback=true`.
+    #[serde(default = "default_me2dc_fast")]
+    pub me2dc_fast: bool,
+
     /// Enable ME keepalive padding frames.
     #[serde(default = "default_true")]
     pub me_keepalive_enabled: bool,
@@ -468,7 +473,7 @@ pub struct GeneralConfig {
     pub me_c2me_send_timeout_ms: u64,
 
     /// Bounded wait in milliseconds for routing ME DATA to per-connection queue.
-    /// `0` keeps legacy no-wait behavior.
+    /// `0` keeps non-blocking routing; values >0 enable bounded wait for compatibility.
     #[serde(default = "default_me_reader_route_data_wait_ms")]
     pub me_reader_route_data_wait_ms: u64,
 
@@ -488,6 +493,14 @@ pub struct GeneralConfig {
     /// Flush client writer immediately after quick-ack write.
     #[serde(default = "default_me_d2c_ack_flush_immediate")]
     pub me_d2c_ack_flush_immediate: bool,
+
+    /// Additional bytes above strict per-user quota allowed in hot-path soft mode.
+    #[serde(default = "default_me_quota_soft_overshoot_bytes")]
+    pub me_quota_soft_overshoot_bytes: u64,
+
+    /// Shrink threshold for reusable ME->Client frame assembly buffer.
+    #[serde(default = "default_me_d2c_frame_buf_shrink_threshold_bytes")]
+    pub me_d2c_frame_buf_shrink_threshold_bytes: usize,
 
     /// Copy buffer size for client->DC direction in direct relay.
     #[serde(default = "default_direct_relay_copy_buf_c2s_bytes")]
@@ -931,6 +944,7 @@ impl Default for GeneralConfig {
             middle_proxy_warm_standby: default_middle_proxy_warm_standby(),
             me_init_retry_attempts: default_me_init_retry_attempts(),
             me2dc_fallback: default_me2dc_fallback(),
+            me2dc_fast: default_me2dc_fast(),
             me_keepalive_enabled: default_true(),
             me_keepalive_interval_secs: default_keepalive_interval(),
             me_keepalive_jitter_secs: default_keepalive_jitter(),
@@ -945,6 +959,9 @@ impl Default for GeneralConfig {
             me_d2c_flush_batch_max_bytes: default_me_d2c_flush_batch_max_bytes(),
             me_d2c_flush_batch_max_delay_us: default_me_d2c_flush_batch_max_delay_us(),
             me_d2c_ack_flush_immediate: default_me_d2c_ack_flush_immediate(),
+            me_quota_soft_overshoot_bytes: default_me_quota_soft_overshoot_bytes(),
+            me_d2c_frame_buf_shrink_threshold_bytes:
+                default_me_d2c_frame_buf_shrink_threshold_bytes(),
             direct_relay_copy_buf_c2s_bytes: default_direct_relay_copy_buf_c2s_bytes(),
             direct_relay_copy_buf_s2c_bytes: default_direct_relay_copy_buf_s2c_bytes(),
             me_warmup_stagger_enabled: default_true(),
@@ -1229,9 +1246,10 @@ pub struct ServerConfig {
 
     /// Trusted source CIDRs allowed to send incoming PROXY protocol headers.
     ///
-    /// When non-empty, connections from addresses outside this allowlist are
-    /// rejected before `src_addr` is applied.
-    #[serde(default)]
+    /// If this field is omitted in config, it defaults to trust-all CIDRs
+    /// (`0.0.0.0/0` and `::/0`). If it is explicitly set to an empty list,
+    /// all PROXY protocol headers are rejected.
+    #[serde(default = "default_proxy_protocol_trusted_cidrs")]
     pub proxy_protocol_trusted_cidrs: Vec<IpNetwork>,
 
     /// Port for the Prometheus-compatible metrics endpoint.
@@ -1276,7 +1294,7 @@ impl Default for ServerConfig {
             listen_tcp: None,
             proxy_protocol: false,
             proxy_protocol_header_timeout_ms: default_proxy_protocol_header_timeout_ms(),
-            proxy_protocol_trusted_cidrs: Vec::new(),
+            proxy_protocol_trusted_cidrs: default_proxy_protocol_trusted_cidrs(),
             metrics_port: None,
             metrics_listen: None,
             metrics_whitelist: default_metrics_whitelist(),
@@ -1347,6 +1365,90 @@ impl Default for TimeoutsConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UnknownSniAction {
+    #[default]
+    Drop,
+    Mask,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsFetchProfile {
+    ModernChromeLike,
+    ModernFirefoxLike,
+    CompatTls12,
+    LegacyMinimal,
+}
+
+impl TlsFetchProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TlsFetchProfile::ModernChromeLike => "modern_chrome_like",
+            TlsFetchProfile::ModernFirefoxLike => "modern_firefox_like",
+            TlsFetchProfile::CompatTls12 => "compat_tls12",
+            TlsFetchProfile::LegacyMinimal => "legacy_minimal",
+        }
+    }
+}
+
+fn default_tls_fetch_profiles() -> Vec<TlsFetchProfile> {
+    vec![
+        TlsFetchProfile::ModernChromeLike,
+        TlsFetchProfile::ModernFirefoxLike,
+        TlsFetchProfile::CompatTls12,
+        TlsFetchProfile::LegacyMinimal,
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsFetchConfig {
+    /// Ordered list of ClientHello profiles used for adaptive fallback.
+    #[serde(default = "default_tls_fetch_profiles")]
+    pub profiles: Vec<TlsFetchProfile>,
+
+    /// When true and upstream route is configured, TLS fetch fails closed on
+    /// upstream connect errors and does not fallback to direct TCP.
+    #[serde(default = "default_tls_fetch_strict_route")]
+    pub strict_route: bool,
+
+    /// Timeout per one profile attempt in milliseconds.
+    #[serde(default = "default_tls_fetch_attempt_timeout_ms")]
+    pub attempt_timeout_ms: u64,
+
+    /// Total wall-clock budget in milliseconds across all profile attempts.
+    #[serde(default = "default_tls_fetch_total_budget_ms")]
+    pub total_budget_ms: u64,
+
+    /// Adds GREASE-style values into selected ClientHello extensions.
+    #[serde(default)]
+    pub grease_enabled: bool,
+
+    /// Produces deterministic ClientHello randomness for debugging/tests.
+    #[serde(default)]
+    pub deterministic: bool,
+
+    /// TTL for winner-profile cache entries in seconds.
+    /// Set to 0 to disable profile cache.
+    #[serde(default = "default_tls_fetch_profile_cache_ttl_secs")]
+    pub profile_cache_ttl_secs: u64,
+}
+
+impl Default for TlsFetchConfig {
+    fn default() -> Self {
+        Self {
+            profiles: default_tls_fetch_profiles(),
+            strict_route: default_tls_fetch_strict_route(),
+            attempt_timeout_ms: default_tls_fetch_attempt_timeout_ms(),
+            total_budget_ms: default_tls_fetch_total_budget_ms(),
+            grease_enabled: false,
+            deterministic: false,
+            profile_cache_ttl_secs: default_tls_fetch_profile_cache_ttl_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntiCensorshipConfig {
     #[serde(default = "default_tls_domain")]
@@ -1356,10 +1458,18 @@ pub struct AntiCensorshipConfig {
     #[serde(default)]
     pub tls_domains: Vec<String>,
 
+    /// Policy for TLS ClientHello with unknown (non-configured) SNI.
+    #[serde(default)]
+    pub unknown_sni_action: UnknownSniAction,
+
     /// Upstream scope used for TLS front metadata fetches.
     /// Empty value keeps default upstream routing behavior.
     #[serde(default = "default_tls_fetch_scope")]
     pub tls_fetch_scope: String,
+
+    /// Fetch strategy for TLS front metadata bootstrap and periodic refresh.
+    #[serde(default)]
+    pub tls_fetch: TlsFetchConfig,
 
     #[serde(default = "default_true")]
     pub mask: bool,
@@ -1440,6 +1550,14 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_mask_shape_above_cap_blur_max_bytes")]
     pub mask_shape_above_cap_blur_max_bytes: usize,
 
+    /// Maximum bytes relayed per direction on unauthenticated masking fallback paths.
+    #[serde(default = "default_mask_relay_max_bytes")]
+    pub mask_relay_max_bytes: usize,
+
+    /// Prefetch timeout (ms) for extending fragmented masking classifier window.
+    #[serde(default = "default_mask_classifier_prefetch_timeout_ms")]
+    pub mask_classifier_prefetch_timeout_ms: u64,
+
     /// Enable outcome-time normalization envelope for masking fallback.
     #[serde(default = "default_mask_timing_normalization_enabled")]
     pub mask_timing_normalization_enabled: bool,
@@ -1458,7 +1576,9 @@ impl Default for AntiCensorshipConfig {
         Self {
             tls_domain: default_tls_domain(),
             tls_domains: Vec::new(),
+            unknown_sni_action: UnknownSniAction::Drop,
             tls_fetch_scope: default_tls_fetch_scope(),
+            tls_fetch: TlsFetchConfig::default(),
             mask: default_true(),
             mask_host: None,
             mask_port: default_mask_port(),
@@ -1478,6 +1598,8 @@ impl Default for AntiCensorshipConfig {
             mask_shape_bucket_cap_bytes: default_mask_shape_bucket_cap_bytes(),
             mask_shape_above_cap_blur: default_mask_shape_above_cap_blur(),
             mask_shape_above_cap_blur_max_bytes: default_mask_shape_above_cap_blur_max_bytes(),
+            mask_relay_max_bytes: default_mask_relay_max_bytes(),
+            mask_classifier_prefetch_timeout_ms: default_mask_classifier_prefetch_timeout_ms(),
             mask_timing_normalization_enabled: default_mask_timing_normalization_enabled(),
             mask_timing_normalization_floor_ms: default_mask_timing_normalization_floor_ms(),
             mask_timing_normalization_ceiling_ms: default_mask_timing_normalization_ceiling_ms(),

@@ -174,6 +174,24 @@ pub(super) struct ZeroMiddleProxyData {
     pub(super) route_drop_queue_full_total: u64,
     pub(super) route_drop_queue_full_base_total: u64,
     pub(super) route_drop_queue_full_high_total: u64,
+    pub(super) d2c_batches_total: u64,
+    pub(super) d2c_batch_frames_total: u64,
+    pub(super) d2c_batch_bytes_total: u64,
+    pub(super) d2c_flush_reason_queue_drain_total: u64,
+    pub(super) d2c_flush_reason_batch_frames_total: u64,
+    pub(super) d2c_flush_reason_batch_bytes_total: u64,
+    pub(super) d2c_flush_reason_max_delay_total: u64,
+    pub(super) d2c_flush_reason_ack_immediate_total: u64,
+    pub(super) d2c_flush_reason_close_total: u64,
+    pub(super) d2c_data_frames_total: u64,
+    pub(super) d2c_ack_frames_total: u64,
+    pub(super) d2c_payload_bytes_total: u64,
+    pub(super) d2c_write_mode_coalesced_total: u64,
+    pub(super) d2c_write_mode_split_total: u64,
+    pub(super) d2c_quota_reject_pre_write_total: u64,
+    pub(super) d2c_quota_reject_post_write_total: u64,
+    pub(super) d2c_frame_buf_shrink_total: u64,
+    pub(super) d2c_frame_buf_shrink_bytes_total: u64,
     pub(super) socks_kdf_strict_reject_total: u64,
     pub(super) socks_kdf_compat_fallback_total: u64,
     pub(super) endpoint_quarantine_total: u64,
@@ -422,6 +440,12 @@ pub(super) struct UserInfo {
     pub(super) recent_unique_ips_list: Vec<IpAddr>,
     pub(super) total_octets: u64,
     pub(super) links: UserLinks,
+}
+
+#[derive(Serialize)]
+pub(super) struct UserActiveIps {
+    pub(super) username: String,
+    pub(super) active_ips: Vec<IpAddr>,
 }
 
 #[derive(Serialize)]

@@ -9,8 +9,10 @@ use tracing::{debug, error, info, warn};
 use crate::cli;
 use crate::config::ProxyConfig;
 use crate::logging::LogDestination;
+use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::{
-    ProxyConfigData, fetch_proxy_config_with_raw, load_proxy_config_cache, save_proxy_config_cache,
+    ProxyConfigData, fetch_proxy_config_with_raw_via_upstream, load_proxy_config_cache,
+    save_proxy_config_cache,
 };
 
 pub(crate) fn resolve_runtime_config_path(
@@ -370,9 +372,10 @@ pub(crate) async fn load_startup_proxy_config_snapshot(
     cache_path: Option<&str>,
     me2dc_fallback: bool,
     label: &'static str,
+    upstream: Option<std::sync::Arc<UpstreamManager>>,
 ) -> Option<ProxyConfigData> {
     loop {
-        match fetch_proxy_config_with_raw(url).await {
+        match fetch_proxy_config_with_raw_via_upstream(url, upstream.clone()).await {
             Ok((cfg, raw)) => {
                 if !cfg.map.is_empty() {
                     if let Some(path) = cache_path

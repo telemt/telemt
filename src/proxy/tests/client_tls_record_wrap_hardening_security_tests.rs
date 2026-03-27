@@ -25,13 +25,26 @@ fn wrap_tls_application_record_oversized_payload_is_chunked_without_truncation()
         let len = u16::from_be_bytes([record[offset + 3], record[offset + 4]]) as usize;
         let body_start = offset + 5;
         let body_end = body_start + len;
-        assert!(body_end <= record.len(), "declared TLS record length must be in-bounds");
+        assert!(
+            body_end <= record.len(),
+            "declared TLS record length must be in-bounds"
+        );
         recovered.extend_from_slice(&record[body_start..body_end]);
         offset = body_end;
         frames += 1;
     }
 
-    assert_eq!(offset, record.len(), "record parser must consume exact output size");
-    assert_eq!(frames, 2, "oversized payload should split into exactly two records");
-    assert_eq!(recovered, payload, "chunked records must preserve full payload");
+    assert_eq!(
+        offset,
+        record.len(),
+        "record parser must consume exact output size"
+    );
+    assert_eq!(
+        frames, 2,
+        "oversized payload should split into exactly two records"
+    );
+    assert_eq!(
+        recovered, payload,
+        "chunked records must preserve full payload"
+    );
 }

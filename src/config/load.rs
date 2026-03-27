@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -430,6 +430,24 @@ impl ProxyConfig {
             ));
         }
 
+        if config.censorship.mask_relay_max_bytes == 0 {
+            return Err(ProxyError::Config(
+                "censorship.mask_relay_max_bytes must be > 0".to_string(),
+            ));
+        }
+
+        if config.censorship.mask_relay_max_bytes > 67_108_864 {
+            return Err(ProxyError::Config(
+                "censorship.mask_relay_max_bytes must be <= 67108864".to_string(),
+            ));
+        }
+
+        if !(5..=50).contains(&config.censorship.mask_classifier_prefetch_timeout_ms) {
+            return Err(ProxyError::Config(
+                "censorship.mask_classifier_prefetch_timeout_ms must be within [5, 50]".to_string(),
+            ));
+        }
+
         if config.censorship.mask_timing_normalization_ceiling_ms
             < config.censorship.mask_timing_normalization_floor_ms
         {
@@ -530,6 +548,21 @@ impl ProxyConfig {
         if config.general.me_d2c_flush_batch_max_delay_us > 5000 {
             return Err(ProxyError::Config(
                 "general.me_d2c_flush_batch_max_delay_us must be within [0, 5000]".to_string(),
+            ));
+        }
+
+        if config.general.me_quota_soft_overshoot_bytes > 16 * 1024 * 1024 {
+            return Err(ProxyError::Config(
+                "general.me_quota_soft_overshoot_bytes must be within [0, 16777216]".to_string(),
+            ));
+        }
+
+        if !(4096..=16 * 1024 * 1024)
+            .contains(&config.general.me_d2c_frame_buf_shrink_threshold_bytes)
+        {
+            return Err(ProxyError::Config(
+                "general.me_d2c_frame_buf_shrink_threshold_bytes must be within [4096, 16777216]"
+                    .to_string(),
             ));
         }
 
@@ -944,6 +977,28 @@ impl ProxyConfig {
         // Normalize optional TLS fetch scope: whitespace-only values disable scoped routing.
         config.censorship.tls_fetch_scope = config.censorship.tls_fetch_scope.trim().to_string();
 
+        if config.censorship.tls_fetch.profiles.is_empty() {
+            config.censorship.tls_fetch.profiles = TlsFetchConfig::default().profiles;
+        } else {
+            let mut seen = HashSet::new();
+            config
+                .censorship
+                .tls_fetch
+                .profiles
+                .retain(|profile| seen.insert(*profile));
+        }
+
+        if config.censorship.tls_fetch.attempt_timeout_ms == 0 {
+            return Err(ProxyError::Config(
+                "censorship.tls_fetch.attempt_timeout_ms must be > 0".to_string(),
+            ));
+        }
+        if config.censorship.tls_fetch.total_budget_ms == 0 {
+            return Err(ProxyError::Config(
+                "censorship.tls_fetch.total_budget_ms must be > 0".to_string(),
+            ));
+        }
+
         // Merge primary + extra TLS domains, deduplicate (primary always first).
         if !config.censorship.tls_domains.is_empty() {
             let mut all = Vec::with_capacity(1 + config.censorship.tls_domains.len());
@@ -1122,6 +1177,10 @@ mod load_security_tests;
 mod load_mask_shape_security_tests;
 
 #[cfg(test)]
+#[path = "tests/load_mask_classifier_prefetch_timeout_security_tests.rs"]
+mod load_mask_classifier_prefetch_timeout_security_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1158,6 +1217,7 @@ mod tests {
             default_me_init_retry_attempts()
         );
         assert_eq!(cfg.general.me2dc_fallback, default_me2dc_fallback());
+        assert_eq!(cfg.general.me2dc_fast, default_me2dc_fast());
         assert_eq!(
             cfg.general.proxy_config_v4_cache_path,
             default_proxy_config_v4_cache_path()
@@ -1226,6 +1286,11 @@ mod tests {
         assert_eq!(cfg.general.update_every, default_update_every());
         assert_eq!(cfg.server.listen_addr_ipv4, default_listen_addr_ipv4());
         assert_eq!(cfg.server.listen_addr_ipv6, default_listen_addr_ipv6_opt());
+        assert_eq!(
+            cfg.server.proxy_protocol_trusted_cidrs,
+            default_proxy_protocol_trusted_cidrs()
+        );
+        assert_eq!(cfg.censorship.unknown_sni_action, UnknownSniAction::Drop);
         assert_eq!(cfg.server.api.listen, default_api_listen());
         assert_eq!(cfg.server.api.whitelist, default_api_whitelist());
         assert_eq!(
@@ -1292,6 +1357,7 @@ mod tests {
             default_me_init_retry_attempts()
         );
         assert_eq!(general.me2dc_fallback, default_me2dc_fallback());
+        assert_eq!(general.me2dc_fast, default_me2dc_fast());
         assert_eq!(
             general.proxy_config_v4_cache_path,
             default_proxy_config_v4_cache_path()
@@ -1358,6 +1424,14 @@ mod tests {
 
         let server = ServerConfig::default();
         assert_eq!(server.listen_addr_ipv6, Some(default_listen_addr_ipv6()));
+        assert_eq!(
+            server.proxy_protocol_trusted_cidrs,
+            default_proxy_protocol_trusted_cidrs()
+        );
+        assert_eq!(
+            AntiCensorshipConfig::default().unknown_sni_action,
+            UnknownSniAction::Drop
+        );
         assert_eq!(server.api.listen, default_api_listen());
         assert_eq!(server.api.whitelist, default_api_whitelist());
         assert_eq!(
@@ -1391,6 +1465,75 @@ mod tests {
 
         let access = AccessConfig::default();
         assert_eq!(access.users, default_access_users());
+    }
+
+    #[test]
+    fn proxy_protocol_trusted_cidrs_missing_uses_trust_all_but_explicit_empty_stays_empty() {
+        let cfg_missing: ProxyConfig = toml::from_str(
+            r#"
+            [server]
+            [general]
+            [network]
+            [access]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_missing.server.proxy_protocol_trusted_cidrs,
+            default_proxy_protocol_trusted_cidrs()
+        );
+
+        let cfg_explicit_empty: ProxyConfig = toml::from_str(
+            r#"
+            [server]
+            proxy_protocol_trusted_cidrs = []
+
+            [general]
+            [network]
+            [access]
+            "#,
+        )
+        .unwrap();
+        assert!(
+            cfg_explicit_empty
+                .server
+                .proxy_protocol_trusted_cidrs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unknown_sni_action_parses_and_defaults_to_drop() {
+        let cfg_default: ProxyConfig = toml::from_str(
+            r#"
+            [server]
+            [general]
+            [network]
+            [access]
+            [censorship]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_default.censorship.unknown_sni_action,
+            UnknownSniAction::Drop
+        );
+
+        let cfg_mask: ProxyConfig = toml::from_str(
+            r#"
+            [server]
+            [general]
+            [network]
+            [access]
+            [censorship]
+            unknown_sni_action = "mask"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_mask.censorship.unknown_sni_action,
+            UnknownSniAction::Mask
+        );
     }
 
     #[test]
@@ -2337,6 +2480,94 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let cfg = ProxyConfig::load(&path).unwrap();
         assert!(cfg.censorship.tls_fetch_scope.is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tls_fetch_defaults_are_applied() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_tls_fetch_defaults_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(
+            cfg.censorship.tls_fetch.profiles,
+            TlsFetchConfig::default().profiles
+        );
+        assert!(cfg.censorship.tls_fetch.strict_route);
+        assert_eq!(cfg.censorship.tls_fetch.attempt_timeout_ms, 5_000);
+        assert_eq!(cfg.censorship.tls_fetch.total_budget_ms, 15_000);
+        assert_eq!(cfg.censorship.tls_fetch.profile_cache_ttl_secs, 600);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tls_fetch_profiles_are_deduplicated_preserving_order() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+            [censorship.tls_fetch]
+            profiles = ["compat_tls12", "modern_chrome_like", "compat_tls12", "legacy_minimal"]
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_tls_fetch_profiles_dedup_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+        assert_eq!(
+            cfg.censorship.tls_fetch.profiles,
+            vec![
+                TlsFetchProfile::CompatTls12,
+                TlsFetchProfile::ModernChromeLike,
+                TlsFetchProfile::LegacyMinimal
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tls_fetch_attempt_timeout_zero_is_rejected() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+            [censorship.tls_fetch]
+            attempt_timeout_ms = 0
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_tls_fetch_attempt_timeout_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("censorship.tls_fetch.attempt_timeout_ms must be > 0"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tls_fetch_total_budget_zero_is_rejected() {
+        let toml = r#"
+            [censorship]
+            tls_domain = "example.com"
+            [censorship.tls_fetch]
+            total_budget_ms = 0
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_tls_fetch_total_budget_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("censorship.tls_fetch.total_budget_ms must be > 0"));
         let _ = std::fs::remove_file(path);
     }
 

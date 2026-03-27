@@ -957,6 +957,89 @@ async fn stress_tls_sni_preferred_user_hint_scales_to_large_user_set() {
 }
 
 #[tokio::test]
+async fn tls_unknown_sni_drop_policy_returns_hard_error() {
+    let secret = [0x48u8; 16];
+    let mut config = test_config_with_secret_hex("48484848484848484848484848484848");
+    config.censorship.unknown_sni_action = UnknownSniAction::Drop;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.190:44326".parse().unwrap();
+    let handshake =
+        make_valid_tls_client_hello_with_sni_and_alpn(&secret, 0, "unknown.example", &[b"h2"]);
+
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        HandshakeResult::Error(ProxyError::UnknownTlsSni)
+    ));
+}
+
+#[tokio::test]
+async fn tls_unknown_sni_mask_policy_falls_back_to_bad_client() {
+    let secret = [0x49u8; 16];
+    let mut config = test_config_with_secret_hex("49494949494949494949494949494949");
+    config.censorship.unknown_sni_action = UnknownSniAction::Mask;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.191:44326".parse().unwrap();
+    let handshake =
+        make_valid_tls_client_hello_with_sni_and_alpn(&secret, 0, "unknown.example", &[b"h2"]);
+
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::BadClient { .. }));
+}
+
+#[tokio::test]
+async fn tls_missing_sni_keeps_legacy_auth_path() {
+    let secret = [0x4Au8; 16];
+    let mut config = test_config_with_secret_hex("4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a");
+    config.censorship.unknown_sni_action = UnknownSniAction::Drop;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.192:44326".parse().unwrap();
+    let handshake = make_valid_tls_handshake(&secret, 0);
+
+    let result = handle_tls_handshake(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(result, HandshakeResult::Success(_)));
+}
+
+#[tokio::test]
 async fn alpn_enforce_rejects_unsupported_client_alpn() {
     let secret = [0x33u8; 16];
     let mut config = test_config_with_secret_hex("33333333333333333333333333333333");
@@ -1557,6 +1640,32 @@ fn auth_probe_capacity_fresh_full_map_still_tracks_newcomer_with_bounded_evictio
     assert!(
         auth_probe_saturation_is_throttled_at_for_testing(now),
         "capacity pressure should still activate coarse global pre-auth throttling"
+    );
+}
+
+#[test]
+fn unknown_sni_warn_cooldown_first_event_is_warn_and_repeated_events_are_info_until_window_expires()
+{
+    let _guard = unknown_sni_warn_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clear_unknown_sni_warn_state_for_testing();
+
+    let now = Instant::now();
+
+    assert!(
+        should_emit_unknown_sni_warn_for_testing(now),
+        "first unknown SNI event must be eligible for WARN emission"
+    );
+    assert!(
+        !should_emit_unknown_sni_warn_for_testing(now + Duration::from_secs(1)),
+        "events inside cooldown window must be demoted from WARN to INFO"
+    );
+    assert!(
+        should_emit_unknown_sni_warn_for_testing(
+            now + Duration::from_secs(UNKNOWN_SNI_WARN_COOLDOWN_SECS)
+        ),
+        "once cooldown expires, next unknown SNI event must be WARN-eligible again"
     );
 }
 

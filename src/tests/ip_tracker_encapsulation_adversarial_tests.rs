@@ -44,7 +44,10 @@ async fn encapsulation_repeated_queue_poison_recovery_preserves_forward_progress
     let ip_primary = ip_from_idx(10_001);
     let ip_alt = ip_from_idx(10_002);
 
-    tracker.check_and_add("encap-poison", ip_primary).await.unwrap();
+    tracker
+        .check_and_add("encap-poison", ip_primary)
+        .await
+        .unwrap();
 
     for _ in 0..128 {
         let queue = tracker.cleanup_queue_mutex_for_tests();

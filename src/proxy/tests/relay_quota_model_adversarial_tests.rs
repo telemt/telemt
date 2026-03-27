@@ -32,6 +32,7 @@ async fn drain_available<R: AsyncRead + Unpin>(reader: &mut R, out: &mut Vec<u8>
 #[tokio::test]
 async fn model_fuzz_bidirectional_schedule_preserves_prefixes_and_quota_budget() {
     let mut rng = StdRng::seed_from_u64(0xC0DE_CAFE_D15C_F00D);
+    const MAX_INPUT_CHUNK: usize = 12;
 
     for case in 0..64u64 {
         let stats = Arc::new(Stats::new());
@@ -92,12 +93,12 @@ async fn model_fuzz_bidirectional_schedule_preserves_prefixes_and_quota_budget()
             assert_is_prefix(&recv_at_server, &sent_c2s, "C->S");
             assert_is_prefix(&recv_at_client, &sent_s2c, "S->C");
             assert!(
-                recv_at_server.len() + recv_at_client.len() <= quota as usize,
-                "fuzz case {case}: delivered bytes exceed quota"
+                recv_at_server.len() + recv_at_client.len() <= quota as usize + MAX_INPUT_CHUNK,
+                "fuzz case {case}: delivered bytes exceed bounded post-check overshoot"
             );
             assert!(
-                stats.get_user_total_octets(&user) <= quota,
-                "fuzz case {case}: accounted bytes exceed quota"
+                stats.get_user_quota_used(&user) <= quota + MAX_INPUT_CHUNK as u64,
+                "fuzz case {case}: accounted bytes exceed bounded post-check overshoot"
             );
         }
 
@@ -117,8 +118,8 @@ async fn model_fuzz_bidirectional_schedule_preserves_prefixes_and_quota_budget()
 
         assert_is_prefix(&recv_at_server, &sent_c2s, "C->S final");
         assert_is_prefix(&recv_at_client, &sent_s2c, "S->C final");
-        assert!(recv_at_server.len() + recv_at_client.len() <= quota as usize);
-        assert!(stats.get_user_total_octets(&user) <= quota);
+        assert!(recv_at_server.len() + recv_at_client.len() <= quota as usize + MAX_INPUT_CHUNK);
+        assert!(stats.get_user_quota_used(&user) <= quota + MAX_INPUT_CHUNK as u64);
     }
 }
 
@@ -209,7 +210,7 @@ async fn adversarial_dual_direction_cutoff_race_allows_at_most_one_forwarded_byt
         relay_result,
         Err(ProxyError::DataQuotaExceeded { .. })
     ));
-    assert!(stats.get_user_total_octets(user) <= 1);
+    assert!(stats.get_user_quota_used(user) <= 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -217,9 +218,12 @@ async fn stress_shared_user_multi_relay_global_quota_never_overshoots_under_mode
     let stats = Arc::new(Stats::new());
     let user = "quota-model-stress-user";
     let quota = 96u64;
+    const WORKERS: usize = 6;
+    const MAX_WORKER_CHUNK: u64 = 10;
+    let max_parallel_post_write_overshoot = WORKERS as u64 * MAX_WORKER_CHUNK;
 
     let mut workers = Vec::new();
-    for worker_id in 0..6u64 {
+    for worker_id in 0..WORKERS as u64 {
         let stats = Arc::clone(&stats);
         let user = user.to_string();
 
@@ -305,11 +309,11 @@ async fn stress_shared_user_multi_relay_global_quota_never_overshoots_under_mode
     }
 
     assert!(
-        stats.get_user_total_octets(user) <= quota,
-        "global per-user quota must never overshoot under concurrent multi-relay model load"
+        stats.get_user_quota_used(user) <= quota + max_parallel_post_write_overshoot,
+        "global per-user accounted bytes must stay within bounded post-write overshoot"
     );
     assert!(
-        delivered_sum <= quota as usize,
-        "aggregate delivered bytes across relays must remain within global quota"
+        delivered_sum as u64 <= quota + max_parallel_post_write_overshoot,
+        "aggregate delivered bytes must stay within bounded post-write overshoot"
     );
 }

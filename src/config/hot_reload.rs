@@ -106,6 +106,8 @@ pub struct HotFields {
     pub me_d2c_flush_batch_max_bytes: usize,
     pub me_d2c_flush_batch_max_delay_us: u64,
     pub me_d2c_ack_flush_immediate: bool,
+    pub me_quota_soft_overshoot_bytes: u64,
+    pub me_d2c_frame_buf_shrink_threshold_bytes: usize,
     pub direct_relay_copy_buf_c2s_bytes: usize,
     pub direct_relay_copy_buf_s2c_bytes: usize,
     pub me_health_interval_ms_unhealthy: u64,
@@ -225,6 +227,10 @@ impl HotFields {
             me_d2c_flush_batch_max_bytes: cfg.general.me_d2c_flush_batch_max_bytes,
             me_d2c_flush_batch_max_delay_us: cfg.general.me_d2c_flush_batch_max_delay_us,
             me_d2c_ack_flush_immediate: cfg.general.me_d2c_ack_flush_immediate,
+            me_quota_soft_overshoot_bytes: cfg.general.me_quota_soft_overshoot_bytes,
+            me_d2c_frame_buf_shrink_threshold_bytes: cfg
+                .general
+                .me_d2c_frame_buf_shrink_threshold_bytes,
             direct_relay_copy_buf_c2s_bytes: cfg.general.direct_relay_copy_buf_c2s_bytes,
             direct_relay_copy_buf_s2c_bytes: cfg.general.direct_relay_copy_buf_s2c_bytes,
             me_health_interval_ms_unhealthy: cfg.general.me_health_interval_ms_unhealthy,
@@ -511,6 +517,9 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.general.me_d2c_flush_batch_max_bytes = new.general.me_d2c_flush_batch_max_bytes;
     cfg.general.me_d2c_flush_batch_max_delay_us = new.general.me_d2c_flush_batch_max_delay_us;
     cfg.general.me_d2c_ack_flush_immediate = new.general.me_d2c_ack_flush_immediate;
+    cfg.general.me_quota_soft_overshoot_bytes = new.general.me_quota_soft_overshoot_bytes;
+    cfg.general.me_d2c_frame_buf_shrink_threshold_bytes =
+        new.general.me_d2c_frame_buf_shrink_threshold_bytes;
     cfg.general.direct_relay_copy_buf_c2s_bytes = new.general.direct_relay_copy_buf_c2s_bytes;
     cfg.general.direct_relay_copy_buf_s2c_bytes = new.general.direct_relay_copy_buf_s2c_bytes;
     cfg.general.me_health_interval_ms_unhealthy = new.general.me_health_interval_ms_unhealthy;
@@ -593,6 +602,9 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         || old.censorship.mask_shape_above_cap_blur != new.censorship.mask_shape_above_cap_blur
         || old.censorship.mask_shape_above_cap_blur_max_bytes
             != new.censorship.mask_shape_above_cap_blur_max_bytes
+        || old.censorship.mask_relay_max_bytes != new.censorship.mask_relay_max_bytes
+        || old.censorship.mask_classifier_prefetch_timeout_ms
+            != new.censorship.mask_classifier_prefetch_timeout_ms
         || old.censorship.mask_timing_normalization_enabled
             != new.censorship.mask_timing_normalization_enabled
         || old.censorship.mask_timing_normalization_floor_ms
@@ -639,6 +651,9 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
     }
     if old.general.me_route_no_writer_mode != new.general.me_route_no_writer_mode
         || old.general.me_route_no_writer_wait_ms != new.general.me_route_no_writer_wait_ms
+        || old.general.me_route_hybrid_max_wait_ms != new.general.me_route_hybrid_max_wait_ms
+        || old.general.me_route_blocking_send_timeout_ms
+            != new.general.me_route_blocking_send_timeout_ms
         || old.general.me_route_inline_recovery_attempts
             != new.general.me_route_inline_recovery_attempts
         || old.general.me_route_inline_recovery_wait_ms
@@ -657,9 +672,11 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         warned = true;
         warn!("config reload: general.me_init_retry_attempts changed; restart required");
     }
-    if old.general.me2dc_fallback != new.general.me2dc_fallback {
+    if old.general.me2dc_fallback != new.general.me2dc_fallback
+        || old.general.me2dc_fast != new.general.me2dc_fast
+    {
         warned = true;
-        warn!("config reload: general.me2dc_fallback changed; restart required");
+        warn!("config reload: general.me2dc_fallback/me2dc_fast changed; restart required");
     }
     if old.general.proxy_config_v4_cache_path != new.general.proxy_config_v4_cache_path
         || old.general.proxy_config_v6_cache_path != new.general.proxy_config_v6_cache_path
@@ -1030,15 +1047,20 @@ fn log_changes(
         || old_hot.me_d2c_flush_batch_max_bytes != new_hot.me_d2c_flush_batch_max_bytes
         || old_hot.me_d2c_flush_batch_max_delay_us != new_hot.me_d2c_flush_batch_max_delay_us
         || old_hot.me_d2c_ack_flush_immediate != new_hot.me_d2c_ack_flush_immediate
+        || old_hot.me_quota_soft_overshoot_bytes != new_hot.me_quota_soft_overshoot_bytes
+        || old_hot.me_d2c_frame_buf_shrink_threshold_bytes
+            != new_hot.me_d2c_frame_buf_shrink_threshold_bytes
         || old_hot.direct_relay_copy_buf_c2s_bytes != new_hot.direct_relay_copy_buf_c2s_bytes
         || old_hot.direct_relay_copy_buf_s2c_bytes != new_hot.direct_relay_copy_buf_s2c_bytes
     {
         info!(
-            "config reload: relay_tuning: me_d2c_frames={} me_d2c_bytes={} me_d2c_delay_us={} me_ack_flush_immediate={} direct_buf_c2s={} direct_buf_s2c={}",
+            "config reload: relay_tuning: me_d2c_frames={} me_d2c_bytes={} me_d2c_delay_us={} me_ack_flush_immediate={} me_quota_soft_overshoot_bytes={} me_d2c_frame_buf_shrink_threshold_bytes={} direct_buf_c2s={} direct_buf_s2c={}",
             new_hot.me_d2c_flush_batch_max_frames,
             new_hot.me_d2c_flush_batch_max_bytes,
             new_hot.me_d2c_flush_batch_max_delay_us,
             new_hot.me_d2c_ack_flush_immediate,
+            new_hot.me_quota_soft_overshoot_bytes,
+            new_hot.me_d2c_frame_buf_shrink_threshold_bytes,
             new_hot.direct_relay_copy_buf_c2s_bytes,
             new_hot.direct_relay_copy_buf_s2c_bytes,
         );

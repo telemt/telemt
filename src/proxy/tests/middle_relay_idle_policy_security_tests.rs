@@ -2,8 +2,8 @@ use super::*;
 use crate::crypto::AesCtr;
 use crate::stats::Stats;
 use crate::stream::{BufferPool, CryptoReader};
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::AsyncWriteExt;
 use tokio::io::duplex;
 use tokio::time::{Duration as TokioDuration, Instant as TokioInstant, timeout};
@@ -45,18 +45,6 @@ fn make_idle_policy(soft_ms: u64, hard_ms: u64, grace_ms: u64) -> RelayClientIdl
         hard_idle: Duration::from_millis(hard_ms),
         grace_after_downstream_activity: Duration::from_millis(grace_ms),
         legacy_frame_read_timeout: Duration::from_millis(hard_ms),
-    }
-}
-
-fn idle_pressure_test_lock() -> &'static Mutex<()> {
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn acquire_idle_pressure_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    match idle_pressure_test_lock().lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -372,7 +360,7 @@ async fn stress_many_idle_sessions_fail_closed_without_hang() {
 
 #[test]
 fn pressure_evicts_oldest_idle_candidate_with_deterministic_ordering() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -402,7 +390,7 @@ fn pressure_evicts_oldest_idle_candidate_with_deterministic_ordering() {
 
 #[test]
 fn pressure_does_not_evict_without_new_pressure_signal() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -421,7 +409,7 @@ fn pressure_does_not_evict_without_new_pressure_signal() {
 
 #[test]
 fn stress_pressure_eviction_preserves_fifo_across_many_candidates() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -457,7 +445,7 @@ fn stress_pressure_eviction_preserves_fifo_across_many_candidates() {
 
 #[test]
 fn blackhat_single_pressure_event_must_not_evict_more_than_one_candidate() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -491,7 +479,7 @@ fn blackhat_single_pressure_event_must_not_evict_more_than_one_candidate() {
 
 #[test]
 fn blackhat_pressure_counter_must_track_global_budget_not_per_session_cursor() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -524,7 +512,7 @@ fn blackhat_pressure_counter_must_track_global_budget_not_per_session_cursor() {
 
 #[test]
 fn blackhat_stale_pressure_before_idle_mark_must_not_trigger_eviction() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -543,7 +531,7 @@ fn blackhat_stale_pressure_before_idle_mark_must_not_trigger_eviction() {
 
 #[test]
 fn blackhat_stale_pressure_must_not_evict_any_of_newly_marked_batch() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -575,7 +563,7 @@ fn blackhat_stale_pressure_must_not_evict_any_of_newly_marked_batch() {
 
 #[test]
 fn blackhat_stale_pressure_seen_without_candidates_must_be_globally_invalidated() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -601,7 +589,7 @@ fn blackhat_stale_pressure_seen_without_candidates_must_be_globally_invalidated(
 
 #[test]
 fn blackhat_stale_pressure_must_not_survive_candidate_churn() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
     let stats = Stats::new();
 
@@ -621,7 +609,7 @@ fn blackhat_stale_pressure_must_not_survive_candidate_churn() {
 
 #[test]
 fn blackhat_pressure_seq_saturation_must_not_disable_future_pressure_accounting() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
 
     {
@@ -646,7 +634,7 @@ fn blackhat_pressure_seq_saturation_must_not_disable_future_pressure_accounting(
 
 #[test]
 fn blackhat_pressure_seq_saturation_must_not_break_multiple_distinct_events() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
 
     {
@@ -673,7 +661,7 @@ fn blackhat_pressure_seq_saturation_must_not_break_multiple_distinct_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn integration_race_single_pressure_event_allows_at_most_one_eviction_under_parallel_claims()
 {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
 
     let stats = Arc::new(Stats::new());
@@ -738,7 +726,7 @@ async fn integration_race_single_pressure_event_allows_at_most_one_eviction_unde
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn integration_race_burst_pressure_with_churn_preserves_empty_set_invalidation_and_budget() {
-    let _guard = acquire_idle_pressure_test_lock();
+    let _guard = relay_idle_pressure_test_scope();
     clear_relay_idle_pressure_state_for_testing();
 
     let stats = Arc::new(Stats::new());

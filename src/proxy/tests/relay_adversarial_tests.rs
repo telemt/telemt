@@ -78,7 +78,8 @@ async fn relay_hol_blocking_prevention_regression() {
 async fn relay_quota_mid_session_cutoff() {
     let stats = Arc::new(Stats::new());
     let user = "quota-mid-user";
-    let quota = 5000;
+    let quota = 5000u64;
+    let c2s_buf_size = 1024usize;
 
     let (client_peer, relay_client) = duplex(8192);
     let (relay_server, server_peer) = duplex(8192);
@@ -93,7 +94,7 @@ async fn relay_quota_mid_session_cutoff() {
         client_writer,
         server_reader,
         server_writer,
-        1024,
+        c2s_buf_size,
         1024,
         user,
         Arc::clone(&stats),
@@ -120,9 +121,25 @@ async fn relay_quota_mid_session_cutoff() {
         other => panic!("Expected DataQuotaExceeded error, got: {:?}", other),
     }
 
-    let mut small_buf = [0u8; 1];
-    let n = sp_reader.read(&mut small_buf).await.unwrap();
-    assert_eq!(n, 0, "Server must see EOF after quota reached");
+    let mut overshoot_bytes = 0usize;
+    let mut buf = [0u8; 256];
+    loop {
+        match timeout(Duration::from_millis(20), sp_reader.read(&mut buf)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => overshoot_bytes = overshoot_bytes.saturating_add(n),
+            Ok(Err(e)) => panic!("server read must not fail after relay cutoff: {e}"),
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        overshoot_bytes <= c2s_buf_size,
+        "post-write cutoff may leak at most one C->S chunk after boundary, got {overshoot_bytes}"
+    );
+    assert!(
+        stats.get_user_quota_used(user) <= quota.saturating_add(c2s_buf_size as u64),
+        "accounted quota must remain bounded by one in-flight chunk overshoot"
+    );
 }
 
 #[tokio::test]

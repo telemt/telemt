@@ -63,9 +63,10 @@ pub(crate) async fn initialize_me_pool(
     let proxy_secret_path = config.general.proxy_secret_path.as_deref();
     let pool_size = config.general.middle_proxy_pool_size.max(1);
     let proxy_secret = loop {
-        match crate::transport::middle_proxy::fetch_proxy_secret(
+        match crate::transport::middle_proxy::fetch_proxy_secret_with_upstream(
             proxy_secret_path,
             config.general.proxy_secret_len_max,
+            Some(upstream_manager.clone()),
         )
         .await
         {
@@ -129,6 +130,7 @@ pub(crate) async fn initialize_me_pool(
                 config.general.proxy_config_v4_cache_path.as_deref(),
                 me2dc_fallback,
                 "getProxyConfig",
+                Some(upstream_manager.clone()),
             )
             .await;
             if cfg_v4.is_some() {
@@ -160,6 +162,7 @@ pub(crate) async fn initialize_me_pool(
                 config.general.proxy_config_v6_cache_path.as_deref(),
                 me2dc_fallback,
                 "getProxyConfigV6",
+                Some(upstream_manager.clone()),
             )
             .await;
             if cfg_v6.is_some() {
@@ -274,6 +277,8 @@ pub(crate) async fn initialize_me_pool(
                     config.general.me_warn_rate_limit_ms,
                     config.general.me_route_no_writer_mode,
                     config.general.me_route_no_writer_wait_ms,
+                    config.general.me_route_hybrid_max_wait_ms,
+                    config.general.me_route_blocking_send_timeout_ms,
                     config.general.me_route_inline_recovery_attempts,
                     config.general.me_route_inline_recovery_wait_ms,
                 );

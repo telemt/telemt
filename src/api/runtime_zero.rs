@@ -35,11 +35,14 @@ pub(super) struct RuntimeGatesData {
     pub(super) conditional_cast_enabled: bool,
     pub(super) me_runtime_ready: bool,
     pub(super) me2dc_fallback_enabled: bool,
+    pub(super) me2dc_fast_enabled: bool,
     pub(super) use_middle_proxy: bool,
     pub(super) route_mode: &'static str,
     pub(super) reroute_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) reroute_to_direct_at_epoch_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reroute_reason: Option<&'static str>,
     pub(super) startup_status: &'static str,
     pub(super) startup_stage: String,
     pub(super) startup_progress_pct: f64,
@@ -86,6 +89,7 @@ pub(super) struct EffectiveMiddleProxyLimits {
     pub(super) writer_pick_mode: &'static str,
     pub(super) writer_pick_sample_size: u8,
     pub(super) me2dc_fallback: bool,
+    pub(super) me2dc_fast: bool,
 }
 
 #[derive(Serialize)]
@@ -169,11 +173,22 @@ pub(super) async fn build_runtime_gates_data(
     let startup_summary = build_runtime_startup_summary(shared).await;
     let route_state = shared.route_runtime.snapshot();
     let route_mode = route_state.mode.as_str();
+    let fast_fallback_enabled =
+        cfg.general.use_middle_proxy && cfg.general.me2dc_fallback && cfg.general.me2dc_fast;
     let reroute_active = cfg.general.use_middle_proxy
         && cfg.general.me2dc_fallback
         && matches!(route_state.mode, RelayRouteMode::Direct);
     let reroute_to_direct_at_epoch_secs = if reroute_active {
         shared.route_runtime.direct_since_epoch_secs()
+    } else {
+        None
+    };
+    let reroute_reason = if reroute_active {
+        if fast_fallback_enabled {
+            Some("fast_not_ready_fallback")
+        } else {
+            Some("strict_grace_fallback")
+        }
     } else {
         None
     };
@@ -194,10 +209,12 @@ pub(super) async fn build_runtime_gates_data(
         conditional_cast_enabled: cfg.general.use_middle_proxy,
         me_runtime_ready,
         me2dc_fallback_enabled: cfg.general.me2dc_fallback,
+        me2dc_fast_enabled: fast_fallback_enabled,
         use_middle_proxy: cfg.general.use_middle_proxy,
         route_mode,
         reroute_active,
         reroute_to_direct_at_epoch_secs,
+        reroute_reason,
         startup_status: startup_summary.status,
         startup_stage: startup_summary.stage,
         startup_progress_pct: startup_summary.progress_pct,
@@ -263,6 +280,7 @@ pub(super) fn build_limits_effective_data(cfg: &ProxyConfig) -> EffectiveLimitsD
             writer_pick_mode: me_writer_pick_mode_label(cfg.general.me_writer_pick_mode),
             writer_pick_sample_size: cfg.general.me_writer_pick_sample_size,
             me2dc_fallback: cfg.general.me2dc_fallback,
+            me2dc_fast: cfg.general.me2dc_fast,
         },
         user_ip_policy: EffectiveUserIpPolicyLimits {
             global_each: cfg.access.user_max_unique_ips_global_each,

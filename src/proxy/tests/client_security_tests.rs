@@ -7,6 +7,9 @@ use crate::protocol::tls;
 use crate::proxy::handshake::HandshakeSuccess;
 use crate::stream::{CryptoReader, CryptoWriter};
 use crate::transport::proxy_protocol::ProxyProtocolV1Builder;
+use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::net::{TcpListener, TcpStream};
@@ -25,6 +28,220 @@ fn synthetic_local_addr_uses_configured_port_for_max() {
     assert_eq!(addr.port(), u16::MAX);
 }
 
+#[test]
+fn handshake_timeout_with_mask_grace_includes_mask_margin() {
+    let mut config = ProxyConfig::default();
+    config.timeouts.client_handshake = 2;
+
+    config.censorship.mask = false;
+    assert_eq!(
+        handshake_timeout_with_mask_grace(&config),
+        Duration::from_secs(2)
+    );
+
+    config.censorship.mask = true;
+    assert_eq!(
+        handshake_timeout_with_mask_grace(&config),
+        Duration::from_millis(2750),
+        "mask mode extends handshake timeout by 750 ms"
+    );
+}
+
+#[tokio::test]
+async fn read_with_progress_reads_partial_buffers_before_eof() {
+    let data = vec![0xAA, 0xBB, 0xCC];
+    let mut reader = std::io::Cursor::new(data);
+    let mut buf = [0u8; 5];
+
+    let read = read_with_progress(&mut reader, &mut buf).await.unwrap();
+    assert_eq!(read, 3);
+    assert_eq!(&buf[..3], &[0xAA, 0xBB, 0xCC]);
+}
+
+#[test]
+fn is_trusted_proxy_source_respects_cidr_list_and_empty_rejects_all() {
+    let peer: IpAddr = "10.10.10.10".parse().unwrap();
+    assert!(!is_trusted_proxy_source(peer, &[]));
+
+    let trusted = vec!["10.0.0.0/8".parse().unwrap()];
+    assert!(is_trusted_proxy_source(peer, &trusted));
+
+    let not_trusted = vec!["192.0.2.0/24".parse().unwrap()];
+    assert!(!is_trusted_proxy_source(peer, &not_trusted));
+}
+
+#[test]
+fn is_trusted_proxy_source_accepts_cidr_zero_zero_as_global_cidr() {
+    let peer: IpAddr = "203.0.113.42".parse().unwrap();
+    let trust_all = vec!["0.0.0.0/0".parse().unwrap()];
+    assert!(is_trusted_proxy_source(peer, &trust_all));
+
+    let peer_v6: IpAddr = "2001:db8::1".parse().unwrap();
+    let trust_all_v6 = vec!["::/0".parse().unwrap()];
+    assert!(is_trusted_proxy_source(peer_v6, &trust_all_v6));
+}
+
+struct ErrorReader;
+
+impl tokio::io::AsyncRead for ErrorReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "fake error",
+        )))
+    }
+}
+
+#[tokio::test]
+async fn read_with_progress_returns_error_from_failed_reader() {
+    let mut reader = ErrorReader;
+    let mut buf = [0u8; 8];
+    let err = read_with_progress(&mut reader, &mut buf).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn handshake_timeout_with_mask_grace_handles_maximum_values_without_overflow() {
+    let mut config = ProxyConfig::default();
+    config.timeouts.client_handshake = u64::MAX;
+    config.censorship.mask = true;
+
+    let timeout = handshake_timeout_with_mask_grace(&config);
+    assert!(timeout >= Duration::from_secs(u64::MAX));
+}
+
+#[tokio::test]
+async fn read_with_progress_zero_length_buffer_returns_zero() {
+    let data = vec![1, 2, 3];
+    let mut reader = std::io::Cursor::new(data);
+    let mut buf = [];
+
+    let read = read_with_progress(&mut reader, &mut buf).await.unwrap();
+    assert_eq!(read, 0);
+}
+
+#[test]
+fn handshake_timeout_without_mask_is_exact_base() {
+    let mut config = ProxyConfig::default();
+    config.timeouts.client_handshake = 7;
+    config.censorship.mask = false;
+
+    assert_eq!(
+        handshake_timeout_with_mask_grace(&config),
+        Duration::from_secs(7)
+    );
+}
+
+#[test]
+fn handshake_timeout_mask_enabled_adds_750ms() {
+    let mut config = ProxyConfig::default();
+    config.timeouts.client_handshake = 3;
+    config.censorship.mask = true;
+
+    assert_eq!(
+        handshake_timeout_with_mask_grace(&config),
+        Duration::from_millis(3750)
+    );
+}
+
+#[tokio::test]
+async fn read_with_progress_full_then_empty_transition() {
+    let data = vec![0x10, 0x20];
+    let mut cursor = std::io::Cursor::new(data);
+    let mut buf = [0u8; 2];
+
+    assert_eq!(read_with_progress(&mut cursor, &mut buf).await.unwrap(), 2);
+    assert_eq!(read_with_progress(&mut cursor, &mut buf).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn read_with_progress_fragmented_io_works_over_multiple_calls() {
+    let mut cursor = std::io::Cursor::new(vec![1, 2, 3, 4, 5]);
+    let mut result = Vec::new();
+
+    for chunk_size in 1..=5 {
+        let mut b = vec![0u8; chunk_size];
+        let n = read_with_progress(&mut cursor, &mut b).await.unwrap();
+        result.extend_from_slice(&b[..n]);
+        if n == 0 {
+            break;
+        }
+    }
+
+    assert_eq!(result, vec![1, 2, 3, 4, 5]);
+}
+
+#[tokio::test]
+async fn read_with_progress_stress_randomized_chunk_sizes() {
+    for i in 0..128 {
+        let mut rng = StdRng::seed_from_u64(i as u64 + 1);
+        let mut input: Vec<u8> = (0..(i % 41)).map(|_| rng.next_u32() as u8).collect();
+        let mut cursor = std::io::Cursor::new(input.clone());
+        let mut collected = Vec::new();
+
+        while cursor.position() < cursor.get_ref().len() as u64 {
+            let chunk = 1 + (rng.next_u32() as usize % 8);
+            let mut b = vec![0u8; chunk];
+            let read = read_with_progress(&mut cursor, &mut b).await.unwrap();
+            collected.extend_from_slice(&b[..read]);
+            if read == 0 {
+                break;
+            }
+        }
+
+        assert_eq!(collected, input);
+    }
+}
+
+#[test]
+fn is_trusted_proxy_source_boundary_narrow_ipv4() {
+    let matching = "172.16.0.1".parse().unwrap();
+    let not_matching = "172.15.255.255".parse().unwrap();
+    let cidr = vec!["172.16.0.0/12".parse().unwrap()];
+    assert!(is_trusted_proxy_source(matching, &cidr));
+    assert!(!is_trusted_proxy_source(not_matching, &cidr));
+}
+
+#[test]
+fn is_trusted_proxy_source_rejects_out_of_family_ipv6_v4_cidr() {
+    let peer = "2001:db8::1".parse().unwrap();
+    let cidr = vec!["10.0.0.0/8".parse().unwrap()];
+    assert!(!is_trusted_proxy_source(peer, &cidr));
+}
+
+#[test]
+fn wrap_tls_application_record_reserved_chunks_look_reasonable() {
+    let payload = vec![0xAA; 1 + (u16::MAX as usize) + 2];
+    let wrapped = wrap_tls_application_record(&payload);
+    assert!(wrapped.len() > payload.len());
+    assert!(wrapped.contains(&0x17));
+}
+
+#[test]
+fn wrap_tls_application_record_roundtrip_size_check() {
+    let payload_len = 3000;
+    let payload = vec![0x55; payload_len];
+    let wrapped = wrap_tls_application_record(&payload);
+
+    let mut idx = 0;
+    let mut consumed = 0;
+    while idx + 5 <= wrapped.len() {
+        assert_eq!(wrapped[idx], 0x17);
+        let len = u16::from_be_bytes([wrapped[idx + 3], wrapped[idx + 4]]) as usize;
+        consumed += len;
+        idx += 5 + len;
+        if idx >= wrapped.len() {
+            break;
+        }
+    }
+
+    assert_eq!(consumed, payload_len);
+}
+
 fn make_crypto_reader<R>(reader: R) -> CryptoReader<R>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -41,6 +258,11 @@ where
     let key = [0u8; 32];
     let iv = 0u128;
     CryptoWriter::new(writer, AesCtr::new(&key, iv), 8 * 1024)
+}
+
+fn preload_user_quota(stats: &Stats, user: &str, bytes: u64) {
+    let user_stats = stats.get_or_create_user_stats_handle(user);
+    stats.quota_charge_post_write(user_stats.as_ref(), bytes);
 }
 
 #[tokio::test]
@@ -2841,7 +3063,7 @@ async fn quota_rejection_does_not_reserve_ip_or_trigger_rollback() {
         .insert("user".to_string(), 1024);
 
     let stats = Stats::new();
-    stats.add_user_octets_from("user", 1024);
+    preload_user_quota(&stats, "user", 1024);
 
     let ip_tracker = UserIpTracker::new();
     let peer_addr: SocketAddr = "203.0.113.211:50001".parse().unwrap();

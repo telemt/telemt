@@ -201,7 +201,10 @@ impl ConnectionPool {
     pub async fn close_all(&self) {
         let pools_snapshot: Vec<(SocketAddr, Arc<Mutex<PoolInner>>)> = {
             let pools = self.pools.read();
-            pools.iter().map(|(addr, pool)| (*addr, Arc::clone(pool))).collect()
+            pools
+                .iter()
+                .map(|(addr, pool)| (*addr, Arc::clone(pool)))
+                .collect()
         };
 
         for (addr, pool) in pools_snapshot {

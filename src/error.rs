@@ -216,6 +216,9 @@ pub enum ProxyError {
     #[error("Invalid proxy protocol header")]
     InvalidProxyProtocol,
 
+    #[error("Unknown TLS SNI")]
+    UnknownTlsSni,
+
     #[error("Proxy error: {0}")]
     Proxy(String),
 

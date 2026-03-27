@@ -85,7 +85,10 @@ async fn aggressive_mode_shapes_backend_silent_non_eof_path() {
     let legacy = capture_forwarded_len_with_mode(body_sent, false, false, false, 0).await;
     let aggressive = capture_forwarded_len_with_mode(body_sent, false, true, false, 0).await;
 
-    assert!(legacy < floor, "legacy mode should keep timeout path unshaped");
+    assert!(
+        legacy < floor,
+        "legacy mode should keep timeout path unshaped"
+    );
     assert!(
         aggressive >= floor,
         "aggressive mode must shape backend-silent non-EOF paths (aggressive={aggressive}, floor={floor})"

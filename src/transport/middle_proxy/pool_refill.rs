@@ -13,13 +13,40 @@ use super::pool::{MePool, RefillDcKey, RefillEndpointKey, WriterContour};
 
 const ME_FLAP_UPTIME_THRESHOLD_SECS: u64 = 20;
 const ME_FLAP_QUARANTINE_SECS: u64 = 25;
+const ME_FLAP_MIN_UPTIME_MILLIS: u64 = 500;
+const ME_REFILL_TOTAL_ATTEMPT_CAP: u32 = 20;
 
 impl MePool {
+    pub(super) async fn sweep_endpoint_quarantine(&self) {
+        let configured = self
+            .endpoint_dc_map
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect::<HashSet<SocketAddr>>();
+        let now = Instant::now();
+        let mut guard = self.endpoint_quarantine.lock().await;
+        guard.retain(|addr, expiry| *expiry > now && configured.contains(addr));
+    }
+
     pub(super) async fn maybe_quarantine_flapping_endpoint(
         &self,
         addr: SocketAddr,
         uptime: Duration,
+        reason: &'static str,
     ) {
+        if uptime < Duration::from_millis(ME_FLAP_MIN_UPTIME_MILLIS) {
+            debug!(
+                %addr,
+                reason,
+                uptime_ms = uptime.as_millis(),
+                min_uptime_ms = ME_FLAP_MIN_UPTIME_MILLIS,
+                "Skipping flap quarantine for ultra-short writer lifetime"
+            );
+            return;
+        }
+
         if uptime > Duration::from_secs(ME_FLAP_UPTIME_THRESHOLD_SECS) {
             return;
         }
@@ -31,6 +58,7 @@ impl MePool {
         self.stats.increment_me_endpoint_quarantine_total();
         warn!(
             %addr,
+            reason,
             uptime_ms = uptime.as_millis(),
             quarantine_secs = ME_FLAP_QUARANTINE_SECS,
             "ME endpoint temporarily quarantined due to rapid writer flap"
@@ -205,11 +233,16 @@ impl MePool {
     }
 
     async fn refill_writer_after_loss(self: &Arc<Self>, addr: SocketAddr, writer_dc: i32) -> bool {
-        let fast_retries = self.me_reconnect_fast_retry_count.max(1);
+        let fast_retries = self.reconnect_runtime.me_reconnect_fast_retry_count.max(1);
+        let mut total_attempts = 0u32;
         let same_endpoint_quarantined = self.is_endpoint_quarantined(addr).await;
 
         if !same_endpoint_quarantined {
             for attempt in 0..fast_retries {
+                if total_attempts >= ME_REFILL_TOTAL_ATTEMPT_CAP {
+                    break;
+                }
+                total_attempts = total_attempts.saturating_add(1);
                 self.stats.increment_me_reconnect_attempt();
                 match self
                     .connect_one_for_dc(addr, writer_dc, self.rng.as_ref())
@@ -250,6 +283,10 @@ impl MePool {
         }
 
         for attempt in 0..fast_retries {
+            if total_attempts >= ME_REFILL_TOTAL_ATTEMPT_CAP {
+                break;
+            }
+            total_attempts = total_attempts.saturating_add(1);
             self.stats.increment_me_reconnect_attempt();
             if self
                 .connect_endpoints_round_robin(writer_dc, &dc_endpoints, self.rng.as_ref())

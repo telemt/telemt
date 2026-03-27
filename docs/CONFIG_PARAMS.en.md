@@ -20,7 +20,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | Parameter | Type | Default | Constraints / validation | Description |
 |---|---|---|---|---|
 | data_path | `String \| null` | `null` | — | Optional runtime data directory path. |
-| prefer_ipv6 | `bool` | `false` | — | Prefer IPv6 where applicable in runtime logic. |
+| prefer_ipv6 | `bool` | `false` | Deprecated. Use `network.prefer`. | Deprecated legacy IPv6 preference flag migrated to `network.prefer`. |
 | fast_mode | `bool` | `true` | — | Enables fast-path optimizations for traffic processing. |
 | use_middle_proxy | `bool` | `true` | none | Enables ME transport mode; if `false`, runtime falls back to direct DC routing. |
 | proxy_secret_path | `String \| null` | `"proxy-secret"` | Path may be `null`. | Path to Telegram infrastructure proxy-secret file used by ME handshake logic. |
@@ -44,11 +44,14 @@ This document lists all configuration keys accepted by `config.toml`.
 | me_writer_cmd_channel_capacity | `usize` | `4096` | Must be `> 0`. | Capacity of per-writer command channel. |
 | me_route_channel_capacity | `usize` | `768` | Must be `> 0`. | Capacity of per-connection ME response route channel. |
 | me_c2me_channel_capacity | `usize` | `1024` | Must be `> 0`. | Capacity of per-client command queue (client reader -> ME sender). |
+| me_c2me_send_timeout_ms | `u64` | `4000` | `0..=60000`. | Maximum wait for enqueueing client->ME commands when the per-client queue is full (`0` keeps legacy unbounded wait). |
 | me_reader_route_data_wait_ms | `u64` | `2` | `0..=20`. | Bounded wait for routing ME DATA to per-connection queue (`0` = no wait). |
 | me_d2c_flush_batch_max_frames | `usize` | `32` | `1..=512`. | Max ME->client frames coalesced before flush. |
 | me_d2c_flush_batch_max_bytes | `usize` | `131072` | `4096..=2_097_152`. | Max ME->client payload bytes coalesced before flush. |
 | me_d2c_flush_batch_max_delay_us | `u64` | `500` | `0..=5000`. | Max microsecond wait for coalescing more ME->client frames (`0` disables timed coalescing). |
 | me_d2c_ack_flush_immediate | `bool` | `true` | — | Flushes client writer immediately after quick-ack write. |
+| me_quota_soft_overshoot_bytes | `u64` | `65536` | `0..=16_777_216`. | Extra per-route quota allowance (bytes) tolerated before writer-side quota enforcement drops route data. |
+| me_d2c_frame_buf_shrink_threshold_bytes | `usize` | `262144` | `4096..=16_777_216`. | Threshold for shrinking oversized ME->client frame-aggregation buffers after flush. |
 | direct_relay_copy_buf_c2s_bytes | `usize` | `65536` | `4096..=1_048_576`. | Copy buffer size for client->DC direction in direct relay. |
 | direct_relay_copy_buf_s2c_bytes | `usize` | `262144` | `8192..=2_097_152`. | Copy buffer size for DC->client direction in direct relay. |
 | crypto_pending_buffer | `usize` | `262144` | — | Max pending ciphertext buffer per client writer (bytes). |
@@ -105,6 +108,8 @@ This document lists all configuration keys accepted by `config.toml`.
 | me_warn_rate_limit_ms | `u64` | `5000` | Must be `> 0`. | Cooldown for repetitive ME warning logs (ms). |
 | me_route_no_writer_mode | `"async_recovery_failfast" \| "inline_recovery_legacy" \| "hybrid_async_persistent"` | `"hybrid_async_persistent"` | — | Route behavior when no writer is immediately available. |
 | me_route_no_writer_wait_ms | `u64` | `250` | `10..=5000`. | Max wait in async-recovery failfast mode (ms). |
+| me_route_hybrid_max_wait_ms | `u64` | `3000` | `50..=60000`. | Maximum cumulative wait in hybrid no-writer mode before failfast fallback (ms). |
+| me_route_blocking_send_timeout_ms | `u64` | `250` | `0..=5000`. | Maximum wait for blocking route-channel send fallback (`0` keeps legacy unbounded wait). |
 | me_route_inline_recovery_attempts | `u32` | `3` | Must be `> 0`. | Inline recovery attempts in legacy mode. |
 | me_route_inline_recovery_wait_ms | `u64` | `3000` | `10..=30000`. | Max inline recovery wait in legacy mode (ms). |
 | fast_mode_min_tls_record | `usize` | `0` | — | Minimum TLS record size when fast-mode coalescing is enabled (`0` disables). |
@@ -124,6 +129,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | me_secret_atomic_snapshot | `bool` | `true` | — | Keeps selector and secret bytes from the same snapshot atomically. |
 | proxy_secret_len_max | `usize` | `256` | Must be within `[32, 4096]`. | Upper length limit for accepted proxy-secret bytes. |
 | me_pool_drain_ttl_secs | `u64` | `90` | none | Time window where stale writers remain fallback-eligible after map change. |
+| me_instadrain | `bool` | `false` | — | Forces draining stale writers to be removed on the next cleanup tick, bypassing TTL/deadline waiting. |
 | me_pool_drain_threshold | `u64` | `128` | — | Max draining stale writers before batch force-close (`0` disables threshold cleanup). |
 | me_pool_drain_soft_evict_enabled | `bool` | `true` | — | Enables gradual soft-eviction of stale writers during drain/reinit instead of immediate hard close. |
 | me_pool_drain_soft_evict_grace_secs | `u64` | `30` | `0..=3600`. | Grace period before stale writers become soft-evict candidates. |
@@ -198,10 +204,14 @@ This document lists all configuration keys accepted by `config.toml`.
 | listen_tcp | `bool \| null` | `null` (auto) | — | Explicit TCP listener enable/disable override. |
 | proxy_protocol | `bool` | `false` | — | Enables HAProxy PROXY protocol parsing on incoming client connections. |
 | proxy_protocol_header_timeout_ms | `u64` | `500` | Must be `> 0`. | Timeout for PROXY protocol header read/parse (ms). |
+| proxy_protocol_trusted_cidrs | `IpNetwork[]` | `[]` | — | When non-empty, only connections from these proxy source CIDRs are allowed to provide PROXY protocol headers. If empty, PROXY headers are rejected by default (security hardening). |
 | metrics_port | `u16 \| null` | `null` | — | Metrics endpoint port (enables metrics listener). |
 | metrics_listen | `String \| null` | `null` | — | Full metrics bind address (`IP:PORT`), overrides `metrics_port`. |
 | metrics_whitelist | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | — | CIDR whitelist for metrics endpoint access. |
 | max_connections | `u32` | `10000` | — | Max concurrent client connections (`0` = unlimited). |
+| accept_permit_timeout_ms | `u64` | `250` | `0..=60000`. | Maximum wait for acquiring a connection-slot permit before the accepted connection is dropped (`0` keeps legacy unbounded wait). |
+
+Note: When `server.proxy_protocol` is enabled, incoming PROXY protocol headers are parsed from the first bytes of the connection and the client source address is replaced with `src_addr` from the header. For security, the peer source IP (the direct connection address) is verified against `server.proxy_protocol_trusted_cidrs`; if this list is empty, PROXY headers are rejected and the connection is considered untrusted. 
 
 ## [server.api]
 
@@ -226,7 +236,7 @@ This document lists all configuration keys accepted by `config.toml`.
 |---|---|---|---|---|
 | ip | `IpAddr` | — | — | Listener bind IP. |
 | announce | `String \| null` | — | — | Public IP/domain announced in proxy links (priority over `announce_ip`). |
-| announce_ip | `IpAddr \| null` | — | — | Deprecated legacy announce IP (migrated to `announce` if needed). |
+| announce_ip | `IpAddr \| null` | — | Deprecated. Use `announce`. | Deprecated legacy announce IP (migrated to `announce` if needed). |
 | proxy_protocol | `bool \| null` | `null` | — | Per-listener override for PROXY protocol enable flag. |
 | reuse_allow | `bool` | `false` | — | Enables `SO_REUSEPORT` for multi-instance bind sharing. |
 
@@ -235,6 +245,10 @@ This document lists all configuration keys accepted by `config.toml`.
 | Parameter | Type | Default | Constraints / validation | Description |
 |---|---|---|---|---|
 | client_handshake | `u64` | `30` | — | Client handshake timeout. |
+| relay_idle_policy_v2_enabled | `bool` | `true` | — | Enables soft/hard middle-relay client idle policy. |
+| relay_client_idle_soft_secs | `u64` | `120` | Must be `> 0`; must be `<= relay_client_idle_hard_secs`. | Soft idle threshold for middle-relay client uplink inactivity (seconds). |
+| relay_client_idle_hard_secs | `u64` | `360` | Must be `> 0`; must be `>= relay_client_idle_soft_secs`. | Hard idle threshold for middle-relay client uplink inactivity (seconds). |
+| relay_idle_grace_after_downstream_activity_secs | `u64` | `30` | Must be `<= relay_client_idle_hard_secs`. | Extra hard-idle grace after recent downstream activity (seconds). |
 | tg_connect | `u64` | `10` | — | Upstream Telegram connect timeout. |
 | client_keepalive | `u64` | `15` | — | Client keepalive timeout. |
 | client_ack | `u64` | `90` | — | Client ACK timeout. |
@@ -247,6 +261,9 @@ This document lists all configuration keys accepted by `config.toml`.
 |---|---|---|---|---|
 | tls_domain | `String` | `"petrovich.ru"` | — | Primary TLS domain used in fake TLS handshake profile. |
 | tls_domains | `String[]` | `[]` | — | Additional TLS domains for generating multiple links. |
+| unknown_sni_action | `"drop" \| "mask"` | `"drop"` | — | Action for TLS ClientHello with unknown/non-configured SNI. |
+| tls_fetch_scope | `String` | `""` | Value is trimmed during load; empty keeps default upstream routing behavior. | Upstream scope tag used for TLS-front metadata fetches. |
+| tls_fetch | `Table` | built-in defaults | See `[censorship.tls_fetch]` section below. | TLS-front metadata fetch strategy settings. |
 | mask | `bool` | `true` | — | Enables masking/fronting relay mode. |
 | mask_host | `String \| null` | `null` | — | Upstream mask host for TLS fronting relay. |
 | mask_port | `u16` | `443` | — | Upstream mask port for TLS fronting relay. |
@@ -266,9 +283,23 @@ This document lists all configuration keys accepted by `config.toml`.
 | mask_shape_bucket_cap_bytes | `usize` | `4096` | Must be `>= mask_shape_bucket_floor_bytes`. | Maximum bucket size used by shape-channel hardening; traffic above cap is not padded further. |
 | mask_shape_above_cap_blur | `bool` | `false` | Requires `mask_shape_hardening = true`; requires `mask_shape_above_cap_blur_max_bytes > 0`. | Adds bounded randomized tail bytes even when forwarded size already exceeds cap. |
 | mask_shape_above_cap_blur_max_bytes | `usize` | `512` | Must be `<= 1048576`; must be `> 0` when `mask_shape_above_cap_blur = true`. | Maximum randomized extra bytes appended above cap. |
+| mask_relay_max_bytes | `usize` | `5242880` | Must be `> 0`; must be `<= 67108864`. | Maximum relayed bytes per direction on unauthenticated masking fallback path. |
+| mask_classifier_prefetch_timeout_ms | `u64` | `5` | Must be within `[5, 50]`. | Timeout budget (ms) for extending fragmented initial classifier window on masking fallback. |
 | mask_timing_normalization_enabled | `bool` | `false` | Requires `mask_timing_normalization_floor_ms > 0`; requires `ceiling >= floor`. | Enables timing envelope normalization on masking outcomes. |
 | mask_timing_normalization_floor_ms | `u64` | `0` | Must be `> 0` when timing normalization is enabled; must be `<= ceiling`. | Lower bound (ms) for masking outcome normalization target. |
 | mask_timing_normalization_ceiling_ms | `u64` | `0` | Must be `>= floor`; must be `<= 60000`. | Upper bound (ms) for masking outcome normalization target. |
+
+## [censorship.tls_fetch]
+
+| Parameter | Type | Default | Constraints / validation | Description |
+|---|---|---|---|---|
+| profiles | `("modern_chrome_like" \| "modern_firefox_like" \| "compat_tls12" \| "legacy_minimal")[]` | `["modern_chrome_like", "modern_firefox_like", "compat_tls12", "legacy_minimal"]` | Empty list falls back to defaults; values are deduplicated preserving order. | Ordered ClientHello profile fallback chain for TLS-front metadata fetch. |
+| strict_route | `bool` | `true` | — | Fails closed on upstream-route connect errors instead of falling back to direct TCP when route is configured. |
+| attempt_timeout_ms | `u64` | `5000` | Must be `> 0`. | Timeout budget per one TLS-fetch profile attempt (ms). |
+| total_budget_ms | `u64` | `15000` | Must be `> 0`. | Total wall-clock budget across all TLS-fetch attempts (ms). |
+| grease_enabled | `bool` | `false` | — | Enables GREASE-style random values in selected ClientHello extensions for fetch traffic. |
+| deterministic | `bool` | `false` | — | Enables deterministic ClientHello randomness for debugging/tests. |
+| profile_cache_ttl_secs | `u64` | `600` | `0` disables cache. | TTL for winner-profile cache entries used by TLS fetch path. |
 
 ### Shape-channel hardening notes (`[censorship]`)
 

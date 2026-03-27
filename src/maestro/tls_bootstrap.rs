@@ -7,6 +7,7 @@ use tracing::warn;
 use crate::config::ProxyConfig;
 use crate::startup::{COMPONENT_TLS_FRONT_BOOTSTRAP, StartupTracker};
 use crate::tls_front::TlsFrontCache;
+use crate::tls_front::fetcher::TlsFetchStrategy;
 use crate::transport::UpstreamManager;
 
 pub(crate) async fn bootstrap_tls_front(
@@ -40,7 +41,17 @@ pub(crate) async fn bootstrap_tls_front(
         let mask_unix_sock = config.censorship.mask_unix_sock.clone();
         let tls_fetch_scope = (!config.censorship.tls_fetch_scope.is_empty())
             .then(|| config.censorship.tls_fetch_scope.clone());
-        let fetch_timeout = Duration::from_secs(5);
+        let tls_fetch = config.censorship.tls_fetch.clone();
+        let fetch_strategy = TlsFetchStrategy {
+            profiles: tls_fetch.profiles,
+            strict_route: tls_fetch.strict_route,
+            attempt_timeout: Duration::from_millis(tls_fetch.attempt_timeout_ms.max(1)),
+            total_budget: Duration::from_millis(tls_fetch.total_budget_ms.max(1)),
+            grease_enabled: tls_fetch.grease_enabled,
+            deterministic: tls_fetch.deterministic,
+            profile_cache_ttl: Duration::from_secs(tls_fetch.profile_cache_ttl_secs),
+        };
+        let fetch_timeout = fetch_strategy.total_budget;
 
         let cache_initial = cache.clone();
         let domains_initial = tls_domains.to_vec();
@@ -48,6 +59,7 @@ pub(crate) async fn bootstrap_tls_front(
         let unix_sock_initial = mask_unix_sock.clone();
         let scope_initial = tls_fetch_scope.clone();
         let upstream_initial = upstream_manager.clone();
+        let strategy_initial = fetch_strategy.clone();
         tokio::spawn(async move {
             let mut join = tokio::task::JoinSet::new();
             for domain in domains_initial {
@@ -56,12 +68,13 @@ pub(crate) async fn bootstrap_tls_front(
                 let unix_sock_domain = unix_sock_initial.clone();
                 let scope_domain = scope_initial.clone();
                 let upstream_domain = upstream_initial.clone();
+                let strategy_domain = strategy_initial.clone();
                 join.spawn(async move {
-                    match crate::tls_front::fetcher::fetch_real_tls(
+                    match crate::tls_front::fetcher::fetch_real_tls_with_strategy(
                         &host_domain,
                         port,
                         &domain,
-                        fetch_timeout,
+                        &strategy_domain,
                         Some(upstream_domain),
                         scope_domain.as_deref(),
                         proxy_protocol,
@@ -107,6 +120,7 @@ pub(crate) async fn bootstrap_tls_front(
         let unix_sock_refresh = mask_unix_sock.clone();
         let scope_refresh = tls_fetch_scope.clone();
         let upstream_refresh = upstream_manager.clone();
+        let strategy_refresh = fetch_strategy.clone();
         tokio::spawn(async move {
             loop {
                 let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
@@ -120,12 +134,13 @@ pub(crate) async fn bootstrap_tls_front(
                     let unix_sock_domain = unix_sock_refresh.clone();
                     let scope_domain = scope_refresh.clone();
                     let upstream_domain = upstream_refresh.clone();
+                    let strategy_domain = strategy_refresh.clone();
                     join.spawn(async move {
-                        match crate::tls_front::fetcher::fetch_real_tls(
+                        match crate::tls_front::fetcher::fetch_real_tls_with_strategy(
                             &host_domain,
                             port,
                             &domain,
-                            fetch_timeout,
+                            &strategy_domain,
                             Some(upstream_domain),
                             scope_domain.as_deref(),
                             proxy_protocol,

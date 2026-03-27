@@ -2,13 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use arc_swap::ArcSwap;
+use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{
@@ -55,6 +57,87 @@ pub struct MeWriter {
     pub allow_drain_fallback: Arc<AtomicBool>,
 }
 
+pub(super) struct WritersState {
+    // HARD INVARIANT:
+    // All writers.store() calls MUST be guarded by writers_write_guard.
+    writers: ArcSwap<Vec<MeWriter>>,
+    writers_write_guard: Mutex<()>,
+}
+
+impl WritersState {
+    pub(super) fn new() -> Self {
+        Self {
+            writers: ArcSwap::from_pointee(Vec::new()),
+            writers_write_guard: Mutex::new(()),
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> Arc<Vec<MeWriter>> {
+        self.writers.load_full()
+    }
+
+    pub(super) async fn read(&self) -> Arc<Vec<MeWriter>> {
+        self.snapshot()
+    }
+
+    pub(super) async fn write(&self) -> WritersWriteGuard<'_> {
+        let guard = self.writers_write_guard.lock().await;
+        let writers = (*self.writers.load_full()).clone();
+        WritersWriteGuard {
+            state: self,
+            _guard: guard,
+            writers,
+        }
+    }
+
+    pub(super) async fn update<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut Vec<MeWriter>) -> R,
+    {
+        let mut guard = self.write().await;
+        f(&mut guard)
+    }
+
+    fn debug_assert_store_guarded(&self) {
+        debug_assert!(
+            self.writers_write_guard.try_lock().is_err(),
+            "HARD INVARIANT violated: writers.store() without writers_write_guard"
+        );
+    }
+
+    fn store_guarded(&self, writers: Vec<MeWriter>) {
+        self.debug_assert_store_guarded();
+        self.writers.store(Arc::new(writers));
+    }
+}
+
+pub(super) struct WritersWriteGuard<'a> {
+    state: &'a WritersState,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    writers: Vec<MeWriter>,
+}
+
+impl Deref for WritersWriteGuard<'_> {
+    type Target = Vec<MeWriter>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writers
+    }
+}
+
+impl DerefMut for WritersWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writers
+    }
+}
+
+impl Drop for WritersWriteGuard<'_> {
+    fn drop(&mut self) {
+        let writers = std::mem::take(&mut self.writers);
+        self.state.store_guarded(writers);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum WriterContour {
@@ -69,6 +152,10 @@ impl WriterContour {
     }
 
     pub(super) fn from_u8(value: u8) -> Self {
+        debug_assert!(
+            value <= Self::Draining as u8,
+            "Unexpected WriterContour discriminant: {value}"
+        );
         match value {
             0 => Self::Warm,
             1 => Self::Active,
@@ -87,16 +174,34 @@ pub(crate) enum MeFamilyRuntimeState {
     Recovering = 3,
 }
 
-impl MeFamilyRuntimeState {
-    pub(crate) fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Degraded,
-            2 => Self::Suppressed,
-            3 => Self::Recovering,
-            _ => Self::Healthy,
+#[derive(Debug, Clone)]
+pub(crate) struct FamilyHealthSnapshot {
+    pub(crate) state: MeFamilyRuntimeState,
+    pub(crate) state_since_epoch_secs: u64,
+    pub(crate) suppressed_until_epoch_secs: u64,
+    pub(crate) fail_streak: u32,
+    pub(crate) recover_success_streak: u32,
+}
+
+impl FamilyHealthSnapshot {
+    fn new(
+        state: MeFamilyRuntimeState,
+        state_since_epoch_secs: u64,
+        suppressed_until_epoch_secs: u64,
+        fail_streak: u32,
+        recover_success_streak: u32,
+    ) -> Self {
+        Self {
+            state,
+            state_since_epoch_secs,
+            suppressed_until_epoch_secs,
+            fail_streak,
+            recover_success_streak,
         }
     }
+}
 
+impl MeFamilyRuntimeState {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Healthy => "healthy",
@@ -143,16 +248,89 @@ pub struct SecretSnapshot {
     pub secret: Vec<u8>,
 }
 
-#[allow(dead_code)]
-pub struct MePool {
+pub struct RoutingCore {
     pub(super) registry: Arc<ConnRegistry>,
-    pub(super) writers: Arc<RwLock<Vec<MeWriter>>>,
+    pub(super) writers: Arc<WritersState>,
     pub(super) rr: AtomicU64,
-    pub(super) decision: NetworkDecision,
-    pub(super) upstream: Option<Arc<UpstreamManager>>,
-    pub(super) rng: Arc<SecureRandom>,
-    pub(super) proxy_tag: Option<Vec<u8>>,
-    pub(super) proxy_secret: Arc<RwLock<SecretSnapshot>>,
+    pub(super) writer_epoch: watch::Sender<u64>,
+    pub(super) preferred_endpoints_by_dc: ArcSwap<HashMap<i32, Vec<SocketAddr>>>,
+}
+
+pub(super) struct ReinitCore {
+    pub(super) generation: AtomicU64,
+    pub(super) active_generation: AtomicU64,
+    pub(super) warm_generation: AtomicU64,
+    pub(super) pending_hardswap_generation: AtomicU64,
+    pub(super) pending_hardswap_started_at_epoch_secs: AtomicU64,
+    pub(super) pending_hardswap_map_hash: AtomicU64,
+    pub(super) hardswap: AtomicBool,
+    pub(super) me_hardswap_warmup_delay_min_ms: AtomicU64,
+    pub(super) me_hardswap_warmup_delay_max_ms: AtomicU64,
+    pub(super) me_hardswap_warmup_extra_passes: AtomicU32,
+    pub(super) me_hardswap_warmup_pass_backoff_base_ms: AtomicU64,
+}
+
+pub(super) struct WriterLifecycleCore {
+    pub(super) me_keepalive_enabled: bool,
+    pub(super) me_keepalive_interval: Duration,
+    pub(super) me_keepalive_jitter: Duration,
+    pub(super) me_keepalive_payload_random: bool,
+    pub(super) rpc_proxy_req_every_secs: AtomicU64,
+    pub(super) writer_cmd_channel_capacity: usize,
+}
+
+pub(super) struct RouteRuntimeCore {
+    pub(super) me_route_no_writer_mode: AtomicU8,
+    pub(super) me_route_no_writer_wait: Duration,
+    pub(super) me_route_hybrid_max_wait: Duration,
+    pub(super) me_route_blocking_send_timeout: Option<Duration>,
+    pub(super) me_route_last_success_epoch_ms: AtomicU64,
+    pub(super) me_route_hybrid_timeout_warn_epoch_ms: AtomicU64,
+    pub(super) me_async_recovery_last_trigger_epoch_ms: AtomicU64,
+    pub(super) me_route_inline_recovery_attempts: u32,
+    pub(super) me_route_inline_recovery_wait: Duration,
+}
+
+pub(super) struct HealthRuntimeCore {
+    pub(super) me_health_interval_ms_unhealthy: AtomicU64,
+    pub(super) me_health_interval_ms_healthy: AtomicU64,
+    pub(super) me_warn_rate_limit_ms: AtomicU64,
+    pub(super) family_health_v4: ArcSwap<FamilyHealthSnapshot>,
+    pub(super) family_health_v6: ArcSwap<FamilyHealthSnapshot>,
+}
+
+pub(super) struct DrainRuntimeCore {
+    pub(super) me_pool_drain_ttl_secs: AtomicU64,
+    pub(super) me_instadrain: AtomicBool,
+    pub(super) me_pool_drain_threshold: AtomicU64,
+    pub(super) me_pool_drain_soft_evict_enabled: AtomicBool,
+    pub(super) me_pool_drain_soft_evict_grace_secs: AtomicU64,
+    pub(super) me_pool_drain_soft_evict_per_writer: AtomicU8,
+    pub(super) me_pool_drain_soft_evict_budget_per_core: AtomicU32,
+    pub(super) me_pool_drain_soft_evict_cooldown_ms: AtomicU64,
+    pub(super) me_pool_force_close_secs: AtomicU64,
+    pub(super) me_pool_min_fresh_ratio_permille: AtomicU32,
+    pub(super) me_last_drain_gate_route_quorum_ok: AtomicBool,
+    pub(super) me_last_drain_gate_redundancy_ok: AtomicBool,
+    pub(super) me_last_drain_gate_block_reason: AtomicU8,
+    pub(super) me_last_drain_gate_updated_at_epoch_secs: AtomicU64,
+}
+
+pub(super) struct SingleEndpointRuntimeCore {
+    pub(super) me_single_endpoint_shadow_writers: AtomicU8,
+    pub(super) me_single_endpoint_outage_mode_enabled: AtomicBool,
+    pub(super) me_single_endpoint_outage_disable_quarantine: AtomicBool,
+    pub(super) me_single_endpoint_outage_backoff_min_ms: AtomicU64,
+    pub(super) me_single_endpoint_outage_backoff_max_ms: AtomicU64,
+    pub(super) me_single_endpoint_shadow_rotate_every_secs: AtomicU64,
+}
+
+pub(super) struct BindingPolicyCore {
+    pub(super) me_bind_stale_mode: AtomicU8,
+    pub(super) me_bind_stale_ttl_secs: AtomicU64,
+}
+
+pub(super) struct NatRuntimeCore {
     pub(super) nat_ip_cfg: Option<IpAddr>,
     pub(super) nat_ip_detected: Arc<RwLock<Option<IpAddr>>>,
     pub(super) nat_probe: bool,
@@ -164,14 +342,15 @@ pub struct MePool {
     pub(super) nat_probe_attempts: std::sync::atomic::AtomicU8,
     pub(super) nat_probe_disabled: std::sync::atomic::AtomicBool,
     pub(super) stun_backoff_until: Arc<RwLock<Option<Instant>>>,
+    pub(super) nat_reflection_cache: Arc<Mutex<NatReflectionCache>>,
+    pub(super) nat_reflection_singleflight_v4: Arc<Mutex<()>>,
+    pub(super) nat_reflection_singleflight_v6: Arc<Mutex<()>>,
+}
+
+pub(super) struct ReconnectRuntimeCore {
+    #[allow(dead_code)]
     pub(super) me_one_retry: u8,
     pub(super) me_one_timeout: Duration,
-    pub(super) me_keepalive_enabled: bool,
-    pub(super) me_keepalive_interval: Duration,
-    pub(super) me_keepalive_jitter: Duration,
-    pub(super) me_keepalive_payload_random: bool,
-    pub(super) rpc_proxy_req_every_secs: AtomicU64,
-    pub(super) writer_cmd_channel_capacity: usize,
     pub(super) me_warmup_stagger_enabled: bool,
     pub(super) me_warmup_step_delay: Duration,
     pub(super) me_warmup_step_jitter: Duration,
@@ -179,12 +358,9 @@ pub struct MePool {
     pub(super) me_reconnect_backoff_base: Duration,
     pub(super) me_reconnect_backoff_cap: Duration,
     pub(super) me_reconnect_fast_retry_count: u32,
-    pub(super) me_single_endpoint_shadow_writers: AtomicU8,
-    pub(super) me_single_endpoint_outage_mode_enabled: AtomicBool,
-    pub(super) me_single_endpoint_outage_disable_quarantine: AtomicBool,
-    pub(super) me_single_endpoint_outage_backoff_min_ms: AtomicU64,
-    pub(super) me_single_endpoint_outage_backoff_max_ms: AtomicU64,
-    pub(super) me_single_endpoint_shadow_rotate_every_secs: AtomicU64,
+}
+
+pub(super) struct FloorRuntimeCore {
     pub(super) me_floor_mode: AtomicU8,
     pub(super) me_adaptive_floor_idle_secs: AtomicU64,
     pub(super) me_adaptive_floor_min_writers_single_endpoint: AtomicU8,
@@ -209,78 +385,63 @@ pub struct MePool {
     pub(super) me_adaptive_floor_warm_cap_effective: AtomicU64,
     pub(super) me_adaptive_floor_active_writers_current: AtomicU64,
     pub(super) me_adaptive_floor_warm_writers_current: AtomicU64,
+}
+
+pub(super) struct WriterSelectionPolicyCore {
+    pub(super) secret_atomic_snapshot: AtomicBool,
+    pub(super) me_deterministic_writer_sort: AtomicBool,
+    pub(super) me_writer_pick_mode: AtomicU8,
+    pub(super) me_writer_pick_sample_size: AtomicU8,
+}
+
+pub(super) struct TransportPolicyCore {
+    pub(super) me_socks_kdf_policy: AtomicU8,
+    pub(super) me_reader_route_data_wait_ms: Arc<AtomicU64>,
+}
+
+#[allow(dead_code)]
+pub struct MePool {
+    pub(super) routing: Arc<RoutingCore>,
+    pub(super) reinit: Arc<ReinitCore>,
+    pub(super) writer_lifecycle: Arc<WriterLifecycleCore>,
+    pub(super) route_runtime: Arc<RouteRuntimeCore>,
+    pub(super) health_runtime: Arc<HealthRuntimeCore>,
+    pub(super) drain_runtime: Arc<DrainRuntimeCore>,
+    pub(super) single_endpoint_runtime: Arc<SingleEndpointRuntimeCore>,
+    pub(super) binding_policy: Arc<BindingPolicyCore>,
+    pub(super) nat_runtime: Arc<NatRuntimeCore>,
+    pub(super) reconnect_runtime: Arc<ReconnectRuntimeCore>,
+    pub(super) floor_runtime: Arc<FloorRuntimeCore>,
+    pub(super) writer_selection_policy: Arc<WriterSelectionPolicyCore>,
+    pub(super) transport_policy: Arc<TransportPolicyCore>,
+    pub(super) decision: NetworkDecision,
+    pub(super) upstream: Option<Arc<UpstreamManager>>,
+    pub(super) rng: Arc<SecureRandom>,
+    pub(super) proxy_tag: Option<Vec<u8>>,
+    pub(super) proxy_secret: Arc<RwLock<SecretSnapshot>>,
     pub(super) proxy_map_v4: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
     pub(super) proxy_map_v6: Arc<RwLock<HashMap<i32, Vec<(IpAddr, u16)>>>>,
     pub(super) endpoint_dc_map: Arc<RwLock<HashMap<SocketAddr, Option<i32>>>>,
     pub(super) default_dc: AtomicI32,
     pub(super) next_writer_id: AtomicU64,
-    pub(super) ping_tracker: Arc<Mutex<HashMap<i64, (std::time::Instant, u64)>>>,
-    pub(super) ping_tracker_last_cleanup_epoch_ms: AtomicU64,
     pub(super) rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
-    pub(super) nat_reflection_cache: Arc<Mutex<NatReflectionCache>>,
-    pub(super) nat_reflection_singleflight_v4: Arc<Mutex<()>>,
-    pub(super) nat_reflection_singleflight_v6: Arc<Mutex<()>>,
-    pub(super) writer_available: Arc<Notify>,
     pub(super) refill_inflight: Arc<Mutex<HashSet<RefillEndpointKey>>>,
     pub(super) refill_inflight_dc: Arc<Mutex<HashSet<RefillDcKey>>>,
     pub(super) conn_count: AtomicUsize,
     pub(super) draining_active_runtime: AtomicU64,
     pub(super) stats: Arc<crate::stats::Stats>,
-    pub(super) generation: AtomicU64,
-    pub(super) active_generation: AtomicU64,
-    pub(super) warm_generation: AtomicU64,
-    pub(super) pending_hardswap_generation: AtomicU64,
-    pub(super) pending_hardswap_started_at_epoch_secs: AtomicU64,
-    pub(super) pending_hardswap_map_hash: AtomicU64,
-    pub(super) hardswap: AtomicBool,
     pub(super) endpoint_quarantine: Arc<Mutex<HashMap<SocketAddr, Instant>>>,
     pub(super) kdf_material_fingerprint: Arc<RwLock<HashMap<SocketAddr, (u64, u16)>>>,
-    pub(super) me_pool_drain_ttl_secs: AtomicU64,
-    pub(super) me_instadrain: AtomicBool,
-    pub(super) me_pool_drain_threshold: AtomicU64,
-    pub(super) me_pool_drain_soft_evict_enabled: AtomicBool,
-    pub(super) me_pool_drain_soft_evict_grace_secs: AtomicU64,
-    pub(super) me_pool_drain_soft_evict_per_writer: AtomicU8,
-    pub(super) me_pool_drain_soft_evict_budget_per_core: AtomicU32,
-    pub(super) me_pool_drain_soft_evict_cooldown_ms: AtomicU64,
-    pub(super) me_pool_force_close_secs: AtomicU64,
-    pub(super) me_pool_min_fresh_ratio_permille: AtomicU32,
-    pub(super) me_hardswap_warmup_delay_min_ms: AtomicU64,
-    pub(super) me_hardswap_warmup_delay_max_ms: AtomicU64,
-    pub(super) me_hardswap_warmup_extra_passes: AtomicU32,
-    pub(super) me_hardswap_warmup_pass_backoff_base_ms: AtomicU64,
-    pub(super) me_bind_stale_mode: AtomicU8,
-    pub(super) me_bind_stale_ttl_secs: AtomicU64,
-    pub(super) secret_atomic_snapshot: AtomicBool,
-    pub(super) me_deterministic_writer_sort: AtomicBool,
-    pub(super) me_writer_pick_mode: AtomicU8,
-    pub(super) me_writer_pick_sample_size: AtomicU8,
-    pub(super) me_socks_kdf_policy: AtomicU8,
-    pub(super) me_reader_route_data_wait_ms: Arc<AtomicU64>,
-    pub(super) me_route_no_writer_mode: AtomicU8,
-    pub(super) me_route_no_writer_wait: Duration,
-    pub(super) me_route_inline_recovery_attempts: u32,
-    pub(super) me_route_inline_recovery_wait: Duration,
-    pub(super) me_health_interval_ms_unhealthy: AtomicU64,
-    pub(super) me_health_interval_ms_healthy: AtomicU64,
-    pub(super) me_warn_rate_limit_ms: AtomicU64,
-    pub(super) me_family_v4_runtime_state: AtomicU8,
-    pub(super) me_family_v6_runtime_state: AtomicU8,
-    pub(super) me_family_v4_state_since_epoch_secs: AtomicU64,
-    pub(super) me_family_v6_state_since_epoch_secs: AtomicU64,
-    pub(super) me_family_v4_suppressed_until_epoch_secs: AtomicU64,
-    pub(super) me_family_v6_suppressed_until_epoch_secs: AtomicU64,
-    pub(super) me_family_v4_fail_streak: AtomicU32,
-    pub(super) me_family_v6_fail_streak: AtomicU32,
-    pub(super) me_family_v4_recover_success_streak: AtomicU32,
-    pub(super) me_family_v6_recover_success_streak: AtomicU32,
-    pub(super) me_last_drain_gate_route_quorum_ok: AtomicBool,
-    pub(super) me_last_drain_gate_redundancy_ok: AtomicBool,
-    pub(super) me_last_drain_gate_block_reason: AtomicU8,
-    pub(super) me_last_drain_gate_updated_at_epoch_secs: AtomicU64,
     pub(super) runtime_ready: AtomicBool,
     pool_size: usize,
-    pub(super) preferred_endpoints_by_dc: Arc<RwLock<HashMap<i32, Vec<SocketAddr>>>>,
+}
+
+impl Deref for MePool {
+    type Target = RoutingCore;
+
+    fn deref(&self) -> &Self::Target {
+        self.routing.as_ref()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -396,6 +557,8 @@ impl MePool {
         me_warn_rate_limit_ms: u64,
         me_route_no_writer_mode: MeRouteNoWriterMode,
         me_route_no_writer_wait_ms: u64,
+        me_route_hybrid_max_wait_ms: u64,
+        me_route_blocking_send_timeout_ms: u64,
         me_route_inline_recovery_attempts: u32,
         me_route_inline_recovery_wait_ms: u64,
     ) -> Arc<Self> {
@@ -410,10 +573,220 @@ impl MePool {
             me_route_backpressure_high_timeout_ms,
             me_route_backpressure_high_watermark_pct,
         );
+        let (writer_epoch, _) = watch::channel(0u64);
+        let now_epoch_secs = Self::now_epoch_secs();
         Arc::new(Self {
-            registry,
-            writers: Arc::new(RwLock::new(Vec::new())),
-            rr: AtomicU64::new(0),
+            routing: Arc::new(RoutingCore {
+                registry,
+                writers: Arc::new(WritersState::new()),
+                rr: AtomicU64::new(0),
+                writer_epoch,
+                preferred_endpoints_by_dc: ArcSwap::from_pointee(preferred_endpoints_by_dc),
+            }),
+            reinit: Arc::new(ReinitCore {
+                generation: AtomicU64::new(1),
+                active_generation: AtomicU64::new(1),
+                warm_generation: AtomicU64::new(0),
+                pending_hardswap_generation: AtomicU64::new(0),
+                pending_hardswap_started_at_epoch_secs: AtomicU64::new(0),
+                pending_hardswap_map_hash: AtomicU64::new(0),
+                hardswap: AtomicBool::new(hardswap),
+                me_hardswap_warmup_delay_min_ms: AtomicU64::new(me_hardswap_warmup_delay_min_ms),
+                me_hardswap_warmup_delay_max_ms: AtomicU64::new(me_hardswap_warmup_delay_max_ms),
+                me_hardswap_warmup_extra_passes: AtomicU32::new(
+                    me_hardswap_warmup_extra_passes as u32,
+                ),
+                me_hardswap_warmup_pass_backoff_base_ms: AtomicU64::new(
+                    me_hardswap_warmup_pass_backoff_base_ms,
+                ),
+            }),
+            writer_lifecycle: Arc::new(WriterLifecycleCore {
+                me_keepalive_enabled,
+                me_keepalive_interval: Duration::from_secs(me_keepalive_interval_secs),
+                me_keepalive_jitter: Duration::from_secs(me_keepalive_jitter_secs),
+                me_keepalive_payload_random,
+                rpc_proxy_req_every_secs: AtomicU64::new(rpc_proxy_req_every_secs),
+                writer_cmd_channel_capacity: me_writer_cmd_channel_capacity.max(1),
+            }),
+            route_runtime: Arc::new(RouteRuntimeCore {
+                me_route_no_writer_mode: AtomicU8::new(me_route_no_writer_mode.as_u8()),
+                me_route_no_writer_wait: Duration::from_millis(me_route_no_writer_wait_ms),
+                me_route_hybrid_max_wait: Duration::from_millis(
+                    me_route_hybrid_max_wait_ms.max(50),
+                ),
+                me_route_blocking_send_timeout: if me_route_blocking_send_timeout_ms == 0 {
+                    None
+                } else {
+                    Some(Duration::from_millis(
+                        me_route_blocking_send_timeout_ms.min(5_000),
+                    ))
+                },
+                me_route_last_success_epoch_ms: AtomicU64::new(0),
+                me_route_hybrid_timeout_warn_epoch_ms: AtomicU64::new(0),
+                me_async_recovery_last_trigger_epoch_ms: AtomicU64::new(0),
+                me_route_inline_recovery_attempts,
+                me_route_inline_recovery_wait: Duration::from_millis(
+                    me_route_inline_recovery_wait_ms,
+                ),
+            }),
+            health_runtime: Arc::new(HealthRuntimeCore {
+                me_health_interval_ms_unhealthy: AtomicU64::new(
+                    me_health_interval_ms_unhealthy.max(1),
+                ),
+                me_health_interval_ms_healthy: AtomicU64::new(me_health_interval_ms_healthy.max(1)),
+                me_warn_rate_limit_ms: AtomicU64::new(me_warn_rate_limit_ms.max(1)),
+                family_health_v4: ArcSwap::from_pointee(FamilyHealthSnapshot::new(
+                    MeFamilyRuntimeState::Healthy,
+                    now_epoch_secs,
+                    0,
+                    0,
+                    0,
+                )),
+                family_health_v6: ArcSwap::from_pointee(FamilyHealthSnapshot::new(
+                    MeFamilyRuntimeState::Healthy,
+                    now_epoch_secs,
+                    0,
+                    0,
+                    0,
+                )),
+            }),
+            drain_runtime: Arc::new(DrainRuntimeCore {
+                me_pool_drain_ttl_secs: AtomicU64::new(me_pool_drain_ttl_secs),
+                me_instadrain: AtomicBool::new(me_instadrain),
+                me_pool_drain_threshold: AtomicU64::new(me_pool_drain_threshold),
+                me_pool_drain_soft_evict_enabled: AtomicBool::new(me_pool_drain_soft_evict_enabled),
+                me_pool_drain_soft_evict_grace_secs: AtomicU64::new(
+                    me_pool_drain_soft_evict_grace_secs,
+                ),
+                me_pool_drain_soft_evict_per_writer: AtomicU8::new(
+                    me_pool_drain_soft_evict_per_writer.max(1),
+                ),
+                me_pool_drain_soft_evict_budget_per_core: AtomicU32::new(
+                    me_pool_drain_soft_evict_budget_per_core.max(1) as u32,
+                ),
+                me_pool_drain_soft_evict_cooldown_ms: AtomicU64::new(
+                    me_pool_drain_soft_evict_cooldown_ms.max(1),
+                ),
+                me_pool_force_close_secs: AtomicU64::new(Self::normalize_force_close_secs(
+                    me_pool_force_close_secs,
+                )),
+                me_pool_min_fresh_ratio_permille: AtomicU32::new(Self::ratio_to_permille(
+                    me_pool_min_fresh_ratio,
+                )),
+                me_last_drain_gate_route_quorum_ok: AtomicBool::new(false),
+                me_last_drain_gate_redundancy_ok: AtomicBool::new(false),
+                me_last_drain_gate_block_reason: AtomicU8::new(MeDrainGateReason::Open as u8),
+                me_last_drain_gate_updated_at_epoch_secs: AtomicU64::new(now_epoch_secs),
+            }),
+            single_endpoint_runtime: Arc::new(SingleEndpointRuntimeCore {
+                me_single_endpoint_shadow_writers: AtomicU8::new(me_single_endpoint_shadow_writers),
+                me_single_endpoint_outage_mode_enabled: AtomicBool::new(
+                    me_single_endpoint_outage_mode_enabled,
+                ),
+                me_single_endpoint_outage_disable_quarantine: AtomicBool::new(
+                    me_single_endpoint_outage_disable_quarantine,
+                ),
+                me_single_endpoint_outage_backoff_min_ms: AtomicU64::new(
+                    me_single_endpoint_outage_backoff_min_ms,
+                ),
+                me_single_endpoint_outage_backoff_max_ms: AtomicU64::new(
+                    me_single_endpoint_outage_backoff_max_ms,
+                ),
+                me_single_endpoint_shadow_rotate_every_secs: AtomicU64::new(
+                    me_single_endpoint_shadow_rotate_every_secs,
+                ),
+            }),
+            binding_policy: Arc::new(BindingPolicyCore {
+                me_bind_stale_mode: AtomicU8::new(me_bind_stale_mode.as_u8()),
+                me_bind_stale_ttl_secs: AtomicU64::new(me_bind_stale_ttl_secs),
+            }),
+            nat_runtime: Arc::new(NatRuntimeCore {
+                nat_ip_cfg: nat_ip,
+                nat_ip_detected: Arc::new(RwLock::new(None)),
+                nat_probe,
+                nat_stun,
+                nat_stun_servers,
+                nat_stun_live_servers: Arc::new(RwLock::new(Vec::new())),
+                nat_probe_concurrency: nat_probe_concurrency.max(1),
+                detected_ipv6,
+                nat_probe_attempts: std::sync::atomic::AtomicU8::new(0),
+                nat_probe_disabled: std::sync::atomic::AtomicBool::new(false),
+                stun_backoff_until: Arc::new(RwLock::new(None)),
+                nat_reflection_cache: Arc::new(Mutex::new(NatReflectionCache::default())),
+                nat_reflection_singleflight_v4: Arc::new(Mutex::new(())),
+                nat_reflection_singleflight_v6: Arc::new(Mutex::new(())),
+            }),
+            reconnect_runtime: Arc::new(ReconnectRuntimeCore {
+                me_one_retry,
+                me_one_timeout: Duration::from_millis(me_one_timeout_ms),
+                me_warmup_stagger_enabled,
+                me_warmup_step_delay: Duration::from_millis(me_warmup_step_delay_ms),
+                me_warmup_step_jitter: Duration::from_millis(me_warmup_step_jitter_ms),
+                me_reconnect_max_concurrent_per_dc,
+                me_reconnect_backoff_base: Duration::from_millis(me_reconnect_backoff_base_ms),
+                me_reconnect_backoff_cap: Duration::from_millis(me_reconnect_backoff_cap_ms),
+                me_reconnect_fast_retry_count,
+            }),
+            floor_runtime: Arc::new(FloorRuntimeCore {
+                me_floor_mode: AtomicU8::new(me_floor_mode.as_u8()),
+                me_adaptive_floor_idle_secs: AtomicU64::new(me_adaptive_floor_idle_secs),
+                me_adaptive_floor_min_writers_single_endpoint: AtomicU8::new(
+                    me_adaptive_floor_min_writers_single_endpoint,
+                ),
+                me_adaptive_floor_min_writers_multi_endpoint: AtomicU8::new(
+                    me_adaptive_floor_min_writers_multi_endpoint,
+                ),
+                me_adaptive_floor_recover_grace_secs: AtomicU64::new(
+                    me_adaptive_floor_recover_grace_secs,
+                ),
+                me_adaptive_floor_writers_per_core_total: AtomicU32::new(
+                    me_adaptive_floor_writers_per_core_total as u32,
+                ),
+                me_adaptive_floor_cpu_cores_override: AtomicU32::new(
+                    me_adaptive_floor_cpu_cores_override as u32,
+                ),
+                me_adaptive_floor_max_extra_writers_single_per_core: AtomicU32::new(
+                    me_adaptive_floor_max_extra_writers_single_per_core as u32,
+                ),
+                me_adaptive_floor_max_extra_writers_multi_per_core: AtomicU32::new(
+                    me_adaptive_floor_max_extra_writers_multi_per_core as u32,
+                ),
+                me_adaptive_floor_max_active_writers_per_core: AtomicU32::new(
+                    me_adaptive_floor_max_active_writers_per_core as u32,
+                ),
+                me_adaptive_floor_max_warm_writers_per_core: AtomicU32::new(
+                    me_adaptive_floor_max_warm_writers_per_core as u32,
+                ),
+                me_adaptive_floor_max_active_writers_global: AtomicU32::new(
+                    me_adaptive_floor_max_active_writers_global,
+                ),
+                me_adaptive_floor_max_warm_writers_global: AtomicU32::new(
+                    me_adaptive_floor_max_warm_writers_global,
+                ),
+                me_adaptive_floor_cpu_cores_detected: AtomicU32::new(1),
+                me_adaptive_floor_cpu_cores_effective: AtomicU32::new(1),
+                me_adaptive_floor_global_cap_raw: AtomicU64::new(0),
+                me_adaptive_floor_global_cap_effective: AtomicU64::new(0),
+                me_adaptive_floor_target_writers_total: AtomicU64::new(0),
+                me_adaptive_floor_active_cap_configured: AtomicU64::new(0),
+                me_adaptive_floor_active_cap_effective: AtomicU64::new(0),
+                me_adaptive_floor_warm_cap_configured: AtomicU64::new(0),
+                me_adaptive_floor_warm_cap_effective: AtomicU64::new(0),
+                me_adaptive_floor_active_writers_current: AtomicU64::new(0),
+                me_adaptive_floor_warm_writers_current: AtomicU64::new(0),
+            }),
+            writer_selection_policy: Arc::new(WriterSelectionPolicyCore {
+                secret_atomic_snapshot: AtomicBool::new(me_secret_atomic_snapshot),
+                me_deterministic_writer_sort: AtomicBool::new(me_deterministic_writer_sort),
+                me_writer_pick_mode: AtomicU8::new(me_writer_pick_mode.as_u8()),
+                me_writer_pick_sample_size: AtomicU8::new(me_writer_pick_sample_size.clamp(2, 4)),
+            }),
+            transport_policy: Arc::new(TransportPolicyCore {
+                me_socks_kdf_policy: AtomicU8::new(me_socks_kdf_policy.as_u8()),
+                me_reader_route_data_wait_ms: Arc::new(AtomicU64::new(
+                    me_reader_route_data_wait_ms,
+                )),
+            }),
             decision,
             upstream,
             rng,
@@ -432,185 +805,26 @@ impl MePool {
                 },
                 secret: proxy_secret,
             })),
-            nat_ip_cfg: nat_ip,
-            nat_ip_detected: Arc::new(RwLock::new(None)),
-            nat_probe,
-            nat_stun,
-            nat_stun_servers,
-            nat_stun_live_servers: Arc::new(RwLock::new(Vec::new())),
-            nat_probe_concurrency: nat_probe_concurrency.max(1),
-            detected_ipv6,
-            nat_probe_attempts: std::sync::atomic::AtomicU8::new(0),
-            nat_probe_disabled: std::sync::atomic::AtomicBool::new(false),
-            stun_backoff_until: Arc::new(RwLock::new(None)),
-            me_one_retry,
-            me_one_timeout: Duration::from_millis(me_one_timeout_ms),
             stats,
-            me_keepalive_enabled,
-            me_keepalive_interval: Duration::from_secs(me_keepalive_interval_secs),
-            me_keepalive_jitter: Duration::from_secs(me_keepalive_jitter_secs),
-            me_keepalive_payload_random,
-            rpc_proxy_req_every_secs: AtomicU64::new(rpc_proxy_req_every_secs),
-            writer_cmd_channel_capacity: me_writer_cmd_channel_capacity.max(1),
-            me_warmup_stagger_enabled,
-            me_warmup_step_delay: Duration::from_millis(me_warmup_step_delay_ms),
-            me_warmup_step_jitter: Duration::from_millis(me_warmup_step_jitter_ms),
-            me_reconnect_max_concurrent_per_dc,
-            me_reconnect_backoff_base: Duration::from_millis(me_reconnect_backoff_base_ms),
-            me_reconnect_backoff_cap: Duration::from_millis(me_reconnect_backoff_cap_ms),
-            me_reconnect_fast_retry_count,
-            me_single_endpoint_shadow_writers: AtomicU8::new(me_single_endpoint_shadow_writers),
-            me_single_endpoint_outage_mode_enabled: AtomicBool::new(
-                me_single_endpoint_outage_mode_enabled,
-            ),
-            me_single_endpoint_outage_disable_quarantine: AtomicBool::new(
-                me_single_endpoint_outage_disable_quarantine,
-            ),
-            me_single_endpoint_outage_backoff_min_ms: AtomicU64::new(
-                me_single_endpoint_outage_backoff_min_ms,
-            ),
-            me_single_endpoint_outage_backoff_max_ms: AtomicU64::new(
-                me_single_endpoint_outage_backoff_max_ms,
-            ),
-            me_single_endpoint_shadow_rotate_every_secs: AtomicU64::new(
-                me_single_endpoint_shadow_rotate_every_secs,
-            ),
-            me_floor_mode: AtomicU8::new(me_floor_mode.as_u8()),
-            me_adaptive_floor_idle_secs: AtomicU64::new(me_adaptive_floor_idle_secs),
-            me_adaptive_floor_min_writers_single_endpoint: AtomicU8::new(
-                me_adaptive_floor_min_writers_single_endpoint,
-            ),
-            me_adaptive_floor_min_writers_multi_endpoint: AtomicU8::new(
-                me_adaptive_floor_min_writers_multi_endpoint,
-            ),
-            me_adaptive_floor_recover_grace_secs: AtomicU64::new(
-                me_adaptive_floor_recover_grace_secs,
-            ),
-            me_adaptive_floor_writers_per_core_total: AtomicU32::new(
-                me_adaptive_floor_writers_per_core_total as u32,
-            ),
-            me_adaptive_floor_cpu_cores_override: AtomicU32::new(
-                me_adaptive_floor_cpu_cores_override as u32,
-            ),
-            me_adaptive_floor_max_extra_writers_single_per_core: AtomicU32::new(
-                me_adaptive_floor_max_extra_writers_single_per_core as u32,
-            ),
-            me_adaptive_floor_max_extra_writers_multi_per_core: AtomicU32::new(
-                me_adaptive_floor_max_extra_writers_multi_per_core as u32,
-            ),
-            me_adaptive_floor_max_active_writers_per_core: AtomicU32::new(
-                me_adaptive_floor_max_active_writers_per_core as u32,
-            ),
-            me_adaptive_floor_max_warm_writers_per_core: AtomicU32::new(
-                me_adaptive_floor_max_warm_writers_per_core as u32,
-            ),
-            me_adaptive_floor_max_active_writers_global: AtomicU32::new(
-                me_adaptive_floor_max_active_writers_global,
-            ),
-            me_adaptive_floor_max_warm_writers_global: AtomicU32::new(
-                me_adaptive_floor_max_warm_writers_global,
-            ),
-            me_adaptive_floor_cpu_cores_detected: AtomicU32::new(1),
-            me_adaptive_floor_cpu_cores_effective: AtomicU32::new(1),
-            me_adaptive_floor_global_cap_raw: AtomicU64::new(0),
-            me_adaptive_floor_global_cap_effective: AtomicU64::new(0),
-            me_adaptive_floor_target_writers_total: AtomicU64::new(0),
-            me_adaptive_floor_active_cap_configured: AtomicU64::new(0),
-            me_adaptive_floor_active_cap_effective: AtomicU64::new(0),
-            me_adaptive_floor_warm_cap_configured: AtomicU64::new(0),
-            me_adaptive_floor_warm_cap_effective: AtomicU64::new(0),
-            me_adaptive_floor_active_writers_current: AtomicU64::new(0),
-            me_adaptive_floor_warm_writers_current: AtomicU64::new(0),
             pool_size: 2,
             proxy_map_v4: Arc::new(RwLock::new(proxy_map_v4)),
             proxy_map_v6: Arc::new(RwLock::new(proxy_map_v6)),
             endpoint_dc_map: Arc::new(RwLock::new(endpoint_dc_map)),
             default_dc: AtomicI32::new(default_dc.unwrap_or(2)),
             next_writer_id: AtomicU64::new(1),
-            ping_tracker: Arc::new(Mutex::new(HashMap::new())),
-            ping_tracker_last_cleanup_epoch_ms: AtomicU64::new(0),
             rtt_stats: Arc::new(Mutex::new(HashMap::new())),
-            nat_reflection_cache: Arc::new(Mutex::new(NatReflectionCache::default())),
-            nat_reflection_singleflight_v4: Arc::new(Mutex::new(())),
-            nat_reflection_singleflight_v6: Arc::new(Mutex::new(())),
-            writer_available: Arc::new(Notify::new()),
             refill_inflight: Arc::new(Mutex::new(HashSet::new())),
             refill_inflight_dc: Arc::new(Mutex::new(HashSet::new())),
             conn_count: AtomicUsize::new(0),
             draining_active_runtime: AtomicU64::new(0),
-            generation: AtomicU64::new(1),
-            active_generation: AtomicU64::new(1),
-            warm_generation: AtomicU64::new(0),
-            pending_hardswap_generation: AtomicU64::new(0),
-            pending_hardswap_started_at_epoch_secs: AtomicU64::new(0),
-            pending_hardswap_map_hash: AtomicU64::new(0),
-            hardswap: AtomicBool::new(hardswap),
             endpoint_quarantine: Arc::new(Mutex::new(HashMap::new())),
             kdf_material_fingerprint: Arc::new(RwLock::new(HashMap::new())),
-            me_pool_drain_ttl_secs: AtomicU64::new(me_pool_drain_ttl_secs),
-            me_instadrain: AtomicBool::new(me_instadrain),
-            me_pool_drain_threshold: AtomicU64::new(me_pool_drain_threshold),
-            me_pool_drain_soft_evict_enabled: AtomicBool::new(me_pool_drain_soft_evict_enabled),
-            me_pool_drain_soft_evict_grace_secs: AtomicU64::new(
-                me_pool_drain_soft_evict_grace_secs,
-            ),
-            me_pool_drain_soft_evict_per_writer: AtomicU8::new(
-                me_pool_drain_soft_evict_per_writer.max(1),
-            ),
-            me_pool_drain_soft_evict_budget_per_core: AtomicU32::new(
-                me_pool_drain_soft_evict_budget_per_core.max(1) as u32,
-            ),
-            me_pool_drain_soft_evict_cooldown_ms: AtomicU64::new(
-                me_pool_drain_soft_evict_cooldown_ms.max(1),
-            ),
-            me_pool_force_close_secs: AtomicU64::new(Self::normalize_force_close_secs(
-                me_pool_force_close_secs,
-            )),
-            me_pool_min_fresh_ratio_permille: AtomicU32::new(Self::ratio_to_permille(
-                me_pool_min_fresh_ratio,
-            )),
-            me_hardswap_warmup_delay_min_ms: AtomicU64::new(me_hardswap_warmup_delay_min_ms),
-            me_hardswap_warmup_delay_max_ms: AtomicU64::new(me_hardswap_warmup_delay_max_ms),
-            me_hardswap_warmup_extra_passes: AtomicU32::new(me_hardswap_warmup_extra_passes as u32),
-            me_hardswap_warmup_pass_backoff_base_ms: AtomicU64::new(
-                me_hardswap_warmup_pass_backoff_base_ms,
-            ),
-            me_bind_stale_mode: AtomicU8::new(me_bind_stale_mode.as_u8()),
-            me_bind_stale_ttl_secs: AtomicU64::new(me_bind_stale_ttl_secs),
-            secret_atomic_snapshot: AtomicBool::new(me_secret_atomic_snapshot),
-            me_deterministic_writer_sort: AtomicBool::new(me_deterministic_writer_sort),
-            me_writer_pick_mode: AtomicU8::new(me_writer_pick_mode.as_u8()),
-            me_writer_pick_sample_size: AtomicU8::new(me_writer_pick_sample_size.clamp(2, 4)),
-            me_socks_kdf_policy: AtomicU8::new(me_socks_kdf_policy.as_u8()),
-            me_reader_route_data_wait_ms: Arc::new(AtomicU64::new(me_reader_route_data_wait_ms)),
-            me_route_no_writer_mode: AtomicU8::new(me_route_no_writer_mode.as_u8()),
-            me_route_no_writer_wait: Duration::from_millis(me_route_no_writer_wait_ms),
-            me_route_inline_recovery_attempts,
-            me_route_inline_recovery_wait: Duration::from_millis(me_route_inline_recovery_wait_ms),
-            me_health_interval_ms_unhealthy: AtomicU64::new(me_health_interval_ms_unhealthy.max(1)),
-            me_health_interval_ms_healthy: AtomicU64::new(me_health_interval_ms_healthy.max(1)),
-            me_warn_rate_limit_ms: AtomicU64::new(me_warn_rate_limit_ms.max(1)),
-            me_family_v4_runtime_state: AtomicU8::new(MeFamilyRuntimeState::Healthy as u8),
-            me_family_v6_runtime_state: AtomicU8::new(MeFamilyRuntimeState::Healthy as u8),
-            me_family_v4_state_since_epoch_secs: AtomicU64::new(Self::now_epoch_secs()),
-            me_family_v6_state_since_epoch_secs: AtomicU64::new(Self::now_epoch_secs()),
-            me_family_v4_suppressed_until_epoch_secs: AtomicU64::new(0),
-            me_family_v6_suppressed_until_epoch_secs: AtomicU64::new(0),
-            me_family_v4_fail_streak: AtomicU32::new(0),
-            me_family_v6_fail_streak: AtomicU32::new(0),
-            me_family_v4_recover_success_streak: AtomicU32::new(0),
-            me_family_v6_recover_success_streak: AtomicU32::new(0),
-            me_last_drain_gate_route_quorum_ok: AtomicBool::new(false),
-            me_last_drain_gate_redundancy_ok: AtomicBool::new(false),
-            me_last_drain_gate_block_reason: AtomicU8::new(MeDrainGateReason::Open as u8),
-            me_last_drain_gate_updated_at_epoch_secs: AtomicU64::new(Self::now_epoch_secs()),
             runtime_ready: AtomicBool::new(false),
-            preferred_endpoints_by_dc: Arc::new(RwLock::new(preferred_endpoints_by_dc)),
         })
     }
 
     pub fn current_generation(&self) -> u64 {
-        self.active_generation.load(Ordering::Relaxed)
+        self.reinit.active_generation.load(Ordering::Relaxed)
     }
 
     pub fn set_runtime_ready(&self, ready: bool) {
@@ -621,7 +835,19 @@ impl MePool {
         self.runtime_ready.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)]
+    pub(super) fn now_epoch_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    pub(super) fn notify_writer_epoch(&self) {
+        self.writer_epoch.send_modify(|epoch| {
+            *epoch = epoch.wrapping_add(1);
+        });
+    }
+
     pub(super) fn set_family_runtime_state(
         &self,
         family: IpFamily,
@@ -631,82 +857,81 @@ impl MePool {
         fail_streak: u32,
         recover_success_streak: u32,
     ) {
+        let snapshot = Arc::new(FamilyHealthSnapshot::new(
+            state,
+            state_since_epoch_secs,
+            suppressed_until_epoch_secs,
+            fail_streak,
+            recover_success_streak,
+        ));
         match family {
-            IpFamily::V4 => {
-                self.me_family_v4_runtime_state
-                    .store(state as u8, Ordering::Relaxed);
-                self.me_family_v4_state_since_epoch_secs
-                    .store(state_since_epoch_secs, Ordering::Relaxed);
-                self.me_family_v4_suppressed_until_epoch_secs
-                    .store(suppressed_until_epoch_secs, Ordering::Relaxed);
-                self.me_family_v4_fail_streak
-                    .store(fail_streak, Ordering::Relaxed);
-                self.me_family_v4_recover_success_streak
-                    .store(recover_success_streak, Ordering::Relaxed);
-            }
-            IpFamily::V6 => {
-                self.me_family_v6_runtime_state
-                    .store(state as u8, Ordering::Relaxed);
-                self.me_family_v6_state_since_epoch_secs
-                    .store(state_since_epoch_secs, Ordering::Relaxed);
-                self.me_family_v6_suppressed_until_epoch_secs
-                    .store(suppressed_until_epoch_secs, Ordering::Relaxed);
-                self.me_family_v6_fail_streak
-                    .store(fail_streak, Ordering::Relaxed);
-                self.me_family_v6_recover_success_streak
-                    .store(recover_success_streak, Ordering::Relaxed);
-            }
+            IpFamily::V4 => self.health_runtime.family_health_v4.store(snapshot),
+            IpFamily::V6 => self.health_runtime.family_health_v6.store(snapshot),
         }
     }
 
     pub(crate) fn family_runtime_state(&self, family: IpFamily) -> MeFamilyRuntimeState {
         match family {
-            IpFamily::V4 => MeFamilyRuntimeState::from_u8(
-                self.me_family_v4_runtime_state.load(Ordering::Relaxed),
-            ),
-            IpFamily::V6 => MeFamilyRuntimeState::from_u8(
-                self.me_family_v6_runtime_state.load(Ordering::Relaxed),
-            ),
+            IpFamily::V4 => self.health_runtime.family_health_v4.load().state,
+            IpFamily::V6 => self.health_runtime.family_health_v6.load().state,
         }
     }
 
     pub(crate) fn family_runtime_state_since_epoch_secs(&self, family: IpFamily) -> u64 {
         match family {
-            IpFamily::V4 => self
-                .me_family_v4_state_since_epoch_secs
-                .load(Ordering::Relaxed),
-            IpFamily::V6 => self
-                .me_family_v6_state_since_epoch_secs
-                .load(Ordering::Relaxed),
+            IpFamily::V4 => {
+                self.health_runtime
+                    .family_health_v4
+                    .load()
+                    .state_since_epoch_secs
+            }
+            IpFamily::V6 => {
+                self.health_runtime
+                    .family_health_v6
+                    .load()
+                    .state_since_epoch_secs
+            }
         }
     }
 
     pub(crate) fn family_suppressed_until_epoch_secs(&self, family: IpFamily) -> u64 {
         match family {
-            IpFamily::V4 => self
-                .me_family_v4_suppressed_until_epoch_secs
-                .load(Ordering::Relaxed),
-            IpFamily::V6 => self
-                .me_family_v6_suppressed_until_epoch_secs
-                .load(Ordering::Relaxed),
+            IpFamily::V4 => {
+                self.health_runtime
+                    .family_health_v4
+                    .load()
+                    .suppressed_until_epoch_secs
+            }
+            IpFamily::V6 => {
+                self.health_runtime
+                    .family_health_v6
+                    .load()
+                    .suppressed_until_epoch_secs
+            }
         }
     }
 
     pub(crate) fn family_fail_streak(&self, family: IpFamily) -> u32 {
         match family {
-            IpFamily::V4 => self.me_family_v4_fail_streak.load(Ordering::Relaxed),
-            IpFamily::V6 => self.me_family_v6_fail_streak.load(Ordering::Relaxed),
+            IpFamily::V4 => self.health_runtime.family_health_v4.load().fail_streak,
+            IpFamily::V6 => self.health_runtime.family_health_v6.load().fail_streak,
         }
     }
 
     pub(crate) fn family_recover_success_streak(&self, family: IpFamily) -> u32 {
         match family {
-            IpFamily::V4 => self
-                .me_family_v4_recover_success_streak
-                .load(Ordering::Relaxed),
-            IpFamily::V6 => self
-                .me_family_v6_recover_success_streak
-                .load(Ordering::Relaxed),
+            IpFamily::V4 => {
+                self.health_runtime
+                    .family_health_v4
+                    .load()
+                    .recover_success_streak
+            }
+            IpFamily::V6 => {
+                self.health_runtime
+                    .family_health_v6
+                    .load()
+                    .recover_success_streak
+            }
         }
     }
 
@@ -737,32 +962,43 @@ impl MePool {
         block_reason: MeDrainGateReason,
         updated_at_epoch_secs: u64,
     ) {
-        self.me_last_drain_gate_route_quorum_ok
+        self.drain_runtime
+            .me_last_drain_gate_route_quorum_ok
             .store(route_quorum_ok, Ordering::Relaxed);
-        self.me_last_drain_gate_redundancy_ok
+        self.drain_runtime
+            .me_last_drain_gate_redundancy_ok
             .store(redundancy_ok, Ordering::Relaxed);
-        self.me_last_drain_gate_block_reason
+        self.drain_runtime
+            .me_last_drain_gate_block_reason
             .store(block_reason as u8, Ordering::Relaxed);
-        self.me_last_drain_gate_updated_at_epoch_secs
+        self.drain_runtime
+            .me_last_drain_gate_updated_at_epoch_secs
             .store(updated_at_epoch_secs, Ordering::Relaxed);
     }
 
     pub(crate) fn last_drain_gate_route_quorum_ok(&self) -> bool {
-        self.me_last_drain_gate_route_quorum_ok
+        self.drain_runtime
+            .me_last_drain_gate_route_quorum_ok
             .load(Ordering::Relaxed)
     }
 
     pub(crate) fn last_drain_gate_redundancy_ok(&self) -> bool {
-        self.me_last_drain_gate_redundancy_ok
+        self.drain_runtime
+            .me_last_drain_gate_redundancy_ok
             .load(Ordering::Relaxed)
     }
 
     pub(crate) fn last_drain_gate_block_reason(&self) -> MeDrainGateReason {
-        MeDrainGateReason::from_u8(self.me_last_drain_gate_block_reason.load(Ordering::Relaxed))
+        MeDrainGateReason::from_u8(
+            self.drain_runtime
+                .me_last_drain_gate_block_reason
+                .load(Ordering::Relaxed),
+        )
     }
 
     pub(crate) fn last_drain_gate_updated_at_epoch_secs(&self) -> u64 {
-        self.me_last_drain_gate_updated_at_epoch_secs
+        self.drain_runtime
+            .me_last_drain_gate_updated_at_epoch_secs
             .load(Ordering::Relaxed)
     }
 
@@ -812,112 +1048,162 @@ impl MePool {
         me_health_interval_ms_healthy: u64,
         me_warn_rate_limit_ms: u64,
     ) {
-        self.hardswap.store(hardswap, Ordering::Relaxed);
-        self.me_pool_drain_ttl_secs
+        self.reinit.hardswap.store(hardswap, Ordering::Relaxed);
+        self.drain_runtime
+            .me_pool_drain_ttl_secs
             .store(drain_ttl_secs, Ordering::Relaxed);
-        self.me_instadrain.store(instadrain, Ordering::Relaxed);
-        self.me_pool_drain_threshold
+        self.drain_runtime
+            .me_instadrain
+            .store(instadrain, Ordering::Relaxed);
+        self.drain_runtime
+            .me_pool_drain_threshold
             .store(pool_drain_threshold, Ordering::Relaxed);
-        self.me_pool_drain_soft_evict_enabled
+        // Runtime soft-evict knobs are updated lock-free to keep control-plane
+        // writes non-blocking; readers observe a short eventual-consistency
+        // window by design.
+        self.drain_runtime
+            .me_pool_drain_soft_evict_enabled
             .store(pool_drain_soft_evict_enabled, Ordering::Relaxed);
-        self.me_pool_drain_soft_evict_grace_secs
+        self.drain_runtime
+            .me_pool_drain_soft_evict_grace_secs
             .store(pool_drain_soft_evict_grace_secs, Ordering::Relaxed);
-        self.me_pool_drain_soft_evict_per_writer
+        self.drain_runtime
+            .me_pool_drain_soft_evict_per_writer
             .store(pool_drain_soft_evict_per_writer.max(1), Ordering::Relaxed);
-        self.me_pool_drain_soft_evict_budget_per_core.store(
-            pool_drain_soft_evict_budget_per_core.max(1) as u32,
-            Ordering::Relaxed,
-        );
-        self.me_pool_drain_soft_evict_cooldown_ms
+        self.drain_runtime
+            .me_pool_drain_soft_evict_budget_per_core
+            .store(
+                pool_drain_soft_evict_budget_per_core.max(1) as u32,
+                Ordering::Relaxed,
+            );
+        self.drain_runtime
+            .me_pool_drain_soft_evict_cooldown_ms
             .store(pool_drain_soft_evict_cooldown_ms.max(1), Ordering::Relaxed);
-        self.me_pool_force_close_secs.store(
+        self.drain_runtime.me_pool_force_close_secs.store(
             Self::normalize_force_close_secs(force_close_secs),
             Ordering::Relaxed,
         );
-        self.me_pool_min_fresh_ratio_permille
+        self.drain_runtime
+            .me_pool_min_fresh_ratio_permille
             .store(Self::ratio_to_permille(min_fresh_ratio), Ordering::Relaxed);
-        self.me_hardswap_warmup_delay_min_ms
+        self.reinit
+            .me_hardswap_warmup_delay_min_ms
             .store(hardswap_warmup_delay_min_ms, Ordering::Relaxed);
-        self.me_hardswap_warmup_delay_max_ms
+        self.reinit
+            .me_hardswap_warmup_delay_max_ms
             .store(hardswap_warmup_delay_max_ms, Ordering::Relaxed);
-        self.me_hardswap_warmup_extra_passes
+        self.reinit
+            .me_hardswap_warmup_extra_passes
             .store(hardswap_warmup_extra_passes as u32, Ordering::Relaxed);
-        self.me_hardswap_warmup_pass_backoff_base_ms
+        self.reinit
+            .me_hardswap_warmup_pass_backoff_base_ms
             .store(hardswap_warmup_pass_backoff_base_ms, Ordering::Relaxed);
-        self.me_bind_stale_mode
+        self.binding_policy
+            .me_bind_stale_mode
             .store(bind_stale_mode.as_u8(), Ordering::Relaxed);
-        self.me_bind_stale_ttl_secs
+        self.binding_policy
+            .me_bind_stale_ttl_secs
             .store(bind_stale_ttl_secs, Ordering::Relaxed);
-        self.secret_atomic_snapshot
+        self.writer_selection_policy
+            .secret_atomic_snapshot
             .store(secret_atomic_snapshot, Ordering::Relaxed);
-        self.me_deterministic_writer_sort
+        self.writer_selection_policy
+            .me_deterministic_writer_sort
             .store(deterministic_writer_sort, Ordering::Relaxed);
         let previous_writer_pick_mode = self.writer_pick_mode();
-        self.me_writer_pick_mode
+        self.writer_selection_policy
+            .me_writer_pick_mode
             .store(writer_pick_mode.as_u8(), Ordering::Relaxed);
-        self.me_writer_pick_sample_size
+        self.writer_selection_policy
+            .me_writer_pick_sample_size
             .store(writer_pick_sample_size.clamp(2, 4), Ordering::Relaxed);
         if previous_writer_pick_mode != writer_pick_mode {
             self.stats.increment_me_writer_pick_mode_switch_total();
         }
-        self.me_single_endpoint_shadow_writers
+        self.single_endpoint_runtime
+            .me_single_endpoint_shadow_writers
             .store(single_endpoint_shadow_writers, Ordering::Relaxed);
-        self.me_single_endpoint_outage_mode_enabled
+        self.single_endpoint_runtime
+            .me_single_endpoint_outage_mode_enabled
             .store(single_endpoint_outage_mode_enabled, Ordering::Relaxed);
-        self.me_single_endpoint_outage_disable_quarantine
+        self.single_endpoint_runtime
+            .me_single_endpoint_outage_disable_quarantine
             .store(single_endpoint_outage_disable_quarantine, Ordering::Relaxed);
-        self.me_single_endpoint_outage_backoff_min_ms
+        self.single_endpoint_runtime
+            .me_single_endpoint_outage_backoff_min_ms
             .store(single_endpoint_outage_backoff_min_ms, Ordering::Relaxed);
-        self.me_single_endpoint_outage_backoff_max_ms
+        self.single_endpoint_runtime
+            .me_single_endpoint_outage_backoff_max_ms
             .store(single_endpoint_outage_backoff_max_ms, Ordering::Relaxed);
-        self.me_single_endpoint_shadow_rotate_every_secs
+        self.single_endpoint_runtime
+            .me_single_endpoint_shadow_rotate_every_secs
             .store(single_endpoint_shadow_rotate_every_secs, Ordering::Relaxed);
         let previous_floor_mode = self.floor_mode();
-        self.me_floor_mode
+        self.floor_runtime
+            .me_floor_mode
             .store(floor_mode.as_u8(), Ordering::Relaxed);
-        self.me_adaptive_floor_idle_secs
+        self.floor_runtime
+            .me_adaptive_floor_idle_secs
             .store(adaptive_floor_idle_secs, Ordering::Relaxed);
-        self.me_adaptive_floor_min_writers_single_endpoint.store(
-            adaptive_floor_min_writers_single_endpoint,
-            Ordering::Relaxed,
-        );
-        self.me_adaptive_floor_min_writers_multi_endpoint
+        self.floor_runtime
+            .me_adaptive_floor_min_writers_single_endpoint
+            .store(
+                adaptive_floor_min_writers_single_endpoint,
+                Ordering::Relaxed,
+            );
+        self.floor_runtime
+            .me_adaptive_floor_min_writers_multi_endpoint
             .store(adaptive_floor_min_writers_multi_endpoint, Ordering::Relaxed);
-        self.me_adaptive_floor_recover_grace_secs
+        self.floor_runtime
+            .me_adaptive_floor_recover_grace_secs
             .store(adaptive_floor_recover_grace_secs, Ordering::Relaxed);
-        self.me_adaptive_floor_writers_per_core_total.store(
-            adaptive_floor_writers_per_core_total as u32,
-            Ordering::Relaxed,
-        );
-        self.me_adaptive_floor_cpu_cores_override
+        self.floor_runtime
+            .me_adaptive_floor_writers_per_core_total
+            .store(
+                adaptive_floor_writers_per_core_total as u32,
+                Ordering::Relaxed,
+            );
+        self.floor_runtime
+            .me_adaptive_floor_cpu_cores_override
             .store(adaptive_floor_cpu_cores_override as u32, Ordering::Relaxed);
-        self.me_adaptive_floor_max_extra_writers_single_per_core
+        self.floor_runtime
+            .me_adaptive_floor_max_extra_writers_single_per_core
             .store(
                 adaptive_floor_max_extra_writers_single_per_core as u32,
                 Ordering::Relaxed,
             );
-        self.me_adaptive_floor_max_extra_writers_multi_per_core
+        self.floor_runtime
+            .me_adaptive_floor_max_extra_writers_multi_per_core
             .store(
                 adaptive_floor_max_extra_writers_multi_per_core as u32,
                 Ordering::Relaxed,
             );
-        self.me_adaptive_floor_max_active_writers_per_core.store(
-            adaptive_floor_max_active_writers_per_core as u32,
-            Ordering::Relaxed,
-        );
-        self.me_adaptive_floor_max_warm_writers_per_core.store(
-            adaptive_floor_max_warm_writers_per_core as u32,
-            Ordering::Relaxed,
-        );
-        self.me_adaptive_floor_max_active_writers_global
+        self.floor_runtime
+            .me_adaptive_floor_max_active_writers_per_core
+            .store(
+                adaptive_floor_max_active_writers_per_core as u32,
+                Ordering::Relaxed,
+            );
+        self.floor_runtime
+            .me_adaptive_floor_max_warm_writers_per_core
+            .store(
+                adaptive_floor_max_warm_writers_per_core as u32,
+                Ordering::Relaxed,
+            );
+        self.floor_runtime
+            .me_adaptive_floor_max_active_writers_global
             .store(adaptive_floor_max_active_writers_global, Ordering::Relaxed);
-        self.me_adaptive_floor_max_warm_writers_global
+        self.floor_runtime
+            .me_adaptive_floor_max_warm_writers_global
             .store(adaptive_floor_max_warm_writers_global, Ordering::Relaxed);
-        self.me_health_interval_ms_unhealthy
+        self.health_runtime
+            .me_health_interval_ms_unhealthy
             .store(me_health_interval_ms_unhealthy.max(1), Ordering::Relaxed);
-        self.me_health_interval_ms_healthy
+        self.health_runtime
+            .me_health_interval_ms_healthy
             .store(me_health_interval_ms_healthy.max(1), Ordering::Relaxed);
-        self.me_warn_rate_limit_ms
+        self.health_runtime
+            .me_warn_rate_limit_ms
             .store(me_warn_rate_limit_ms.max(1), Ordering::Relaxed);
         if previous_floor_mode != floor_mode {
             self.stats.increment_me_floor_mode_switch_total();
@@ -936,9 +1222,13 @@ impl MePool {
     }
 
     pub fn reset_stun_state(&self) {
-        self.nat_probe_attempts.store(0, Ordering::Relaxed);
-        self.nat_probe_disabled.store(false, Ordering::Relaxed);
-        if let Ok(mut live) = self.nat_stun_live_servers.try_write() {
+        self.nat_runtime
+            .nat_probe_attempts
+            .store(0, Ordering::Relaxed);
+        self.nat_runtime
+            .nat_probe_disabled
+            .store(false, Ordering::Relaxed);
+        if let Ok(mut live) = self.nat_runtime.nat_stun_live_servers.try_write() {
             live.clear();
         }
     }
@@ -960,9 +1250,11 @@ impl MePool {
         route_backpressure_high_watermark_pct: u8,
         reader_route_data_wait_ms: u64,
     ) {
-        self.me_socks_kdf_policy
+        self.transport_policy
+            .me_socks_kdf_policy
             .store(socks_kdf_policy.as_u8(), Ordering::Relaxed);
-        self.me_reader_route_data_wait_ms
+        self.transport_policy
+            .me_reader_route_data_wait_ms
             .store(reader_route_data_wait_ms, Ordering::Relaxed);
         self.registry.update_route_backpressure_policy(
             route_backpressure_base_timeout_ms,
@@ -972,41 +1264,52 @@ impl MePool {
     }
 
     pub(super) fn socks_kdf_policy(&self) -> MeSocksKdfPolicy {
-        MeSocksKdfPolicy::from_u8(self.me_socks_kdf_policy.load(Ordering::Relaxed))
+        MeSocksKdfPolicy::from_u8(
+            self.transport_policy
+                .me_socks_kdf_policy
+                .load(Ordering::Relaxed),
+        )
     }
 
-    pub(super) fn writers_arc(&self) -> Arc<RwLock<Vec<MeWriter>>> {
+    pub(super) fn writers_arc(&self) -> Arc<WritersState> {
         self.writers.clone()
     }
 
     pub(super) fn force_close_timeout(&self) -> Option<Duration> {
-        let secs =
-            Self::normalize_force_close_secs(self.me_pool_force_close_secs.load(Ordering::Relaxed));
+        let secs = Self::normalize_force_close_secs(
+            self.drain_runtime
+                .me_pool_force_close_secs
+                .load(Ordering::Relaxed),
+        );
         Some(Duration::from_secs(secs))
     }
 
     #[allow(dead_code)]
     pub(super) fn drain_soft_evict_enabled(&self) -> bool {
-        self.me_pool_drain_soft_evict_enabled
+        self.drain_runtime
+            .me_pool_drain_soft_evict_enabled
             .load(Ordering::Relaxed)
     }
 
     #[allow(dead_code)]
     pub(super) fn drain_soft_evict_grace_secs(&self) -> u64 {
-        self.me_pool_drain_soft_evict_grace_secs
+        self.drain_runtime
+            .me_pool_drain_soft_evict_grace_secs
             .load(Ordering::Relaxed)
     }
 
     #[allow(dead_code)]
     pub(super) fn drain_soft_evict_per_writer(&self) -> usize {
-        self.me_pool_drain_soft_evict_per_writer
+        self.drain_runtime
+            .me_pool_drain_soft_evict_per_writer
             .load(Ordering::Relaxed)
             .max(1) as usize
     }
 
     #[allow(dead_code)]
     pub(super) fn drain_soft_evict_budget_per_core(&self) -> usize {
-        self.me_pool_drain_soft_evict_budget_per_core
+        self.drain_runtime
+            .me_pool_drain_soft_evict_budget_per_core
             .load(Ordering::Relaxed)
             .max(1) as usize
     }
@@ -1014,7 +1317,8 @@ impl MePool {
     #[allow(dead_code)]
     pub(super) fn drain_soft_evict_cooldown(&self) -> Duration {
         Duration::from_millis(
-            self.me_pool_drain_soft_evict_cooldown_ms
+            self.drain_runtime
+                .me_pool_drain_soft_evict_cooldown_ms
                 .load(Ordering::Relaxed)
                 .max(1),
         )
@@ -1078,15 +1382,24 @@ impl MePool {
     }
 
     pub(super) fn bind_stale_mode(&self) -> MeBindStaleMode {
-        MeBindStaleMode::from_u8(self.me_bind_stale_mode.load(Ordering::Relaxed))
+        MeBindStaleMode::from_u8(
+            self.binding_policy
+                .me_bind_stale_mode
+                .load(Ordering::Relaxed),
+        )
     }
 
     pub(super) fn writer_pick_mode(&self) -> MeWriterPickMode {
-        MeWriterPickMode::from_u8(self.me_writer_pick_mode.load(Ordering::Relaxed))
+        MeWriterPickMode::from_u8(
+            self.writer_selection_policy
+                .me_writer_pick_mode
+                .load(Ordering::Relaxed),
+        )
     }
 
     pub(super) fn writer_pick_sample_size(&self) -> usize {
-        self.me_writer_pick_sample_size
+        self.writer_selection_policy
+            .me_writer_pick_sample_size
             .load(Ordering::Relaxed)
             .clamp(2, 4) as usize
     }
@@ -1097,6 +1410,7 @@ impl MePool {
         }
         if endpoint_count == 1 {
             let shadow = self
+                .single_endpoint_runtime
                 .me_single_endpoint_shadow_writers
                 .load(Ordering::Relaxed) as usize;
             return (1 + shadow).max(3);
@@ -1105,39 +1419,48 @@ impl MePool {
     }
 
     pub(super) fn floor_mode(&self) -> MeFloorMode {
-        MeFloorMode::from_u8(self.me_floor_mode.load(Ordering::Relaxed))
+        MeFloorMode::from_u8(self.floor_runtime.me_floor_mode.load(Ordering::Relaxed))
     }
 
     pub(super) fn adaptive_floor_idle_duration(&self) -> Duration {
-        Duration::from_secs(self.me_adaptive_floor_idle_secs.load(Ordering::Relaxed))
+        Duration::from_secs(
+            self.floor_runtime
+                .me_adaptive_floor_idle_secs
+                .load(Ordering::Relaxed),
+        )
     }
 
     pub(super) fn adaptive_floor_recover_grace_duration(&self) -> Duration {
         Duration::from_secs(
-            self.me_adaptive_floor_recover_grace_secs
+            self.floor_runtime
+                .me_adaptive_floor_recover_grace_secs
                 .load(Ordering::Relaxed),
         )
     }
 
     pub(super) fn adaptive_floor_min_writers_multi_endpoint(&self) -> usize {
         (self
+            .floor_runtime
             .me_adaptive_floor_min_writers_multi_endpoint
             .load(Ordering::Relaxed) as usize)
             .max(1)
     }
 
     pub(super) fn adaptive_floor_max_extra_single_per_core(&self) -> usize {
-        self.me_adaptive_floor_max_extra_writers_single_per_core
+        self.floor_runtime
+            .me_adaptive_floor_max_extra_writers_single_per_core
             .load(Ordering::Relaxed) as usize
     }
 
     pub(super) fn adaptive_floor_max_extra_multi_per_core(&self) -> usize {
-        self.me_adaptive_floor_max_extra_writers_multi_per_core
+        self.floor_runtime
+            .me_adaptive_floor_max_extra_writers_multi_per_core
             .load(Ordering::Relaxed) as usize
     }
 
     pub(super) fn adaptive_floor_max_active_writers_per_core(&self) -> usize {
         (self
+            .floor_runtime
             .me_adaptive_floor_max_active_writers_per_core
             .load(Ordering::Relaxed) as usize)
             .max(1)
@@ -1145,6 +1468,7 @@ impl MePool {
 
     pub(super) fn adaptive_floor_max_warm_writers_per_core(&self) -> usize {
         (self
+            .floor_runtime
             .me_adaptive_floor_max_warm_writers_per_core
             .load(Ordering::Relaxed) as usize)
             .max(1)
@@ -1152,6 +1476,7 @@ impl MePool {
 
     pub(super) fn adaptive_floor_max_active_writers_global(&self) -> usize {
         (self
+            .floor_runtime
             .me_adaptive_floor_max_active_writers_global
             .load(Ordering::Relaxed) as usize)
             .max(1)
@@ -1159,6 +1484,7 @@ impl MePool {
 
     pub(super) fn adaptive_floor_max_warm_writers_global(&self) -> usize {
         (self
+            .floor_runtime
             .me_adaptive_floor_max_warm_writers_global
             .load(Ordering::Relaxed) as usize)
             .max(1)
@@ -1174,6 +1500,7 @@ impl MePool {
     pub(super) fn adaptive_floor_effective_cpu_cores(&self) -> usize {
         let detected = self.adaptive_floor_detected_cpu_cores();
         let override_cores = self
+            .floor_runtime
             .me_adaptive_floor_cpu_cores_override
             .load(Ordering::Relaxed) as usize;
         let effective = if override_cores == 0 {
@@ -1181,9 +1508,11 @@ impl MePool {
         } else {
             override_cores.max(1)
         };
-        self.me_adaptive_floor_cpu_cores_detected
+        self.floor_runtime
+            .me_adaptive_floor_cpu_cores_detected
             .store(detected as u32, Ordering::Relaxed);
-        self.me_adaptive_floor_cpu_cores_effective
+        self.floor_runtime
+            .me_adaptive_floor_cpu_cores_effective
             .store(effective as u32, Ordering::Relaxed);
         self.stats
             .set_me_floor_cpu_cores_detected_gauge(detected as u64);
@@ -1215,7 +1544,8 @@ impl MePool {
             .min(self.adaptive_floor_max_active_writers_global())
             .min(per_contour_budget)
             .max(1);
-        self.me_adaptive_floor_active_cap_configured
+        self.floor_runtime
+            .me_adaptive_floor_active_cap_configured
             .store(configured as u64, Ordering::Relaxed);
         self.stats
             .set_me_floor_active_cap_configured_gauge(configured as u64);
@@ -1230,7 +1560,8 @@ impl MePool {
             .min(self.adaptive_floor_max_warm_writers_global())
             .min(per_contour_budget)
             .max(1);
-        self.me_adaptive_floor_warm_cap_configured
+        self.floor_runtime
+            .me_adaptive_floor_warm_cap_configured
             .store(configured as u64, Ordering::Relaxed);
         self.stats
             .set_me_floor_warm_cap_configured_gauge(configured as u64);
@@ -1247,23 +1578,32 @@ impl MePool {
         active_writers_current: usize,
         warm_writers_current: usize,
     ) {
-        self.me_adaptive_floor_global_cap_raw
+        self.floor_runtime
+            .me_adaptive_floor_global_cap_raw
             .store(active_cap_configured as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_global_cap_effective
+        self.floor_runtime
+            .me_adaptive_floor_global_cap_effective
             .store(active_cap_effective as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_target_writers_total
+        self.floor_runtime
+            .me_adaptive_floor_target_writers_total
             .store(target_writers_total as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_active_cap_configured
+        self.floor_runtime
+            .me_adaptive_floor_active_cap_configured
             .store(active_cap_configured as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_active_cap_effective
+        self.floor_runtime
+            .me_adaptive_floor_active_cap_effective
             .store(active_cap_effective as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_warm_cap_configured
+        self.floor_runtime
+            .me_adaptive_floor_warm_cap_configured
             .store(warm_cap_configured as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_warm_cap_effective
+        self.floor_runtime
+            .me_adaptive_floor_warm_cap_effective
             .store(warm_cap_effective as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_active_writers_current
+        self.floor_runtime
+            .me_adaptive_floor_active_writers_current
             .store(active_writers_current as u64, Ordering::Relaxed);
-        self.me_adaptive_floor_warm_writers_current
+        self.floor_runtime
+            .me_adaptive_floor_warm_writers_current
             .store(warm_writers_current as u64, Ordering::Relaxed);
         self.stats
             .set_me_floor_global_cap_raw_gauge(active_cap_configured as u64);
@@ -1352,11 +1692,13 @@ impl MePool {
         }
         let min_writers = if endpoint_count == 1 {
             (self
+                .floor_runtime
                 .me_adaptive_floor_min_writers_single_endpoint
                 .load(Ordering::Relaxed) as usize)
                 .max(1)
         } else {
             (self
+                .floor_runtime
                 .me_adaptive_floor_min_writers_multi_endpoint
                 .load(Ordering::Relaxed) as usize)
                 .max(1)
@@ -1365,20 +1707,24 @@ impl MePool {
     }
 
     pub(super) fn single_endpoint_outage_mode_enabled(&self) -> bool {
-        self.me_single_endpoint_outage_mode_enabled
+        self.single_endpoint_runtime
+            .me_single_endpoint_outage_mode_enabled
             .load(Ordering::Relaxed)
     }
 
     pub(super) fn single_endpoint_outage_disable_quarantine(&self) -> bool {
-        self.me_single_endpoint_outage_disable_quarantine
+        self.single_endpoint_runtime
+            .me_single_endpoint_outage_disable_quarantine
             .load(Ordering::Relaxed)
     }
 
     pub(super) fn single_endpoint_outage_backoff_bounds_ms(&self) -> (u64, u64) {
         let min_ms = self
+            .single_endpoint_runtime
             .me_single_endpoint_outage_backoff_min_ms
             .load(Ordering::Relaxed);
         let max_ms = self
+            .single_endpoint_runtime
             .me_single_endpoint_outage_backoff_max_ms
             .load(Ordering::Relaxed);
         if min_ms <= max_ms {
@@ -1390,6 +1736,7 @@ impl MePool {
 
     pub(super) fn single_endpoint_shadow_rotate_interval(&self) -> Option<Duration> {
         let secs = self
+            .single_endpoint_runtime
             .me_single_endpoint_shadow_rotate_every_secs
             .load(Ordering::Relaxed);
         if secs == 0 {
@@ -1573,17 +1920,34 @@ impl MePool {
         let rebuilt = Self::build_endpoint_dc_map_from_maps(&map_v4, &map_v6);
         let preferred = Self::build_preferred_endpoints_by_dc(&self.decision, &map_v4, &map_v6);
         *self.endpoint_dc_map.write().await = rebuilt;
-        *self.preferred_endpoints_by_dc.write().await = preferred;
+        self.preferred_endpoints_by_dc.store(Arc::new(preferred));
+        let configured_endpoints = self
+            .endpoint_dc_map
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect::<HashSet<SocketAddr>>();
+        {
+            let mut quarantine = self.endpoint_quarantine.lock().await;
+            let now = Instant::now();
+            quarantine.retain(|addr, expiry| *expiry > now && configured_endpoints.contains(addr));
+        }
+        {
+            let mut kdf_fp = self.kdf_material_fingerprint.write().await;
+            kdf_fp.retain(|addr, _| configured_endpoints.contains(addr));
+        }
     }
 
     pub(super) async fn preferred_endpoints_for_dc(&self, dc: i32) -> Vec<SocketAddr> {
-        let guard = self.preferred_endpoints_by_dc.read().await;
+        let guard = self.preferred_endpoints_by_dc.load();
         guard.get(&dc).cloned().unwrap_or_default()
     }
 
     pub(super) fn health_interval_unhealthy(&self) -> Duration {
         Duration::from_millis(
-            self.me_health_interval_ms_unhealthy
+            self.health_runtime
+                .me_health_interval_ms_unhealthy
                 .load(Ordering::Relaxed)
                 .max(1),
         )
@@ -1591,13 +1955,19 @@ impl MePool {
 
     pub(super) fn health_interval_healthy(&self) -> Duration {
         Duration::from_millis(
-            self.me_health_interval_ms_healthy
+            self.health_runtime
+                .me_health_interval_ms_healthy
                 .load(Ordering::Relaxed)
                 .max(1),
         )
     }
 
     pub(super) fn warn_rate_limit_duration(&self) -> Duration {
-        Duration::from_millis(self.me_warn_rate_limit_ms.load(Ordering::Relaxed).max(1))
+        Duration::from_millis(
+            self.health_runtime
+                .me_warn_rate_limit_ms
+                .load(Ordering::Relaxed)
+                .max(1),
+        )
     }
 }

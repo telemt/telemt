@@ -14,7 +14,10 @@ fn padding_rounding_equivalent_for_extensive_safe_domain() {
         let old = old_padding_round_up_to_4(len).expect("old expression must be safe");
         let new = new_padding_round_up_to_4(len).expect("new expression must be safe");
         assert_eq!(old, new, "mismatch for len={len}");
-        assert!(new >= len, "rounded length must not shrink: len={len}, out={new}");
+        assert!(
+            new >= len,
+            "rounded length must not shrink: len={len}, out={new}"
+        );
         assert_eq!(new % 4, 0, "rounded length must stay 4-byte aligned");
     }
 }

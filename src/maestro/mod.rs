@@ -168,15 +168,13 @@ async fn run_inner(
                 );
                 std::process::exit(1);
             }
-        } else {
-            if let Err(e) = std::fs::create_dir_all(data_path) {
-                eprintln!(
-                    "[telemt] Can't create data_path {}: {}",
-                    data_path.display(),
-                    e
-                );
-                std::process::exit(1);
-            }
+        } else if let Err(e) = std::fs::create_dir_all(data_path) {
+            eprintln!(
+                "[telemt] Can't create data_path {}: {}",
+                data_path.display(),
+                e
+            );
+            std::process::exit(1);
         }
 
         if let Err(e) = std::env::set_current_dir(data_path) {

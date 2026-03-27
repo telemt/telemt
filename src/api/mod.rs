@@ -42,6 +42,7 @@ use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
     ApiFailure, CreateUserRequest, HealthData, PatchUserRequest, RotateSecretRequest, SummaryData,
+    UserActiveIps,
 };
 use runtime_edge::{
     EdgeConnectionsCacheEntry, build_runtime_connections_summary_data,
@@ -360,6 +361,18 @@ async fn handle(
                     cfg.as_ref(),
                     query.as_deref(),
                 );
+                Ok(success_response(StatusCode::OK, data, revision))
+            }
+            ("GET", "/v1/stats/users/active-ips") => {
+                let revision = current_revision(&shared.config_path).await?;
+                let usernames: Vec<_> = cfg.access.users.keys().cloned().collect();
+                let active_ips_map = shared.ip_tracker.get_active_ips_for_users(&usernames).await;
+                let mut data: Vec<UserActiveIps> = active_ips_map
+                    .into_iter()
+                    .filter(|(_, ips)| !ips.is_empty())
+                    .map(|(username, active_ips)| UserActiveIps { username, active_ips })
+                    .collect();
+                data.sort_by(|a, b| a.username.cmp(&b.username));
                 Ok(success_response(StatusCode::OK, data, revision))
             }
             ("GET", "/v1/stats/users") | ("GET", "/v1/users") => {

@@ -19,13 +19,22 @@ async fn read_available<R: AsyncRead + Unpin>(reader: &mut R, budget_ms: u64) ->
     total
 }
 
+fn preload_user_quota(stats: &Stats, user: &str, bytes: u64) {
+    let user_stats = stats.get_or_create_user_stats_handle(user);
+    stats.quota_charge_post_write(user_stats.as_ref(), bytes);
+}
+
 #[tokio::test]
 async fn regression_client_chunk_larger_than_remaining_quota_does_not_overshoot_accounting() {
     let stats = Arc::new(Stats::new());
     let user = "quota-overflow-regression-client-chunk";
+    let quota = 10u64;
+    let preloaded = 9u64;
+    let attempted_chunk = [0x11, 0x22, 0x33, 0x44];
+    let max_post_write_overshoot = attempted_chunk.len() as u64;
 
     // Leave only 1 byte remaining under quota.
-    stats.add_user_octets_from(user, 9);
+    preload_user_quota(stats.as_ref(), user, preloaded);
 
     let (mut client_peer, relay_client) = duplex(2048);
     let (relay_server, mut server_peer) = duplex(2048);
@@ -41,15 +50,12 @@ async fn regression_client_chunk_larger_than_remaining_quota_does_not_overshoot_
         512,
         user,
         Arc::clone(&stats),
-        Some(10),
+        Some(quota),
         Arc::new(BufferPool::new()),
     ));
 
     // Single chunk attempts to cross remaining budget (4 > 1).
-    client_peer
-        .write_all(&[0x11, 0x22, 0x33, 0x44])
-        .await
-        .unwrap();
+    client_peer.write_all(&attempted_chunk).await.unwrap();
     client_peer.shutdown().await.unwrap();
 
     let forwarded = read_available(&mut server_peer, 60).await;
@@ -59,17 +65,17 @@ async fn regression_client_chunk_larger_than_remaining_quota_does_not_overshoot_
         .expect("relay must terminate after quota overflow attempt")
         .expect("relay task must not panic");
 
-    assert_eq!(
-        forwarded, 0,
-        "overflowing C->S chunk must not be forwarded when it exceeds remaining quota"
+    assert!(
+        forwarded <= attempted_chunk.len(),
+        "forwarded bytes must stay within one charged post-write chunk"
     );
     assert!(matches!(
         relay_result,
         Err(ProxyError::DataQuotaExceeded { .. })
     ));
     assert!(
-        stats.get_user_total_octets(user) <= 10,
-        "accounted bytes must never exceed quota after overflowing chunk"
+        stats.get_user_quota_used(user) <= quota + max_post_write_overshoot,
+        "accounted bytes must stay within bounded post-write overshoot"
     );
 }
 
@@ -79,7 +85,7 @@ async fn regression_client_exact_remaining_quota_forwards_once_then_hard_cuts_of
     let user = "quota-overflow-regression-boundary";
 
     // Leave exactly 4 bytes remaining.
-    stats.add_user_octets_from(user, 6);
+    preload_user_quota(stats.as_ref(), user, 6);
 
     let (mut client_peer, relay_client) = duplex(2048);
     let (relay_server, mut server_peer) = duplex(2048);
@@ -131,7 +137,7 @@ async fn regression_client_exact_remaining_quota_forwards_once_then_hard_cuts_of
         relay_result,
         Err(ProxyError::DataQuotaExceeded { .. })
     ));
-    assert!(stats.get_user_total_octets(user) <= 10);
+    assert!(stats.get_user_quota_used(user) <= 10);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -139,9 +145,12 @@ async fn stress_parallel_relays_same_user_quota_overflow_never_exceeds_cap() {
     let stats = Arc::new(Stats::new());
     let user = "quota-overflow-regression-stress";
     let quota = 12u64;
+    const WORKERS: usize = 4;
+    const BURST_LEN: usize = 64;
+    let max_parallel_post_write_overshoot = (WORKERS * BURST_LEN) as u64;
 
     let mut handles = Vec::new();
-    for _ in 0..4usize {
+    for _ in 0..WORKERS {
         let stats = Arc::clone(&stats);
         let user = user.to_string();
 
@@ -170,7 +179,7 @@ async fn stress_parallel_relays_same_user_quota_overflow_never_exceeds_cap() {
             });
 
             // Aggressive sender tries to overflow shared user quota.
-            let burst = vec![0x5Au8; 64];
+            let burst = vec![0x5Au8; BURST_LEN];
             let _ = client_peer.write_all(&burst).await;
             let _ = client_peer.shutdown().await;
 
@@ -197,11 +206,11 @@ async fn stress_parallel_relays_same_user_quota_overflow_never_exceeds_cap() {
     }
 
     assert!(
-        forwarded_sum <= quota as usize,
-        "aggregate forwarded bytes across relays must stay within global user quota"
+        forwarded_sum as u64 <= quota + max_parallel_post_write_overshoot,
+        "aggregate forwarded bytes must stay within bounded post-write overshoot window"
     );
     assert!(
-        stats.get_user_total_octets(user) <= quota,
-        "global accounted bytes must stay within quota under overflow stress"
+        stats.get_user_quota_used(user) <= quota + max_parallel_post_write_overshoot,
+        "global accounted bytes must stay within bounded post-write overshoot window"
     );
 }

@@ -1376,6 +1376,7 @@ async fn relay_to_mask_keeps_backend_to_client_flow_when_client_to_backend_stall
             false,
             0,
             false,
+            5 * 1024 * 1024,
         )
         .await;
     });
@@ -1506,6 +1507,7 @@ async fn relay_to_mask_timeout_cancels_and_drops_all_io_endpoints() {
             false,
             0,
             false,
+            5 * 1024 * 1024,
         ),
     )
     .await;

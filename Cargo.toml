@@ -1,7 +1,10 @@
 [package]
 name = "telemt"
-version = "3.3.29"
+version = "3.3.32"
 edition = "2024"
+
+[features]
+redteam_offline_expected_fail = []
 
 [dependencies]
 # C
@@ -93,4 +96,6 @@ name = "crypto_bench"
 harness = false
 
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+

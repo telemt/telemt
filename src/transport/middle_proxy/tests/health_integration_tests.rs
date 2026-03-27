@@ -111,6 +111,8 @@ async fn make_pool(
         general.me_warn_rate_limit_ms,
         MeRouteNoWriterMode::default(),
         general.me_route_no_writer_wait_ms,
+        general.me_route_hybrid_max_wait_ms,
+        general.me_route_blocking_send_timeout_ms,
         general.me_route_inline_recovery_attempts,
         general.me_route_inline_recovery_wait_ms,
     );

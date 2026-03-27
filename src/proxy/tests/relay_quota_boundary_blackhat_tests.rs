@@ -29,6 +29,11 @@ async fn read_available<R: AsyncRead + Unpin>(reader: &mut R, budget: Duration) 
     total
 }
 
+fn preload_user_quota(stats: &Stats, user: &str, bytes: u64) {
+    let user_stats = stats.get_or_create_user_stats_handle(user);
+    stats.quota_charge_post_write(user_stats.as_ref(), bytes);
+}
+
 #[tokio::test]
 async fn integration_full_duplex_exact_budget_then_hard_cutoff() {
     let stats = Arc::new(Stats::new());
@@ -102,14 +107,14 @@ async fn integration_full_duplex_exact_budget_then_hard_cutoff() {
         relay_result,
         Err(ProxyError::DataQuotaExceeded { ref user }) if user == "quota-full-duplex-boundary-user"
     ));
-    assert!(stats.get_user_total_octets(user) <= 10);
+    assert!(stats.get_user_quota_used(user) <= 10);
 }
 
 #[tokio::test]
 async fn negative_preloaded_quota_blocks_both_directions_immediately() {
     let stats = Arc::new(Stats::new());
     let user = "quota-preloaded-cutoff-user";
-    stats.add_user_octets_from(user, 5);
+    preload_user_quota(stats.as_ref(), user, 5);
 
     let (mut client_peer, relay_client) = duplex(2048);
     let (relay_server, mut server_peer) = duplex(2048);
@@ -154,7 +159,7 @@ async fn negative_preloaded_quota_blocks_both_directions_immediately() {
         relay_result,
         Err(ProxyError::DataQuotaExceeded { .. })
     ));
-    assert!(stats.get_user_total_octets(user) <= 5);
+    assert!(stats.get_user_quota_used(user) <= 5);
 }
 
 #[tokio::test]
@@ -212,7 +217,7 @@ async fn edge_quota_one_bidirectional_race_allows_at_most_one_forwarded_octet() 
         relay_result,
         Err(ProxyError::DataQuotaExceeded { .. })
     ));
-    assert!(stats.get_user_total_octets(user) <= 1);
+    assert!(stats.get_user_quota_used(user) <= 1);
 }
 
 #[tokio::test]
@@ -277,7 +282,7 @@ async fn adversarial_blackhat_alternating_fragmented_jitter_never_overshoots_glo
         delivered_to_server + delivered_to_client <= quota as usize,
         "combined forwarded bytes must never exceed configured quota"
     );
-    assert!(stats.get_user_total_octets(user) <= quota);
+    assert!(stats.get_user_quota_used(user) <= quota);
 }
 
 #[tokio::test]
@@ -356,7 +361,7 @@ async fn light_fuzz_randomized_schedule_preserves_quota_and_forwarded_byte_invar
             "fuzz case {case}: forwarded bytes must not exceed quota"
         );
         assert!(
-            stats.get_user_total_octets(&user) <= quota,
+            stats.get_user_quota_used(&user) <= quota,
             "fuzz case {case}: accounted bytes must not exceed quota"
         );
     }
@@ -451,7 +456,7 @@ async fn stress_multi_relay_same_user_mixed_direction_jitter_respects_global_quo
     }
 
     assert!(
-        stats.get_user_total_octets(user) <= quota,
+        stats.get_user_quota_used(user) <= quota,
         "global per-user quota must hold under concurrent mixed-direction relay stress"
     );
     assert!(

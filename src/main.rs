@@ -11,11 +11,11 @@ mod ip_tracker;
 mod logging;
 mod service;
 #[cfg(test)]
-#[path = "tests/ip_tracker_hotpath_adversarial_tests.rs"]
-mod ip_tracker_hotpath_adversarial_tests;
-#[cfg(test)]
 #[path = "tests/ip_tracker_encapsulation_adversarial_tests.rs"]
 mod ip_tracker_encapsulation_adversarial_tests;
+#[cfg(test)]
+#[path = "tests/ip_tracker_hotpath_adversarial_tests.rs"]
+mod ip_tracker_hotpath_adversarial_tests;
 #[cfg(test)]
 #[path = "tests/ip_tracker_regression_tests.rs"]
 mod ip_tracker_regression_tests;
@@ -32,6 +32,9 @@ mod transport;
 mod util;
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Install rustls crypto provider early
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = cli::parse_command(&args);
 
@@ -40,20 +43,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         std::process::exit(exit_code);
     }
 
-    // On Unix, handle daemonization before starting tokio runtime
     #[cfg(unix)]
     {
         let daemon_opts = cmd.daemon_opts;
 
-        // Daemonize if requested (must happen before tokio runtime starts)
+        // Daemonize BEFORE runtime
         if daemon_opts.should_daemonize() {
             match daemon::daemonize(daemon_opts.working_dir.as_deref()) {
                 Ok(daemon::DaemonizeResult::Parent) => {
-                    // Parent process exits successfully
                     std::process::exit(0);
                 }
                 Ok(daemon::DaemonizeResult::Child) => {
-                    // Continue as daemon child
+                    // continue
                 }
                 Err(e) => {
                     eprintln!("[telemt] Daemonization failed: {}", e);
@@ -62,7 +63,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Now start tokio runtime and run the server
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?

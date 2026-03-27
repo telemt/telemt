@@ -106,6 +106,8 @@ async fn make_pool() -> (Arc<MePool>, Arc<SecureRandom>) {
         general.me_warn_rate_limit_ms,
         general.me_route_no_writer_mode,
         general.me_route_no_writer_wait_ms,
+        general.me_route_hybrid_max_wait_ms,
+        general.me_route_blocking_send_timeout_ms,
         general.me_route_inline_recovery_attempts,
         general.me_route_inline_recovery_wait_ms,
     );

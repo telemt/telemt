@@ -1,14 +1,16 @@
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeSet, HashMap};
+#[cfg(test)]
+use std::future::Future;
 use std::hash::{BuildHasher, Hash};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, trace, warn};
 
@@ -21,7 +23,9 @@ use crate::proxy::route_mode::{
     ROUTE_SWITCH_ERROR_MSG, RelayRouteMode, RouteCutoverState, affected_cutover_state,
     cutover_stagger_delay,
 };
-use crate::stats::Stats;
+use crate::stats::{
+    MeD2cFlushReason, MeD2cQuotaRejectStage, MeD2cWriteMode, QuotaReserveError, Stats, UserStats,
+};
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter, PooledBuffer};
 use crate::transport::middle_proxy::{MePool, MeResponse, proto_flags_for_tag};
 
@@ -32,35 +36,36 @@ enum C2MeCommand {
 
 const DESYNC_DEDUP_WINDOW: Duration = Duration::from_secs(60);
 const DESYNC_DEDUP_MAX_ENTRIES: usize = 65_536;
-const DESYNC_DEDUP_PRUNE_SCAN_LIMIT: usize = 1024;
 const DESYNC_FULL_CACHE_EMIT_MIN_INTERVAL: Duration = Duration::from_millis(1000);
 const DESYNC_ERROR_CLASS: &str = "frame_too_large_crypto_desync";
 const C2ME_CHANNEL_CAPACITY_FALLBACK: usize = 128;
 const C2ME_SOFT_PRESSURE_MIN_FREE_SLOTS: usize = 64;
 const C2ME_SENDER_FAIRNESS_BUDGET: usize = 32;
 const RELAY_IDLE_IO_POLL_MAX: Duration = Duration::from_secs(1);
+const TINY_FRAME_DEBT_PER_TINY: u32 = 8;
+const TINY_FRAME_DEBT_LIMIT: u32 = 512;
 #[cfg(test)]
-const C2ME_SEND_TIMEOUT: Duration = Duration::from_millis(50);
-#[cfg(not(test))]
-const C2ME_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const RELAY_TEST_STEP_TIMEOUT: Duration = Duration::from_secs(1);
 const ME_D2C_FLUSH_BATCH_MAX_FRAMES_MIN: usize = 1;
 const ME_D2C_FLUSH_BATCH_MAX_BYTES_MIN: usize = 4096;
-#[cfg(test)]
-const QUOTA_USER_LOCKS_MAX: usize = 64;
-#[cfg(not(test))]
-const QUOTA_USER_LOCKS_MAX: usize = 4_096;
-#[cfg(test)]
-const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 16;
-#[cfg(not(test))]
-const QUOTA_OVERFLOW_LOCK_STRIPES: usize = 256;
+const ME_D2C_FRAME_BUF_SHRINK_HYSTERESIS_FACTOR: usize = 2;
+const ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES: usize = 128 * 1024;
+const QUOTA_RESERVE_SPIN_RETRIES: usize = 32;
 static DESYNC_DEDUP: OnceLock<DashMap<u64, Instant>> = OnceLock::new();
+static DESYNC_DEDUP_PREVIOUS: OnceLock<DashMap<u64, Instant>> = OnceLock::new();
 static DESYNC_HASHER: OnceLock<RandomState> = OnceLock::new();
 static DESYNC_FULL_CACHE_LAST_EMIT_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-static DESYNC_DEDUP_EVER_SATURATED: OnceLock<AtomicBool> = OnceLock::new();
-static QUOTA_USER_LOCKS: OnceLock<DashMap<String, Arc<AsyncMutex<()>>>> = OnceLock::new();
-static QUOTA_USER_OVERFLOW_LOCKS: OnceLock<Vec<Arc<AsyncMutex<()>>>> = OnceLock::new();
+static DESYNC_DEDUP_ROTATION_STATE: OnceLock<Mutex<DesyncDedupRotationState>> = OnceLock::new();
+// Invariant for async callers:
+// this std::sync::Mutex is allowed only because critical sections are short,
+// synchronous, and MUST never cross an `.await`.
 static RELAY_IDLE_CANDIDATE_REGISTRY: OnceLock<Mutex<RelayIdleCandidateRegistry>> = OnceLock::new();
 static RELAY_IDLE_MARK_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct DesyncDedupRotationState {
+    current_started_at: Option<Instant>,
+}
 
 struct RelayForensicsState {
     trace_id: u64,
@@ -92,10 +97,25 @@ fn relay_idle_candidate_registry() -> &'static Mutex<RelayIdleCandidateRegistry>
     RELAY_IDLE_CANDIDATE_REGISTRY.get_or_init(|| Mutex::new(RelayIdleCandidateRegistry::default()))
 }
 
+fn relay_idle_candidate_registry_lock() -> std::sync::MutexGuard<'static, RelayIdleCandidateRegistry>
+{
+    // Keep lock scope narrow and synchronous: callers must drop guard before any `.await`.
+    let registry = relay_idle_candidate_registry();
+    match registry.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            // Fail closed after panic while holding registry lock: drop all
+            // candidates and pressure cursors to avoid stale cross-session state.
+            *guard = RelayIdleCandidateRegistry::default();
+            registry.clear_poison();
+            guard
+        }
+    }
+}
+
 fn mark_relay_idle_candidate(conn_id: u64) -> bool {
-    let Ok(mut guard) = relay_idle_candidate_registry().lock() else {
-        return false;
-    };
+    let mut guard = relay_idle_candidate_registry_lock();
 
     if guard.by_conn_id.contains_key(&conn_id) {
         return false;
@@ -114,9 +134,7 @@ fn mark_relay_idle_candidate(conn_id: u64) -> bool {
 }
 
 fn clear_relay_idle_candidate(conn_id: u64) {
-    let Ok(mut guard) = relay_idle_candidate_registry().lock() else {
-        return;
-    };
+    let mut guard = relay_idle_candidate_registry_lock();
 
     if let Some(meta) = guard.by_conn_id.remove(&conn_id) {
         guard.ordered.remove(&(meta.mark_order_seq, conn_id));
@@ -125,23 +143,17 @@ fn clear_relay_idle_candidate(conn_id: u64) {
 
 #[cfg(test)]
 fn oldest_relay_idle_candidate() -> Option<u64> {
-    let Ok(guard) = relay_idle_candidate_registry().lock() else {
-        return None;
-    };
+    let guard = relay_idle_candidate_registry_lock();
     guard.ordered.iter().next().map(|(_, conn_id)| *conn_id)
 }
 
 fn note_relay_pressure_event() {
-    let Ok(mut guard) = relay_idle_candidate_registry().lock() else {
-        return;
-    };
+    let mut guard = relay_idle_candidate_registry_lock();
     guard.pressure_event_seq = guard.pressure_event_seq.wrapping_add(1);
 }
 
 fn relay_pressure_event_seq() -> u64 {
-    let Ok(guard) = relay_idle_candidate_registry().lock() else {
-        return 0;
-    };
+    let guard = relay_idle_candidate_registry_lock();
     guard.pressure_event_seq
 }
 
@@ -150,9 +162,7 @@ fn maybe_evict_idle_candidate_on_pressure(
     seen_pressure_seq: &mut u64,
     stats: &Stats,
 ) -> bool {
-    let Ok(mut guard) = relay_idle_candidate_registry().lock() else {
-        return false;
-    };
+    let mut guard = relay_idle_candidate_registry_lock();
 
     let latest_pressure_seq = guard.pressure_event_seq;
     if latest_pressure_seq == *seen_pressure_seq {
@@ -197,13 +207,9 @@ fn maybe_evict_idle_candidate_on_pressure(
 
 #[cfg(test)]
 fn clear_relay_idle_pressure_state_for_testing() {
-    if let Some(registry) = RELAY_IDLE_CANDIDATE_REGISTRY.get()
-        && let Ok(mut guard) = registry.lock()
-    {
-        guard.by_conn_id.clear();
-        guard.ordered.clear();
-        guard.pressure_event_seq = 0;
-        guard.pressure_consumed_seq = 0;
+    if RELAY_IDLE_CANDIDATE_REGISTRY.get().is_some() {
+        let mut guard = relay_idle_candidate_registry_lock();
+        *guard = RelayIdleCandidateRegistry::default();
     }
     RELAY_IDLE_MARK_SEQ.store(0, Ordering::Relaxed);
 }
@@ -214,6 +220,8 @@ struct MeD2cFlushPolicy {
     max_bytes: usize,
     max_delay: Duration,
     ack_flush_immediate: bool,
+    quota_soft_overshoot_bytes: u64,
+    frame_buf_shrink_threshold_bytes: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -255,6 +263,7 @@ impl RelayClientIdlePolicy {
 struct RelayClientIdleState {
     last_client_frame_at: Instant,
     soft_idle_marked: bool,
+    tiny_frame_debt: u32,
 }
 
 impl RelayClientIdleState {
@@ -262,6 +271,7 @@ impl RelayClientIdleState {
         Self {
             last_client_frame_at: now,
             soft_idle_marked: false,
+            tiny_frame_debt: 0,
         }
     }
 
@@ -284,6 +294,11 @@ impl MeD2cFlushPolicy {
                 .max(ME_D2C_FLUSH_BATCH_MAX_BYTES_MIN),
             max_delay: Duration::from_micros(config.general.me_d2c_flush_batch_max_delay_us),
             ack_flush_immediate: config.general.me_d2c_ack_flush_immediate,
+            quota_soft_overshoot_bytes: config.general.me_quota_soft_overshoot_bytes,
+            frame_buf_shrink_threshold_bytes: config
+                .general
+                .me_d2c_frame_buf_shrink_threshold_bytes
+                .max(4096),
         }
     }
 }
@@ -302,64 +317,76 @@ fn should_emit_full_desync(key: u64, all_full: bool, now: Instant) -> bool {
         return true;
     }
 
-    let dedup = DESYNC_DEDUP.get_or_init(DashMap::new);
-    let saturated_before = dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES;
-    let ever_saturated = DESYNC_DEDUP_EVER_SATURATED.get_or_init(|| AtomicBool::new(false));
-    if saturated_before {
-        ever_saturated.store(true, Ordering::Relaxed);
-    }
+    let dedup_current = DESYNC_DEDUP.get_or_init(DashMap::new);
+    let dedup_previous = DESYNC_DEDUP_PREVIOUS.get_or_init(DashMap::new);
+    let rotation_state =
+        DESYNC_DEDUP_ROTATION_STATE.get_or_init(|| Mutex::new(DesyncDedupRotationState::default()));
 
-    if let Some(mut seen_at) = dedup.get_mut(&key) {
-        if now.duration_since(*seen_at) >= DESYNC_DEDUP_WINDOW {
-            *seen_at = now;
-            return true;
+    let mut state = match rotation_state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            *guard = DesyncDedupRotationState::default();
+            rotation_state.clear_poison();
+            guard
         }
-        return false;
-    }
-
-    if dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES {
-        let mut stale_keys = Vec::new();
-        let mut oldest_candidate: Option<(u64, Instant)> = None;
-        for entry in dedup.iter().take(DESYNC_DEDUP_PRUNE_SCAN_LIMIT) {
-            let key = *entry.key();
-            let seen_at = *entry.value();
-
-            match oldest_candidate {
-                Some((_, oldest_seen)) if seen_at >= oldest_seen => {}
-                _ => oldest_candidate = Some((key, seen_at)),
-            }
-
-            if now.duration_since(seen_at) >= DESYNC_DEDUP_WINDOW {
-                stale_keys.push(*entry.key());
-            }
-        }
-        for stale_key in stale_keys {
-            dedup.remove(&stale_key);
-        }
-        if dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES {
-            let Some((evict_key, _)) = oldest_candidate else {
-                return false;
-            };
-            dedup.remove(&evict_key);
-            dedup.insert(key, now);
-            return should_emit_full_desync_full_cache(now);
-        }
-    }
-
-    dedup.insert(key, now);
-    let saturated_after = dedup.len() >= DESYNC_DEDUP_MAX_ENTRIES;
-    // Preserve the first sequential insert that reaches capacity as a normal
-    // emit, while still gating concurrent newcomer churn after the cache has
-    // ever been observed at saturation.
-    let was_ever_saturated = if saturated_after {
-        ever_saturated.swap(true, Ordering::Relaxed)
-    } else {
-        ever_saturated.load(Ordering::Relaxed)
     };
 
-    if saturated_before || (saturated_after && was_ever_saturated) {
+    let rotate_now = match state.current_started_at {
+        Some(current_started_at) => match now.checked_duration_since(current_started_at) {
+            Some(elapsed) => elapsed >= DESYNC_DEDUP_WINDOW,
+            None => true,
+        },
+        None => true,
+    };
+    if rotate_now {
+        dedup_previous.clear();
+        for entry in dedup_current.iter() {
+            dedup_previous.insert(*entry.key(), *entry.value());
+        }
+        dedup_current.clear();
+        state.current_started_at = Some(now);
+    }
+
+    if let Some(seen_at) = dedup_current.get(&key).map(|entry| *entry.value()) {
+        let within_window = match now.checked_duration_since(seen_at) {
+            Some(elapsed) => elapsed < DESYNC_DEDUP_WINDOW,
+            None => true,
+        };
+        if within_window {
+            return false;
+        }
+        dedup_current.insert(key, now);
+        return true;
+    }
+
+    if let Some(seen_at) = dedup_previous.get(&key).map(|entry| *entry.value()) {
+        let within_window = match now.checked_duration_since(seen_at) {
+            Some(elapsed) => elapsed < DESYNC_DEDUP_WINDOW,
+            None => true,
+        };
+        if within_window {
+            // Keep the original timestamp when promoting from previous bucket,
+            // so dedup expiry remains tied to first-seen time.
+            dedup_current.insert(key, seen_at);
+            return false;
+        }
+        dedup_previous.remove(&key);
+    }
+
+    if dedup_current.len() >= DESYNC_DEDUP_MAX_ENTRIES {
+        // Bounded eviction path: rotate buckets instead of scanning/evicting
+        // arbitrary entries from a saturated single map.
+        dedup_previous.clear();
+        for entry in dedup_current.iter() {
+            dedup_previous.insert(*entry.key(), *entry.value());
+        }
+        dedup_current.clear();
+        state.current_started_at = Some(now);
+        dedup_current.insert(key, now);
         should_emit_full_desync_full_cache(now)
     } else {
+        dedup_current.insert(key, now);
         true
     }
 }
@@ -395,8 +422,20 @@ fn clear_desync_dedup_for_testing() {
     if let Some(dedup) = DESYNC_DEDUP.get() {
         dedup.clear();
     }
-    if let Some(ever_saturated) = DESYNC_DEDUP_EVER_SATURATED.get() {
-        ever_saturated.store(false, Ordering::Relaxed);
+    if let Some(dedup_previous) = DESYNC_DEDUP_PREVIOUS.get() {
+        dedup_previous.clear();
+    }
+    if let Some(rotation_state) = DESYNC_DEDUP_ROTATION_STATE.get() {
+        match rotation_state.lock() {
+            Ok(mut guard) => {
+                *guard = DesyncDedupRotationState::default();
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = DesyncDedupRotationState::default();
+                rotation_state.clear_poison();
+            }
+        }
     }
     if let Some(last_emit_at) = DESYNC_FULL_CACHE_LAST_EMIT_AT.get() {
         match last_emit_at.lock() {
@@ -522,73 +561,90 @@ fn should_yield_c2me_sender(sent_since_yield: usize, has_backlog: bool) -> bool 
     has_backlog && sent_since_yield >= C2ME_SENDER_FAIRNESS_BUDGET
 }
 
-fn quota_exceeded_for_user(stats: &Stats, user: &str, quota_limit: Option<u64>) -> bool {
-    quota_limit.is_some_and(|quota| stats.get_user_total_octets(user) >= quota)
+fn quota_soft_cap(limit: u64, overshoot: u64) -> u64 {
+    limit.saturating_add(overshoot)
 }
 
-fn quota_would_be_exceeded_for_user(
-    stats: &Stats,
-    user: &str,
-    quota_limit: Option<u64>,
+async fn reserve_user_quota_with_yield(
+    user_stats: &UserStats,
     bytes: u64,
-) -> bool {
-    quota_limit.is_some_and(|quota| {
-        let used = stats.get_user_total_octets(user);
-        used >= quota || bytes > quota.saturating_sub(used)
-    })
+    limit: u64,
+) -> std::result::Result<u64, QuotaReserveError> {
+    loop {
+        for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
+            match user_stats.quota_try_reserve(bytes, limit) {
+                Ok(total) => return Ok(total),
+                Err(QuotaReserveError::LimitExceeded) => {
+                    return Err(QuotaReserveError::LimitExceeded);
+                }
+                Err(QuotaReserveError::Contended) => std::hint::spin_loop(),
+            }
+        }
+
+        tokio::task::yield_now().await;
+    }
+}
+
+fn classify_me_d2c_flush_reason(
+    flush_immediately: bool,
+    batch_frames: usize,
+    max_frames: usize,
+    batch_bytes: usize,
+    max_bytes: usize,
+    max_delay_fired: bool,
+) -> MeD2cFlushReason {
+    if flush_immediately {
+        return MeD2cFlushReason::AckImmediate;
+    }
+    if batch_frames >= max_frames {
+        return MeD2cFlushReason::BatchFrames;
+    }
+    if batch_bytes >= max_bytes {
+        return MeD2cFlushReason::BatchBytes;
+    }
+    if max_delay_fired {
+        return MeD2cFlushReason::MaxDelay;
+    }
+    MeD2cFlushReason::QueueDrain
+}
+
+fn observe_me_d2c_flush_event(
+    stats: &Stats,
+    reason: MeD2cFlushReason,
+    batch_frames: usize,
+    batch_bytes: usize,
+    flush_duration_us: Option<u64>,
+) {
+    stats.increment_me_d2c_flush_reason(reason);
+    if batch_frames > 0 || batch_bytes > 0 {
+        stats.increment_me_d2c_batches_total();
+        stats.add_me_d2c_batch_frames_total(batch_frames as u64);
+        stats.add_me_d2c_batch_bytes_total(batch_bytes as u64);
+        stats.observe_me_d2c_batch_frames(batch_frames as u64);
+        stats.observe_me_d2c_batch_bytes(batch_bytes as u64);
+    }
+    if let Some(duration_us) = flush_duration_us {
+        stats.observe_me_d2c_flush_duration_us(duration_us);
+    }
 }
 
 #[cfg(test)]
-fn quota_user_lock_test_guard() -> &'static Mutex<()> {
+fn relay_idle_pressure_test_guard() -> &'static Mutex<()> {
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]
-fn quota_user_lock_test_scope() -> std::sync::MutexGuard<'static, ()> {
-    quota_user_lock_test_guard()
+pub(crate) fn relay_idle_pressure_test_scope() -> std::sync::MutexGuard<'static, ()> {
+    relay_idle_pressure_test_guard()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn quota_overflow_user_lock(user: &str) -> Arc<AsyncMutex<()>> {
-    let stripes = QUOTA_USER_OVERFLOW_LOCKS.get_or_init(|| {
-        (0..QUOTA_OVERFLOW_LOCK_STRIPES)
-            .map(|_| Arc::new(AsyncMutex::new(())))
-            .collect()
-    });
-
-    let hash = crc32fast::hash(user.as_bytes()) as usize;
-    Arc::clone(&stripes[hash % stripes.len()])
-}
-
-fn quota_user_lock(user: &str) -> Arc<AsyncMutex<()>> {
-    let locks = QUOTA_USER_LOCKS.get_or_init(DashMap::new);
-    if let Some(existing) = locks.get(user) {
-        return Arc::clone(existing.value());
-    }
-
-    if locks.len() >= QUOTA_USER_LOCKS_MAX {
-        locks.retain(|_, value| Arc::strong_count(value) > 1);
-    }
-
-    if locks.len() >= QUOTA_USER_LOCKS_MAX {
-        return quota_overflow_user_lock(user);
-    }
-
-    let created = Arc::new(AsyncMutex::new(()));
-    match locks.entry(user.to_string()) {
-        dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
-        dashmap::mapref::entry::Entry::Vacant(entry) => {
-            entry.insert(Arc::clone(&created));
-            created
-        }
-    }
 }
 
 async fn enqueue_c2me_command(
     tx: &mpsc::Sender<C2MeCommand>,
     cmd: C2MeCommand,
+    send_timeout: Option<Duration>,
 ) -> std::result::Result<(), mpsc::error::SendError<C2MeCommand>> {
     match tx.try_send(cmd) {
         Ok(()) => Ok(()),
@@ -599,16 +655,32 @@ async fn enqueue_c2me_command(
             if tx.capacity() <= C2ME_SOFT_PRESSURE_MIN_FREE_SLOTS {
                 tokio::task::yield_now().await;
             }
-            match timeout(C2ME_SEND_TIMEOUT, tx.reserve()).await {
-                Ok(Ok(permit)) => {
+            let reserve_result = match send_timeout {
+                Some(send_timeout) => match timeout(send_timeout, tx.reserve()).await {
+                    Ok(result) => result,
+                    Err(_) => return Err(mpsc::error::SendError(cmd)),
+                },
+                None => tx.reserve().await,
+            };
+            match reserve_result {
+                Ok(permit) => {
                     permit.send(cmd);
                     Ok(())
                 }
-                Ok(Err(_)) => Err(mpsc::error::SendError(cmd)),
                 Err(_) => Err(mpsc::error::SendError(cmd)),
             }
         }
     }
+}
+
+#[cfg(test)]
+async fn run_relay_test_step_timeout<F, T>(context: &'static str, fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    timeout(RELAY_TEST_STEP_TIMEOUT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("{context} exceeded {}s", RELAY_TEST_STEP_TIMEOUT.as_secs()))
 }
 
 pub(crate) async fn handle_via_middle_proxy<R, W>(
@@ -631,6 +703,7 @@ where
 {
     let user = success.user.clone();
     let quota_limit = config.access.user_data_quota.get(&user).copied();
+    let quota_user_stats = quota_limit.map(|_| stats.get_or_create_user_stats_handle(&user));
     let peer = success.peer;
     let proto_tag = success.proto_tag;
     let pool_generation = me_pool.current_generation();
@@ -719,6 +792,10 @@ where
         .general
         .me_c2me_channel_capacity
         .max(C2ME_CHANNEL_CAPACITY_FALLBACK);
+    let c2me_send_timeout = match config.general.me_c2me_send_timeout_ms {
+        0 => None,
+        timeout_ms => Some(Duration::from_millis(timeout_ms)),
+    };
     let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(c2me_channel_capacity);
     let me_pool_c2me = me_pool.clone();
     let c2me_sender = tokio::spawn(async move {
@@ -757,6 +834,7 @@ where
     let stats_clone = stats.clone();
     let rng_clone = rng.clone();
     let user_clone = user.clone();
+    let quota_user_stats_me_writer = quota_user_stats.clone();
     let last_downstream_activity_ms_clone = last_downstream_activity_ms.clone();
     let bytes_me2c_clone = bytes_me2c.clone();
     let d2c_flush_policy = MeD2cFlushPolicy::from_config(&config);
@@ -774,6 +852,7 @@ where
                     let mut batch_frames = 0usize;
                     let mut batch_bytes = 0usize;
                     let mut flush_immediately;
+                    let mut max_delay_fired = false;
 
                     let first_is_downstream_activity =
                         matches!(&first, MeResponse::Data { .. } | MeResponse::Ack(_));
@@ -785,7 +864,9 @@ where
                         &mut frame_buf,
                         stats_clone.as_ref(),
                         &user_clone,
+                        quota_user_stats_me_writer.as_deref(),
                         quota_limit,
+                        d2c_flush_policy.quota_soft_overshoot_bytes,
                         bytes_me2c_clone.as_ref(),
                         conn_id,
                         d2c_flush_policy.ack_flush_immediate,
@@ -801,7 +882,25 @@ where
                             flush_immediately = immediate;
                         }
                         MeWriterResponseOutcome::Close => {
+                            let flush_started_at = if stats_clone.telemetry_policy().me_level.allows_debug() {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
                             let _ = writer.flush().await;
+                            let flush_duration_us = flush_started_at.map(|started| {
+                                started
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX)) as u64
+                            });
+                            observe_me_d2c_flush_event(
+                                stats_clone.as_ref(),
+                                MeD2cFlushReason::Close,
+                                batch_frames,
+                                batch_bytes,
+                                flush_duration_us,
+                            );
                             return Ok(());
                         }
                     }
@@ -824,7 +923,9 @@ where
                             &mut frame_buf,
                             stats_clone.as_ref(),
                             &user_clone,
+                            quota_user_stats_me_writer.as_deref(),
                             quota_limit,
+                            d2c_flush_policy.quota_soft_overshoot_bytes,
                             bytes_me2c_clone.as_ref(),
                             conn_id,
                             d2c_flush_policy.ack_flush_immediate,
@@ -840,7 +941,27 @@ where
                                 flush_immediately |= immediate;
                             }
                             MeWriterResponseOutcome::Close => {
+                                let flush_started_at =
+                                    if stats_clone.telemetry_policy().me_level.allows_debug() {
+                                        Some(Instant::now())
+                                    } else {
+                                        None
+                                    };
                                 let _ = writer.flush().await;
+                                let flush_duration_us = flush_started_at.map(|started| {
+                                    started
+                                        .elapsed()
+                                        .as_micros()
+                                        .min(u128::from(u64::MAX))
+                                        as u64
+                                });
+                                observe_me_d2c_flush_event(
+                                    stats_clone.as_ref(),
+                                    MeD2cFlushReason::Close,
+                                    batch_frames,
+                                    batch_bytes,
+                                    flush_duration_us,
+                                );
                                 return Ok(());
                             }
                         }
@@ -851,6 +972,7 @@ where
                         && batch_frames < d2c_flush_policy.max_frames
                         && batch_bytes < d2c_flush_policy.max_bytes
                     {
+                        stats_clone.increment_me_d2c_batch_timeout_armed_total();
                         match tokio::time::timeout(d2c_flush_policy.max_delay, me_rx_task.recv()).await {
                             Ok(Some(next)) => {
                                 let next_is_downstream_activity =
@@ -863,7 +985,9 @@ where
                                     &mut frame_buf,
                                     stats_clone.as_ref(),
                                     &user_clone,
+                                    quota_user_stats_me_writer.as_deref(),
                                     quota_limit,
+                                    d2c_flush_policy.quota_soft_overshoot_bytes,
                                     bytes_me2c_clone.as_ref(),
                                     conn_id,
                                     d2c_flush_policy.ack_flush_immediate,
@@ -879,7 +1003,30 @@ where
                                         flush_immediately |= immediate;
                                     }
                                     MeWriterResponseOutcome::Close => {
+                                        let flush_started_at = if stats_clone
+                                            .telemetry_policy()
+                                            .me_level
+                                            .allows_debug()
+                                        {
+                                            Some(Instant::now())
+                                        } else {
+                                            None
+                                        };
                                         let _ = writer.flush().await;
+                                        let flush_duration_us = flush_started_at.map(|started| {
+                                            started
+                                                .elapsed()
+                                                .as_micros()
+                                                .min(u128::from(u64::MAX))
+                                                as u64
+                                        });
+                                        observe_me_d2c_flush_event(
+                                            stats_clone.as_ref(),
+                                            MeD2cFlushReason::Close,
+                                            batch_frames,
+                                            batch_bytes,
+                                            flush_duration_us,
+                                        );
                                         return Ok(());
                                     }
                                 }
@@ -902,7 +1049,9 @@ where
                                         &mut frame_buf,
                                         stats_clone.as_ref(),
                                         &user_clone,
+                                        quota_user_stats_me_writer.as_deref(),
                                         quota_limit,
+                                        d2c_flush_policy.quota_soft_overshoot_bytes,
                                         bytes_me2c_clone.as_ref(),
                                         conn_id,
                                         d2c_flush_policy.ack_flush_immediate,
@@ -918,7 +1067,30 @@ where
                                             flush_immediately |= immediate;
                                         }
                                         MeWriterResponseOutcome::Close => {
+                                            let flush_started_at = if stats_clone
+                                                .telemetry_policy()
+                                                .me_level
+                                                .allows_debug()
+                                            {
+                                                Some(Instant::now())
+                                            } else {
+                                                None
+                                            };
                                             let _ = writer.flush().await;
+                                            let flush_duration_us = flush_started_at.map(|started| {
+                                                started
+                                                    .elapsed()
+                                                    .as_micros()
+                                                    .min(u128::from(u64::MAX))
+                                                    as u64
+                                            });
+                                            observe_me_d2c_flush_event(
+                                                stats_clone.as_ref(),
+                                                MeD2cFlushReason::Close,
+                                                batch_frames,
+                                                batch_bytes,
+                                                flush_duration_us,
+                                            );
                                             return Ok(());
                                         }
                                     }
@@ -928,11 +1100,50 @@ where
                                 debug!(conn_id, "ME channel closed");
                                 return Err(ProxyError::Proxy("ME connection lost".into()));
                             }
-                            Err(_) => {}
+                            Err(_) => {
+                                max_delay_fired = true;
+                                stats_clone.increment_me_d2c_batch_timeout_fired_total();
+                            }
                         }
                     }
 
+                    let flush_reason = classify_me_d2c_flush_reason(
+                        flush_immediately,
+                        batch_frames,
+                        d2c_flush_policy.max_frames,
+                        batch_bytes,
+                        d2c_flush_policy.max_bytes,
+                        max_delay_fired,
+                    );
+                    let flush_started_at = if stats_clone.telemetry_policy().me_level.allows_debug() {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
                     writer.flush().await.map_err(ProxyError::Io)?;
+                    let flush_duration_us = flush_started_at.map(|started| {
+                        started
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64
+                    });
+                    observe_me_d2c_flush_event(
+                        stats_clone.as_ref(),
+                        flush_reason,
+                        batch_frames,
+                        batch_bytes,
+                        flush_duration_us,
+                    );
+                    let shrink_threshold = d2c_flush_policy.frame_buf_shrink_threshold_bytes;
+                    let shrink_trigger = shrink_threshold
+                        .saturating_mul(ME_D2C_FRAME_BUF_SHRINK_HYSTERESIS_FACTOR);
+                    if frame_buf.capacity() > shrink_trigger {
+                        let cap_before = frame_buf.capacity();
+                        frame_buf.shrink_to(shrink_threshold);
+                        let cap_after = frame_buf.capacity();
+                        let bytes_freed = cap_before.saturating_sub(cap_after) as u64;
+                        stats_clone.observe_me_d2c_frame_buf_shrink(bytes_freed);
+                    }
                 }
                 _ = &mut stop_rx => {
                     debug!(conn_id, "ME writer stop signal");
@@ -961,7 +1172,7 @@ where
                 user = %user,
                 "Middle-relay pressure eviction for idle-candidate session"
             );
-            let _ = enqueue_c2me_command(&c2me_tx, C2MeCommand::Close).await;
+            let _ = enqueue_c2me_command(&c2me_tx, C2MeCommand::Close, c2me_send_timeout).await;
             main_result = Err(ProxyError::Proxy(
                 "middle-relay session evicted under pressure (idle-candidate)".to_string(),
             ));
@@ -980,7 +1191,7 @@ where
                 "Cutover affected middle session, closing client connection"
             );
             tokio::time::sleep(delay).await;
-            let _ = enqueue_c2me_command(&c2me_tx, C2MeCommand::Close).await;
+            let _ = enqueue_c2me_command(&c2me_tx, C2MeCommand::Close, c2me_send_timeout).await;
             main_result = Err(ProxyError::Proxy(ROUTE_SWITCH_ERROR_MSG.to_string()));
             break;
         }
@@ -1010,16 +1221,23 @@ where
                         forensics.bytes_c2me = forensics
                             .bytes_c2me
                             .saturating_add(payload.len() as u64);
-                        if let Some(limit) = quota_limit {
-                            let quota_lock = quota_user_lock(&user);
-                            let _quota_guard = quota_lock.lock().await;
-                            stats.add_user_octets_from(&user, payload.len() as u64);
-                            if quota_exceeded_for_user(stats.as_ref(), &user, Some(limit)) {
+                        if let (Some(limit), Some(user_stats)) =
+                            (quota_limit, quota_user_stats.as_deref())
+                        {
+                            if reserve_user_quota_with_yield(
+                                user_stats,
+                                payload.len() as u64,
+                                limit,
+                            )
+                            .await
+                            .is_err()
+                            {
                                 main_result = Err(ProxyError::DataQuotaExceeded {
                                     user: user.clone(),
                                 });
                                 break;
                             }
+                            stats.add_user_octets_from_handle(user_stats, payload.len() as u64);
                         } else {
                             stats.add_user_octets_from(&user, payload.len() as u64);
                         }
@@ -1031,8 +1249,12 @@ where
                             flags |= RPC_FLAG_NOT_ENCRYPTED;
                         }
                         // Keep client read loop lightweight: route heavy ME send path via a dedicated task.
-                        if enqueue_c2me_command(&c2me_tx, C2MeCommand::Data { payload, flags })
-                            .await
+                        if enqueue_c2me_command(
+                            &c2me_tx,
+                            C2MeCommand::Data { payload, flags },
+                            c2me_send_timeout,
+                        )
+                        .await
                             .is_err()
                         {
                             main_result = Err(ProxyError::Proxy("ME sender channel closed".into()));
@@ -1042,7 +1264,9 @@ where
                     Ok(None) => {
                         debug!(conn_id, "Client EOF");
                         client_closed = true;
-                        let _ = enqueue_c2me_command(&c2me_tx, C2MeCommand::Close).await;
+                        let _ =
+                            enqueue_c2me_command(&c2me_tx, C2MeCommand::Close, c2me_send_timeout)
+                                .await;
                         break;
                     }
                     Err(e) => {
@@ -1112,6 +1336,8 @@ async fn read_client_payload_with_idle_policy<R>(
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
+    const LEGACY_MAX_CONSECUTIVE_ZERO_LEN_FRAMES: u32 = 4;
+
     async fn read_exact_with_policy<R>(
         client_reader: &mut CryptoReader<R>,
         buf: &mut [u8],
@@ -1250,6 +1476,7 @@ where
         Ok(())
     }
 
+    let mut consecutive_zero_len_frames = 0u32;
     loop {
         let (len, quickack, raw_len_bytes) = match proto_tag {
             ProtoTag::Abridged => {
@@ -1330,6 +1557,26 @@ where
         };
 
         if len == 0 {
+            idle_state.tiny_frame_debt = idle_state
+                .tiny_frame_debt
+                .saturating_add(TINY_FRAME_DEBT_PER_TINY);
+            if idle_state.tiny_frame_debt >= TINY_FRAME_DEBT_LIMIT {
+                stats.increment_relay_protocol_desync_close_total();
+                return Err(ProxyError::Proxy(format!(
+                    "Tiny frame overhead limit exceeded: debt={}, conn_id={}",
+                    idle_state.tiny_frame_debt, forensics.conn_id
+                )));
+            }
+
+            if !idle_policy.enabled {
+                consecutive_zero_len_frames = consecutive_zero_len_frames.saturating_add(1);
+                if consecutive_zero_len_frames > LEGACY_MAX_CONSECUTIVE_ZERO_LEN_FRAMES {
+                    stats.increment_relay_protocol_desync_close_total();
+                    return Err(ProxyError::Proxy(
+                        "Excessive zero-length abridged frames".to_string(),
+                    ));
+                }
+            }
             continue;
         }
         if len < 4 && proto_tag != ProtoTag::Abridged {
@@ -1398,6 +1645,7 @@ where
         }
         *frame_counter += 1;
         idle_state.on_client_frame(Instant::now());
+        idle_state.tiny_frame_debt = idle_state.tiny_frame_debt.saturating_sub(1);
         clear_relay_idle_candidate(forensics.conn_id);
         return Ok(Some((payload, quickack)));
     }
@@ -1481,7 +1729,9 @@ async fn process_me_writer_response<W>(
     frame_buf: &mut Vec<u8>,
     stats: &Stats,
     user: &str,
+    quota_user_stats: Option<&UserStats>,
     quota_limit: Option<u64>,
+    quota_soft_overshoot_bytes: u64,
     bytes_me2c: &AtomicU64,
     conn_id: u64,
     ack_flush_immediate: bool,
@@ -1498,32 +1748,42 @@ where
                 trace!(conn_id, bytes = data.len(), flags, "ME->C data");
             }
             let data_len = data.len() as u64;
-            if let Some(limit) = quota_limit {
-                let quota_lock = quota_user_lock(user);
-                let _quota_guard = quota_lock.lock().await;
-                if quota_would_be_exceeded_for_user(stats, user, Some(limit), data_len) {
+            if let (Some(limit), Some(user_stats)) = (quota_limit, quota_user_stats) {
+                let soft_limit = quota_soft_cap(limit, quota_soft_overshoot_bytes);
+                if reserve_user_quota_with_yield(user_stats, data_len, soft_limit)
+                    .await
+                    .is_err()
+                {
+                    stats.increment_me_d2c_quota_reject_total(MeD2cQuotaRejectStage::PreWrite);
                     return Err(ProxyError::DataQuotaExceeded {
                         user: user.to_string(),
                     });
                 }
-                write_client_payload(client_writer, proto_tag, flags, &data, rng, frame_buf)
-                    .await?;
-
-                bytes_me2c.fetch_add(data.len() as u64, Ordering::Relaxed);
-                stats.add_user_octets_to(user, data.len() as u64);
-
-                if quota_exceeded_for_user(stats, user, Some(limit)) {
-                    return Err(ProxyError::DataQuotaExceeded {
-                        user: user.to_string(),
-                    });
-                }
-            } else {
-                write_client_payload(client_writer, proto_tag, flags, &data, rng, frame_buf)
-                    .await?;
-
-                bytes_me2c.fetch_add(data.len() as u64, Ordering::Relaxed);
-                stats.add_user_octets_to(user, data.len() as u64);
             }
+
+            let write_mode =
+                match write_client_payload(client_writer, proto_tag, flags, &data, rng, frame_buf)
+                    .await
+                {
+                    Ok(mode) => mode,
+                    Err(err) => {
+                        if quota_limit.is_some() {
+                            stats.add_quota_write_fail_bytes_total(data_len);
+                            stats.increment_quota_write_fail_events_total();
+                        }
+                        return Err(err);
+                    }
+                };
+
+            bytes_me2c.fetch_add(data_len, Ordering::Relaxed);
+            if let Some(user_stats) = quota_user_stats {
+                stats.add_user_octets_to_handle(user_stats, data_len);
+            } else {
+                stats.add_user_octets_to(user, data_len);
+            }
+            stats.increment_me_d2c_data_frames_total();
+            stats.add_me_d2c_payload_bytes_total(data_len);
+            stats.increment_me_d2c_write_mode(write_mode);
 
             Ok(MeWriterResponseOutcome::Continue {
                 frames: 1,
@@ -1538,6 +1798,7 @@ where
                 trace!(conn_id, confirm, "ME->C quickack");
             }
             write_client_ack(client_writer, proto_tag, confirm).await?;
+            stats.increment_me_d2c_ack_frames_total();
 
             Ok(MeWriterResponseOutcome::Continue {
                 frames: 1,
@@ -1588,13 +1849,13 @@ async fn write_client_payload<W>(
     data: &[u8],
     rng: &SecureRandom,
     frame_buf: &mut Vec<u8>,
-) -> Result<()>
+) -> Result<MeD2cWriteMode>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let quickack = (flags & RPC_FLAG_QUICKACK) != 0;
 
-    match proto_tag {
+    let write_mode = match proto_tag {
         ProtoTag::Abridged => {
             if !data.len().is_multiple_of(4) {
                 return Err(ProxyError::Proxy(format!(
@@ -1609,28 +1870,58 @@ where
                 if quickack {
                     first |= 0x80;
                 }
-                frame_buf.clear();
-                frame_buf.reserve(1 + data.len());
-                frame_buf.push(first);
-                frame_buf.extend_from_slice(data);
-                client_writer
-                    .write_all(frame_buf)
-                    .await
-                    .map_err(ProxyError::Io)?;
+                let wire_len = 1usize.saturating_add(data.len());
+                if wire_len <= ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES {
+                    frame_buf.clear();
+                    frame_buf.reserve(wire_len);
+                    frame_buf.push(first);
+                    frame_buf.extend_from_slice(data);
+                    client_writer
+                        .write_all(frame_buf.as_slice())
+                        .await
+                        .map_err(ProxyError::Io)?;
+                    MeD2cWriteMode::Coalesced
+                } else {
+                    let header = [first];
+                    client_writer
+                        .write_all(&header)
+                        .await
+                        .map_err(ProxyError::Io)?;
+                    client_writer
+                        .write_all(data)
+                        .await
+                        .map_err(ProxyError::Io)?;
+                    MeD2cWriteMode::Split
+                }
             } else if len_words < (1 << 24) {
                 let mut first = 0x7fu8;
                 if quickack {
                     first |= 0x80;
                 }
                 let lw = (len_words as u32).to_le_bytes();
-                frame_buf.clear();
-                frame_buf.reserve(4 + data.len());
-                frame_buf.extend_from_slice(&[first, lw[0], lw[1], lw[2]]);
-                frame_buf.extend_from_slice(data);
-                client_writer
-                    .write_all(frame_buf)
-                    .await
-                    .map_err(ProxyError::Io)?;
+                let wire_len = 4usize.saturating_add(data.len());
+                if wire_len <= ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES {
+                    frame_buf.clear();
+                    frame_buf.reserve(wire_len);
+                    frame_buf.extend_from_slice(&[first, lw[0], lw[1], lw[2]]);
+                    frame_buf.extend_from_slice(data);
+                    client_writer
+                        .write_all(frame_buf.as_slice())
+                        .await
+                        .map_err(ProxyError::Io)?;
+                    MeD2cWriteMode::Coalesced
+                } else {
+                    let header = [first, lw[0], lw[1], lw[2]];
+                    client_writer
+                        .write_all(&header)
+                        .await
+                        .map_err(ProxyError::Io)?;
+                    client_writer
+                        .write_all(data)
+                        .await
+                        .map_err(ProxyError::Io)?;
+                    MeD2cWriteMode::Split
+                }
             } else {
                 return Err(ProxyError::Proxy(format!(
                     "Abridged frame too large: {}",
@@ -1650,25 +1941,52 @@ where
             } else {
                 0
             };
+
             let (len_val, total) =
                 compute_intermediate_secure_wire_len(data.len(), padding_len, quickack)?;
-            frame_buf.clear();
-            frame_buf.reserve(total);
-            frame_buf.extend_from_slice(&len_val.to_le_bytes());
-            frame_buf.extend_from_slice(data);
-            if padding_len > 0 {
-                let start = frame_buf.len();
-                frame_buf.resize(start + padding_len, 0);
-                rng.fill(&mut frame_buf[start..]);
+            if total <= ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES {
+                frame_buf.clear();
+                frame_buf.reserve(total);
+                frame_buf.extend_from_slice(&len_val.to_le_bytes());
+                frame_buf.extend_from_slice(data);
+                if padding_len > 0 {
+                    let start = frame_buf.len();
+                    frame_buf.resize(start + padding_len, 0);
+                    rng.fill(&mut frame_buf[start..]);
+                }
+                client_writer
+                    .write_all(frame_buf.as_slice())
+                    .await
+                    .map_err(ProxyError::Io)?;
+                MeD2cWriteMode::Coalesced
+            } else {
+                let header = len_val.to_le_bytes();
+                client_writer
+                    .write_all(&header)
+                    .await
+                    .map_err(ProxyError::Io)?;
+                client_writer
+                    .write_all(data)
+                    .await
+                    .map_err(ProxyError::Io)?;
+                if padding_len > 0 {
+                    frame_buf.clear();
+                    if frame_buf.capacity() < padding_len {
+                        frame_buf.reserve(padding_len);
+                    }
+                    frame_buf.resize(padding_len, 0);
+                    rng.fill(frame_buf.as_mut_slice());
+                    client_writer
+                        .write_all(frame_buf.as_slice())
+                        .await
+                        .map_err(ProxyError::Io)?;
+                }
+                MeD2cWriteMode::Split
             }
-            client_writer
-                .write_all(frame_buf)
-                .await
-                .map_err(ProxyError::Io)?;
         }
-    }
+    };
 
-    Ok(())
+    Ok(write_mode)
 }
 
 async fn write_client_ack<W>(
@@ -1691,10 +2009,6 @@ where
 }
 
 #[cfg(test)]
-#[path = "tests/middle_relay_security_tests.rs"]
-mod security_tests;
-
-#[cfg(test)]
 #[path = "tests/middle_relay_idle_policy_security_tests.rs"]
 mod idle_policy_security_tests;
 
@@ -1707,17 +2021,29 @@ mod desync_all_full_dedup_security_tests;
 mod stub_completion_security_tests;
 
 #[cfg(test)]
-#[path = "tests/middle_relay_coverage_high_risk_security_tests.rs"]
-mod coverage_high_risk_security_tests;
-
-#[cfg(test)]
-#[path = "tests/middle_relay_quota_overflow_lock_security_tests.rs"]
-mod quota_overflow_lock_security_tests;
-
-#[cfg(test)]
 #[path = "tests/middle_relay_length_cast_hardening_security_tests.rs"]
 mod length_cast_hardening_security_tests;
 
 #[cfg(test)]
-#[path = "tests/middle_relay_blackhat_campaign_integration_tests.rs"]
-mod blackhat_campaign_integration_tests;
+#[path = "tests/middle_relay_idle_registry_poison_security_tests.rs"]
+mod middle_relay_idle_registry_poison_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_zero_length_frame_security_tests.rs"]
+mod middle_relay_zero_length_frame_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_tiny_frame_debt_security_tests.rs"]
+mod middle_relay_tiny_frame_debt_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_tiny_frame_debt_concurrency_security_tests.rs"]
+mod middle_relay_tiny_frame_debt_concurrency_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_tiny_frame_debt_proto_chunking_security_tests.rs"]
+mod middle_relay_tiny_frame_debt_proto_chunking_security_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_atomic_quota_invariant_tests.rs"]
+mod middle_relay_atomic_quota_invariant_tests;
