@@ -14,10 +14,10 @@ This document lists all configuration keys accepted by `config.toml`.
 
 | Key | Type | Default |
 | --- | ---- | ------- |
-| [`include`](#cfg-top-include) | `String` (special directive) | `null` |
+| [`include`](#cfg-top-include) | `String` (special directive) | — |
 | [`show_link`](#cfg-top-show_link) | `"*"` or `String[]` | `[]` (`ShowLink::None`) |
 | [`dc_overrides`](#cfg-top-dc_overrides) | `Map<String, String or String[]>` | `{}` |
-| [`default_dc`](#cfg-top-default_dc) | `u8` or `null` | `null` (effective fallback: `2` in ME routing) |
+| [`default_dc`](#cfg-top-default_dc) | `u8` | — (effective fallback: `2` in ME routing) |
 
 <a id="cfg-top-include"></a>
 - `include`
@@ -68,17 +68,17 @@ This document lists all configuration keys accepted by `config.toml`.
 
 | Key | Type | Default |
 | --- | ---- | ------- |
-| [`data_path`](#cfg-general-data_path) | `String` or `null` | `null` |
+| [`data_path`](#cfg-general-data_path) | `String` | — |
 | [`prefer_ipv6`](#cfg-general-prefer_ipv6) | `bool` | `false` |
 | [`fast_mode`](#cfg-general-fast_mode) | `bool` | `true` |
 | [`use_middle_proxy`](#cfg-general-use_middle_proxy) | `bool` | `true` |
-| [`proxy_secret_path`](#cfg-general-proxy_secret_path) | `String` or `null` | `"proxy-secret"` |
-| [`proxy_config_v4_cache_path`](#cfg-general-proxy_config_v4_cache_path) | `String` or `null` | `"cache/proxy-config-v4.txt"` |
-| [`proxy_config_v6_cache_path`](#cfg-general-proxy_config_v6_cache_path) | `String` or `null` | `"cache/proxy-config-v6.txt"` |
-| [`ad_tag`](#cfg-general-ad_tag) | `String` or `null` | `null` |
-| [`middle_proxy_nat_ip`](#cfg-general-middle_proxy_nat_ip) | `IpAddr` or `null` | `null` |
+| [`proxy_secret_path`](#cfg-general-proxy_secret_path) | `String` | `"proxy-secret"` |
+| [`proxy_config_v4_cache_path`](#cfg-general-proxy_config_v4_cache_path) | `String` | `"cache/proxy-config-v4.txt"` |
+| [`proxy_config_v6_cache_path`](#cfg-general-proxy_config_v6_cache_path) | `String` | `"cache/proxy-config-v6.txt"` |
+| [`ad_tag`](#cfg-general-ad_tag) | `String` | — |
+| [`middle_proxy_nat_ip`](#cfg-general-middle_proxy_nat_ip) | `IpAddr` | — |
 | [`middle_proxy_nat_probe`](#cfg-general-middle_proxy_nat_probe) | `bool` | `true` |
-| [`middle_proxy_nat_stun`](#cfg-general-middle_proxy_nat_stun) | `String` or `null` | `null` |
+| [`middle_proxy_nat_stun`](#cfg-general-middle_proxy_nat_stun) | `String` | — |
 | [`middle_proxy_nat_stun_servers`](#cfg-general-middle_proxy_nat_stun_servers) | `String[]` | `[]` |
 | [`stun_nat_probe_concurrency`](#cfg-general-stun_nat_probe_concurrency) | `usize` | `8` |
 | [`middle_proxy_pool_size`](#cfg-general-middle_proxy_pool_size) | `usize` | `8` |
@@ -144,7 +144,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`upstream_unhealthy_fail_threshold`](#cfg-general-upstream_unhealthy_fail_threshold) | `u32` | `5` |
 | [`upstream_connect_failfast_hard_errors`](#cfg-general-upstream_connect_failfast_hard_errors) | `bool` | `false` |
 | [`stun_iface_mismatch_ignore`](#cfg-general-stun_iface_mismatch_ignore) | `bool` | `false` |
-| [`unknown_dc_log_path`](#cfg-general-unknown_dc_log_path) | `String` or `null` | `"unknown-dc.txt"` |
+| [`unknown_dc_log_path`](#cfg-general-unknown_dc_log_path) | `String` | `"unknown-dc.txt"` |
 | [`unknown_dc_file_log_enabled`](#cfg-general-unknown_dc_file_log_enabled) | `bool` | `false` |
 | [`log_level`](#cfg-general-log_level) | `"debug"`, `"verbose"`, `"normal"`, or `"silent"` | `"normal"` |
 | [`disable_colors`](#cfg-general-disable_colors) | `bool` | `false` |
@@ -163,7 +163,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`me_route_inline_recovery_attempts`](#cfg-general-me_route_inline_recovery_attempts) | `u32` | `3` |
 | [`me_route_inline_recovery_wait_ms`](#cfg-general-me_route_inline_recovery_wait_ms) | `u64` | `3000` |
 | [`fast_mode_min_tls_record`](#cfg-general-fast_mode_min_tls_record) | `usize` | `0` |
-| [`update_every`](#cfg-general-update_every) | `u64` or `null` | `300` |
+| [`update_every`](#cfg-general-update_every) | `u64` | `300` |
 | [`me_reinit_every_secs`](#cfg-general-me_reinit_every_secs) | `u64` | `900` |
 | [`me_hardswap_warmup_delay_min_ms`](#cfg-general-me_hardswap_warmup_delay_min_ms) | `u64` | `1000` |
 | [`me_hardswap_warmup_delay_max_ms`](#cfg-general-me_hardswap_warmup_delay_max_ms) | `u64` | `2000` |
@@ -205,7 +205,7 @@ This document lists all configuration keys accepted by `config.toml`.
 
 <a id="cfg-general-data_path"></a>
 - `data_path`
-  - **Constraints / validation**: `String` or `null`.
+  - **Constraints / validation**: `String` (optional).
   - **Description**: Optional runtime data directory path.
   - **Example**:
 
@@ -245,7 +245,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-proxy_secret_path"></a>
 - `proxy_secret_path`
-  - **Constraints / validation**: `String` or `null`. If `null`, the effective cache path is `"proxy-secret"`. Empty values are accepted but will likely fail at runtime (invalid file path).
+  - **Constraints / validation**: `String`. When omitted, the default path is `"proxy-secret"`. Empty values are accepted by TOML/serde but will likely fail at runtime (invalid file path).
   - **Description**: Path to Telegram infrastructure `proxy-secret` cache file used by ME handshake/RPC auth. Telemt always tries a fresh download from `https://core.telegram.org/getProxySecret` first, caches it to this path on success, and falls back to reading the cached file (any age) on download failure.
   - **Example**:
 
@@ -255,7 +255,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-proxy_config_v4_cache_path"></a>
 - `proxy_config_v4_cache_path`
-  - **Constraints / validation**: `String` or `null`. When set, must not be empty/whitespace-only.
+  - **Constraints / validation**: `String`. When set, must not be empty/whitespace-only.
   - **Description**: Optional disk cache path for raw `getProxyConfig` (IPv4) snapshot. At startup Telemt tries to fetch a fresh snapshot first; on fetch failure or empty snapshot it falls back to this cache file when present and non-empty.
   - **Example**:
 
@@ -265,7 +265,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-proxy_config_v6_cache_path"></a>
 - `proxy_config_v6_cache_path`
-  - **Constraints / validation**: `String` or `null`. When set, must not be empty/whitespace-only.
+  - **Constraints / validation**: `String`. When set, must not be empty/whitespace-only.
   - **Description**: Optional disk cache path for raw `getProxyConfigV6` (IPv6) snapshot. At startup Telemt tries to fetch a fresh snapshot first; on fetch failure or empty snapshot it falls back to this cache file when present and non-empty.
   - **Example**:
 
@@ -275,7 +275,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-ad_tag"></a>
 - `ad_tag`
-  - **Constraints / validation**: `String` or `null`. When set, must be exactly 32 hex characters; invalid values are disabled during config load.
+  - **Constraints / validation**: `String` (optional). When set, must be exactly 32 hex characters; invalid values are disabled during config load.
   - **Description**: Global fallback sponsored-channel `ad_tag` (used when user has no override in `access.user_ad_tags`). An all-zero tag is accepted but has no effect (and is warned about) until replaced with a real tag from `@MTProxybot`.
   - **Example**:
 
@@ -285,7 +285,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-middle_proxy_nat_ip"></a>
 - `middle_proxy_nat_ip`
-  - **Constraints / validation**: `IpAddr` or `null`.
+  - **Constraints / validation**: `IpAddr` (optional).
   - **Description**: Manual public NAT IP override used as ME address material when set.
   - **Example**:
 
@@ -967,8 +967,8 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-unknown_dc_log_path"></a>
 - `unknown_dc_log_path`
-  - **Constraints / validation**: `String` or `null`. Must be a safe path (no `..` components, parent directory must exist); unsafe paths are rejected at runtime.
-  - **Description**: Log file path for unknown (non-standard) DC requests when `unknown_dc_file_log_enabled = true`. Set to `null` to disable file logging.
+  - **Constraints / validation**: `String` (optional). Must be a safe path (no `..` components, parent directory must exist); unsafe paths are rejected at runtime.
+  - **Description**: Log file path for unknown (non-standard) DC requests when `unknown_dc_file_log_enabled = true`. Omit this key to disable file logging.
   - **Example**:
 
     ```toml
@@ -1157,7 +1157,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-update_every"></a>
 - `update_every`
-  - **Constraints / validation**: `u64` (seconds) or `null`. If set, must be `> 0`. If `null`, legacy `proxy_secret_auto_reload_secs` and `proxy_config_auto_reload_secs` are used and their effective minimum must be `> 0`.
+  - **Constraints / validation**: `u64` (seconds). If set, must be `> 0`. If this key is not explicitly set, legacy `proxy_secret_auto_reload_secs` and `proxy_config_auto_reload_secs` may be used (their effective minimum must be `> 0`).
   - **Description**: Unified refresh interval for ME updater tasks (`getProxyConfig`, `getProxyConfigV6`, `getProxySecret`). When set, it overrides legacy proxy reload intervals.
   - **Example**:
 
@@ -1450,7 +1450,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-proxy_secret_auto_reload_secs"></a>
 - `proxy_secret_auto_reload_secs`
-  - **Constraints / validation**: Deprecated. Use `general.update_every`. When `general.update_every` is `null`, the effective legacy refresh interval is `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` and must be `> 0`.
+  - **Constraints / validation**: Deprecated. Use `general.update_every`. When `general.update_every` is not explicitly set, the effective legacy refresh interval is `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` and must be `> 0`.
   - **Description**: Deprecated legacy proxy-secret refresh interval. Used only when `general.update_every` is not set.
   - **Example**:
 
@@ -1463,7 +1463,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-proxy_config_auto_reload_secs"></a>
 - `proxy_config_auto_reload_secs`
-  - **Constraints / validation**: Deprecated. Use `general.update_every`. When `general.update_every` is `null`, the effective legacy refresh interval is `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` and must be `> 0`.
+  - **Constraints / validation**: Deprecated. Use `general.update_every`. When `general.update_every` is not explicitly set, the effective legacy refresh interval is `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` and must be `> 0`.
   - **Description**: Deprecated legacy ME config refresh interval. Used only when `general.update_every` is not set.
   - **Example**:
 
@@ -1624,8 +1624,8 @@ This document lists all configuration keys accepted by `config.toml`.
 | Key | Type | Default |
 | --- | ---- | ------- |
 | [`show`](#cfg-general-links-show) | `"*"` or `String[]` | `"*"` |
-| [`public_host`](#cfg-general-links-public_host) | `String` or `null` | `null` |
-| [`public_port`](#cfg-general-links-public_port) | `u16` or `null` | `null` |
+| [`public_host`](#cfg-general-links-public_host) | `String` | — |
+| [`public_port`](#cfg-general-links-public_port) | `u16` | — |
 
 <a id="cfg-general-links-show"></a>
 - `show`
@@ -1641,7 +1641,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-links-public_host"></a>
 - `public_host`
-  - **Constraints / validation**: `String` or `null`.
+  - **Constraints / validation**: `String` (optional).
   - **Description**: Public hostname/IP override used for generated `tg://` links (overrides detected IP).
   - **Example**:
 
@@ -1651,7 +1651,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-general-links-public_port"></a>
 - `public_port`
-  - **Constraints / validation**: `u16` or `null`.
+  - **Constraints / validation**: `u16` (optional).
   - **Description**: Public port override used for generated `tg://` links (overrides `server.port`).
   - **Example**:
 
@@ -1708,7 +1708,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | Key | Type | Default |
 | --- | ---- | ------- |
 | [`ipv4`](#cfg-network-ipv4) | `bool` | `true` |
-| [`ipv6`](#cfg-network-ipv6) | `bool` or `null` | `false` |
+| [`ipv6`](#cfg-network-ipv6) | `bool` | `false` |
 | [`prefer`](#cfg-network-prefer) | `u8` | `4` |
 | [`multipath`](#cfg-network-multipath) | `bool` | `false` |
 | [`stun_use`](#cfg-network-stun_use) | `bool` | `true` |
@@ -1730,8 +1730,8 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-network-ipv6"></a>
 - `ipv6`
-  - **Constraints / validation**: `bool` or `null`. `null` means "auto-detect IPv6 availability".
-  - **Description**: Enables/disables IPv6 when explicitly set; when `null`, Telemt will auto-detect IPv6 availability at runtime.
+  - **Constraints / validation**: `bool`.
+  - **Description**: Enables/disables IPv6 networking. When omitted, defaults to `false`.
   - **Example**:
 
     ```toml
@@ -1741,9 +1741,6 @@ This document lists all configuration keys accepted by `config.toml`.
 
     # or: disable IPv6 explicitly
     # ipv6 = false
-
-    # or: let Telemt auto-detect
-    # ipv6 = null
     ```
 <a id="cfg-network-prefer"></a>
 - `prefer`
@@ -1842,16 +1839,16 @@ This document lists all configuration keys accepted by `config.toml`.
 | Key | Type | Default |
 | --- | ---- | ------- |
 | [`port`](#cfg-server-port) | `u16` | `443` |
-| [`listen_addr_ipv4`](#cfg-server-listen_addr_ipv4) | `String` or `null` | `"0.0.0.0"` |
-| [`listen_addr_ipv6`](#cfg-server-listen_addr_ipv6) | `String` or `null` | `"::"` |
-| [`listen_unix_sock`](#cfg-server-listen_unix_sock) | `String` or `null` | `null` |
-| [`listen_unix_sock_perm`](#cfg-server-listen_unix_sock_perm) | `String` or `null` | `null` |
-| [`listen_tcp`](#cfg-server-listen_tcp) | `bool` or `null` | `null` (auto) |
+| [`listen_addr_ipv4`](#cfg-server-listen_addr_ipv4) | `String` | `"0.0.0.0"` |
+| [`listen_addr_ipv6`](#cfg-server-listen_addr_ipv6) | `String` | `"::"` |
+| [`listen_unix_sock`](#cfg-server-listen_unix_sock) | `String` | — |
+| [`listen_unix_sock_perm`](#cfg-server-listen_unix_sock_perm) | `String` | — |
+| [`listen_tcp`](#cfg-server-listen_tcp) | `bool` | — (auto) |
 | [`proxy_protocol`](#cfg-server-proxy_protocol) | `bool` | `false` |
 | [`proxy_protocol_header_timeout_ms`](#cfg-server-proxy_protocol_header_timeout_ms) | `u64` | `500` |
 | [`proxy_protocol_trusted_cidrs`](#cfg-server-proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `[]` |
-| [`metrics_port`](#cfg-server-metrics_port) | `u16` or `null` | `null` |
-| [`metrics_listen`](#cfg-server-metrics_listen) | `String` or `null` | `null` |
+| [`metrics_port`](#cfg-server-metrics_port) | `u16` | — |
+| [`metrics_listen`](#cfg-server-metrics_listen) | `String` | — |
 | [`metrics_whitelist`](#cfg-server-metrics_whitelist) | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` |
 | [`max_connections`](#cfg-server-max_connections) | `u32` | `10000` |
 | [`accept_permit_timeout_ms`](#cfg-server-accept_permit_timeout_ms) | `u64` | `250` |
@@ -1868,8 +1865,8 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-server-listen_addr_ipv4"></a>
 - `listen_addr_ipv4`
-  - **Constraints / validation**: `String` or `null`. When set, must be a valid IPv4 address string.
-  - **Description**: IPv4 bind address for TCP listener (`null` disables IPv4 bind).
+  - **Constraints / validation**: `String` (optional). When set, must be a valid IPv4 address string.
+  - **Description**: IPv4 bind address for TCP listener (omit this key to disable IPv4 bind).
   - **Example**:
 
     ```toml
@@ -1878,8 +1875,8 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-server-listen_addr_ipv6"></a>
 - `listen_addr_ipv6`
-  - **Constraints / validation**: `String` or `null`. When set, must be a valid IPv6 address string.
-  - **Description**: IPv6 bind address for TCP listener (`null` disables IPv6 bind).
+  - **Constraints / validation**: `String` (optional). When set, must be a valid IPv6 address string.
+  - **Description**: IPv6 bind address for TCP listener (omit this key to disable IPv6 bind).
   - **Example**:
 
     ```toml
@@ -1888,7 +1885,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-server-listen_unix_sock"></a>
 - `listen_unix_sock`
-  - **Constraints / validation**: `String` or `null`. Must not be empty when set. Unix only.
+  - **Constraints / validation**: `String` (optional). Must not be empty when set. Unix only.
   - **Description**: Unix socket path for listener. When set, `server.listen_tcp` defaults to `false` (unless explicitly overridden).
   - **Example**:
 
@@ -1898,8 +1895,8 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-server-listen_unix_sock_perm"></a>
 - `listen_unix_sock_perm`
-  - **Constraints / validation**: `String` or `null`. When set, should be an octal permission string like `"0666"` or `"0777"`.
-  - **Description**: Optional Unix socket file permissions applied after bind (chmod). `null` means "no change" (inherits umask).
+  - **Constraints / validation**: `String` (optional). When set, should be an octal permission string like `"0666"` or `"0777"`.
+  - **Description**: Optional Unix socket file permissions applied after bind (chmod). When omitted, permissions are not changed (inherits umask).
   - **Example**:
 
     ```toml
@@ -1909,7 +1906,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-server-listen_tcp"></a>
 - `listen_tcp`
-  - **Constraints / validation**: `bool` or `null`. `null` means auto:
+  - **Constraints / validation**: `bool` (optional). When omitted, Telemt auto-detects:
     - `true` when `listen_unix_sock` is not set
     - `false` when `listen_unix_sock` is set
   - **Description**: Explicit TCP listener enable/disable override.
@@ -1957,7 +1954,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-server-metrics_port"></a>
 - `metrics_port`
-  - **Constraints / validation**: `u16` or `null`.
+  - **Constraints / validation**: `u16` (optional).
   - **Description**: Prometheus-compatible metrics endpoint port. When set, enables the metrics listener (bind behavior can be overridden by `metrics_listen`).
   - **Example**:
 
@@ -1967,7 +1964,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 <a id="cfg-server-metrics_listen"></a>
 - `metrics_listen`
-  - **Constraints / validation**: `String` or `null`. When set, must be in `IP:PORT` format.
+  - **Constraints / validation**: `String` (optional). When set, must be in `IP:PORT` format.
   - **Description**: Full metrics bind address (`IP:PORT`), overrides `metrics_port` and binds on the specified address only.
   - **Example**:
 
@@ -2158,9 +2155,9 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | Key | Type | Default |
 | --- | ---- | ------- |
 | [`ip`](#cfg-server-listeners-ip) | `IpAddr` | — |
-| [`announce`](#cfg-server-listeners-announce) | `String` or `null` | — |
-| [`announce_ip`](#cfg-server-listeners-announce_ip) | `IpAddr` or `null` | — |
-| [`proxy_protocol`](#cfg-server-listeners-proxy_protocol) | `bool` or `null` | `null` |
+| [`announce`](#cfg-server-listeners-announce) | `String` | — |
+| [`announce_ip`](#cfg-server-listeners-announce_ip) | `IpAddr` | — |
+| [`proxy_protocol`](#cfg-server-listeners-proxy_protocol) | `bool` | — |
 | [`reuse_allow`](#cfg-server-listeners-reuse_allow) | `bool` | `false` |
 
 <a id="cfg-server-listeners-ip"></a>
@@ -2175,7 +2172,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 <a id="cfg-server-listeners-announce"></a>
 - `announce`
-  - **Constraints / validation**: `String` or `null`. Must not be empty when set.
+  - **Constraints / validation**: `String` (optional). Must not be empty when set.
   - **Description**: Public IP/domain announced in proxy links for this listener. Takes precedence over `announce_ip`.
   - **Example**:
 
@@ -2186,7 +2183,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 <a id="cfg-server-listeners-announce_ip"></a>
 - `announce_ip`
-  - **Constraints / validation**: `IpAddr` or `null`. Deprecated. Use `announce`.
+  - **Constraints / validation**: `IpAddr` (optional). Deprecated. Use `announce`.
   - **Description**: Deprecated legacy announce IP. During config load it is migrated to `announce` when `announce` is not set.
   - **Example**:
 
@@ -2197,7 +2194,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 <a id="cfg-server-listeners-proxy_protocol"></a>
 - `proxy_protocol`
-  - **Constraints / validation**: `bool` or `null`. When set, overrides `server.proxy_protocol` for this listener.
+  - **Constraints / validation**: `bool` (optional). When set, overrides `server.proxy_protocol` for this listener.
   - **Description**: Per-listener PROXY protocol override.
   - **Example**:
 
@@ -2351,9 +2348,9 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`tls_fetch_scope`](#cfg-censorship-tls_fetch_scope) | `String` | `""` |
 | [`tls_fetch`](#cfg-censorship-tls_fetch) | `Table` | built-in defaults |
 | [`mask`](#cfg-censorship-mask) | `bool` | `true` |
-| [`mask_host`](#cfg-censorship-mask_host) | `String` or `null` | `null` |
+| [`mask_host`](#cfg-censorship-mask_host) | `String` | — |
 | [`mask_port`](#cfg-censorship-mask_port) | `u16` | `443` |
-| [`mask_unix_sock`](#cfg-censorship-mask_unix_sock) | `String` or `null` | `null` |
+| [`mask_unix_sock`](#cfg-censorship-mask_unix_sock) | `String` | — |
 | [`fake_cert_len`](#cfg-censorship-fake_cert_len) | `usize` | `2048` |
 | [`tls_emulation`](#cfg-censorship-tls_emulation) | `bool` | `true` |
 | [`tls_front_dir`](#cfg-censorship-tls_front_dir) | `String` | `"tlsfront"` |
@@ -2440,8 +2437,8 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 <a id="cfg-censorship-mask_host"></a>
 - `mask_host`
-  - **Constraints / validation**: `String` or `null`.
-    - If `mask_unix_sock` is set, `mask_host` must be `null` (mutually exclusive).
+  - **Constraints / validation**: `String` (optional).
+    - If `mask_unix_sock` is set, `mask_host` must be omitted (mutually exclusive).
     - If `mask_host` is not set and `mask_unix_sock` is not set, Telemt defaults `mask_host` to `tls_domain`.
   - **Description**: Upstream mask host for TLS fronting relay.
   - **Example**:
@@ -2462,7 +2459,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 <a id="cfg-censorship-mask_unix_sock"></a>
 - `mask_unix_sock`
-  - **Constraints / validation**: `String` or `null`.
+  - **Constraints / validation**: `String` (optional).
     - Must not be empty when set.
     - Unix only; rejected on non-Unix platforms.
     - On Unix, must be \(\le 107\) bytes (path length limit).
@@ -2882,6 +2879,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`users`](#cfg-access-users) | `Map<String, String>` | `{"default": "000…000"}` |
 | [`user_ad_tags`](#cfg-access-user_ad_tags) | `Map<String, String>` | `{}` |
 | [`user_max_tcp_conns`](#cfg-access-user_max_tcp_conns) | `Map<String, usize>` | `{}` |
+| [`user_max_tcp_conns_global_each`](#cfg-access-user_max_tcp_conns_global_each) | `usize` | `0` |
 | [`user_expirations`](#cfg-access-user_expirations) | `Map<String, DateTime<Utc>>` | `{}` |
 | [`user_data_quota`](#cfg-access-user_data_quota) | `Map<String, u64>` | `{}` |
 | [`user_max_unique_ips`](#cfg-access-user_max_unique_ips) | `Map<String, usize>` | `{}` |
@@ -2925,6 +2923,20 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```toml
     [access.user_max_tcp_conns]
     alice = 500
+    ```
+<a id="cfg-access-user_max_tcp_conns_global_each"></a>
+- `user_max_tcp_conns_global_each`
+  - **Constraints / validation**: `usize`. `0` disables the inherited limit.
+  - **Description**: Global per-user maximum concurrent TCP connections, applied when a user has **no positive** entry in `[access.user_max_tcp_conns]` (a missing key, or a value of `0`, both fall through to this setting). Per-user limits greater than `0` in `user_max_tcp_conns` take precedence.
+  - **Example**:
+
+    ```toml
+    [access]
+    user_max_tcp_conns_global_each = 200
+
+    [access.user_max_tcp_conns]
+    alice = 500   # uses 500, not the global cap
+    # bob has no entry → uses 200
     ```
 <a id="cfg-access-user_expirations"></a>
 - `user_expirations`
@@ -3027,13 +3039,13 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`weight`](#cfg-upstreams-weight) | `u16` | `1` |
 | [`enabled`](#cfg-upstreams-enabled) | `bool` | `true` |
 | [`scopes`](#cfg-upstreams-scopes) | `String` | `""` |
-| [`interface`](#cfg-upstreams-interface) | `String` or `null` | `null` |
-| [`bind_addresses`](#cfg-upstreams-bind_addresses) | `String[]` or `null` | `null` |
+| [`interface`](#cfg-upstreams-interface) | `String` | — |
+| [`bind_addresses`](#cfg-upstreams-bind_addresses) | `String[]` | — |
 | [`url`](#cfg-upstreams-url) | `String` | — |
 | [`address`](#cfg-upstreams-address) | `String` | — |
-| [`user_id`](#cfg-upstreams-user_id) | `String` or `null` | `null` |
-| [`username`](#cfg-upstreams-username) | `String` or `null` | `null` |
-| [`password`](#cfg-upstreams-password) | `String` or `null` | `null` |
+| [`user_id`](#cfg-upstreams-user_id) | `String` | — |
+| [`username`](#cfg-upstreams-username) | `String` | — |
+| [`password`](#cfg-upstreams-password) | `String` | — |
 
 <a id="cfg-upstreams-type"></a>
 - `type`
@@ -3090,7 +3102,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 <a id="cfg-upstreams-interface"></a>
 - `interface`
-  - **Constraints / validation**: `String` or `null`.
+  - **Constraints / validation**: `String` (optional).
     - For `"direct"`: may be an IP address (used as explicit local bind) or an OS interface name (resolved to an IP at runtime; Unix only).
     - For `"socks4"`/`"socks5"`: supported only when `address` is an `IP:port` literal; when `address` is a hostname, interface binding is ignored.
     - For `"shadowsocks"`: passed to the shadowsocks connector as an optional outbound bind hint.
@@ -3109,7 +3121,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 <a id="cfg-upstreams-bind_addresses"></a>
 - `bind_addresses`
-  - **Constraints / validation**: `String[]` or `null`. Applies only to `type = "direct"`.
+  - **Constraints / validation**: `String[]` (optional). Applies only to `type = "direct"`.
     - Each entry should be an IP address string.
     - At runtime, Telemt selects an address that matches the target family (IPv4 vs IPv6). If `bind_addresses` is set and none match the target family, the connect attempt fails.
   - **Description**: Explicit local source addresses for outgoing direct TCP connects. When multiple addresses are provided, selection is round-robin.
@@ -3150,7 +3162,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 <a id="cfg-upstreams-user_id"></a>
 - `user_id`
-  - **Constraints / validation**: `String` or `null`. Only for `type = "socks4"`.
+  - **Constraints / validation**: `String` (optional). Only for `type = "socks4"`.
   - **Description**: SOCKS4 CONNECT user ID. Note: when a request scope is selected, Telemt may override this with the selected scope value.
   - **Example**:
 
@@ -3162,7 +3174,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 <a id="cfg-upstreams-username"></a>
 - `username`
-  - **Constraints / validation**: `String` or `null`. Only for `type = "socks5"`.
+  - **Constraints / validation**: `String` (optional). Only for `type = "socks5"`.
   - **Description**: SOCKS5 username (for username/password authentication). Note: when a request scope is selected, Telemt may override this with the selected scope value.
   - **Example**:
 
@@ -3174,7 +3186,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 <a id="cfg-upstreams-password"></a>
 - `password`
-  - **Constraints / validation**: `String` or `null`. Only for `type = "socks5"`.
+  - **Constraints / validation**: `String` (optional). Only for `type = "socks5"`.
   - **Description**: SOCKS5 password (for username/password authentication). Note: when a request scope is selected, Telemt may override this with the selected scope value.
   - **Example**:
 
