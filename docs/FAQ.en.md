@@ -1,5 +1,4 @@
 ## How to set up a "proxy sponsor" channel and statistics via the @MTProxybot
-
 1. Go to the @MTProxybot.
 2. Enter the `/newproxy` command.
 3. Send your server's IP address and port. For example: `1.2.3.4:443`.
@@ -32,13 +31,130 @@ use_middle_proxy = true
 hello = "ad_tag"
 hello2 = "ad_tag2"
 ```
+## Recognizability for DPI and crawler
 
-## Why do you need a middle proxy (ME)
+On April 1, 2026, we became aware of a method for detecting MTProxy Fake-TLS, 
+based on the ECH extension and the ordering of cipher suites, 
+as well as an overall unique JA3/JA4 fingerprint 
+that does not occur in modern browsers: 
+we have already submitted initial changes to the Telegram Desktop developers and are working on updates for other clients.
+
+- We consider this a breakthrough aspect, which has no stable analogues today
+- Based on this: if `telemt` configured correctly, **TLS mode is completely identical to real-life handshake + communication** with a specified host
+- Here is our evidence:
+    - 212.220.88.77 - "dummy" host, running `telemt`
+    - `petrovich.ru` - `tls` + `masking` host, in HEX: `706574726f766963682e7275`
+    - **No MITM + No Fake Certificates/Crypto** = pure transparent *TCP Splice* to "best" upstream: MTProxy or tls/mask-host:
+      - DPI see legitimate HTTPS to `tls_host`, including *valid chain-of-trust* and entropy
+      - Crawlers completely satisfied receiving responses from `mask_host`
+  ### Client WITH secret-key accesses the MTProxy resource:
+  
+  <img width="360" height="439" alt="telemt" src="https://github.com/user-attachments/assets/39352afb-4a11-4ecc-9d91-9e8cfb20607d" />
+  
+  ### Client WITHOUT secret-key gets transparent access to the specified resource:
+    - with trusted certificate
+    - with original handshake
+    - with full request-response way
+    - with low-latency overhead
+```bash
+root@debian:~/telemt# curl -v -I --resolve petrovich.ru:443:212.220.88.77 https://petrovich.ru/
+* Added petrovich.ru:443:212.220.88.77 to DNS cache
+* Hostname petrovich.ru was found in DNS cache
+*   Trying 212.220.88.77:443...
+* Connected to petrovich.ru (212.220.88.77) port 443 (#0)
+* ALPN: offers h2,http/1.1
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+*  CAfile: /etc/ssl/certs/ca-certificates.crt
+*  CApath: /etc/ssl/certs
+* TLSv1.3 (IN), TLS handshake, Server hello (2):
+* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+* TLSv1.3 (IN), TLS handshake, Certificate (11):
+* TLSv1.3 (IN), TLS handshake, CERT verify (15):
+* TLSv1.3 (IN), TLS handshake, Finished (20):
+* TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+* TLSv1.3 (OUT), TLS handshake, Finished (20):
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
+* ALPN: server did not agree on a protocol. Uses default.
+* Server certificate:
+*  subject: C=RU; ST=Saint Petersburg; L=Saint Petersburg; O=STD Petrovich; CN=*.petrovich.ru
+*  start date: Jan 28 11:21:01 2025 GMT
+*  expire date: Mar  1 11:21:00 2026 GMT
+*  subjectAltName: host "petrovich.ru" matched cert's "petrovich.ru"
+*  issuer: C=BE; O=GlobalSign nv-sa; CN=GlobalSign RSA OV SSL CA 2018
+*  SSL certificate verify ok.
+* using HTTP/1.x
+> HEAD / HTTP/1.1
+> Host: petrovich.ru
+> User-Agent: curl/7.88.1
+> Accept: */*
+> 
+* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+* old SSL session ID is stale, removing
+< HTTP/1.1 200 OK
+HTTP/1.1 200 OK
+< Server: Variti/0.9.3a
+Server: Variti/0.9.3a
+< Date: Thu, 01 Jan 2026 00:0000 GMT
+Date: Thu, 01 Jan 2026 00:0000 GMT
+< Access-Control-Allow-Origin: *
+Access-Control-Allow-Origin: *
+< Content-Type: text/html
+Content-Type: text/html
+< Cache-Control: no-store
+Cache-Control: no-store
+< Expires: Thu, 01 Jan 2026 00:0000 GMT
+Expires: Thu, 01 Jan 2026 00:0000 GMT
+< Pragma: no-cache
+Pragma: no-cache
+< Set-Cookie: ipp_uid=XXXXX/XXXXX/XXXXX==; Expires=Tue, 31 Dec 2040 23:59:59 GMT; Domain=.petrovich.ru; Path=/
+Set-Cookie: ipp_uid=XXXXX/XXXXX/XXXXX==; Expires=Tue, 31 Dec 2040 23:59:59 GMT; Domain=.petrovich.ru; Path=/
+< Content-Type: text/html
+Content-Type: text/html
+< Content-Length: 31253
+Content-Length: 31253
+< Connection: keep-alive
+Connection: keep-alive
+< Keep-Alive: timeout=60
+Keep-Alive: timeout=60
+
+< 
+* Connection #0 to host petrovich.ru left intact
+
+```
+- We challenged ourselves, we kept trying and we didn't only *beat the air*: now, we have something to show you
+  - Do not just take our word for it? - This is great and we respect that: you can build your own `telemt` or download a build and check it right now
+
+
+## F.A.Q.
+
+### Telegram Calls via MTProxy
+- Telegram architecture **does NOT allow calls via MTProxy**, but only via SOCKS5, which cannot be obfuscated
+
+### How does DPI see MTProxy TLS?
+- DPI sees MTProxy in Fake TLS (ee) mode as TLS 1.3
+- the SNI you specify sends both the client and the server;
+- ALPN is similar to HTTP 1.1/2;
+- high entropy, which is normal for AES-encrypted traffic;
+
+### Whitelist on IP
+- MTProxy cannot work when there is: 
+  - no IP connectivity to the target host: Russian Whitelist on Mobile Networks - "Белый список"
+  - OR all TCP traffic is blocked
+  - OR high entropy/encrypted traffic is blocked: content filters at universities and critical infrastructure
+  - OR all TLS traffic is blocked
+  - OR specified port is blocked: use 443 to make it "like real"
+  - OR provided SNI is blocked: use "officially approved"/innocuous name
+- like most protocols on the Internet; 
+- these situations are observed:
+  - in China behind the Great Firewall
+  - in Russia on mobile networks, less in wired networks
+  - in Iran during "activity"
+
+### Why do you need a middle proxy (ME)
 https://github.com/telemt/telemt/discussions/167
 
-
-## How many people can use one link
-
+### How many people can use one link
 By default, an unlimited number of people can use a single link.  
 However, you can limit the number of unique IP addresses for each user:
 ```toml
@@ -47,8 +163,7 @@ hello = 1
 ```
 This parameter sets the maximum number of unique IP addresses from which a single link can be used simultaneously. If the first user disconnects, a second one can connect. At the same time, multiple users can connect from a single IP address simultaneously (for example, devices on the same Wi-Fi network).
 
-## How to create multiple different links
-
+### How to create multiple different links
 1. Generate the required number of secrets using the command: `openssl rand -hex 16`.
 2. Open the configuration file: `nano /etc/telemt/telemt.toml`.
 3. Add new users to the `[access.users]` section:
@@ -64,7 +179,7 @@ user3 = "00000000000000000000000000000003"
 curl -s http://127.0.0.1:9091/v1/users | jq
 ```
 
-## "Unknown TLS SNI" error
+### "Unknown TLS SNI" error
 Usually, this error occurs if you have changed the `tls_domain` parameter, but users continue to connect using old links with the previous domain.
 
 If you need to allow connections with any domains (ignoring SNI mismatches), add the following parameters:
@@ -73,7 +188,7 @@ If you need to allow connections with any domains (ignoring SNI mismatches), add
 unknown_sni_action = "mask"
 ```
 
-## How to view metrics
+### How to view metrics
 
 1. Open the configuration file: `nano /etc/telemt/telemt.toml`.
 2. Add the following parameters:
@@ -86,6 +201,25 @@ metrics_whitelist = ["127.0.0.1/32", "::1/128", "0.0.0.0/0"]
 4. After that, metrics will be available at: `SERVER_IP:9090/metrics`. 
 > [!WARNING]
 > The value `"0.0.0.0/0"` in `metrics_whitelist` opens access to metrics from any IP address. It is recommended to replace it with your personal IP, for example: `"1.2.3.4/32"`.
+
+### Too many open files
+- On a fresh Linux install the default open file limit is low; under load `telemt` may fail with `Accept error: Too many open files`
+- **Systemd**: add `LimitNOFILE=65536` to the `[Service]` section (already included in the example above)
+- **Docker**: add `--ulimit nofile=65536:65536` to your `docker run` command, or in `docker-compose.yml`:
+```yaml
+ulimits:
+  nofile:
+    soft: 65536
+    hard: 65536
+```
+- **System-wide** (optional): add to `/etc/security/limits.conf`:
+```
+*       soft    nofile  1048576
+*       hard    nofile  1048576
+root    soft    nofile  1048576
+root    hard    nofile  1048576
+```
+
 
 ## Additional parameters
 

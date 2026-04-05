@@ -2,188 +2,59 @@
 
 ***Löst Probleme, bevor andere überhaupt wissen, dass sie existieren*** / ***It solves problems before others even realize they exist***
 
-### [**Telemt Chat in Telegram**](https://t.me/telemtrs)
-#### Fixed TLS ClientHello is now available in Telegram Desktop starting from version 6.7.2: to work with EE-MTProxy, please update your client;
-#### Fixed TLS ClientHello for Telegram Android Client is available in [our chat](https://t.me/telemtrs/30234/36441); official releases for Android and iOS are "work in progress";
+> [!NOTE]
+>
+> Fixed TLS ClientHello is now available in **Telegram Desktop** starting from version **6.7.2**: to work with EE-MTProxy, please update your client;
+> 
+> Fixed TLS ClientHello for Telegram Android Client is available in [our chat](https://t.me/telemtrs/30234/36441); **official releases for Android and iOS are "work in progress"**;
 
+<p align="center">
+  <a href="https://t.me/telemtrs">
+    <img src="docs/assets/telegram_button.png" alt="Join us in Telegram" />
+  </a>
+</p>
 
 **Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements such as:
-- [ME Pool + Reader/Writer + Registry + Refill + Adaptive Floor + Trio-State + Generation Lifecycle](https://github.com/telemt/telemt/blob/main/docs/model/MODEL.en.md)
-- [Full-covered API w/ management](https://github.com/telemt/telemt/blob/main/docs/API.md)
-- Anti-Replay on Sliding Window
-- Prometheus-format Metrics
-- TLS-Fronting and TCP-Splicing for masking from "prying" eyes
+- [ME Pool + Reader/Writer + Registry + Refill + Adaptive Floor + Trio-State + Generation Lifecycle](https://github.com/telemt/telemt/blob/main/docs/model/MODEL.en.md);
+- [Full-covered API w/ management](https://github.com/telemt/telemt/blob/main/docs/API.md);
+- Anti-Replay on Sliding Window;
+- Prometheus-format Metrics;
+- TLS-Fronting and TCP-Splicing for masking from "prying" eyes.
+
+![telemt_scheme](docs/assets/telemt.png)
 
 ⚓ Our implementation of **TLS-fronting** is one of the most deeply debugged, focused, advanced and *almost* **"behaviorally consistent to real"**:  we are confident we have it right - [see evidence on our validation and traces](#recognizability-for-dpi-and-crawler)
 
 ⚓ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared to other implementations of connecting to the Middle-End Proxy: non dramatically, but usual
 
 - Full support for all official MTProto proxy modes:
-  - Classic
-  - Secure - with `dd` prefix
-  - Fake TLS - with `ee` prefix + SNI fronting
-- Replay attack protection
-- Optional traffic masking: forward unrecognized connections to a real web server, e.g. GitHub 🤪
-- Configurable keepalives + timeouts + IPv6 and "Fast Mode"
-- Graceful shutdown on Ctrl+C
-- Extensive logging via `trace` and `debug` with `RUST_LOG` method
+  - Classic;
+  - Secure - with `dd` prefix;
+  - Fake TLS - with `ee` prefix + SNI fronting;
+- Replay attack protection;
+- Optional traffic masking: forward unrecognized connections to a real web server, e.g. GitHub 🤪;
+- Configurable keepalives + timeouts + IPv6 and "Fast Mode";
+- Graceful shutdown on Ctrl+C;
+- Extensive logging via `trace` and `debug` with `RUST_LOG` method.
 
 # GOTO
-- [Quick Start Guide](#quick-start-guide)
 - [FAQ](#faq)
-  - [Recognizability for DPI and crawler](#recognizability-for-dpi-and-crawler)
-    - [Client WITH secret-key accesses the MTProxy resource:](#client-with-secret-key-accesses-the-mtproxy-resource)
-    - [Client WITHOUT secret-key gets transparent access to the specified resource:](#client-without-secret-key-gets-transparent-access-to-the-specified-resource)
-  - [Telegram Calls via MTProxy](#telegram-calls-via-mtproxy)
-  - [How does DPI see MTProxy TLS?](#how-does-dpi-see-mtproxy-tls)
-  - [Whitelist on IP](#whitelist-on-ip)
-  - [Too many open files](#too-many-open-files)
+- [Architecture](docs/Architecture)
+- [Quick Start Guide](#quick-start-guide)
+- [Config parameters](docs/Config_params)
 - [Build](#build)
 - [Why Rust?](#why-rust)
 - [Issues](#issues)
 - [Roadmap](#roadmap)
 
-
 ## Quick Start Guide
-- [Quick Start Guide RU](docs/QUICK_START_GUIDE.ru.md)
-- [Quick Start Guide EN](docs/QUICK_START_GUIDE.en.md)
+- [Quick Start Guide RU](docs/Quick_start/QUICK_START_GUIDE.ru.md)
+- [Quick Start Guide EN](docs/Quick_start/QUICK_START_GUIDE.en.md)
 
 ## FAQ
 
 - [FAQ RU](docs/FAQ.ru.md)
 - [FAQ EN](docs/FAQ.en.md)
-
-### Recognizability for DPI and crawler
-
-On April 1, 2026, we became aware of a method for detecting MTProxy Fake-TLS, 
-based on the ECH extension and the ordering of cipher suites, 
-as well as an overall unique JA3/JA4 fingerprint 
-that does not occur in modern browsers: 
-we have already submitted initial changes to the Telegram Desktop developers and are working on updates for other clients.
-
-- We consider this a breakthrough aspect, which has no stable analogues today
-- Based on this: if `telemt` configured correctly, **TLS mode is completely identical to real-life handshake + communication** with a specified host
-- Here is our evidence:
-    - 212.220.88.77 - "dummy" host, running `telemt`
-    - `petrovich.ru` - `tls` + `masking` host, in HEX: `706574726f766963682e7275`
-    - **No MITM + No Fake Certificates/Crypto** = pure transparent *TCP Splice* to "best" upstream: MTProxy or tls/mask-host:
-      - DPI see legitimate HTTPS to `tls_host`, including *valid chain-of-trust* and entropy
-      - Crawlers completely satisfied receiving responses from `mask_host`
-  #### Client WITH secret-key accesses the MTProxy resource:
-  
-  <img width="360" height="439" alt="telemt" src="https://github.com/user-attachments/assets/39352afb-4a11-4ecc-9d91-9e8cfb20607d" />
-  
-  #### Client WITHOUT secret-key gets transparent access to the specified resource:
-    - with trusted certificate
-    - with original handshake
-    - with full request-response way
-    - with low-latency overhead
-```bash
-root@debian:~/telemt# curl -v -I --resolve petrovich.ru:443:212.220.88.77 https://petrovich.ru/
-* Added petrovich.ru:443:212.220.88.77 to DNS cache
-* Hostname petrovich.ru was found in DNS cache
-*   Trying 212.220.88.77:443...
-* Connected to petrovich.ru (212.220.88.77) port 443 (#0)
-* ALPN: offers h2,http/1.1
-* TLSv1.3 (OUT), TLS handshake, Client hello (1):
-*  CAfile: /etc/ssl/certs/ca-certificates.crt
-*  CApath: /etc/ssl/certs
-* TLSv1.3 (IN), TLS handshake, Server hello (2):
-* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
-* TLSv1.3 (IN), TLS handshake, Certificate (11):
-* TLSv1.3 (IN), TLS handshake, CERT verify (15):
-* TLSv1.3 (IN), TLS handshake, Finished (20):
-* TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
-* TLSv1.3 (OUT), TLS handshake, Finished (20):
-* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
-* ALPN: server did not agree on a protocol. Uses default.
-* Server certificate:
-*  subject: C=RU; ST=Saint Petersburg; L=Saint Petersburg; O=STD Petrovich; CN=*.petrovich.ru
-*  start date: Jan 28 11:21:01 2025 GMT
-*  expire date: Mar  1 11:21:00 2026 GMT
-*  subjectAltName: host "petrovich.ru" matched cert's "petrovich.ru"
-*  issuer: C=BE; O=GlobalSign nv-sa; CN=GlobalSign RSA OV SSL CA 2018
-*  SSL certificate verify ok.
-* using HTTP/1.x
-> HEAD / HTTP/1.1
-> Host: petrovich.ru
-> User-Agent: curl/7.88.1
-> Accept: */*
-> 
-* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
-* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
-* old SSL session ID is stale, removing
-< HTTP/1.1 200 OK
-HTTP/1.1 200 OK
-< Server: Variti/0.9.3a
-Server: Variti/0.9.3a
-< Date: Thu, 01 Jan 2026 00:0000 GMT
-Date: Thu, 01 Jan 2026 00:0000 GMT
-< Access-Control-Allow-Origin: *
-Access-Control-Allow-Origin: *
-< Content-Type: text/html
-Content-Type: text/html
-< Cache-Control: no-store
-Cache-Control: no-store
-< Expires: Thu, 01 Jan 2026 00:0000 GMT
-Expires: Thu, 01 Jan 2026 00:0000 GMT
-< Pragma: no-cache
-Pragma: no-cache
-< Set-Cookie: ipp_uid=XXXXX/XXXXX/XXXXX==; Expires=Tue, 31 Dec 2040 23:59:59 GMT; Domain=.petrovich.ru; Path=/
-Set-Cookie: ipp_uid=XXXXX/XXXXX/XXXXX==; Expires=Tue, 31 Dec 2040 23:59:59 GMT; Domain=.petrovich.ru; Path=/
-< Content-Type: text/html
-Content-Type: text/html
-< Content-Length: 31253
-Content-Length: 31253
-< Connection: keep-alive
-Connection: keep-alive
-< Keep-Alive: timeout=60
-Keep-Alive: timeout=60
-
-< 
-* Connection #0 to host petrovich.ru left intact
-
-```
-- We challenged ourselves, we kept trying and we didn't only *beat the air*: now, we have something to show you
-  - Do not just take our word for it? - This is great and we respect that: you can build your own `telemt` or download a build and check it right now
-### Telegram Calls via MTProxy
-- Telegram architecture **does NOT allow calls via MTProxy**, but only via SOCKS5, which cannot be obfuscated
-### How does DPI see MTProxy TLS?
-- DPI sees MTProxy in Fake TLS (ee) mode as TLS 1.3
-- the SNI you specify sends both the client and the server;
-- ALPN is similar to HTTP 1.1/2;
-- high entropy, which is normal for AES-encrypted traffic;
-### Whitelist on IP
-- MTProxy cannot work when there is: 
-  - no IP connectivity to the target host: Russian Whitelist on Mobile Networks - "Белый список"
-  - OR all TCP traffic is blocked
-  - OR high entropy/encrypted traffic is blocked: content filters at universities and critical infrastructure
-  - OR all TLS traffic is blocked
-  - OR specified port is blocked: use 443 to make it "like real"
-  - OR provided SNI is blocked: use "officially approved"/innocuous name
-- like most protocols on the Internet; 
-- these situations are observed:
-  - in China behind the Great Firewall
-  - in Russia on mobile networks, less in wired networks
-  - in Iran during "activity"
-### Too many open files
-- On a fresh Linux install the default open file limit is low; under load `telemt` may fail with `Accept error: Too many open files`
-- **Systemd**: add `LimitNOFILE=65536` to the `[Service]` section (already included in the example above)
-- **Docker**: add `--ulimit nofile=65536:65536` to your `docker run` command, or in `docker-compose.yml`:
-```yaml
-ulimits:
-  nofile:
-    soft: 65536
-    hard: 65536
-```
-- **System-wide** (optional): add to `/etc/security/limits.conf`:
-```
-*       soft    nofile  1048576
-*       hard    nofile  1048576
-root    soft    nofile  1048576
-root    hard    nofile  1048576
-```
-
 
 ## Build
 ```bash
@@ -207,7 +78,7 @@ telemt config.toml
 ```
 
 ### OpenBSD
-- Build and service setup guide: [OpenBSD Guide (EN)](docs/OPENBSD.en.md)
+- Build and service setup guide: [OpenBSD Guide (EN)](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md)
 - Example rc.d script: [contrib/openbsd/telemt.rcd](contrib/openbsd/telemt.rcd)
 - Status: OpenBSD sandbox hardening with `pledge(2)` and `unveil(2)` is not implemented yet.
 
