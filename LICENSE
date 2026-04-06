@@ -14,11 +14,15 @@ are preserved and complied with.
 The canonical version of this License is the English version.
 Official translations are provided for informational purposes only
 and for convenience, and do not have legal force. In case of any
-discrepancy, the English version of this License shall prevail.
-Available versions:
-- English in Markdown: docs/LICENSE/LICENSE.md
-- German: docs/LICENSE/LICENSE.de.md
-- Russian: docs/LICENSE/LICENSE.ru.md
+discrepancy, the English version of this License shall prevail
+
+/----------------------------------------------------------\
+| Language    | Location                                   |
+|-------------|--------------------------------------------|
+| English     | docs/LICENSE/TELEMT-PUBLIC-LICENSE-3.en.md |
+| German      | docs/LICENSE/TELEMT-PUBLIC-LICENSE-3.de.md |
+| Russian     | docs/LICENSE/TELEMT-PUBLIC-LICENSE-3.ru.md |
+\----------------------------------------------------------/
 
 ### License Versioning Policy
 
