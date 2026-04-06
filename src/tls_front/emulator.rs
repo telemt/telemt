@@ -221,25 +221,16 @@ pub fn build_emulated_server_hello(
             marker.extend_from_slice(proto);
             marker
         });
-    let mut payload_offset = 0usize;
     for (idx, size) in sizes.into_iter().enumerate() {
         let mut rec = Vec::with_capacity(5 + size);
         rec.push(TLS_RECORD_APPLICATION);
         rec.extend_from_slice(&TLS_VERSION);
         rec.extend_from_slice(&(size as u16).to_be_bytes());
 
-        if let Some(payload) = selected_payload {
+        if selected_payload.is_some() {
             if size > 17 {
                 let body_len = size - 17;
-                let remaining = payload.len().saturating_sub(payload_offset);
-                let copy_len = remaining.min(body_len);
-                if copy_len > 0 {
-                    rec.extend_from_slice(&payload[payload_offset..payload_offset + copy_len]);
-                    payload_offset += copy_len;
-                }
-                if body_len > copy_len {
-                    rec.extend_from_slice(&rng.bytes(body_len - copy_len));
-                }
+                rec.extend_from_slice(&rng.bytes(body_len));
                 rec.push(0x16); // inner content type marker (handshake)
                 rec.extend_from_slice(&rng.bytes(16)); // AEAD-like tag
             } else {
