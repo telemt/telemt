@@ -150,7 +150,7 @@ systemctl daemon-reload
 
 **7.** To get the link(s), enter:
 ```bash
-curl -s http://127.0.0.1:9091/v1/users | jq
+curl -s http://127.0.0.1:9091/v1/users | jq -r '.data[] | "User: \(.username)\n\(.links.tls[0] // empty)"'
 ```
 
 > Any number of people can use one link.
