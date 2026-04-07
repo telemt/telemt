@@ -267,6 +267,17 @@ async fn render_metrics(
     let me_allows_normal = telemetry.me_level.allows_normal();
     let me_allows_debug = telemetry.me_level.allows_debug();
 
+    let _ = writeln!(
+        out,
+        "# HELP telemt_build_info Build information for the running telemt binary"
+    );
+    let _ = writeln!(out, "# TYPE telemt_build_info gauge");
+    let _ = writeln!(
+        out,
+        "telemt_build_info{{version=\"{}\"}} 1",
+        env!("CARGO_PKG_VERSION")
+    );
+
     let _ = writeln!(out, "# HELP telemt_uptime_seconds Proxy uptime");
     let _ = writeln!(out, "# TYPE telemt_uptime_seconds gauge");
     let _ = writeln!(out, "telemt_uptime_seconds {:.1}", stats.uptime_secs());
@@ -2981,6 +2992,10 @@ mod tests {
 
         let output = render_metrics(&stats, shared_state.as_ref(), &config, &tracker).await;
 
+        assert!(output.contains(&format!(
+            "telemt_build_info{{version=\"{}\"}} 1",
+            env!("CARGO_PKG_VERSION")
+        )));
         assert!(output.contains("telemt_connections_total 2"));
         assert!(output.contains("telemt_connections_bad_total 1"));
         assert!(output.contains("telemt_handshake_timeouts_total 1"));
@@ -3139,6 +3154,14 @@ mod tests {
             std::str::from_utf8(body.as_ref())
                 .unwrap()
                 .contains("telemt_connections_total 3")
+        );
+        assert!(
+            std::str::from_utf8(body.as_ref())
+                .unwrap()
+                .contains(&format!(
+                    "telemt_build_info{{version=\"{}\"}} 1",
+                    env!("CARGO_PKG_VERSION")
+                ))
         );
 
         config.general.beobachten = true;
