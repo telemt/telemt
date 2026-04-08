@@ -89,6 +89,45 @@ async fn self_target_fallback_refuses_recursive_loopback_connect() {
 }
 
 #[tokio::test]
+async fn self_target_fallback_refuses_recursive_hostname_connect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let accept_task = tokio::spawn(async move {
+        timeout(Duration::from_millis(120), listener.accept())
+            .await
+            .is_ok()
+    });
+
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.censorship.mask = true;
+    config.censorship.mask_unix_sock = None;
+    config.censorship.mask_host = Some("localhost".to_string());
+    config.censorship.mask_port = local_addr.port();
+    config.censorship.mask_proxy_protocol = 0;
+
+    let peer: SocketAddr = "203.0.113.99:55099".parse().unwrap();
+    let beobachten = BeobachtenStore::new();
+
+    handle_bad_client(
+        tokio::io::empty(),
+        tokio::io::sink(),
+        b"GET /",
+        peer,
+        local_addr,
+        &config,
+        &beobachten,
+    )
+    .await;
+
+    let accepted = accept_task.await.unwrap();
+    assert!(
+        !accepted,
+        "hostname self-target masking must fail closed without connecting to local listener"
+    );
+}
+
+#[tokio::test]
 async fn same_ip_different_port_still_forwards_to_mask_backend() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let backend_addr = listener.local_addr().unwrap();

@@ -8,8 +8,6 @@ use hmac::{Hmac, Mac};
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
-#[cfg(test)]
-use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv6Addr};
@@ -55,6 +53,7 @@ const STICKY_HINT_MAX_ENTRIES: usize = 65_536;
 const CANDIDATE_HINT_TRACK_CAP: usize = 64;
 const OVERLOAD_CANDIDATE_BUDGET_HINTED: usize = 16;
 const OVERLOAD_CANDIDATE_BUDGET_UNHINTED: usize = 8;
+const OVERLOAD_FULL_SCAN_USER_THRESHOLD: usize = CANDIDATE_HINT_TRACK_CAP;
 const RECENT_USER_RING_SCAN_LIMIT: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -242,12 +241,49 @@ fn budget_for_validation(total_users: usize, overload: bool, has_hint: bool) -> 
     if !overload {
         return total_users;
     }
+    if total_users <= OVERLOAD_FULL_SCAN_USER_THRESHOLD {
+        return total_users;
+    }
     let cap = if has_hint {
         OVERLOAD_CANDIDATE_BUDGET_HINTED
     } else {
         OVERLOAD_CANDIDATE_BUDGET_UNHINTED
     };
     total_users.min(cap.max(1))
+}
+
+// Fold the peer address into a stable scan offset seed without invoking any
+// cryptographic or keyed hashing. This only needs to fan peers out across the
+// overload validation ring so repeated partial scans do not start at the same slot.
+fn candidate_scan_peer_seed(peer_ip: IpAddr) -> usize {
+    match peer_ip {
+        IpAddr::V4(ip) => u32::from_be_bytes(ip.octets()) as usize,
+        IpAddr::V6(ip) => {
+            let raw = u128::from_be_bytes(ip.octets());
+            ((raw >> 64) as u64 ^ raw as u64) as usize
+        }
+    }
+}
+
+// Rotate partial overload scans across larger snapshots so one truncated
+// validation window does not permanently starve the same cold users.
+fn candidate_scan_start_offset_in(
+    shared: &ProxySharedState,
+    peer_ip: IpAddr,
+    total_users: usize,
+    candidate_budget: usize,
+) -> usize {
+    if total_users == 0 || candidate_budget >= total_users {
+        return 0;
+    }
+
+    let seq = shared
+        .handshake
+        .auth_candidate_scan_seq
+        .fetch_add(1, Ordering::Relaxed);
+    candidate_scan_peer_seed(peer_ip)
+        .wrapping_add(seq as usize)
+        % total_users
 }
 
 fn parse_tls_auth_material(
@@ -1312,7 +1348,14 @@ where
         }
 
         if !matched && !budget_exhausted {
-            for idx in 0..snapshot.entries().len() {
+            let fallback_start = candidate_scan_start_offset_in(
+                shared,
+                peer.ip(),
+                snapshot.entries().len(),
+                candidate_budget,
+            );
+            for offset in 0..snapshot.entries().len() {
+                let idx = (fallback_start + offset) % snapshot.entries().len();
                 let Some(user_id) = u32::try_from(idx).ok() else {
                     break;
                 };
@@ -1679,7 +1722,14 @@ where
         }
 
         if !matched && !budget_exhausted {
-            for idx in 0..snapshot.entries().len() {
+            let fallback_start = candidate_scan_start_offset_in(
+                shared,
+                peer.ip(),
+                snapshot.entries().len(),
+                candidate_budget,
+            );
+            for offset in 0..snapshot.entries().len() {
+                let idx = (fallback_start + offset) % snapshot.entries().len();
                 let Some(user_id) = u32::try_from(idx).ok() else {
                     break;
                 };
