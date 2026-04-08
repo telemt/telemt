@@ -26,6 +26,7 @@
 
 ![telemt_scheme](docs/assets/telemt.png)
 
+## Features
 Our implementation of **TLS-fronting** is one of the most deeply debugged, focused, advanced and *almost* **"behaviorally consistent to real"**:  we are confident we have it right - [see evidence on our validation and traces](docs/FAQ.en.md#recognizability-for-dpi-and-crawler)
 
 Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared to other implementations of connecting to the Middle-End Proxy: non dramatically, but usual
@@ -59,7 +60,6 @@ See more in the [Quick Start Guide](docs/Quick_start/QUICK_START_GUIDE.en.md).
 - [Quick Start Guide EN](docs/Quick_start/QUICK_START_GUIDE.en.md)
 
 ## FAQ
-
 - [FAQ RU](docs/FAQ.ru.md)
 - [FAQ EN](docs/FAQ.en.md)
 
@@ -72,9 +72,8 @@ cd telemt
 # Starting Release Build
 cargo build --release
 
-# Low-RAM devices (1 GB, e.g. NanoPi Neo3 / Raspberry Pi Zero 2):
-# release profile uses lto = "thin" to reduce peak linker memory.
-# If your custom toolchain overrides profiles, avoid enabling fat LTO.
+# Current release profile uses lto = "fat" for maximum optimization (see Cargo.toml).
+# On low-RAM systems (~1 GB) you can override it to "thin".
 
 # Move to /bin
 mv ./target/release/telemt /bin

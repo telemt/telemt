@@ -103,22 +103,22 @@ tls = true
 [general.links]
 show = "*"
 # show = ["alice", "bob"] # Показывать ссылки только для alice и bob
-# show = "*"              # Показывать ссылки для всех пользователей
-# public_host = "proxy.example.com"  # Хост (IP-адрес или домен) для ссылок tg://
-# public_port = 443                  # Порт для ссылок tg:// (по умолчанию: server.port)
+# show = "*"              # Показывать ссылки для всех пользователей
+# public_host = "proxy.example.com"  # Хост (IP-адрес или домен) для ссылок tg://
+# public_port = 443                  # Порт для ссылок tg:// (по умолчанию: server.port)
 
 # === Привязка сервера ===
 [server]
 port = 443
-# proxy_protocol = false           # Включите, если сервер находится за HAProxy/nginx с протоколом PROXY
+# proxy_protocol = false           # Включите, если сервер находится за HAProxy/nginx с протоколом PROXY
 # metrics_port = 9090
-# metrics_listen = "0.0.0.0:9090"  # Адрес прослушивания для метрик (переопределяет metrics_port)
-# metrics_whitelist = ["127.0.0.1", "::1", "0.0.0.0/0"]
+# metrics_listen = "127.0.0.1:9090"  # Адрес прослушивания для метрик (переопределяет metrics_port)
+# metrics_whitelist = ["127.0.0.1/32", "::1/128"]
 
 [server.api]
 enabled = true
-listen = "0.0.0.0:9091"
-whitelist = ["127.0.0.0/8"]
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1/32", "::1/128"]
 minimal_runtime_enabled = false
 minimal_runtime_cache_ttl_ms = 1000
 
@@ -128,9 +128,9 @@ ip = "0.0.0.0"
 
 # === Обход блокировок и маскировка ===
 [censorship]
-tls_domain = "petrovich.ru"
+tls_domain = "petrovich.ru"  # Домен Fake-TLS / SNI, который будет использоваться в сгенерированных ee-ссылках
 mask = true
-tls_emulation = true        # Получить реальную длину сертификата и эмулировать запись TLS
+tls_emulation = true         # Получить реальную длину сертификата и эмулировать запись TLS
 tls_front_dir = "tlsfront"   # Директория кэша для эмуляции TLS
 
 [access.users]
@@ -141,9 +141,9 @@ hello = "00000000000000000000000000000000"
 Затем нажмите Ctrl+S -> Ctrl+X, чтобы сохранить
 
 > [!WARNING]
-> Замените значение параметра hello на значение, которое вы получили в пункте 0.  
-> Так же замените значение параметра tls_domain на другой сайт.
-> Изменение параметра tls_domain сделает нерабочими все ссылки, использующие старый домен!
+> Замените значение параметра `hello` на значение, которое вы получили в пункте 0.  
+> Так же замените значение параметра `tls_domain` на другой сайт.
+> Изменение параметра `tls_domain` сделает нерабочими все ссылки, использующие старый домен!
 
 ---
 
