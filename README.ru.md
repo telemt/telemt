@@ -4,9 +4,12 @@
 
 > [!NOTE]
 >
-> Исправленный TLS ClientHello доступен в **Telegram Desktop** начиная с версии **6.7.2**: для работы с EE-MTProxy обновите клиент.
+> Исправленный TLS ClientHello доступен:
+> - в **Telegram Desktop** начиная с версии **6.7.2**
+> - в **Telegram Android** начиная с версии **12.6.4**
+> - **официальный релиз для iOS находится в процессе разработки**.
 >
-> Исправленный TLS ClientHello доступен в **Telegram Android** начиная с версии **12.6.4**; **официальный релиз для iOS находится в процессе разработки**.
+> Для работы с EE-MTProxy обновите клиент!
 
 <p align="center">
   <a href="https://t.me/telemtrs">
@@ -15,7 +18,6 @@
 </p>
 
 **Telemt** — это быстрый, безопасный и функциональный сервер, написанный на Rust. Он полностью реализует официальный алгоритм прокси Telegram и добавляет множество улучшений для продакшена:
-
 - [ME Pool + Reader/Writer + Registry + Refill + Adaptive Floor + Trio-State + жизненный цикл генераций](https://github.com/telemt/telemt/blob/main/docs/Architecture/Model/MODEL.en.md);
 - [Полноценный API с управлением](https://github.com/telemt/telemt/blob/main/docs/Architecture/API/API.md);
 - Защита от повторных атак (Anti-Replay on Sliding Window);
@@ -25,7 +27,6 @@
 ![telemt_scheme](docs/assets/telemt.png)
 
 ## Особенности
-
 Реализация **TLS-fronting** максимально приближена к поведению реального HTTPS-трафика (подробнее - [FAQ](docs/FAQ.ru.md#распознаваемость-для-dpi-и-сканеров)).
 
 ***Middle-End Pool*** оптимизирован для высокой производительности.
@@ -63,12 +64,10 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 - [Quick Start Guide EN](docs/Quick_start/QUICK_START_GUIDE.en.md)
 
 ## FAQ
-
 - [FAQ RU](docs/FAQ.ru.md)
 - [FAQ EN](docs/FAQ.en.md)
 
 ## Сборка
-
 ```bash
 # Клонируйте репозиторий
 git clone https://github.com/telemt/telemt 
@@ -77,9 +76,8 @@ cd telemt
 # Начните процесс сборки
 cargo build --release
 
-# Устройства с небольшим объёмом оперативной памяти (1 ГБ, например NanoPi Neo3 / Raspberry Pi Zero 2):
-# используется параметр lto = «thin» для уменьшения пикового потребления памяти.
-# Если ваш пользовательский набор инструментов переопределяет профили, не используйте Fat LTO.
+# В текущем release-профиле используется lto = "fat" для максимальной оптимизации (см. Cargo.toml).
+# На системах с малым объёмом RAM (~1 ГБ) можно переопределить это значение на "thin".
 
 # Перейдите в каталог /bin
 mv ./target/release/telemt /bin
@@ -89,22 +87,14 @@ chmod +x /bin/telemt
 telemt config.toml
 ```
 
-### Устройства с малым объемом RAM
-Для устройств с ~1 ГБ RAM (например Raspberry Pi):
-- используется облегчённая оптимизация линковщика (thin LTO);
-- не рекомендуется включать fat LTO.
-
-## OpenBSD
-
+### OpenBSD
 - Руководство по сборке и настройке на английском языке [OpenBSD Guide (EN)](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md);
 - Пример rc.d скрипта: [contrib/openbsd/telemt.rcd](contrib/openbsd/telemt.rcd);
 - Поддержка sandbox с `pledge(2)` и `unveil(2)` пока не реализована.
 
 ## Почему Rust?
-
 - Надёжность для долгоживущих процессов;
 - Детерминированное управление ресурсами (RAII);
 - Отсутствие сборщика мусора;
 - Безопасность памяти;
 - Асинхронная архитектура Tokio.
-

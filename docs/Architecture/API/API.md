@@ -9,12 +9,12 @@ API runtime is configured in `[server.api]`.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | `bool` | `false` | Enables REST API listener. |
-| `listen` | `string` (`IP:PORT`) | `127.0.0.1:9091` | API bind address. |
-| `whitelist` | `CIDR[]` | `127.0.0.1/32, ::1/128` | Source IP allowlist. Empty list means allow all. |
+| `enabled` | `bool` | `true` | Enables REST API listener. |
+| `listen` | `string` (`IP:PORT`) | `0.0.0.0:9091` | API bind address. |
+| `whitelist` | `CIDR[]` | `127.0.0.0/8` | Source IP allowlist. Empty list means allow all. |
 | `auth_header` | `string` | `""` | Exact value for `Authorization` header. Empty disables header auth. |
 | `request_body_limit_bytes` | `usize` | `65536` | Maximum request body size. Must be `> 0`. |
-| `minimal_runtime_enabled` | `bool` | `false` | Enables runtime snapshot endpoints requiring ME pool read-lock aggregation. |
+| `minimal_runtime_enabled` | `bool` | `true` | Enables runtime snapshot endpoints requiring ME pool read-lock aggregation. |
 | `minimal_runtime_cache_ttl_ms` | `u64` | `1000` | Cache TTL for minimal snapshots. `0` disables cache; valid range is `[0, 60000]`. |
 | `runtime_edge_enabled` | `bool` | `false` | Enables runtime edge endpoints with cached aggregation payloads. |
 | `runtime_edge_cache_ttl_ms` | `u64` | `1000` | Cache TTL for runtime edge summary payloads. `0` disables cache. |
