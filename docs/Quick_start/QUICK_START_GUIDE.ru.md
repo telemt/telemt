@@ -78,31 +78,63 @@ nano /etc/telemt/telemt.toml
 Вставьте свою конфигурацию
 
 ```toml
-# === General Settings ===
+### Конфигурационный файл на основе Telemt
+# Мы полагаем, что этих настроек достаточно для большинства сценариев, 
+# где не требуются передовые методы, параметры или специальные решения
+
+# === Общие настройки ===
 [general]
+use_middle_proxy = true
+# Глобальный ad_tag, если у пользователя нет индивидуального тега в [access.user_ad_tags]
 # ad_tag = "00000000000000000000000000000000"
-use_middle_proxy = false
+# Индивидуальный ad_tag в [access.user_ad_tags] (32 шестнадцатеричных символа от @MTProxybot)
+
+# === Уровень логирования ===
+# Уровень логирования: debug | verbose | normal | silent
+# Можно переопределить с помощью флагов командной строки --silent или --log-level
+# Переменная окружения RUST_LOG имеет абсолютный приоритет над всеми этими настройками
+log_level = "normal"
 
 [general.modes]
 classic = false
 secure = false
 tls = true
 
+[general.links]
+show = "*"
+# show = ["alice", "bob"] # Показывать ссылки только для alice и bob
+# show = "*"              # Показывать ссылки для всех пользователей
+# public_host = "proxy.example.com"  # Хост (IP-адрес или домен) для ссылок tg://
+# public_port = 443                  # Порт для ссылок tg:// (по умолчанию: server.port)
+
+# === Привязка сервера ===
 [server]
 port = 443
+# proxy_protocol = false           # Включите, если сервер находится за HAProxy/nginx с протоколом PROXY
+# metrics_port = 9090
+# metrics_listen = "0.0.0.0:9090"  # Адрес прослушивания для метрик (переопределяет metrics_port)
+# metrics_whitelist = ["127.0.0.1", "::1", "0.0.0.0/0"]
 
 [server.api]
 enabled = true
-# listen = "127.0.0.1:9091"
-# whitelist = ["127.0.0.1/32"]
-# read_only = true
+listen = "0.0.0.0:9091"
+whitelist = ["127.0.0.0/8"]
+minimal_runtime_enabled = false
+minimal_runtime_cache_ttl_ms = 1000
 
-# === Anti-Censorship & Masking ===
+# Прослушивание на нескольких интерфейсах/IP-адресах - IPv4
+[[server.listeners]]
+ip = "0.0.0.0"
+
+# === Обход блокировок и маскировка ===
 [censorship]
 tls_domain = "petrovich.ru"
+mask = true
+tls_emulation = true        # Получать реальную длину сертификатов и эмулировать записи TLS
+tls_front_dir = "tlsfront"   # Директория кэша для TLS-эмуляции
 
 [access.users]
-# format: "username" = "32_hex_chars_secret"
+# формат: "имя_пользователя" = "секрет_из_32_шестнадцатеричных_символов"
 hello = "00000000000000000000000000000000"
 ```
 

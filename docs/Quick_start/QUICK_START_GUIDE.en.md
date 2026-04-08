@@ -78,28 +78,60 @@ nano /etc/telemt/telemt.toml
 Insert your configuration:
 
 ```toml
+### Telemt Based Config.toml
+# We believe that these settings are sufficient for most scenarios 
+# where cutting-egde methods and parameters or special solutions are not needed
+
 # === General Settings ===
 [general]
+use_middle_proxy = true
+# Global ad_tag fallback when user has no per-user tag in [access.user_ad_tags]
 # ad_tag = "00000000000000000000000000000000"
-use_middle_proxy = false
+# Per-user ad_tag in [access.user_ad_tags] (32 hex from @MTProxybot)
+
+# === Log Level ===
+# Log level: debug | verbose | normal | silent
+# Can be overridden with --silent or --log-level CLI flags
+# RUST_LOG env var takes absolute priority over all of these
+log_level = "normal"
 
 [general.modes]
 classic = false
 secure = false
 tls = true
 
+[general.links]
+show = "*"
+# show = ["alice", "bob"] # Only show links for alice and bob
+# show = "*"              # Show links for all users
+# public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
+# public_port = 443                  # Port for tg:// links (default: server.port)
+
+# === Server Binding ===
 [server]
 port = 443
+# proxy_protocol = false           # Enable if behind HAProxy/nginx with PROXY protocol
+# metrics_port = 9090
+# metrics_listen = "0.0.0.0:9090"  # Listen address for metrics (overrides metrics_port)
+# metrics_whitelist = ["127.0.0.1", "::1", "0.0.0.0/0"]
 
 [server.api]
 enabled = true
-# listen = "127.0.0.1:9091"
-# whitelist = ["127.0.0.1/32"]
-# read_only = true
+listen = "0.0.0.0:9091"
+whitelist = ["127.0.0.0/8"]
+minimal_runtime_enabled = false
+minimal_runtime_cache_ttl_ms = 1000
+
+# Listen on multiple interfaces/IPs - IPv4
+[[server.listeners]]
+ip = "0.0.0.0"
 
 # === Anti-Censorship & Masking ===
 [censorship]
 tls_domain = "petrovich.ru"
+mask = true
+tls_emulation = true        # Fetch real cert lengths and emulate TLS records
+tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 
 [access.users]
 # format: "username" = "32_hex_chars_secret"
