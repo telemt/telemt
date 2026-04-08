@@ -1942,7 +1942,7 @@ This document lists all configuration keys accepted by `config.toml`.
 <a id="cfg-server-proxy_protocol_trusted_cidrs"></a>
 - `proxy_protocol_trusted_cidrs`
   - **Constraints / validation**: `IpNetwork[]`.
-    - If omitted, defaults to trust-all CIDRs (`0.0.0.0/0` and `::/0`).
+    - If omitted, defaults to an empty list and incoming PROXY headers are rejected.
     - If explicitly set to an empty array, all PROXY headers are rejected.
   - **Description**: Trusted source CIDRs allowed to provide PROXY protocol headers (security control).
   - **Example**:
@@ -3296,5 +3296,4 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     username = "alice"
     password = "secret"
     ```
-
 
