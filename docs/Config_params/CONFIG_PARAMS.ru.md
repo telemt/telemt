@@ -2,15 +2,32 @@
 
 В этом документе перечислены все ключи конфигурации, принимаемые `config.toml`.
 
-> [!ПРИМЕЧАНИЕ]
+> [!NOTE]
 >
 > Этот справочник был составлен с помощью искусственного интеллекта и сверен с базой кода (схема конфигурации, значения по умолчанию и логика проверки).
 
-> [!ПРЕДУПРЕЖДЕНИЕ]
+> [!WARNING]
 >
 > Параметры конфигурации, подробно описанные в этом документе, предназначены для опытных пользователей и для целей тонкой настройки. Изменение этих параметров без четкого понимания их функции может привести к нестабильности приложения или другому неожиданному поведению. Пожалуйста, действуйте осторожно и на свой страх и риск.
 
-## Ключи верхнего уровня
+# Содержание
+ - [Ключи верхнего уровня](#top-level-keys)
+ - [general](#general)
+ - [general.modes](#generalmodes)
+ - [general.links](#generallinks)
+ - [general.telemetry](#generaltelemetry)
+ - [network](#network)
+ - [server](#server)
+ - [server.conntrack_control](#serverconntrack_control)
+ - [server.api](#serverapi)
+ - [[server.listeners]](#serverlisteners)
+ - [timeouts](#timeouts)
+ - [censorship](#censorship)
+ - [censorship.tls_fetch](#censorshiptls_fetch)
+ - [access](#access)
+ - [[upstreams]](#upstreams)
+
+# Ключи верхнего уровня
 
 | Ключ | Тип | По умолчанию |
 | --- | ---- | ------- |
@@ -19,7 +36,7 @@
 | [`dc_overrides`](#cfg-top-dc_overrides) | `Map<String, String or String[]>` | `{}` |
 | [`default_dc`](#cfg-top-default_dc) | `u8` | — (effective fallback: `2` in ME routing) |
 
-<a id="cfg-top-include"></a>
+## "cfg-top-include"
 - `include`
   - **Ограничения / валидация**: Должна быть однострочной директивой в форме `include = "path/to/file.toml"`. Включения расширяются перед анализом TOML. Максимальная глубина включения — 10.
   - **Описание**: Включает еще один файл TOML с помощью `include = "relative/or/absolute/path.toml"`; включения обрабатываются рекурсивно перед анализом.
@@ -28,7 +45,7 @@
     ```toml
     include = "secrets.toml"
     ```
-<a id="cfg-top-show_link"></a>
+## "cfg-top-show_link"
 - `show_link`
   - **Ограничения / валидация**: Принимает `"*"` или массив имен пользователей. Пустой массив означает «не показывать ничего».
   - **Описание**: Устаревший селектор видимости ссылок верхнего уровня («*»` для всех пользователей или списка явных имен пользователей).
@@ -41,7 +58,7 @@
     # or: show links only for selected users
     # show_link = ["alice", "bob"]
     ```
-<a id="cfg-top-dc_overrides"></a>
+## "cfg-top-dc_overrides"
 - `dc_overrides`
   - **Ограничения / валидация**: Ключ должен быть положительным целочисленным индексом DC, закодированным как строка (например, `"203"`). Значения должны анализироваться как `SocketAddr` (`ip:port`). Пустые строки игнорируются.
   - **Описание**: Переопределяет конечные точки контроллера домена для нестандартных контроллеров домена; ключ — индексная строка контроллера домена, значение — один или несколько адресов `ip:port`.
@@ -52,7 +69,7 @@
     "201" = "149.154.175.50:443"
     "203" = ["149.154.175.100:443", "91.105.192.100:443"]
     ```
-<a id="cfg-top-default_dc"></a>
+## "cfg-top-default_dc"
 - `default_dc`
   - **Ограничения / валидация**: Предполагаемый диапазон: «1..=5». Если этот параметр выходит за пределы диапазона, время выполнения возвращается к поведению DC1 в прямом реле; Маршрутизация среднего уровня возвращается к значению «2», если она не установлена.
   - **Описание**: Индекс контроллера домена по умолчанию, используемый для несопоставленных нестандартных контроллеров домена.
@@ -64,7 +81,7 @@
     default_dc = 2
     ```
 
-## [general]
+# [general]
 
 | Ключ | Тип | По умолчанию |
 | --- | ---- | ------- |
@@ -203,7 +220,7 @@
 | [`auto_degradation_enabled`](#cfg-general-auto_degradation_enabled) | `bool` | `true` |
 | [`degradation_min_unavailable_dc_groups`](#cfg-general-degradation_min_unavailable_dc_groups) | `u8` | `2` |
 
-<a id="cfg-general-data_path"></a>
+## "cfg-general-data_path"
 - `data_path`
   - **Ограничения / валидация**: `Строка` (необязательно).
   - **Описание**: Необязательный путь к каталогу данных времени выполнения.
@@ -213,7 +230,7 @@
     [general]
     data_path = "/var/lib/telemt"
     ```
-<a id="cfg-general-prefer_ipv6"></a>
+## "cfg-general-prefer_ipv6"
 - `prefer_ipv6`
   - **Ограничения / валидация**: Устарело. Используйте `network.prefer`.
   - **Описание**: Устаревший устаревший флаг предпочтения IPv6 перенесен в network.prefer.
@@ -223,7 +240,7 @@
     [network]
     prefer = 6
     ```
-<a id="cfg-general-fast_mode"></a>
+## "cfg-general-fast_mode"
 - `fast_mode`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает оптимизацию быстрого пути для обработки трафика.
@@ -233,7 +250,7 @@
     [general]
     fast_mode = true
     ```
-<a id="cfg-general-use_middle_proxy"></a>
+## "cfg-general-use_middle_proxy"
 - `use_middle_proxy`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает транспортный режим ME; если значение false, среда выполнения возвращается к прямой маршрутизации постоянного тока.
@@ -243,7 +260,7 @@
     [general]
     use_middle_proxy = true
     ```
-<a id="cfg-general-proxy_secret_path"></a>
+## "cfg-general-proxy_secret_path"
 - `proxy_secret_path`
   - **Ограничения / валидация**: `Строка`. Если этот параметр опущен, путь по умолчанию — «proxy-secret». Пустые значения принимаются TOML/serde, но, скорее всего, во время выполнения произойдет ошибка (неверный путь к файлу).
   - **Описание**: Путь к файлу кэша `proxy-secret` инфраструктуры Telegram, используемому ME-рукопожатием/аутентификацией RPC. Telemt всегда сначала пытается выполнить новую загрузку с https://core.telegram.org/getProxySecret, в случае успеха кэширует ее по этому пути и возвращается к чтению кэшированного файла (любого возраста) в случае сбоя загрузки.
@@ -253,7 +270,7 @@
     [general]
     proxy_secret_path = "proxy-secret"
     ```
-<a id="cfg-general-proxy_config_v4_cache_path"></a>
+## "cfg-general-proxy_config_v4_cache_path"
 - `proxy_config_v4_cache_path`
   - **Ограничения / валидация**: `Строка`. Если установлено, оно не должно быть пустым или содержать только пробелы.
   - **Описание**: Необязательный путь к дисковому кэшу для необработанного снимка getProxyConfig (IPv4). При запуске Telemt сначала пытается получить свежий снимок; в случае сбоя выборки или пустого снимка он возвращается к этому файлу кэша, если он присутствует и не пуст.
@@ -263,7 +280,7 @@
     [general]
     proxy_config_v4_cache_path = "cache/proxy-config-v4.txt"
     ```
-<a id="cfg-general-proxy_config_v6_cache_path"></a>
+## "cfg-general-proxy_config_v6_cache_path"
 - `proxy_config_v6_cache_path`
   - **Ограничения / валидация**: `Строка`. Если установлено, оно не должно быть пустым или содержать только пробелы.
   - **Описание**: Необязательный путь к дисковому кэшу для необработанного снимка getProxyConfigV6 (IPv6). При запуске Telemt сначала пытается получить свежий снимок; в случае сбоя выборки или пустого снимка он возвращается к этому файлу кэша, если он присутствует и не пуст.
@@ -273,7 +290,7 @@
     [general]
     proxy_config_v6_cache_path = "cache/proxy-config-v6.txt"
     ```
-<a id="cfg-general-ad_tag"></a>
+## "cfg-general-ad_tag"
 - `ad_tag`
   - **Ограничения / валидация**: `Строка` (необязательно). Если установлено, должно быть ровно 32 шестнадцатеричных символа; недопустимые значения отключаются во время загрузки конфигурации.
   - **Описание**: Глобальный резервный спонсируемый канал `ad_tag` (используется, когда у пользователя нет переопределения в `access.user_ad_tags`). Тег со всеми нулями принимается, но не имеет никакого эффекта (и о нем предупреждается), пока не будет заменен реальным тегом от `@MTProxybot`.
@@ -283,7 +300,7 @@
     [general]
     ad_tag = "00112233445566778899aabbccddeeff"
     ```
-<a id="cfg-general-middle_proxy_nat_ip"></a>
+## "cfg-general-middle_proxy_nat_ip"
 - `middle_proxy_nat_ip`
   - **Ограничения / валидация**: `IpAddr` (необязательно).
   - **Описание**: Ручное переопределение общедоступного IP-адреса NAT используется в качестве материала ME-адреса, если оно установлено.
@@ -293,7 +310,7 @@
     [general]
     middle_proxy_nat_ip = "203.0.113.10"
     ```
-<a id="cfg-general-middle_proxy_nat_probe"></a>
+## "cfg-general-middle_proxy_nat_probe"
 - `middle_proxy_nat_probe`
   - **Ограничения / валидация**: `бул`. Эффективное зондирование ограничивается `network.stun_use` (когда `network.stun_use = false`, STUN-зондирование отключается, даже если этот флаг имеет значение `true`).
   - **Описание**: Позволяет зондировать NAT на основе STUN для обнаружения общедоступного IP-порта, используемого при получении ключа ME в средах NAT.
@@ -303,7 +320,7 @@
     [general]
     middle_proxy_nat_probe = true
     ```
-<a id="cfg-general-middle_proxy_nat_stun"></a>
+## "cfg-general-middle_proxy_nat_stun"
 - `middle_proxy_nat_stun`
   - **Ограничения / валидация**: Устарело. Используйте `network.stun_servers`.
   - **Описание**: Устаревший устаревший одиночный сервер STUN для проверки NAT. Во время загрузки конфигурации он объединяется с `network.stun_servers`, если `network.stun_servers` не задан явно.
@@ -313,7 +330,7 @@
     [network]
     stun_servers = ["stun.l.google.com:19302"]
     ```
-<a id="cfg-general-middle_proxy_nat_stun_servers"></a>
+## "cfg-general-middle_proxy_nat_stun_servers"
 - `middle_proxy_nat_stun_servers`
   - **Ограничения / валидация**: Устарело. Используйте `network.stun_servers`.
   - **Описание**: Устаревший устаревший список STUN для резервного копирования NAT. Во время загрузки конфигурации он объединяется с `network.stun_servers`, если `network.stun_servers` не задан явно.
@@ -323,7 +340,7 @@
     [network]
     stun_servers = ["stun.l.google.com:19302"]
     ```
-<a id="cfg-general-stun_nat_probe_concurrency"></a>
+## "cfg-general-stun_nat_probe_concurrency"
 - `stun_nat_probe_concurrency`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Максимальное количество параллельных тестов STUN во время обнаружения NAT/публичной конечной точки.
@@ -333,7 +350,7 @@
     [general]
     stun_nat_probe_concurrency = 8
     ```
-<a id="cfg-general-middle_proxy_pool_size"></a>
+## "cfg-general-middle_proxy_pool_size"
 - `middle_proxy_pool_size`
   - **Ограничения / валидация**: `использовать`. Эффективное значение — «max(value, 1)» во время выполнения (поэтому «0» ведет себя как «1»).
   - **Описание**: Целевой размер активного пула устройств записи ME.
@@ -343,7 +360,7 @@
     [general]
     middle_proxy_pool_size = 8
     ```
-<a id="cfg-general-middle_proxy_warm_standby"></a>
+## "cfg-general-middle_proxy_warm_standby"
 - `middle_proxy_warm_standby`
   - **Ограничения / валидация**: `использовать`.
   - **Описание**: Количество подключений ME в теплом резерве, предварительно инициализированных.
@@ -353,7 +370,7 @@
     [general]
     middle_proxy_warm_standby = 16
     ```
-<a id="cfg-general-me_init_retry_attempts"></a>
+## "cfg-general-me_init_retry_attempts"
 - `me_init_retry_attempts`
   - **Ограничения / валидация**: `0..=1_000_000` (`0` означает неограниченное количество повторов).
   - **Описание**: Повторные попытки инициализации пула ME.
@@ -363,7 +380,7 @@
     [general]
     me_init_retry_attempts = 0
     ```
-<a id="cfg-general-me2dc_fallback"></a>
+## "cfg-general-me2dc_fallback"
 - `me2dc_fallback`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Позволяет перейти из режима ME в режим прямого постоянного тока в случае сбоя запуска ME.
@@ -373,7 +390,7 @@
     [general]
     me2dc_fallback = true
     ```
-<a id="cfg-general-me2dc_fast"></a>
+## "cfg-general-me2dc_fast"
 - `me2dc_fast`
   - **Ограничения / валидация**: `бул`. Активен только тогда, когда `use_middle_proxy = true` и `me2dc_fallback = true`.
   - **Описание**: Fast ME->Режим прямого возврата для новых сеансов.
@@ -385,7 +402,7 @@
     me2dc_fallback = true
     me2dc_fast = false
     ```
-<a id="cfg-general-me_keepalive_enabled"></a>
+## "cfg-general-me_keepalive_enabled"
 - `me_keepalive_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает периодические дополнительные кадры поддержки активности ME.
@@ -395,7 +412,7 @@
     [general]
     me_keepalive_enabled = true
     ```
-<a id="cfg-general-me_keepalive_interval_secs"></a>
+## "cfg-general-me_keepalive_interval_secs"
 - `me_keepalive_interval_secs`
   - **Ограничения / валидация**: `u64` (секунды).
   - **Описание**: Базовый интервал поддержки активности ME в секундах.
@@ -405,7 +422,7 @@
     [general]
     me_keepalive_interval_secs = 8
     ```
-<a id="cfg-general-me_keepalive_jitter_secs"></a>
+## "cfg-general-me_keepalive_jitter_secs"
 - `me_keepalive_jitter_secs`
   - **Ограничения / валидация**: `u64` (секунды).
   - **Описание**: Джиттер Keepalive за считанные секунды для уменьшения синхронизированных пакетов.
@@ -415,7 +432,7 @@
     [general]
     me_keepalive_jitter_secs = 2
     ```
-<a id="cfg-general-me_keepalive_payload_random"></a>
+## "cfg-general-me_keepalive_payload_random"
 - `me_keepalive_payload_random`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Случайным образом изменяет байты полезной нагрузки поддержки активности вместо фиксированной нулевой полезной нагрузки.
@@ -425,7 +442,7 @@
     [general]
     me_keepalive_payload_random = true
     ```
-<a id="cfg-general-rpc_proxy_req_every"></a>
+## "cfg-general-rpc_proxy_req_every"
 - `rpc_proxy_req_every`
   - **Ограничения / валидация**: `0` или в пределах `10..=300` (секунд).
   - **Описание**: Интервал для сигналов активности службы `RPC_PROXY_REQ` для ME (`0` отключает).
@@ -435,7 +452,7 @@
     [general]
     rpc_proxy_req_every = 0
     ```
-<a id="cfg-general-me_writer_cmd_channel_capacity"></a>
+## "cfg-general-me_writer_cmd_channel_capacity"
 - `me_writer_cmd_channel_capacity`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Пропускная способность командного канала для каждого записывающего устройства.
@@ -445,7 +462,7 @@
     [general]
     me_writer_cmd_channel_capacity = 4096
     ```
-<a id="cfg-general-me_route_channel_capacity"></a>
+## "cfg-general-me_route_channel_capacity"
 - `me_route_channel_capacity`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Пропускная способность канала маршрута ответа ME для каждого соединения.
@@ -455,7 +472,7 @@
     [general]
     me_route_channel_capacity = 768
     ```
-<a id="cfg-general-me_c2me_channel_capacity"></a>
+## "cfg-general-me_c2me_channel_capacity"
 - `me_c2me_channel_capacity`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Емкость очереди команд для каждого клиента (читатель клиента -> отправитель ME).
@@ -465,7 +482,7 @@
     [general]
     me_c2me_channel_capacity = 1024
     ```
-<a id="cfg-general-me_c2me_send_timeout_ms"></a>
+## "cfg-general-me_c2me_send_timeout_ms"
 - `me_c2me_send_timeout_ms`
   - **Ограничения / валидация**: `0..=60000` (миллисекунды).
   - **Описание**: Максимальное ожидание постановки в очередь команд клиент->ME, когда очередь для каждого клиента заполнена (`0` сохраняет устаревшее неограниченное ожидание).
@@ -475,7 +492,7 @@
     [general]
     me_c2me_send_timeout_ms = 4000
     ```
-<a id="cfg-general-me_reader_route_data_wait_ms"></a>
+## "cfg-general-me_reader_route_data_wait_ms"
 - `me_reader_route_data_wait_ms`
   - **Ограничения / валидация**: `0..=20` (миллисекунды).
   - **Описание**: Ограниченное ожидание маршрутизации ME DATA в очередь для каждого соединения (`0` = нет ожидания).
@@ -485,7 +502,7 @@
     [general]
     me_reader_route_data_wait_ms = 2
     ```
-<a id="cfg-general-me_d2c_flush_batch_max_frames"></a>
+## "cfg-general-me_d2c_flush_batch_max_frames"
 - `me_d2c_flush_batch_max_frames`
   - **Ограничения / валидация**: Должно быть в пределах `1..=512`.
   - **Описание**: Макс. ME->клиентские кадры объединяются перед очисткой.
@@ -495,7 +512,7 @@
     [general]
     me_d2c_flush_batch_max_frames = 32
     ```
-<a id="cfg-general-me_d2c_flush_batch_max_bytes"></a>
+## "cfg-general-me_d2c_flush_batch_max_bytes"
 - `me_d2c_flush_batch_max_bytes`
   - **Ограничения / валидация**: Должно быть в пределах `4096..=2097152` (байт).
   - **Описание**: Максимальное количество байтов полезной нагрузки ME->клиента, объединенных перед сбросом.
@@ -505,7 +522,7 @@
     [general]
     me_d2c_flush_batch_max_bytes = 131072
     ```
-<a id="cfg-general-me_d2c_flush_batch_max_delay_us"></a>
+## "cfg-general-me_d2c_flush_batch_max_delay_us"
 - `me_d2c_flush_batch_max_delay_us`
   - **Ограничения / валидация**: `0..=5000` (микросекунды).
   - **Описание**: Максимальное время ожидания в микросекундах для объединения большего количества кадров ME->клиента (`0` отключает объединение по времени).
@@ -515,7 +532,7 @@
     [general]
     me_d2c_flush_batch_max_delay_us = 500
     ```
-<a id="cfg-general-me_d2c_ack_flush_immediate"></a>
+## "cfg-general-me_d2c_ack_flush_immediate"
 - `me_d2c_ack_flush_immediate`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Сбрасывает запись клиента сразу после записи быстрого подтверждения.
@@ -525,7 +542,7 @@
     [general]
     me_d2c_ack_flush_immediate = true
     ```
-<a id="cfg-general-me_quota_soft_overshoot_bytes"></a>
+## "cfg-general-me_quota_soft_overshoot_bytes"
 - `me_quota_soft_overshoot_bytes`
   - **Ограничения / валидация**: `0..=16777216` (байты).
   - **Описание**: Дополнительные квоты для каждого маршрута (в байтах) допускаются до того, как принудительное применение квот на стороне записи отбрасывает данные маршрута.
@@ -535,7 +552,7 @@
     [general]
     me_quota_soft_overshoot_bytes = 65536
     ```
-<a id="cfg-general-me_d2c_frame_buf_shrink_threshold_bytes"></a>
+## "cfg-general-me_d2c_frame_buf_shrink_threshold_bytes"
 - `me_d2c_frame_buf_shrink_threshold_bytes`
   - **Ограничения / валидация**: Должно быть в пределах `4096..=16777216` (байт).
   - **Описание**: Пороговое значение для сжатия слишком больших буферов агрегации кадров ME->клиента после очистки.
@@ -545,7 +562,7 @@
     [general]
     me_d2c_frame_buf_shrink_threshold_bytes = 262144
     ```
-<a id="cfg-general-direct_relay_copy_buf_c2s_bytes"></a>
+## "cfg-general-direct_relay_copy_buf_c2s_bytes"
 - `direct_relay_copy_buf_c2s_bytes`
   - **Ограничения / валидация**: Должно быть в пределах `4096..=1048576` (байт).
   - **Описание**: Размер буфера копирования для направления клиент->DC в прямой ретрансляции.
@@ -555,7 +572,7 @@
     [general]
     direct_relay_copy_buf_c2s_bytes = 65536
     ```
-<a id="cfg-general-direct_relay_copy_buf_s2c_bytes"></a>
+## "cfg-general-direct_relay_copy_buf_s2c_bytes"
 - `direct_relay_copy_buf_s2c_bytes`
   - **Ограничения / валидация**: Должно быть в пределах `8192..=2097152` (байт).
   - **Описание**: Размер буфера копирования для направления DC->клиент при прямой ретрансляции.
@@ -565,7 +582,7 @@
     [general]
     direct_relay_copy_buf_s2c_bytes = 262144
     ```
-<a id="cfg-general-crypto_pending_buffer"></a>
+## "cfg-general-crypto_pending_buffer"
 - `crypto_pending_buffer`
   - **Ограничения / валидация**: `использовать` (байты).
   - **Описание**: Максимальный буфер ожидающего зашифрованного текста на каждого клиента-писателя (в байтах).
@@ -575,7 +592,7 @@
     [general]
     crypto_pending_buffer = 262144
     ```
-<a id="cfg-general-max_client_frame"></a>
+## "cfg-general-max_client_frame"
 - `max_client_frame`
   - **Ограничения / валидация**: `использовать` (байты).
   - **Описание**: Максимально допустимый размер кадра MTProto клиента (в байтах).
@@ -585,7 +602,7 @@
     [general]
     max_client_frame = 16777216
     ```
-<a id="cfg-general-desync_all_full"></a>
+## "cfg-general-desync_all_full"
 - `desync_all_full`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Создает полные журналы крипто-рассинхронизации для каждого события.
@@ -595,7 +612,7 @@
     [general]
     desync_all_full = false
     ```
-<a id="cfg-general-beobachten"></a>
+## "cfg-general-beobachten"
 - `beobachten`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает сегменты криминалистического наблюдения для каждого IP-адреса.
@@ -605,7 +622,7 @@
     [general]
     beobachten = true
     ```
-<a id="cfg-general-beobachten_minutes"></a>
+## "cfg-general-beobachten_minutes"
 - `beobachten_minutes`
   - **Ограничения / валидация**: Должно быть `> 0` (минуты).
   - **Описание**: Окно хранения (минуты) для сегментов наблюдения по каждому IP-адресу.
@@ -615,7 +632,7 @@
     [general]
     beobachten_minutes = 10
     ```
-<a id="cfg-general-beobachten_flush_secs"></a>
+## "cfg-general-beobachten_flush_secs"
 - `beobachten_flush_secs`
   - **Ограничения / валидация**: Должно быть `> 0` (секунды).
   - **Описание**: Интервал сброса моментального снимка (в секундах) для выходного файла наблюдения.
@@ -625,7 +642,7 @@
     [general]
     beobachten_flush_secs = 15
     ```
-<a id="cfg-general-beobachten_file"></a>
+## "cfg-general-beobachten_file"
 - `beobachten_file`
   - **Ограничения / валидация**: Не должно быть пустым или содержать только пробелы.
   - **Описание**: Путь к выходному файлу снимка наблюдения.
@@ -635,7 +652,7 @@
     [general]
     beobachten_file = "cache/beobachten.txt"
     ```
-<a id="cfg-general-hardswap"></a>
+## "cfg-general-hardswap"
 - `hardswap`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает стратегию жесткой замены ME на основе генерации.
@@ -645,7 +662,7 @@
     [general]
     hardswap = true
     ```
-<a id="cfg-general-me_warmup_stagger_enabled"></a>
+## "cfg-general-me_warmup_stagger_enabled"
 - `me_warmup_stagger_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Перемещает дополнительные шкалы прогрева ME, чтобы избежать всплесков соединения.
@@ -655,7 +672,7 @@
     [general]
     me_warmup_stagger_enabled = true
     ```
-<a id="cfg-general-me_warmup_step_delay_ms"></a>
+## "cfg-general-me_warmup_step_delay_ms"
 - `me_warmup_step_delay_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды).
   - **Описание**: Базовая задержка в миллисекундах между этапами набора прогрева.
@@ -665,7 +682,7 @@
     [general]
     me_warmup_step_delay_ms = 500
     ```
-<a id="cfg-general-me_warmup_step_jitter_ms"></a>
+## "cfg-general-me_warmup_step_jitter_ms"
 - `me_warmup_step_jitter_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды).
   - **Описание**: Дополнительная случайная задержка в миллисекундах для шагов разминки.
@@ -675,7 +692,7 @@
     [general]
     me_warmup_step_jitter_ms = 300
     ```
-<a id="cfg-general-me_reconnect_max_concurrent_per_dc"></a>
+## "cfg-general-me_reconnect_max_concurrent_per_dc"
 - `me_reconnect_max_concurrent_per_dc`
   - **Ограничения / валидация**: `u32`. Эффективное значение — «max(value, 1)» во время выполнения (поэтому «0» ведет себя как «1»).
   - **Описание**: Ограничивает число одновременных рабочих повторных подключений на каждый контроллер домена во время восстановления работоспособности.
@@ -685,7 +702,7 @@
     [general]
     me_reconnect_max_concurrent_per_dc = 8
     ```
-<a id="cfg-general-me_reconnect_backoff_base_ms"></a>
+## "cfg-general-me_reconnect_backoff_base_ms"
 - `me_reconnect_backoff_base_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды).
   - **Описание**: Начальная задержка повторного подключения в миллисекундах.
@@ -695,7 +712,7 @@
     [general]
     me_reconnect_backoff_base_ms = 500
     ```
-<a id="cfg-general-me_reconnect_backoff_cap_ms"></a>
+## "cfg-general-me_reconnect_backoff_cap_ms"
 - `me_reconnect_backoff_cap_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды).
   - **Описание**: Максимальное ограничение задержки повторного подключения в миллисекундах.
@@ -705,7 +722,7 @@
     [general]
     me_reconnect_backoff_cap_ms = 30000
     ```
-<a id="cfg-general-me_reconnect_fast_retry_count"></a>
+## "cfg-general-me_reconnect_fast_retry_count"
 - `me_reconnect_fast_retry_count`
   - **Ограничения / валидация**: `u32`. Эффективное значение — «max(value, 1)» во время выполнения (поэтому «0» ведет себя как «1»).
   - **Описание**: Немедленный бюджет повторных попыток, прежде чем применяется поведение длительной отсрочки.
@@ -715,7 +732,7 @@
     [general]
     me_reconnect_fast_retry_count = 16
     ```
-<a id="cfg-general-me_single_endpoint_shadow_writers"></a>
+## "cfg-general-me_single_endpoint_shadow_writers"
 - `me_single_endpoint_shadow_writers`
   - **Ограничения / валидация**: Должно быть в пределах `0..=32`.
   - **Описание**: Дополнительные резервные модули записи для групп DC только с одной конечной точкой.
@@ -725,7 +742,7 @@
     [general]
     me_single_endpoint_shadow_writers = 2
     ```
-<a id="cfg-general-me_single_endpoint_outage_mode_enabled"></a>
+## "cfg-general-me_single_endpoint_outage_mode_enabled"
 - `me_single_endpoint_outage_mode_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает агрессивный режим восстановления после сбоя для групп DC только с одной конечной точкой.
@@ -735,7 +752,7 @@
     [general]
     me_single_endpoint_outage_mode_enabled = true
     ```
-<a id="cfg-general-me_single_endpoint_outage_disable_quarantine"></a>
+## "cfg-general-me_single_endpoint_outage_disable_quarantine"
 - `me_single_endpoint_outage_disable_quarantine`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Игнорирует карантин конечной точки в режиме отключения одной конечной точки.
@@ -745,7 +762,7 @@
     [general]
     me_single_endpoint_outage_disable_quarantine = true
     ```
-<a id="cfg-general-me_single_endpoint_outage_backoff_min_ms"></a>
+## "cfg-general-me_single_endpoint_outage_backoff_min_ms"
 - `me_single_endpoint_outage_backoff_min_ms`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды) и `<= me_single_endpoint_outage_backoff_max_ms`.
   - **Описание**: Минимальная задержка повторного подключения в режиме отключения одной конечной точки.
@@ -755,7 +772,7 @@
     [general]
     me_single_endpoint_outage_backoff_min_ms = 250
     ```
-<a id="cfg-general-me_single_endpoint_outage_backoff_max_ms"></a>
+## "cfg-general-me_single_endpoint_outage_backoff_max_ms"
 - `me_single_endpoint_outage_backoff_max_ms`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды) и `>= me_single_endpoint_outage_backoff_min_ms`.
   - **Описание**: Максимальная задержка повторного подключения в режиме отключения одной конечной точки.
@@ -765,7 +782,7 @@
     [general]
     me_single_endpoint_outage_backoff_max_ms = 3000
     ```
-<a id="cfg-general-me_single_endpoint_shadow_rotate_every_secs"></a>
+## "cfg-general-me_single_endpoint_shadow_rotate_every_secs"
 - `me_single_endpoint_shadow_rotate_every_secs`
   - **Ограничения / валидация**: `u64` (секунды). `0` отключает периодическое вращение тени.
   - **Описание**: Периодический интервал ротации теневого записывающего устройства для групп DC с одной конечной точкой.
@@ -775,7 +792,7 @@
     [general]
     me_single_endpoint_shadow_rotate_every_secs = 900
     ```
-<a id="cfg-general-me_floor_mode"></a>
+## "cfg-general-me_floor_mode"
 - `me_floor_mode`
   - **Ограничения / валидация**: «статический» или «адаптивный».
   - **Описание**: Режим политики пола для целей записи ME.
@@ -785,7 +802,7 @@
     [general]
     me_floor_mode = "adaptive"
     ```
-<a id="cfg-general-me_adaptive_floor_idle_secs"></a>
+## "cfg-general-me_adaptive_floor_idle_secs"
 - `me_adaptive_floor_idle_secs`
   - **Ограничения / валидация**: `u64` (секунды).
   - **Описание**: Время простоя перед адаптивным ограничением может уменьшить целевую задачу записи с одной конечной точкой.
@@ -795,7 +812,7 @@
     [general]
     me_adaptive_floor_idle_secs = 90
     ```
-<a id="cfg-general-me_adaptive_floor_min_writers_single_endpoint"></a>
+## "cfg-general-me_adaptive_floor_min_writers_single_endpoint"
 - `me_adaptive_floor_min_writers_single_endpoint`
   - **Ограничения / валидация**: Должно быть в пределах `1..=32`.
   - **Описание**: Минимальная цель записи для групп DC с одной конечной точкой в ​​адаптивном режиме пола.
@@ -805,7 +822,7 @@
     [general]
     me_adaptive_floor_min_writers_single_endpoint = 1
     ```
-<a id="cfg-general-me_adaptive_floor_min_writers_multi_endpoint"></a>
+## "cfg-general-me_adaptive_floor_min_writers_multi_endpoint"
 - `me_adaptive_floor_min_writers_multi_endpoint`
   - **Ограничения / валидация**: Должно быть в пределах `1..=32`.
   - **Описание**: Минимальная цель записи для групп DC с несколькими конечными точками в адаптивном режиме пола.
@@ -815,7 +832,7 @@
     [general]
     me_adaptive_floor_min_writers_multi_endpoint = 1
     ```
-<a id="cfg-general-me_adaptive_floor_recover_grace_secs"></a>
+## "cfg-general-me_adaptive_floor_recover_grace_secs"
 - `me_adaptive_floor_recover_grace_secs`
   - **Ограничения / валидация**: `u64` (секунды).
   - **Описание**: Льготный период для сохранения статического минимума после активности в адаптивном режиме.
@@ -825,7 +842,7 @@
     [general]
     me_adaptive_floor_recover_grace_secs = 180
     ```
-<a id="cfg-general-me_adaptive_floor_writers_per_core_total"></a>
+## "cfg-general-me_adaptive_floor_writers_per_core_total"
 - `me_adaptive_floor_writers_per_core_total`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Глобальный бюджет записи ME на логическое ядро ​​ЦП в адаптивном режиме.
@@ -835,7 +852,7 @@
     [general]
     me_adaptive_floor_writers_per_core_total = 48
     ```
-<a id="cfg-general-me_adaptive_floor_cpu_cores_override"></a>
+## "cfg-general-me_adaptive_floor_cpu_cores_override"
 - `me_adaptive_floor_cpu_cores_override`
   - **Ограничения / валидация**: `u16`. `0` использует автоматическое обнаружение во время выполнения.
   - **Описание**: Переопределить количество логических ядер ЦП, используемое для адаптивных вычислений минимального уровня.
@@ -845,7 +862,7 @@
     [general]
     me_adaptive_floor_cpu_cores_override = 0
     ```
-<a id="cfg-general-me_adaptive_floor_max_extra_writers_single_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_extra_writers_single_per_core"
 - `me_adaptive_floor_max_extra_writers_single_per_core`
   - **Ограничения / валидация**: `u16`.
   - **Описание**: Максимальное количество дополнительных устройств записи на ядро ​​выше базового требуемого уровня для групп DC с одной конечной точкой.
@@ -855,7 +872,7 @@
     [general]
     me_adaptive_floor_max_extra_writers_single_per_core = 1
     ```
-<a id="cfg-general-me_adaptive_floor_max_extra_writers_multi_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_extra_writers_multi_per_core"
 - `me_adaptive_floor_max_extra_writers_multi_per_core`
   - **Ограничения / валидация**: `u16`.
   - **Описание**: Максимальное количество дополнительных устройств записи на ядро ​​выше базового требуемого уровня для групп DC с несколькими конечными точками.
@@ -865,7 +882,7 @@
     [general]
     me_adaptive_floor_max_extra_writers_multi_per_core = 2
     ```
-<a id="cfg-general-me_adaptive_floor_max_active_writers_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_active_writers_per_core"
 - `me_adaptive_floor_max_active_writers_per_core`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Жесткое ограничение для активных устройств записи ME на логическое ядро ​​ЦП.
@@ -875,7 +892,7 @@
     [general]
     me_adaptive_floor_max_active_writers_per_core = 64
     ```
-<a id="cfg-general-me_adaptive_floor_max_warm_writers_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_warm_writers_per_core"
 - `me_adaptive_floor_max_warm_writers_per_core`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Жесткое ограничение для теплых авторов ME на логическое ядро ​​ЦП.
@@ -885,7 +902,7 @@
     [general]
     me_adaptive_floor_max_warm_writers_per_core = 64
     ```
-<a id="cfg-general-me_adaptive_floor_max_active_writers_global"></a>
+## "cfg-general-me_adaptive_floor_max_active_writers_global"
 - `me_adaptive_floor_max_active_writers_global`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Жесткий глобальный лимит для активных авторов ME.
@@ -895,7 +912,7 @@
     [general]
     me_adaptive_floor_max_active_writers_global = 256
     ```
-<a id="cfg-general-me_adaptive_floor_max_warm_writers_global"></a>
+## "cfg-general-me_adaptive_floor_max_warm_writers_global"
 - `me_adaptive_floor_max_warm_writers_global`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Жесткий глобальный лимит для теплых писателей ME.
@@ -905,7 +922,7 @@
     [general]
     me_adaptive_floor_max_warm_writers_global = 256
     ```
-<a id="cfg-general-upstream_connect_retry_attempts"></a>
+## "cfg-general-upstream_connect_retry_attempts"
 - `upstream_connect_retry_attempts`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Попытки подключения для выбранного восходящего потока перед возвратом ошибки/резервного варианта.
@@ -915,7 +932,7 @@
     [general]
     upstream_connect_retry_attempts = 2
     ```
-<a id="cfg-general-upstream_connect_retry_backoff_ms"></a>
+## "cfg-general-upstream_connect_retry_backoff_ms"
 - `upstream_connect_retry_backoff_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды). `0` отключает задержку отсрочки (повторные попытки становятся немедленными).
   - **Описание**: Задержка в миллисекундах между попытками восходящего соединения.
@@ -925,7 +942,7 @@
     [general]
     upstream_connect_retry_backoff_ms = 100
     ```
-<a id="cfg-general-upstream_connect_budget_ms"></a>
+## "cfg-general-upstream_connect_budget_ms"
 - `upstream_connect_budget_ms`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
   - **Описание**: Общий бюджет настенных часов в миллисекундах для одного запроса восходящего соединения при повторных попытках.
@@ -935,7 +952,7 @@
     [general]
     upstream_connect_budget_ms = 3000
     ```
-<a id="cfg-general-upstream_unhealthy_fail_threshold"></a>
+## "cfg-general-upstream_unhealthy_fail_threshold"
 - `upstream_unhealthy_fail_threshold`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Последовательные неудачные запросы до того, как восходящий поток будет помечен как неработоспособный.
@@ -945,7 +962,7 @@
     [general]
     upstream_unhealthy_fail_threshold = 5
     ```
-<a id="cfg-general-upstream_connect_failfast_hard_errors"></a>
+## "cfg-general-upstream_connect_failfast_hard_errors"
 - `upstream_connect_failfast_hard_errors`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Если установлено значение true, дополнительные попытки пропускаются при серьезных непереходных ошибках восходящего соединения.
@@ -955,7 +972,7 @@
     [general]
     upstream_connect_failfast_hard_errors = false
     ```
-<a id="cfg-general-stun_iface_mismatch_ignore"></a>
+## "cfg-general-stun_iface_mismatch_ignore"
 - `stun_iface_mismatch_ignore`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Флаг совместимости зарезервирован для использования в будущем. В настоящее время этот ключ анализируется, но не используется средой выполнения.
@@ -965,7 +982,7 @@
     [general]
     stun_iface_mismatch_ignore = false
     ```
-<a id="cfg-general-unknown_dc_log_path"></a>
+## "cfg-general-unknown_dc_log_path"
 - `unknown_dc_log_path`
   - **Ограничения / валидация**: `Строка` (необязательно). Должен быть безопасный путь (никаких компонентов `..`, родительский каталог должен существовать); небезопасные пути отклоняются во время выполнения.
   - **Описание**: Путь к файлу журнала для неизвестных (нестандартных) запросов DC, когда `unknown_dc_file_log_enabled = true`. Опустите этот ключ, чтобы отключить ведение журнала файлов.
@@ -975,7 +992,7 @@
     [general]
     unknown_dc_log_path = "unknown-dc.txt"
     ```
-<a id="cfg-general-unknown_dc_file_log_enabled"></a>
+## "cfg-general-unknown_dc_file_log_enabled"
 - `unknown_dc_file_log_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает ведение журнала файла неизвестного DC (записывает строки `dc_idx=<N>`). Требуется установить `unknown_dc_log_path` и на платформах, отличных от Unix, может не поддерживаться. Ведение журналов дедуплицировано и ограничено (записываются только первые ~ 1024 различных неизвестных индекса DC).
@@ -985,7 +1002,7 @@
     [general]
     unknown_dc_file_log_enabled = false
     ```
-<a id="cfg-general-log_level"></a>
+## "cfg-general-log_level"
 - `log_level`
   - **Ограничения / валидация**: «отладка», «многословный», «нормальный» или «тихий».
   - **Описание**: Уровень детализации журналирования во время выполнения (используется, если RUST_LOG не установлен). Если в среде установлен RUST_LOG, он имеет приоритет над этим параметром.
@@ -995,7 +1012,7 @@
     [general]
     log_level = "normal"
     ```
-<a id="cfg-general-disable_colors"></a>
+## "cfg-general-disable_colors"
 - `disable_colors`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Отключает цвета ANSI в журналах (полезно для файлов/systemd). Это влияет только на форматирование журнала и не меняет уровень/фильтрацию журнала.
@@ -1005,7 +1022,7 @@
     [general]
     disable_colors = false
     ```
-<a id="cfg-general-me_socks_kdf_policy"></a>
+## "cfg-general-me_socks_kdf_policy"
 - `me_socks_kdf_policy`
   - **Ограничения / валидация**: «строгий» или «совместимый».
   - **Описание**: Резервная политика KDF, связанная с SOCKS, для рукопожатия среднего уровня.
@@ -1015,7 +1032,7 @@
     [general]
     me_socks_kdf_policy = "strict"
     ```
-<a id="cfg-general-me_route_backpressure_base_timeout_ms"></a>
+## "cfg-general-me_route_backpressure_base_timeout_ms"
 - `me_route_backpressure_base_timeout_ms`
   - **Ограничения / валидация**: Должно быть в пределах `1..=5000` (миллисекунд).
   - **Описание**: Тайм-аут базового противодавления в миллисекундах для отправки по каналу маршрута ME.
@@ -1025,7 +1042,7 @@
     [general]
     me_route_backpressure_base_timeout_ms = 25
     ```
-<a id="cfg-general-me_route_backpressure_high_timeout_ms"></a>
+## "cfg-general-me_route_backpressure_high_timeout_ms"
 - `me_route_backpressure_high_timeout_ms`
   - **Ограничения / валидация**: Должно быть в пределах `1..=5000` (миллисекунды) и `>= me_route_backpressure_base_timeout_ms`.
   - **Описание**: Тайм-аут высокого противодавления в миллисекундах, когда занятость очереди превышает водяной знак.
@@ -1035,7 +1052,7 @@
     [general]
     me_route_backpressure_high_timeout_ms = 120
     ```
-<a id="cfg-general-me_route_backpressure_high_watermark_pct"></a>
+## "cfg-general-me_route_backpressure_high_watermark_pct"
 - `me_route_backpressure_high_watermark_pct`
   - **Ограничения / валидация**: Должно быть в пределах `1..=100` (процентов).
   - **Описание**: Пороговое значение процента занятости очереди для переключения на тайм-аут высокого противодавления.
@@ -1045,7 +1062,7 @@
     [general]
     me_route_backpressure_high_watermark_pct = 80
     ```
-<a id="cfg-general-me_health_interval_ms_unhealthy"></a>
+## "cfg-general-me_health_interval_ms_unhealthy"
 - `me_health_interval_ms_unhealthy`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
   - **Описание**: Интервал мониторинга работоспособности, когда покрытие записи ME ухудшается.
@@ -1055,7 +1072,7 @@
     [general]
     me_health_interval_ms_unhealthy = 1000
     ```
-<a id="cfg-general-me_health_interval_ms_healthy"></a>
+## "cfg-general-me_health_interval_ms_healthy"
 - `me_health_interval_ms_healthy`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
   - **Описание**: Интервал мониторинга работоспособности, пока покрытие записи ME стабильно/работоспособно.
@@ -1065,7 +1082,7 @@
     [general]
     me_health_interval_ms_healthy = 3000
     ```
-<a id="cfg-general-me_admission_poll_ms"></a>
+## "cfg-general-me_admission_poll_ms"
 - `me_admission_poll_ms`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
   - **Описание**: Интервал опроса для проверок состояния условного приема.
@@ -1075,7 +1092,7 @@
     [general]
     me_admission_poll_ms = 1000
     ```
-<a id="cfg-general-me_warn_rate_limit_ms"></a>
+## "cfg-general-me_warn_rate_limit_ms"
 - `me_warn_rate_limit_ms`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
   - **Описание**: Время восстановления повторяющихся журналов предупреждений ME.
@@ -1085,7 +1102,7 @@
     [general]
     me_warn_rate_limit_ms = 5000
     ```
-<a id="cfg-general-me_route_no_writer_mode"></a>
+## "cfg-general-me_route_no_writer_mode"
 - `me_route_no_writer_mode`
   - **Ограничения / валидация**: `"async_recovery_failfast"`, `"inline_recovery_legacy"` или `"hybrid_async_persistent"`.
   - **Описание**: Поведение маршрута ME, когда ни один писатель не доступен немедленно.
@@ -1095,7 +1112,7 @@
     [general]
     me_route_no_writer_mode = "hybrid_async_persistent"
     ```
-<a id="cfg-general-me_route_no_writer_wait_ms"></a>
+## "cfg-general-me_route_no_writer_wait_ms"
 - `me_route_no_writer_wait_ms`
   - **Ограничения / валидация**: Должно быть в пределах `10..=5000` (миллисекунд).
   - **Описание**: Максимальное время ожидания, используемое в быстром режиме асинхронного восстановления перед откатом.
@@ -1105,7 +1122,7 @@
     [general]
     me_route_no_writer_wait_ms = 250
     ```
-<a id="cfg-general-me_route_hybrid_max_wait_ms"></a>
+## "cfg-general-me_route_hybrid_max_wait_ms"
 - `me_route_hybrid_max_wait_ms`
   - **Ограничения / валидация**: Должно быть в пределах `50..=60000` (миллисекунд).
   - **Описание**: Максимальное совокупное время ожидания в гибридном режиме без записи перед отказоустойчивым переходом.
@@ -1115,7 +1132,7 @@
     [general]
     me_route_hybrid_max_wait_ms = 3000
     ```
-<a id="cfg-general-me_route_blocking_send_timeout_ms"></a>
+## "cfg-general-me_route_blocking_send_timeout_ms"
 - `me_route_blocking_send_timeout_ms`
   - **Ограничения / валидация**: Должно быть в пределах `0..=5000` (миллисекунд). `0` сохраняет устаревшее неограниченное поведение ожидания.
   - **Описание**: Максимальное ожидание блокировки резервной отправки маршрутного канала.
@@ -1125,7 +1142,7 @@
     [general]
     me_route_blocking_send_timeout_ms = 250
     ```
-<a id="cfg-general-me_route_inline_recovery_attempts"></a>
+## "cfg-general-me_route_inline_recovery_attempts"
 - `me_route_inline_recovery_attempts`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Количество попыток оперативного восстановления в устаревшем режиме.
@@ -1135,7 +1152,7 @@
     [general]
     me_route_inline_recovery_attempts = 3
     ```
-<a id="cfg-general-me_route_inline_recovery_wait_ms"></a>
+## "cfg-general-me_route_inline_recovery_wait_ms"
 - `me_route_inline_recovery_wait_ms`
   - **Ограничения / валидация**: Должно быть в пределах `10..=30000` (миллисекунд).
   - **Описание**: Максимальное время ожидания встроенного восстановления в устаревшем режиме.
@@ -1145,7 +1162,7 @@
     [general]
     me_route_inline_recovery_wait_ms = 3000
     ```
-<a id="cfg-general-fast_mode_min_tls_record"></a>
+## "cfg-general-fast_mode_min_tls_record"
 - `fast_mode_min_tls_record`
   - **Ограничения / валидация**: `использовать` (байты). `0` отключает ограничение.
   - **Описание**: Минимальный размер записи TLS при включенном объединении в быстром режиме.
@@ -1155,7 +1172,7 @@
     [general]
     fast_mode_min_tls_record = 0
     ```
-<a id="cfg-general-update_every"></a>
+## "cfg-general-update_every"
 - `update_every`
   - **Ограничения / валидация**: `u64` (секунды). Если установлено, должно быть `> 0`. Если этот ключ не установлен явно, можно использовать устаревшие `proxy_secret_auto_reload_secs` и `proxy_config_auto_reload_secs` (их эффективный минимум должен быть `> 0`).
   - **Описание**: Единый интервал обновления для задач обновления ME (getProxyConfig, getProxyConfigV6, getProxySecret). Если этот параметр установлен, он переопределяет устаревшие интервалы перезагрузки прокси-сервера.
@@ -1165,7 +1182,7 @@
     [general]
     update_every = 300
     ```
-<a id="cfg-general-me_reinit_every_secs"></a>
+## "cfg-general-me_reinit_every_secs"
 - `me_reinit_every_secs`
   - **Ограничения / валидация**: Должно быть `> 0` (секунды).
   - **Описание**: Периодический интервал для цикла повторной инициализации ME с нулевым временем простоя.
@@ -1175,7 +1192,7 @@
     [general]
     me_reinit_every_secs = 900
     ```
-<a id="cfg-general-me_hardswap_warmup_delay_min_ms"></a>
+## "cfg-general-me_hardswap_warmup_delay_min_ms"
 - `me_hardswap_warmup_delay_min_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды). Должно быть `<= me_hardswap_warmup_delay_max_ms`.
   - **Описание**: Нижняя граница интервала прогрева жесткой замены.
@@ -1185,7 +1202,7 @@
     [general]
     me_hardswap_warmup_delay_min_ms = 1000
     ```
-<a id="cfg-general-me_hardswap_warmup_delay_max_ms"></a>
+## "cfg-general-me_hardswap_warmup_delay_max_ms"
 - `me_hardswap_warmup_delay_max_ms`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
   - **Описание**: Верхняя граница интервала прогрева жесткой замены.
@@ -1195,7 +1212,7 @@
     [general]
     me_hardswap_warmup_delay_max_ms = 2000
     ```
-<a id="cfg-general-me_hardswap_warmup_extra_passes"></a>
+## "cfg-general-me_hardswap_warmup_extra_passes"
 - `me_hardswap_warmup_extra_passes`
   - **Ограничения / валидация**: Должно быть в пределах `[0, 10]`.
   - **Описание**: Дополнительные прогрева проходят после базового прохода за один цикл жесткой замены.
@@ -1206,7 +1223,7 @@
     # default: 3 (allowed range: 0..=10)
     me_hardswap_warmup_extra_passes = 3
     ```
-<a id="cfg-general-me_hardswap_warmup_pass_backoff_base_ms"></a>
+## "cfg-general-me_hardswap_warmup_pass_backoff_base_ms"
 - `me_hardswap_warmup_pass_backoff_base_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды). Должно быть `> 0`.
   - **Описание**: Базовая задержка между дополнительными проходами по замене жесткого диска, когда пол еще не завершен.
@@ -1217,7 +1234,7 @@
     # default: 500
     me_hardswap_warmup_pass_backoff_base_ms = 500
     ```
-<a id="cfg-general-me_config_stable_snapshots"></a>
+## "cfg-general-me_config_stable_snapshots"
 - `me_config_stable_snapshots`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Количество идентичных снимков конфигурации ME, необходимое для применения.
@@ -1228,7 +1245,7 @@
     # require 3 identical snapshots before applying ME endpoint map updates
     me_config_stable_snapshots = 3
     ```
-<a id="cfg-general-me_config_apply_cooldown_secs"></a>
+## "cfg-general-me_config_apply_cooldown_secs"
 - `me_config_apply_cooldown_secs`
   - **Ограничения / валидация**: `u64`.
   - **Описание**: Время восстановления между примененными обновлениями карты конечных точек ME. `0` отключает время восстановления.
@@ -1239,7 +1256,7 @@
     # allow applying stable snapshots immediately (no cooldown)
     me_config_apply_cooldown_secs = 0
     ```
-<a id="cfg-general-me_snapshot_require_http_2xx"></a>
+## "cfg-general-me_snapshot_require_http_2xx"
 - `me_snapshot_require_http_2xx`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Для применения снимков конфигурации ME требуется 2xx HTTP-ответа. Если установлено значение «false», ответы, отличные от 2xx, все равно могут быть проанализированы/учтены программой обновления.
@@ -1250,7 +1267,7 @@
     # allow applying snapshots even when the HTTP status is non-2xx
     me_snapshot_require_http_2xx = false
     ```
-<a id="cfg-general-me_snapshot_reject_empty_map"></a>
+## "cfg-general-me_snapshot_reject_empty_map"
 - `me_snapshot_reject_empty_map`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Отклоняет пустые снимки конфигурации ME (без конечных точек). Если установлено значение «false», может быть применен пустой снимок (с учетом других ворот), что может временно уменьшить/очистить карту ME.
@@ -1261,7 +1278,7 @@
     # allow applying empty snapshots (use with care)
     me_snapshot_reject_empty_map = false
     ```
-<a id="cfg-general-me_snapshot_min_proxy_for_lines"></a>
+## "cfg-general-me_snapshot_min_proxy_for_lines"
 - `me_snapshot_min_proxy_for_lines`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Минимальное количество проанализированных строк `proxy_for`, необходимое для принятия снимка.
@@ -1272,7 +1289,7 @@
     # require at least 10 proxy_for rows before accepting a snapshot
     me_snapshot_min_proxy_for_lines = 10
     ```
-<a id="cfg-general-proxy_secret_stable_snapshots"></a>
+## "cfg-general-proxy_secret_stable_snapshots"
 - `proxy_secret_stable_snapshots`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Количество идентичных снимков с секретом прокси-сервера, необходимых перед ротацией.
@@ -1283,7 +1300,7 @@
     # require 2 identical getProxySecret snapshots before rotating at runtime
     proxy_secret_stable_snapshots = 2
     ```
-<a id="cfg-general-proxy_secret_rotate_runtime"></a>
+## "cfg-general-proxy_secret_rotate_runtime"
 - `proxy_secret_rotate_runtime`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает ротацию секретов прокси-сервера во время выполнения из снимков средства обновления.
@@ -1294,7 +1311,7 @@
     # disable runtime proxy-secret rotation (startup still uses proxy_secret_path/proxy_secret_len_max)
     proxy_secret_rotate_runtime = false
     ```
-<a id="cfg-general-me_secret_atomic_snapshot"></a>
+## "cfg-general-me_secret_atomic_snapshot"
 - `me_secret_atomic_snapshot`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Сохраняет селекторные и секретные байты из одного и того же снимка атомарно. Если `general.use_middle_proxy = true`, это автоматически включается во время загрузки конфигурации, чтобы обеспечить согласованность материала ME KDF.
@@ -1305,7 +1322,7 @@
     # NOTE: when use_middle_proxy=true, Telemt will auto-enable this during load
     me_secret_atomic_snapshot = false
     ```
-<a id="cfg-general-proxy_secret_len_max"></a>
+## "cfg-general-proxy_secret_len_max"
 - `proxy_secret_len_max`
   - **Ограничения / валидация**: Должно быть в пределах `[32, 4096]`.
   - **Описание**: Верхний предел длины (в байтах) принимаемого прокси-секрета во время запуска и обновления среды выполнения.
@@ -1316,7 +1333,7 @@
     # default: 256 (bytes)
     proxy_secret_len_max = 256
     ```
-<a id="cfg-general-me_pool_drain_ttl_secs"></a>
+## "cfg-general-me_pool_drain_ttl_secs"
 - `me_pool_drain_ttl_secs`
   - **Ограничения / валидация**: `u64` (секунды). `0` отключает окно дренажного TTL (и подавляет предупреждения дренажного TTL для непустых записывающих устройств дренажа).
   - **Описание**: Временной интервал Drain-TTL для устаревших модулей записи ME после изменения карты конечных точек. Во время TTL устаревшие средства записи можно использовать только в качестве резерва для новых привязок (в зависимости от политики привязки).
@@ -1327,7 +1344,7 @@
     # disable drain TTL (draining writers won't emit "past drain TTL" warnings)
     me_pool_drain_ttl_secs = 0
     ```
-<a id="cfg-general-me_instadrain"></a>
+## "cfg-general-me_instadrain"
 - `me_instadrain`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Принудительно удаляет устаревшие записи записи при следующем такте очистки, минуя ожидание TTL/крайнего срока.
@@ -1338,7 +1355,7 @@
     # default: false
     me_instadrain = false
     ```
-<a id="cfg-general-me_pool_drain_threshold"></a>
+## "cfg-general-me_pool_drain_threshold"
 - `me_pool_drain_threshold`
   - **Ограничения / валидация**: `u64`. Установите значение «0», чтобы отключить очистку на основе пороговых значений.
   - **Описание**: Максимальное количество устаревших источников записи, прежде чем самые старые из них будут принудительно закрыты в пакетном режиме.
@@ -1349,7 +1366,7 @@
     # default: 32
     me_pool_drain_threshold = 32
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_enabled"></a>
+## "cfg-general-me_pool_drain_soft_evict_enabled"
 - `me_pool_drain_soft_evict_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает постепенное мягкое удаление устаревших средств записи во время очистки/повторной инициализации вместо немедленного жесткого закрытия.
@@ -1360,7 +1377,7 @@
     # default: true
     me_pool_drain_soft_evict_enabled = true
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_grace_secs"></a>
+## "cfg-general-me_pool_drain_soft_evict_grace_secs"
 - `me_pool_drain_soft_evict_grace_secs`
   - **Ограничения / валидация**: `u64` (секунды). Должно быть в пределах `[0, 3600]`.
   - **Описание**: Дополнительная льгота (после слива TTL) перед началом этапа мягкого вытеснения.
@@ -1371,7 +1388,7 @@
     # default: 10
     me_pool_drain_soft_evict_grace_secs = 10
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_per_writer"></a>
+## "cfg-general-me_pool_drain_soft_evict_per_writer"
 - `me_pool_drain_soft_evict_per_writer`
   - **Ограничения / валидация**: `1..=16`.
   - **Описание**: Максимальное количество устаревших маршрутов, мягко вытесняемых на одного автора за один проход выселения.
@@ -1382,7 +1399,7 @@
     # default: 2
     me_pool_drain_soft_evict_per_writer = 2
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_budget_per_core"></a>
+## "cfg-general-me_pool_drain_soft_evict_budget_per_core"
 - `me_pool_drain_soft_evict_budget_per_core`
   - **Ограничения / валидация**: `1..=64`.
   - **Описание**: Бюджет на ядро ​​ограничивает совокупную работу по мягкому вытеснению за проход.
@@ -1393,7 +1410,7 @@
     # default: 16
     me_pool_drain_soft_evict_budget_per_core = 16
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_cooldown_ms"></a>
+## "cfg-general-me_pool_drain_soft_evict_cooldown_ms"
 - `me_pool_drain_soft_evict_cooldown_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды). Должно быть `> 0`.
   - **Описание**: Время восстановления между повторяющимися мягкими выселениями одного и того же автора.
@@ -1404,7 +1421,7 @@
     # default: 1000
     me_pool_drain_soft_evict_cooldown_ms = 1000
     ```
-<a id="cfg-general-me_bind_stale_mode"></a>
+## "cfg-general-me_bind_stale_mode"
 - `me_bind_stale_mode`
   - **Ограничения / валидация**: «никогда», «ttl» или «всегда».
   - **Описание**: Политика в отношении новых ограничений для устаревших истощающих авторов.
@@ -1415,7 +1432,7 @@
     # allow stale binds only for a limited time window
     me_bind_stale_mode = "ttl"
     ```
-<a id="cfg-general-me_bind_stale_ttl_secs"></a>
+## "cfg-general-me_bind_stale_ttl_secs"
 - `me_bind_stale_ttl_secs`
   - **Ограничения / валидация**: `u64`.
   - **Описание**: TTL для допуска устаревшей привязки, когда устаревший режим — «ttl».
@@ -1426,7 +1443,7 @@
     me_bind_stale_mode = "ttl"
     me_bind_stale_ttl_secs = 90
     ```
-<a id="cfg-general-me_pool_min_fresh_ratio"></a>
+## "cfg-general-me_pool_min_fresh_ratio"
 - `me_pool_min_fresh_ratio`
   - **Ограничения / валидация**: Должно быть в пределах `[0.0, 1.0]`.
   - **Описание**: Минимальный коэффициент покрытия свежих желаемых DC, прежде чем устаревшие авторы будут истощены.
@@ -1437,7 +1454,7 @@
     # require >=90% desired-DC coverage before draining stale writers
     me_pool_min_fresh_ratio = 0.9
     ```
-<a id="cfg-general-me_reinit_drain_timeout_secs"></a>
+## "cfg-general-me_reinit_drain_timeout_secs"
 - `me_reinit_drain_timeout_secs`
   - **Ограничения / валидация**: `u64`. `0` использует тайм-аут принудительного закрытия для обеспечения безопасности во время выполнения. Если `> 0` и `< me_pool_drain_ttl_secs`, среда выполнения увеличивает значение TTL.
   - **Описание**: Тайм-аут принудительного закрытия для слива устаревших авторов. Если установлено значение «0», эффективный тайм-аут представляет собой резервный режим безопасности во время выполнения (300 секунд).
@@ -1448,7 +1465,7 @@
     # use runtime safety fallback force-close timeout (300s)
     me_reinit_drain_timeout_secs = 0
     ```
-<a id="cfg-general-proxy_secret_auto_reload_secs"></a>
+## "cfg-general-proxy_secret_auto_reload_secs"
 - `proxy_secret_auto_reload_secs`
   - **Ограничения / валидация**: Устарело. Используйте `general.update_every`. Если `general.update_every` не задан явно, эффективный устаревший интервал обновления равен `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` и должен быть `> 0`.
   - **Описание**: Устаревший устаревший интервал обновления секрета прокси-сервера. Используется только в том случае, если `general.update_every` не установлен.
@@ -1461,7 +1478,7 @@
     proxy_config_auto_reload_secs = 120
     # effective updater interval = min(600, 120) = 120 seconds
     ```
-<a id="cfg-general-proxy_config_auto_reload_secs"></a>
+## "cfg-general-proxy_config_auto_reload_secs"
 - `proxy_config_auto_reload_secs`
   - **Ограничения / валидация**: Устарело. Используйте `general.update_every`. Если `general.update_every` не задан явно, эффективный устаревший интервал обновления равен `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` и должен быть `> 0`.
   - **Описание**: Устаревший интервал обновления устаревшей конфигурации ME. Используется только в том случае, если `general.update_every` не установлен.
@@ -1474,7 +1491,7 @@
     proxy_config_auto_reload_secs = 120
     # effective updater interval = min(600, 120) = 120 seconds
     ```
-<a id="cfg-general-me_reinit_singleflight"></a>
+## "cfg-general-me_reinit_singleflight"
 - `me_reinit_singleflight`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Сериализует циклы повторной инициализации ME по источникам триггера.
@@ -1484,7 +1501,7 @@
     [general]
     me_reinit_singleflight = true
     ```
-<a id="cfg-general-me_reinit_trigger_channel"></a>
+## "cfg-general-me_reinit_trigger_channel"
 - `me_reinit_trigger_channel`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Емкость очереди триггеров для планировщика повторной инициализации.
@@ -1494,7 +1511,7 @@
     [general]
     me_reinit_trigger_channel = 64
     ```
-<a id="cfg-general-me_reinit_coalesce_window_ms"></a>
+## "cfg-general-me_reinit_coalesce_window_ms"
 - `me_reinit_coalesce_window_ms`
   - **Ограничения / валидация**: `u64`.
   - **Описание**: Запустить окно объединения триггеров перед началом повторной инициализации (мс).
@@ -1504,7 +1521,7 @@
     [general]
     me_reinit_coalesce_window_ms = 200
     ```
-<a id="cfg-general-me_deterministic_writer_sort"></a>
+## "cfg-general-me_deterministic_writer_sort"
 - `me_deterministic_writer_sort`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает детерминированную сортировку кандидатов для пути привязки записи.
@@ -1514,7 +1531,7 @@
     [general]
     me_deterministic_writer_sort = true
     ```
-<a id="cfg-general-me_writer_pick_mode"></a>
+## "cfg-general-me_writer_pick_mode"
 - `me_writer_pick_mode`
   - **Ограничения / валидация**: `"sorted_rr"` или `"p2c"`.
   - **Описание**: Режим выбора записывающего устройства для пути привязки маршрута.
@@ -1524,7 +1541,7 @@
     [general]
     me_writer_pick_mode = "p2c"
     ```
-<a id="cfg-general-me_writer_pick_sample_size"></a>
+## "cfg-general-me_writer_pick_sample_size"
 - `me_writer_pick_sample_size`
   - **Ограничения / валидация**: `2..=4`.
   - **Описание**: Количество кандидатов, отобранных сборщиком в режиме p2c.
@@ -1535,7 +1552,7 @@
     me_writer_pick_mode = "p2c"
     me_writer_pick_sample_size = 3
     ```
-<a id="cfg-general-ntp_check"></a>
+## "cfg-general-ntp_check"
 - `ntp_check`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Зарезервировано для будущего использования. В настоящее время этот ключ анализируется, но не используется средой выполнения.
@@ -1545,7 +1562,7 @@
     [general]
     ntp_check = true
     ```
-<a id="cfg-general-ntp_servers"></a>
+## "cfg-general-ntp_servers"
 - `ntp_servers`
   - **Ограничения / валидация**: `Строка[]`.
   - **Описание**: Зарезервировано для будущего использования. В настоящее время этот ключ анализируется, но не используется средой выполнения.
@@ -1555,7 +1572,7 @@
     [general]
     ntp_servers = ["pool.ntp.org"]
     ```
-<a id="cfg-general-auto_degradation_enabled"></a>
+## "cfg-general-auto_degradation_enabled"
 - `auto_degradation_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Зарезервировано для будущего использования. В настоящее время этот ключ анализируется, но не используется средой выполнения.
@@ -1565,7 +1582,7 @@
     [general]
     auto_degradation_enabled = true
     ```
-<a id="cfg-general-degradation_min_unavailable_dc_groups"></a>
+## "cfg-general-degradation_min_unavailable_dc_groups"
 - `degradation_min_unavailable_dc_groups`
   - **Ограничения / валидация**: `u8`.
   - **Описание**: Зарезервировано для будущего использования. В настоящее время этот ключ анализируется, но не используется средой выполнения.
@@ -1577,7 +1594,7 @@
     ```
 
 
-## [general.modes]
+# [general.modes]
 
 
 | Ключ | Тип | По умолчанию |
@@ -1586,7 +1603,7 @@
 | [`secure`](#cfg-general-modes-secure) | `bool` | `false` |
 | [`tls`](#cfg-general-modes-tls) | `bool` | `true` |
 
-<a id="cfg-general-modes-classic"></a>
+## "cfg-general-modes-classic"
 - `classic`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает классический режим MTProxy.
@@ -1596,7 +1613,7 @@
     [general.modes]
     classic = true
     ```
-<a id="cfg-general-modes-secure"></a>
+## "cfg-general-modes-secure"
 - `secure`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает безопасный режим.
@@ -1606,7 +1623,7 @@
     [general.modes]
     secure = true
     ```
-<a id="cfg-general-modes-tls"></a>
+## "cfg-general-modes-tls"
 - `tls`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает режим TLS.
@@ -1618,7 +1635,7 @@
     ```
 
 
-## [general.links]
+# [general.links]
 
 
 | Ключ | Тип | По умолчанию |
@@ -1627,7 +1644,7 @@
 | [`public_host`](#cfg-general-links-public_host) | `String` | — |
 | [`public_port`](#cfg-general-links-public_port) | `u16` | — |
 
-<a id="cfg-general-links-show"></a>
+## "cfg-general-links-show"
 - `show`
   - **Ограничения / валидация**: `"*"` или `String[]`. Пустой массив означает «не показывать ничего».
   - **Описание**: Выбирает пользователей, чьи прокси-ссылки `tg://` отображаются при запуске.
@@ -1639,7 +1656,7 @@
     # or:
     # show = ["alice", "bob"]
     ```
-<a id="cfg-general-links-public_host"></a>
+## "cfg-general-links-public_host"
 - `public_host`
   - **Ограничения / валидация**: `Строка` (необязательно).
   - **Описание**: Переопределение общедоступного имени хоста/IP-адреса, используемое для сгенерированных ссылок `tg://` (переопределяет обнаруженный IP-адрес).
@@ -1649,7 +1666,7 @@
     [general.links]
     public_host = "proxy.example.com"
     ```
-<a id="cfg-general-links-public_port"></a>
+## "cfg-general-links-public_port"
 - `public_port`
   - **Ограничения / валидация**: `u16` (необязательно).
   - **Описание**: Переопределение общедоступного порта, используемое для сгенерированных ссылок `tg://` (переопределяет `server.port`).
@@ -1661,7 +1678,7 @@
     ```
 
 
-## [general.telemetry]
+# [general.telemetry]
 
 
 | Ключ | Тип | По умолчанию |
@@ -1670,7 +1687,7 @@
 | [`user_enabled`](#cfg-general-telemetry-user_enabled) | `bool` | `true` |
 | [`me_level`](#cfg-general-telemetry-me_level) | `"silent"`, `"normal"`, or `"debug"` | `"normal"` |
 
-<a id="cfg-general-telemetry-core_enabled"></a>
+## "cfg-general-telemetry-core_enabled"
 - `core_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает основные счетчики телеметрии горячего пути.
@@ -1680,7 +1697,7 @@
     [general.telemetry]
     core_enabled = true
     ```
-<a id="cfg-general-telemetry-user_enabled"></a>
+## "cfg-general-telemetry-user_enabled"
 - `user_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает счетчики телеметрии для каждого пользователя.
@@ -1690,7 +1707,7 @@
     [general.telemetry]
     user_enabled = true
     ```
-<a id="cfg-general-telemetry-me_level"></a>
+## "cfg-general-telemetry-me_level"
 - `me_level`
   - **Ограничения / валидация**: «тихий», «нормальный» или «отладка».
   - **Описание**: Средний уровень детализации телеметрии.
@@ -1702,7 +1719,7 @@
     ```
 
 
-## [network]
+# [network]
 
 
 | Ключ | Тип | По умолчанию |
@@ -1718,7 +1735,7 @@
 | [`cache_public_ip_path`](#cfg-network-cache_public_ip_path) | `String` | `"cache/public_ip.txt"` |
 | [`dns_overrides`](#cfg-network-dns_overrides) | `String[]` | `[]` |
 
-<a id="cfg-network-ipv4"></a>
+## "cfg-network-ipv4"
 - `ipv4`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает сеть IPv4.
@@ -1728,7 +1745,7 @@
     [network]
     ipv4 = true
     ```
-<a id="cfg-network-ipv6"></a>
+## "cfg-network-ipv6"
 - `ipv6`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает/выключает сеть IPv6. Если этот параметр опущен, по умолчанию используется значение «false».
@@ -1742,7 +1759,7 @@
     # or: disable IPv6 explicitly
     # ipv6 = false
     ```
-<a id="cfg-network-prefer"></a>
+## "cfg-network-prefer"
 - `prefer`
   - **Ограничения / валидация**: Должно быть `4` или `6`. Если `prefer = 4`, а `ipv4 = false`, Telemt принудительно использует `prefer = 6`. Если `prefer = 6`, а `ipv6 = false`, Telemt принудительно использует `prefer = 4`.
   - **Описание**: Предпочтительное семейство IP для выбора, если доступны оба семейства.
@@ -1752,7 +1769,7 @@
     [network]
     prefer = 6
     ```
-<a id="cfg-network-multipath"></a>
+## "cfg-network-multipath"
 - `multipath`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает многопутевое поведение, если это поддерживается платформой и средой выполнения.
@@ -1762,7 +1779,7 @@
     [network]
     multipath = true
     ```
-<a id="cfg-network-stun_use"></a>
+## "cfg-network-stun_use"
 - `stun_use`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Глобальный переключатель STUN; если установлено значение «false», проверка STUN отключается и остается только обнаружение без STUN.
@@ -1772,7 +1789,7 @@
     [network]
     stun_use = false
     ```
-<a id="cfg-network-stun_servers"></a>
+## "cfg-network-stun_servers"
 - `stun_servers`
   - **Ограничения / валидация**: `Строка[]`. Значения обрезаются; пустые значения удаляются; список дедуплицируется. Если этот ключ **не** установлен явно, Telemt сохраняет встроенный список STUN по умолчанию.
   - **Описание**: Список серверов STUN для обнаружения общедоступных IP-адресов.
@@ -1785,7 +1802,7 @@
       "stun.stunprotocol.org:3478",
     ]
     ```
-<a id="cfg-network-stun_tcp_fallback"></a>
+## "cfg-network-stun_tcp_fallback"
 - `stun_tcp_fallback`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает резервный TCP для STUN, когда путь UDP заблокирован/недоступен.
@@ -1795,7 +1812,7 @@
     [network]
     stun_tcp_fallback = true
     ```
-<a id="cfg-network-http_ip_detect_urls"></a>
+## "cfg-network-http_ip_detect_urls"
 - `http_ip_detect_urls`
   - **Ограничения / валидация**: `Строка[]`.
   - **Описание**: Конечные точки HTTP, используемые для обнаружения общедоступных IP-адресов (резервный вариант после STUN).
@@ -1805,7 +1822,7 @@
     [network]
     http_ip_detect_urls = ["https://ifconfig.me/ip", "https://api.ipify.org"]
     ```
-<a id="cfg-network-cache_public_ip_path"></a>
+## "cfg-network-cache_public_ip_path"
 - `cache_public_ip_path`
   - **Ограничения / валидация**: `Строка`.
   - **Описание**: Путь к файлу, используемый для кэширования обнаруженного общедоступного IP-адреса.
@@ -1815,7 +1832,7 @@
     [network]
     cache_public_ip_path = "cache/public_ip.txt"
     ```
-<a id="cfg-network-dns_overrides"></a>
+## "cfg-network-dns_overrides"
 - `dns_overrides`
   - **Ограничения / валидация**: `Строка[]`. Каждая запись должна использовать формат «хост:порт:ip».
 - `host`: имя домена (должно быть непустым и не должно содержать `:`)
@@ -1833,7 +1850,7 @@
     ```
 
 
-## [server]
+# [server]
 
 
 | Ключ | Тип | По умолчанию |
@@ -1853,7 +1870,7 @@
 | [`max_connections`](#cfg-server-max_connections) | `u32` | `10000` |
 | [`accept_permit_timeout_ms`](#cfg-server-accept_permit_timeout_ms) | `u64` | `250` |
 
-<a id="cfg-server-port"></a>
+## "cfg-server-port"
 - `port`
   - **Ограничения / валидация**: `u16`.
   - **Описание**: Порт прослушивания основного прокси (TCP).
@@ -1863,7 +1880,7 @@
     [server]
     port = 443
     ```
-<a id="cfg-server-listen_addr_ipv4"></a>
+## "cfg-server-listen_addr_ipv4"
 - `listen_addr_ipv4`
   - **Ограничения / валидация**: `Строка` (необязательно). Если установлено, это должна быть действительная строка адреса IPv4.
   - **Описание**: Адрес привязки IPv4 для прослушивателя TCP (опустите этот ключ, чтобы отключить привязку IPv4).
@@ -1873,7 +1890,7 @@
     [server]
     listen_addr_ipv4 = "0.0.0.0"
     ```
-<a id="cfg-server-listen_addr_ipv6"></a>
+## "cfg-server-listen_addr_ipv6"
 - `listen_addr_ipv6`
   - **Ограничения / валидация**: `Строка` (необязательно). Если установлено, это должна быть действительная строка адреса IPv6.
   - **Описание**: Адрес привязки IPv6 для прослушивателя TCP (опустите этот ключ, чтобы отключить привязку IPv6).
@@ -1883,7 +1900,7 @@
     [server]
     listen_addr_ipv6 = "::"
     ```
-<a id="cfg-server-listen_unix_sock"></a>
+## "cfg-server-listen_unix_sock"
 - `listen_unix_sock`
   - **Ограничения / валидация**: `Строка` (необязательно). Не должно быть пустым, если установлено. Только Юникс.
   - **Описание**: Путь сокета Unix для прослушивателя. Если установлено, `server.listen_tcp` по умолчанию имеет значение `false` (если не указано иное явно).
@@ -1893,7 +1910,7 @@
     [server]
     listen_unix_sock = "/run/telemt.sock"
     ```
-<a id="cfg-server-listen_unix_sock_perm"></a>
+## "cfg-server-listen_unix_sock_perm"
 - `listen_unix_sock_perm`
   - **Ограничения / валидация**: `Строка` (необязательно). Если установлено, это должна быть восьмеричная строка разрешения, например `"0666"` или `"0777"`.
   - **Описание**: Дополнительные разрешения для файлов сокетов Unix, применяемые после привязки (chmod). Если этот параметр опущен, разрешения не изменяются (наследует umask).
@@ -1904,7 +1921,7 @@
     listen_unix_sock = "/run/telemt.sock"
     listen_unix_sock_perm = "0666"
     ```
-<a id="cfg-server-listen_tcp"></a>
+## "cfg-server-listen_tcp"
 - `listen_tcp`
   - **Ограничения / валидация**: `bool` (необязательно). Если этот параметр опущен, Telemt автоматически обнаруживает:
 - `true`, если `listen_unix_sock` не установлен
@@ -1918,7 +1935,7 @@
     listen_unix_sock = "/run/telemt.sock"
     listen_tcp = true
     ```
-<a id="cfg-server-proxy_protocol"></a>
+## "cfg-server-proxy_protocol"
 - `proxy_protocol`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает анализ протокола HAProxy PROXY при входящих соединениях (PROXY v1/v2). Если этот параметр включен, исходный адрес клиента берется из заголовка PROXY.
@@ -1928,7 +1945,7 @@
     [server]
     proxy_protocol = true
     ```
-<a id="cfg-server-proxy_protocol_header_timeout_ms"></a>
+## "cfg-server-proxy_protocol_header_timeout_ms"
 - `proxy_protocol_header_timeout_ms`
   - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
   - **Описание**: Таймаут чтения и анализа заголовков протокола PROXY (мс).
@@ -1939,7 +1956,7 @@
     proxy_protocol = true
     proxy_protocol_header_timeout_ms = 500
     ```
-<a id="cfg-server-proxy_protocol_trusted_cidrs"></a>
+## "cfg-server-proxy_protocol_trusted_cidrs"
 - `proxy_protocol_trusted_cidrs`
   - **Ограничения / валидация**: `IpNetwork[]`.
 - Если этот параметр опущен, по умолчанию используются доверительные все CIDR (`0.0.0.0/0` и `::/0`).
@@ -1952,7 +1969,7 @@
     proxy_protocol = true
     proxy_protocol_trusted_cidrs = ["127.0.0.1/32", "10.0.0.0/8"]
     ```
-<a id="cfg-server-metrics_port"></a>
+## "cfg-server-metrics_port"
 - `metrics_port`
   - **Ограничения / валидация**: `u16` (необязательно).
   - **Описание**: Порт конечной точки метрик, совместимый с Prometheus. Если установлено, включает прослушиватель метрик (поведение привязки можно переопределить с помощью `metrics_listen`).
@@ -1962,7 +1979,7 @@
     [server]
     metrics_port = 9090
     ```
-<a id="cfg-server-metrics_listen"></a>
+## "cfg-server-metrics_listen"
 - `metrics_listen`
   - **Ограничения / валидация**: `Строка` (необязательно). Если установлено, оно должно быть в формате IP:PORT.
   - **Описание**: Полный адрес привязки метрик (`IP:PORT`) переопределяет `metrics_port` и привязывается только к указанному адресу.
@@ -1972,7 +1989,7 @@
     [server]
     metrics_listen = "127.0.0.1:9090"
     ```
-<a id="cfg-server-metrics_whitelist"></a>
+## "cfg-server-metrics_whitelist"
 - `metrics_whitelist`
   - **Ограничения / валидация**: `IpNetwork[]`.
   - **Описание**: Белый список CIDR для доступа к конечной точке метрик.
@@ -1983,7 +2000,7 @@
     metrics_port = 9090
     metrics_whitelist = ["127.0.0.1/32", "::1/128"]
     ```
-<a id="cfg-server-max_connections"></a>
+## "cfg-server-max_connections"
 - `max_connections`
   - **Ограничения / валидация**: `u32`. `0` означает неограниченный.
   - **Описание**: Максимальное количество одновременных клиентских подключений.
@@ -1993,7 +2010,7 @@
     [server]
     max_connections = 10000
     ```
-<a id="cfg-server-accept_permit_timeout_ms"></a>
+## "cfg-server-accept_permit_timeout_ms"
 - `accept_permit_timeout_ms`
   - **Ограничения / валидация**: `0..=60000` (миллисекунды). `0` сохраняет устаревшее неограниченное поведение ожидания.
   - **Описание**: Максимальное время ожидания получения разрешения на слот подключения, прежде чем принятое соединение будет разорвано.
@@ -2007,7 +2024,7 @@
 
 Примечание. Когда `server.proxy_protocol` включен, входящие заголовки протокола PROXY анализируются с первых байтов соединения, а исходный адрес клиента заменяется на `src_addr` из заголовка. В целях безопасности IP-адрес однорангового источника (адрес прямого соединения) проверяется по `server.proxy_protocol_trusted_cidrs`; если этот список пуст, заголовки PROXY отклоняются и соединение считается ненадежным.
 
-## [server.conntrack_control]
+# [server.conntrack_control]
 
 Примечание. Рабочий процесс conntrack-control работает **только в Linux**. В других операционных системах не запускается; если inline_conntrack_control имеет значение true, записывается предупреждение. Для эффективной работы также требуется **CAP_NET_ADMIN** и пригодный к использованию бэкенд (nft или iptables/ip6tables в PATH). Утилита `conntrack` используется для удаления необязательных записей таблицы под давлением.
 
@@ -2023,7 +2040,7 @@
 | [`pressure_low_watermark_pct`](#cfg-server-conntrack_control-pressure_low_watermark_pct) | `u8` | `70` |
 | [`delete_budget_per_sec`](#cfg-server-conntrack_control-delete_budget_per_sec) | `u64` | `4096` |
 
-<a id="cfg-server-conntrack_control-inline_conntrack_control"></a>
+## "cfg-server-conntrack_control-inline_conntrack_control"
 - `inline_conntrack_control`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Главный переключатель для задачи conntrack-control во время выполнения: согласовывает правила сетевого фильтра **raw/notrack** для входа прослушивателя (см. `mode`), образцы загружаются каждую секунду и может запускать **`conntrack -D`** удаления для квалификации событий закрытия, пока **pressure mode** активен (см. `delete_budget_per_sec`). Если установлено значение false, правила отслеживания очищаются, а принудительное удаление отключается.
@@ -2033,7 +2050,7 @@
     [server.conntrack_control]
     inline_conntrack_control = true
     ```
-<a id="cfg-server-conntrack_control-mode"></a>
+## "cfg-server-conntrack_control-mode"
 - `mode`
   - **Ограничения / валидация**: Один из вариантов: «отслеживаемый», «без отслеживания», «гибридный» (регистронезависимый; сериализованный нижний регистр).
   - **Описание**: **`tracked`**: не устанавливать правила telemt notrack (соединения остаются в состоянии conntrack). **`notrack`**: пометить совпадение входящего TCP с `server.port` как notrack — целевые объекты получаются из `[[server.listeners]]`, если таковые имеются, в противном случае из `server.listen_addr_ipv4` / `server.listen_addr_ipv6` (неуказанные адреса означают «любой» для этого семейства). **`hybrid`**: не отслеживать только адреса, перечисленные в `hybrid_listener_ips` (должно быть непустым; проверяется при загрузке).
@@ -2043,7 +2060,7 @@
     [server.conntrack_control]
     mode = "notrack"
     ```
-<a id="cfg-server-conntrack_control-backend"></a>
+## "cfg-server-conntrack_control-backend"
 - `backend`
   - **Ограничения / валидация**: Один из `auto`, `nftables`, `iptables` (без учета регистра; сериализованный нижний регистр).
   - **Описание**: Какой набор команд применяет правила отслеживания. **`auto`**: используйте `nft`, если он присутствует в `PATH`, иначе `iptables`/`ip6tables`, если он присутствует. **`nftables`** / **`iptables`**: принудительно использовать этот бэкэнд; отсутствие двоичного кода означает, что правила невозможно применить. Путь nft использует таблицу `inet telemt_conntrack` и необработанный перехват предварительной маршрутизации; iptables использует цепочку TELEMT_NOTRACK в таблице raw.
@@ -2053,7 +2070,7 @@
     [server.conntrack_control]
     backend = "auto"
     ```
-<a id="cfg-server-conntrack_control-profile"></a>
+## "cfg-server-conntrack_control-profile"
 - `profile`
   - **Ограничения / валидация**: Один из «консервативных», «сбалансированных», «агрессивных» (без учета регистра; сериализованный нижний регистр).
   - **Описание**: Когда **режим давления conntrack** активен (водяные знаки `pressure_*`), ограничиваются тайм-ауты простоя и активности, чтобы уменьшить отток коннтреков: например. **первый байт простоя клиента** (`client.rs`), **тайм-аут активности прямой ретрансляции** (`direct_relay.rs`) и **политика простоя среднего реле** (`middle_relay.rs` через `ConntrackPressureProfile::*_cap_secs` / `direct_activity_timeout_secs`). В более агрессивных профилях используются более короткие заглушки.
@@ -2063,7 +2080,7 @@
     [server.conntrack_control]
     profile = "balanced"
     ```
-<a id="cfg-server-conntrack_control-hybrid_listener_ips"></a>
+## "cfg-server-conntrack_control-hybrid_listener_ips"
 - `hybrid_listener_ips`
   - **Ограничения / валидация**: `IpAddr[]`. Должно быть **непустым**, когда `mode = "hybrid"`. Игнорируется для отслеживаемых/безотслеживаемых сообщений.
   - **Описание**: Явные адреса прослушивателя, которые получают правила nottrack в гибридном режиме (разделенные на правила IPv4 и IPv6 в зависимости от реализации).
@@ -2074,7 +2091,7 @@
     mode = "hybrid"
     hybrid_listener_ips = ["203.0.113.10", "2001:db8::1"]
     ```
-<a id="cfg-server-conntrack_control-pressure_high_watermark_pct"></a>
+## "cfg-server-conntrack_control-pressure_high_watermark_pct"
 - `pressure_high_watermark_pct`
   - **Ограничения / валидация**: Должно быть в пределах `[1, 100]`.
   - **Описание**: Режим давления **входит** при любом из следующих событий: заполнение соединения или `server.max_connections` (в процентах, если `max_connections > 0`), **использование файлового дескриптора** и программное обеспечение процесса `RLIMIT_NOFILE`, **ненулевое** событие `accept_permit_timeout` в последнем окне примера или дельта счетчика **ME c2me send-full**. Ввод сравнивает соответствующие проценты с этой верхней отметкой (см. update_pressure_state в conntrack_control.rs).
@@ -2084,7 +2101,7 @@
     [server.conntrack_control]
     pressure_high_watermark_pct = 85
     ```
-<a id="cfg-server-conntrack_control-pressure_low_watermark_pct"></a>
+## "cfg-server-conntrack_control-pressure_low_watermark_pct"
 - `pressure_low_watermark_pct`
   - **Ограничения / валидация**: Должно быть **строго меньше** `pressure_high_watermark_pct`.
   - **Описание**: Режим давления **сбрасывается** только после **трех** последовательных односекундных выборок, когда все сигналы находятся на уровне этой нижней границы или ниже, а дельты времени ожидания приема/ME-очереди равны нулю (гистерезис).
@@ -2094,7 +2111,7 @@
     [server.conntrack_control]
     pressure_low_watermark_pct = 70
     ```
-<a id="cfg-server-conntrack_control-delete_budget_per_sec"></a>
+## "cfg-server-conntrack_control-delete_budget_per_sec"
 - `delete_budget_per_sec`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Максимальное количество попыток **`conntrack -D`** **в секунду** при активном режиме давления (корзина токенов пополняется каждую секунду). Удаление выполняется только для событий закрытия по причинам **тайм-аут**, **давление** или **сброс**; каждая попытка потребляет токен независимо от результата.
@@ -2106,7 +2123,7 @@
     ```
 
 
-## [server.api]
+# [server.api]
 
 Примечание. В этом разделе также принимается устаревший псевдоним `[server.admin_api]` (та же схема, что и `[server.api]`).
 
@@ -2126,7 +2143,7 @@
 | [`runtime_edge_events_capacity`](#cfg-server-api-runtime_edge_events_capacity) | `usize` | `256` |
 | [`read_only`](#cfg-server-api-read_only) | `bool` | `false` |
 
-<a id="cfg-server-api-enabled"></a>
+## "cfg-server-api-enabled"
 - `enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает REST API плоскости управления.
@@ -2136,7 +2153,7 @@
     [server.api]
     enabled = true
     ```
-<a id="cfg-server-api-listen"></a>
+## "cfg-server-api-listen"
 - `listen`
   - **Ограничения / валидация**: `Строка`. Должен быть в формате IP:PORT.
   - **Описание**: Адрес привязки API в формате IP:PORT.
@@ -2146,7 +2163,7 @@
     [server.api]
     listen = "0.0.0.0:9091"
     ```
-<a id="cfg-server-api-whitelist"></a>
+## "cfg-server-api-whitelist"
 - `whitelist`
   - **Ограничения / валидация**: `IpNetwork[]`.
   - **Описание**: Белый список CIDR разрешил доступ к API.
@@ -2156,7 +2173,7 @@
     [server.api]
     whitelist = ["127.0.0.0/8"]
     ```
-<a id="cfg-server-api-auth_header"></a>
+## "cfg-server-api-auth_header"
 - `auth_header`
   - **Ограничения / валидация**: `Строка`. Пустая строка отключает проверку заголовка аутентификации.
   - **Описание**: Точное ожидаемое значение заголовка `Authorization` (статический общий секрет).
@@ -2166,7 +2183,7 @@
     [server.api]
     auth_header = "Bearer MY_TOKEN"
     ```
-<a id="cfg-server-api-request_body_limit_bytes"></a>
+## "cfg-server-api-request_body_limit_bytes"
 - `request_body_limit_bytes`
   - **Ограничения / валидация**: Должно быть `> 0` (байты).
   - **Описание**: Максимальный принимаемый размер тела HTTP-запроса (в байтах).
@@ -2176,7 +2193,7 @@
     [server.api]
     request_body_limit_bytes = 65536
     ```
-<a id="cfg-server-api-minimal_runtime_enabled"></a>
+## "cfg-server-api-minimal_runtime_enabled"
 - `minimal_runtime_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает минимальную логику конечной точки снимков времени выполнения.
@@ -2186,7 +2203,7 @@
     [server.api]
     minimal_runtime_enabled = true
     ```
-<a id="cfg-server-api-minimal_runtime_cache_ttl_ms"></a>
+## "cfg-server-api-minimal_runtime_cache_ttl_ms"
 - `minimal_runtime_cache_ttl_ms`
   - **Ограничения / валидация**: `0..=60000` (миллисекунды). `0` отключает кеш.
   - **Описание**: Срок жизни кэша для минимальных снимков времени выполнения (мс).
@@ -2196,7 +2213,7 @@
     [server.api]
     minimal_runtime_cache_ttl_ms = 1000
     ```
-<a id="cfg-server-api-runtime_edge_enabled"></a>
+## "cfg-server-api-runtime_edge_enabled"
 - `runtime_edge_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает конечные точки границ среды выполнения.
@@ -2206,7 +2223,7 @@
     [server.api]
     runtime_edge_enabled = false
     ```
-<a id="cfg-server-api-runtime_edge_cache_ttl_ms"></a>
+## "cfg-server-api-runtime_edge_cache_ttl_ms"
 - `runtime_edge_cache_ttl_ms`
   - **Ограничения / валидация**: `0..=60000` (миллисекунды).
   - **Описание**: Срок жизни кэша для полезных данных агрегации границ во время выполнения (мс).
@@ -2216,7 +2233,7 @@
     [server.api]
     runtime_edge_cache_ttl_ms = 1000
     ```
-<a id="cfg-server-api-runtime_edge_top_n"></a>
+## "cfg-server-api-runtime_edge_top_n"
 - `runtime_edge_top_n`
   - **Ограничения / валидация**: `1..=1000`.
   - **Описание**: Размер Top-N для таблицы лидеров краевых соединений.
@@ -2226,7 +2243,7 @@
     [server.api]
     runtime_edge_top_n = 10
     ```
-<a id="cfg-server-api-runtime_edge_events_capacity"></a>
+## "cfg-server-api-runtime_edge_events_capacity"
 - `runtime_edge_events_capacity`
   - **Ограничения / валидация**: `16..=4096`.
   - **Описание**: Емкость кольцевого буфера для пограничных событий во время выполнения.
@@ -2236,7 +2253,7 @@
     [server.api]
     runtime_edge_events_capacity = 256
     ```
-<a id="cfg-server-api-read_only"></a>
+## "cfg-server-api-read_only"
 - `read_only`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Отклоняет изменение конечных точек API, если оно включено.
@@ -2248,7 +2265,7 @@
     ```
 
 
-## [[server.listeners]]
+# [[server.listeners]]
 
 
 | Ключ | Тип | По умолчанию |
@@ -2259,7 +2276,7 @@
 | [`proxy_protocol`](#cfg-server-listeners-proxy_protocol) | `bool` | — |
 | [`reuse_allow`](#cfg-server-listeners-reuse_allow) | `bool` | `false` |
 
-<a id="cfg-server-listeners-ip"></a>
+## "cfg-server-listeners-ip"
 - `ip`
   - **Ограничения / валидация**: Обязательное поле. Должен быть IPAddr.
   - **Описание**: IP-адрес привязки прослушивателя.
@@ -2269,7 +2286,7 @@
     [[server.listeners]]
     ip = "0.0.0.0"
     ```
-<a id="cfg-server-listeners-announce"></a>
+## "cfg-server-listeners-announce"
 - `announce`
   - **Ограничения / валидация**: `Строка` (необязательно). Не должно быть пустым, если установлено.
   - **Описание**: Публичный IP-адрес/домен, объявленный в прокси-ссылках для этого прослушивателя. Имеет приоритет над announce_ip.
@@ -2280,7 +2297,7 @@
     ip = "0.0.0.0"
     announce = "proxy.example.com"
     ```
-<a id="cfg-server-listeners-announce_ip"></a>
+## "cfg-server-listeners-announce_ip"
 - `announce_ip`
   - **Ограничения / валидация**: `IpAddr` (необязательно). Устарело. Используйте «объявить».
   - **Описание**: Устаревший устаревший IP-адрес объявления. Во время загрузки конфигурации он переводится в «announce», если «announce» не установлен.
@@ -2291,7 +2308,7 @@
     ip = "0.0.0.0"
     announce_ip = "203.0.113.10"
     ```
-<a id="cfg-server-listeners-proxy_protocol"></a>
+## "cfg-server-listeners-proxy_protocol"
 - `proxy_protocol`
   - **Ограничения / валидация**: `bool` (необязательно). Если установлено, переопределяет `server.proxy_protocol` для этого прослушивателя.
   - **Описание**: Переопределение протокола PROXY для каждого слушателя.
@@ -2305,7 +2322,7 @@
     ip = "0.0.0.0"
     proxy_protocol = true
     ```
-<a id="cfg-server-listeners-reuse_allow"></a>
+## "cfg-server-listeners-reuse_allow"
 - `reuse_allow`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает `SO_REUSEPORT` для совместного использования привязки нескольких экземпляров (позволяет нескольким экземплярам telemt прослушивать один и тот же `ip:port`).
@@ -2318,7 +2335,7 @@
     ```
 
 
-## [timeouts]
+# [timeouts]
 
 
 | Ключ | Тип | По умолчанию |
@@ -2334,7 +2351,7 @@
 | [`me_one_retry`](#cfg-timeouts-me_one_retry) | `u8` | `12` |
 | [`me_one_timeout_ms`](#cfg-timeouts-me_one_timeout_ms) | `u64` | `1200` |
 
-<a id="cfg-timeouts-client_handshake"></a>
+## "cfg-timeouts-client_handshake"
 - `client_handshake`
   - **Ограничения / валидация**: Должно быть `> 0`. Значение указано в секундах. Также используется в качестве верхней границы некоторых задержек эмуляции TLS (см. `censorship.server_hello_delay_max_ms`).
   - **Описание**: Тайм-аут установления связи клиента (в секундах).
@@ -2344,7 +2361,7 @@
     [timeouts]
     client_handshake = 30
     ```
-<a id="cfg-timeouts-relay_idle_policy_v2_enabled"></a>
+## "cfg-timeouts-relay_idle_policy_v2_enabled"
 - `relay_idle_policy_v2_enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает политику простоя клиента среднего/жесткого промежуточного реле.
@@ -2354,7 +2371,7 @@
     [timeouts]
     relay_idle_policy_v2_enabled = true
     ```
-<a id="cfg-timeouts-relay_client_idle_soft_secs"></a>
+## "cfg-timeouts-relay_client_idle_soft_secs"
 - `relay_client_idle_soft_secs`
   - **Ограничения / валидация**: Должно быть `> 0`; должно быть `<=lay_client_idle_hard_secs`.
   - **Описание**: Порог мягкого простоя (в секундах) для неактивности восходящей линии связи клиента среднего ретранслятора. Достижение этого порога отмечает сеанс как бездействующего кандидата (в зависимости от политики он может подлежать очистке).
@@ -2364,7 +2381,7 @@
     [timeouts]
     relay_client_idle_soft_secs = 120
     ```
-<a id="cfg-timeouts-relay_client_idle_hard_secs"></a>
+## "cfg-timeouts-relay_client_idle_hard_secs"
 - `relay_client_idle_hard_secs`
   - **Ограничения / валидация**: Должно быть `> 0`; должно быть `>=lay_client_idle_soft_secs`.
   - **Описание**: Порог жесткого простоя (в секундах) для неактивности восходящей линии связи клиента среднего ретранслятора. Достижение этого порога закрывает сессию.
@@ -2374,7 +2391,7 @@
     [timeouts]
     relay_client_idle_hard_secs = 360
     ```
-<a id="cfg-timeouts-relay_idle_grace_after_downstream_activity_secs"></a>
+## "cfg-timeouts-relay_idle_grace_after_downstream_activity_secs"
 - `relay_idle_grace_after_downstream_activity_secs`
   - **Ограничения / валидация**: Должно быть `<=lay_client_idle_hard_secs`.
   - **Описание**: Дополнительный льготный период жесткого простоя (в секундах), добавленный после недавней активности в нисходящем направлении.
@@ -2384,7 +2401,7 @@
     [timeouts]
     relay_idle_grace_after_downstream_activity_secs = 30
     ```
-<a id="cfg-timeouts-tg_connect"></a>
+## "cfg-timeouts-tg_connect"
 - `tg_connect`
   - **Ограничения / валидация**: `u64`. Значение указано в секундах.
   - **Описание**: Тайм-аут восходящего соединения Telegram (в секундах).
@@ -2394,7 +2411,7 @@
     [timeouts]
     tg_connect = 10
     ```
-<a id="cfg-timeouts-client_keepalive"></a>
+## "cfg-timeouts-client_keepalive"
 - `client_keepalive`
   - **Ограничения / валидация**: `u64`. Значение указано в секундах.
   - **Описание**: Тайм-аут поддержки активности клиента (в секундах).
@@ -2404,7 +2421,7 @@
     [timeouts]
     client_keepalive = 15
     ```
-<a id="cfg-timeouts-client_ack"></a>
+## "cfg-timeouts-client_ack"
 - `client_ack`
   - **Ограничения / валидация**: `u64`. Значение указано в секундах.
   - **Описание**: Таймаут подтверждения клиента (в секундах).
@@ -2414,7 +2431,7 @@
     [timeouts]
     client_ack = 90
     ```
-<a id="cfg-timeouts-me_one_retry"></a>
+## "cfg-timeouts-me_one_retry"
 - `me_one_retry`
   - **Ограничения / валидация**: `u8`.
   - **Описание**: Бюджет попыток быстрого повторного подключения для сценариев DC с одной конечной точкой.
@@ -2424,7 +2441,7 @@
     [timeouts]
     me_one_retry = 12
     ```
-<a id="cfg-timeouts-me_one_timeout_ms"></a>
+## "cfg-timeouts-me_one_timeout_ms"
 - `me_one_timeout_ms`
   - **Ограничения / валидация**: `u64`. Значение указано в миллисекундах.
   - **Описание**: Тайм-аут на быструю попытку (мс) для логики повторного подключения постоянного тока с одной конечной точкой.
@@ -2436,14 +2453,14 @@
     ```
 
 
-## [censorship]
+# [censorship]
 
 
 | Ключ | Тип | По умолчанию |
 | --- | ---- | ------- |
 | [`tls_domain`](#cfg-censorship-tls_domain) | `String` | `"petrovich.ru"` |
 | [`tls_domains`](#cfg-censorship-tls_domains) | `String[]` | `[]` |
-| [`unknown_sni_action`](#cfg-censorship-unknown_sni_action) | `"drop"` or `"mask"` | `"drop"` |
+| [`unknown_sni_action`](#cfg-censorship-unknown_sni_action) | `"drop"`, `"mask"`, `"accept"` | `"drop"` |
 | [`tls_fetch_scope`](#cfg-censorship-tls_fetch_scope) | `String` | `""` |
 | [`tls_fetch`](#cfg-censorship-tls_fetch) | `Table` | built-in defaults |
 | [`mask`](#cfg-censorship-mask) | `bool` | `true` |
@@ -2471,7 +2488,7 @@
 | [`mask_timing_normalization_floor_ms`](#cfg-censorship-mask_timing_normalization_floor_ms) | `u64` | `0` |
 | [`mask_timing_normalization_ceiling_ms`](#cfg-censorship-mask_timing_normalization_ceiling_ms) | `u64` | `0` |
 
-<a id="cfg-censorship-tls_domain"></a>
+## "cfg-censorship-tls_domain"
 - `tls_domain`
   - **Ограничения / валидация**: Должно быть непустое доменное имя. Не должно содержать пробелов или `/`.
   - **Описание**: Основной домен TLS, используемый в профиле подтверждения FakeTLS и в качестве домена SNI по умолчанию.
@@ -2481,7 +2498,7 @@
     [censorship]
     tls_domain = "example.com"
     ```
-<a id="cfg-censorship-tls_domains"></a>
+## "cfg-censorship-tls_domains"
 - `tls_domains`
   - **Ограничения / валидация**: `Строка[]`. Если установлено, значения объединяются с tls_domain и дедуплицируются (первичный tls_domain всегда остается первым).
   - **Описание**: Дополнительные домены TLS для создания нескольких прокси-ссылок.
@@ -2492,9 +2509,9 @@
     tls_domain = "example.com"
     tls_domains = ["example.net", "example.org"]
     ```
-<a id="cfg-censorship-unknown_sni_action"></a>
+## "cfg-censorship-unknown_sni_action"
 - `unknown_sni_action`
-  - **Ограничения / валидация**: «капля» или «маска».
+  - **Ограничения / валидация**: «drop», «mask» или «accept».
   - **Описание**: Действие для TLS ClientHello с неизвестным/ненастроенным SNI.
   - **Пример**:
 
@@ -2502,7 +2519,7 @@
     [censorship]
     unknown_sni_action = "drop"
     ```
-<a id="cfg-censorship-tls_fetch_scope"></a>
+## "cfg-censorship-tls_fetch_scope"
 - `tls_fetch_scope`
   - **Ограничения / валидация**: `Строка`. Значение обрезается во время загрузки; whitespace-only становится пустым.
   - **Описание**: Тег области восходящего потока, используемый для выборки метаданных TLS-фронт. Пустое значение сохраняет поведение восходящей маршрутизации по умолчанию.
@@ -2512,7 +2529,7 @@
     [censorship]
     tls_fetch_scope = "fetch"
     ```
-<a id="cfg-censorship-tls_fetch"></a>
+## "cfg-censorship-tls_fetch"
 - `tls_fetch`
   - **Ограничения / валидация**: Стол. См. раздел «[censorship.tls_fetch]» ниже.
   - **Описание**: Настройки стратегии выборки метаданных TLS (начальная загрузка + поведение обновления для данных эмуляции TLS).
@@ -2524,7 +2541,7 @@
     attempt_timeout_ms = 5000
     total_budget_ms = 15000
     ```
-<a id="cfg-censorship-mask"></a>
+## "cfg-censorship-mask"
 - `mask`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает режим маскировки/переднего реле.
@@ -2534,7 +2551,7 @@
     [censorship]
     mask = true
     ```
-<a id="cfg-censorship-mask_host"></a>
+## "cfg-censorship-mask_host"
 - `mask_host`
   - **Ограничения / валидация**: `Строка` (необязательно).
 - Если установлена ​​маска_unix_sock, маска_хост должна быть опущена (взаимоисключающая).
@@ -2546,7 +2563,7 @@
     [censorship]
     mask_host = "www.cloudflare.com"
     ```
-<a id="cfg-censorship-mask_port"></a>
+## "cfg-censorship-mask_port"
 - `mask_port`
   - **Ограничения / валидация**: `u16`.
   - **Описание**: Восходящий порт маски для фронтального реле TLS.
@@ -2556,7 +2573,7 @@
     [censorship]
     mask_port = 443
     ```
-<a id="cfg-censorship-mask_unix_sock"></a>
+## "cfg-censorship-mask_unix_sock"
 - `mask_unix_sock`
   - **Ограничения / валидация**: `Строка` (необязательно).
 - Не должно быть пустым, если установлено.
@@ -2570,7 +2587,7 @@
     [censorship]
     mask_unix_sock = "/run/telemt/mask.sock"
     ```
-<a id="cfg-censorship-fake_cert_len"></a>
+## "cfg-censorship-fake_cert_len"
 - `fake_cert_len`
   - **Ограничения / валидация**: `использовать`. Когда `tls_emulation = false` и используется значение по умолчанию, Telemt может рандомизировать его при запуске для обеспечения вариативности.
   - **Описание**: Длина полезных данных синтетического сертификата, когда данные эмуляции недоступны.
@@ -2580,7 +2597,7 @@
     [censorship]
     fake_cert_len = 2048
     ```
-<a id="cfg-censorship-tls_emulation"></a>
+## "cfg-censorship-tls_emulation"
 - `tls_emulation`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает эмуляцию поведения сертификата/TLS из кэшированных реальных фронтов.
@@ -2590,7 +2607,7 @@
     [censorship]
     tls_emulation = true
     ```
-<a id="cfg-censorship-tls_front_dir"></a>
+## "cfg-censorship-tls_front_dir"
 - `tls_front_dir`
   - **Ограничения / валидация**: `Строка`.
   - **Описание**: Путь к каталогу для хранения переднего кэша TLS.
@@ -2600,7 +2617,7 @@
     [censorship]
     tls_front_dir = "tlsfront"
     ```
-<a id="cfg-censorship-server_hello_delay_min_ms"></a>
+## "cfg-censorship-server_hello_delay_min_ms"
 - `server_hello_delay_min_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды).
   - **Описание**: Минимальная задержка server_hello для защиты от отпечатков пальцев (мс).
@@ -2610,7 +2627,7 @@
     [censorship]
     server_hello_delay_min_ms = 0
     ```
-<a id="cfg-censorship-server_hello_delay_max_ms"></a>
+## "cfg-censorship-server_hello_delay_max_ms"
 - `server_hello_delay_max_ms`
   - **Ограничения / валидация**: `u64` (миллисекунды). Должно быть \(<\) `timeouts.client_handshake * 1000`.
   - **Описание**: Максимальная задержка `server_hello` для защиты от отпечатков пальцев (мс).
@@ -2623,7 +2640,7 @@
     [censorship]
     server_hello_delay_max_ms = 0
     ```
-<a id="cfg-censorship-tls_new_session_tickets"></a>
+## "cfg-censorship-tls_new_session_tickets"
 - `tls_new_session_tickets`
   - **Ограничения / валидация**: `u8`.
   - **Описание**: Количество сообщений NewSessionTicket, отправляемых после рукопожатия.
@@ -2633,7 +2650,7 @@
     [censorship]
     tls_new_session_tickets = 0
     ```
-<a id="cfg-censorship-tls_full_cert_ttl_secs"></a>
+## "cfg-censorship-tls_full_cert_ttl_secs"
 - `tls_full_cert_ttl_secs`
   - **Ограничения / валидация**: `u64` (секунды).
   - **Описание**: TTL для отправки полной полезной нагрузки сертификата для каждого кортежа (домен, IP-адрес клиента).
@@ -2643,7 +2660,7 @@
     [censorship]
     tls_full_cert_ttl_secs = 90
     ```
-<a id="cfg-censorship-alpn_enforce"></a>
+## "cfg-censorship-alpn_enforce"
 - `alpn_enforce`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Обеспечивает поведение эха ALPN в зависимости от предпочтений клиента.
@@ -2653,7 +2670,7 @@
     [censorship]
     alpn_enforce = true
     ```
-<a id="cfg-censorship-mask_proxy_protocol"></a>
+## "cfg-censorship-mask_proxy_protocol"
 - `mask_proxy_protocol`
   - **Ограничения / валидация**: `u8`. `0` = отключено, `1` = v1 (текст), `2` = v2 (двоичный).
   - **Описание**: Отправляет заголовок протокола PROXY при подключении к серверной части маски, позволяя серверной части видеть реальный IP-адрес клиента.
@@ -2663,7 +2680,7 @@
     [censorship]
     mask_proxy_protocol = 0
     ```
-<a id="cfg-censorship-mask_shape_hardening"></a>
+## "cfg-censorship-mask_shape_hardening"
 - `mask_shape_hardening`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Включает усиление жесткости канала формы клиента->маски путем применения контролируемого заполнения хвоста к границам сегмента при отключении реле маски.
@@ -2673,7 +2690,7 @@
     [censorship]
     mask_shape_hardening = true
     ```
-<a id="cfg-censorship-mask_shape_hardening_aggressive_mode"></a>
+## "cfg-censorship-mask_shape_hardening_aggressive_mode"
 - `mask_shape_hardening_aggressive_mode`
   - **Ограничения / валидация**: Требуется «mask_shape_hardening = true».
   - **Описание**: Включите агрессивный профиль формирования (более сильное антиклассификаторское поведение с различной семантикой формирования).
@@ -2684,7 +2701,7 @@
     mask_shape_hardening = true
     mask_shape_hardening_aggressive_mode = false
     ```
-<a id="cfg-censorship-mask_shape_bucket_floor_bytes"></a>
+## "cfg-censorship-mask_shape_bucket_floor_bytes"
 - `mask_shape_bucket_floor_bytes`
   - **Ограничения / валидация**: Должно быть `> 0`; должно быть `<= Mask_shape_bucket_cap_bytes`.
   - **Описание**: Минимальный размер ковша, используемый при закалке в форме канала.
@@ -2694,7 +2711,7 @@
     [censorship]
     mask_shape_bucket_floor_bytes = 512
     ```
-<a id="cfg-censorship-mask_shape_bucket_cap_bytes"></a>
+## "cfg-censorship-mask_shape_bucket_cap_bytes"
 - `mask_shape_bucket_cap_bytes`
   - **Ограничения / валидация**: Должно быть `>= Mask_shape_bucket_floor_bytes`.
   - **Описание**: Максимальный размер ковша, используемый при фасонно-канальной закалке; трафик, превышающий ограничение, не дополняется дальше.
@@ -2704,7 +2721,7 @@
     [censorship]
     mask_shape_bucket_cap_bytes = 4096
     ```
-<a id="cfg-censorship-mask_shape_above_cap_blur"></a>
+## "cfg-censorship-mask_shape_above_cap_blur"
 - `mask_shape_above_cap_blur`
   - **Ограничения / валидация**: Требуется «mask_shape_hardening = true».
   - **Описание**: Добавляет ограниченные рандомизированные хвостовые байты, даже если пересылаемый размер уже превышает ограничение.
@@ -2715,7 +2732,7 @@
     mask_shape_hardening = true
     mask_shape_above_cap_blur = false
     ```
-<a id="cfg-censorship-mask_shape_above_cap_blur_max_bytes"></a>
+## "cfg-censorship-mask_shape_above_cap_blur_max_bytes"
 - `mask_shape_above_cap_blur_max_bytes`
   - **Ограничения / валидация**: Должно быть `<= 1048576`. Должно быть `> 0`, когда `mask_shape_above_cap_blur = true`.
   - **Описание**: Максимальное количество случайных дополнительных байтов, добавляемых выше ограничения, если включено размытие выше ограничения.
@@ -2726,7 +2743,7 @@
     mask_shape_above_cap_blur = true
     mask_shape_above_cap_blur_max_bytes = 64
     ```
-<a id="cfg-censorship-mask_relay_max_bytes"></a>
+## "cfg-censorship-mask_relay_max_bytes"
 - `mask_relay_max_bytes`
   - **Ограничения / валидация**: Должно быть `> 0`; должно быть `<= 67108864`.
   - **Описание**: Максимальное количество ретранслируемых байтов в каждом направлении по резервному пути маскировки без аутентификации.
@@ -2736,7 +2753,7 @@
     [censorship]
     mask_relay_max_bytes = 5242880
     ```
-<a id="cfg-censorship-mask_classifier_prefetch_timeout_ms"></a>
+## "cfg-censorship-mask_classifier_prefetch_timeout_ms"
 - `mask_classifier_prefetch_timeout_ms`
   - **Ограничения / валидация**: Должно быть в пределах `[5, 50]` (миллисекунды).
   - **Описание**: Бюджет тайм-аута (мс) для расширения фрагментированного начального окна классификатора при откате маскирования.
@@ -2746,7 +2763,7 @@
     [censorship]
     mask_classifier_prefetch_timeout_ms = 5
     ```
-<a id="cfg-censorship-mask_timing_normalization_enabled"></a>
+## "cfg-censorship-mask_timing_normalization_enabled"
 - `mask_timing_normalization_enabled`
   - **Ограничения / валидация**: Если задано значение true, требуется маска_timing_normalization_floor_ms > 0 и маска_timing_normalization_ceiling_ms >= Mask_timing_normalization_floor_ms. Потолок должен быть `<= 60000`.
   - **Описание**: Включает нормализацию временного конверта для результатов маскировки.
@@ -2756,7 +2773,7 @@
     [censorship]
     mask_timing_normalization_enabled = false
     ```
-<a id="cfg-censorship-mask_timing_normalization_floor_ms"></a>
+## "cfg-censorship-mask_timing_normalization_floor_ms"
 - `mask_timing_normalization_floor_ms`
   - **Ограничения / валидация**: Должно быть `> 0`, если нормализация времени включена; должно быть `<= Mask_timing_normalization_ceiling_ms`.
   - **Описание**: Нижняя граница (мс) для маскировки цели нормализации результата.
@@ -2766,7 +2783,7 @@
     [censorship]
     mask_timing_normalization_floor_ms = 0
     ```
-<a id="cfg-censorship-mask_timing_normalization_ceiling_ms"></a>
+## "cfg-censorship-mask_timing_normalization_ceiling_ms"
 - `mask_timing_normalization_ceiling_ms`
   - **Ограничения / валидация**: Должно быть `>= Mask_timing_normalization_floor_ms`; должно быть `<= 60000`.
   - **Описание**: Верхняя граница (мс) для маскировки цели нормализации результата.
@@ -2777,93 +2794,7 @@
     mask_timing_normalization_ceiling_ms = 0
     ```
 
-
-## [censorship.tls_fetch]
-
-
-| Ключ | Тип | По умолчанию |
-| --- | ---- | ------- |
-| [`profiles`](#cfg-censorship-tls_fetch-profiles) | `String[]` | `["modern_chrome_like", "modern_firefox_like", "compat_tls12", "legacy_minimal"]` |
-| [`strict_route`](#cfg-censorship-tls_fetch-strict_route) | `bool` | `true` |
-| [`attempt_timeout_ms`](#cfg-censorship-tls_fetch-attempt_timeout_ms) | `u64` | `5000` |
-| [`total_budget_ms`](#cfg-censorship-tls_fetch-total_budget_ms) | `u64` | `15000` |
-| [`grease_enabled`](#cfg-censorship-tls_fetch-grease_enabled) | `bool` | `false` |
-| [`deterministic`](#cfg-censorship-tls_fetch-deterministic) | `bool` | `false` |
-| [`profile_cache_ttl_secs`](#cfg-censorship-tls_fetch-profile_cache_ttl_secs) | `u64` | `600` |
-
-<a id="cfg-censorship-tls_fetch-profiles"></a>
-- `profiles`
-  - **Ограничения / валидация**: `Строка[]`. Пустой список возвращает значения по умолчанию; значения дедуплицируются с сохранением порядка.
-  - **Описание**: Упорядоченная резервная цепочка профиля ClientHello для выборки метаданных TLS-фронт.
-  - **Пример**:
-
-    ```toml
-    [censorship.tls_fetch]
-    profiles = ["modern_chrome_like", "compat_tls12"]
-    ```
-<a id="cfg-censorship-tls_fetch-strict_route"></a>
-- `strict_route`
-  - **Ограничения / валидация**: `бул`.
-  - **Описание**: Если true и восходящий маршрут настроен, выборка TLS не закрывается из-за ошибок восходящего соединения вместо возврата к прямому TCP.
-  - **Пример**:
-
-    ```toml
-    [censorship.tls_fetch]
-    strict_route = true
-    ```
-<a id="cfg-censorship-tls_fetch-attempt_timeout_ms"></a>
-- `attempt_timeout_ms`
-  - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
-  - **Описание**: Бюджет таймаута на одну попытку получения профиля TLS (мс).
-  - **Пример**:
-
-    ```toml
-    [censorship.tls_fetch]
-    attempt_timeout_ms = 5000
-    ```
-<a id="cfg-censorship-tls_fetch-total_budget_ms"></a>
-- `total_budget_ms`
-  - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
-  - **Описание**: Общий бюджет настенных часов для всех попыток TLS-выборки (мс).
-  - **Пример**:
-
-    ```toml
-    [censorship.tls_fetch]
-    total_budget_ms = 15000
-    ```
-<a id="cfg-censorship-tls_fetch-grease_enabled"></a>
-- `grease_enabled`
-  - **Ограничения / валидация**: `бул`.
-  - **Описание**: Включает случайные значения в стиле GREASE в выбранных расширениях ClientHello для получения трафика.
-  - **Пример**:
-
-    ```toml
-    [censorship.tls_fetch]
-    grease_enabled = false
-    ```
-<a id="cfg-censorship-tls_fetch-deterministic"></a>
-- `deterministic`
-  - **Ограничения / валидация**: `бул`.
-  - **Описание**: Включает детерминированную случайность ClientHello для отладки/тестирования.
-  - **Пример**:
-
-    ```toml
-    [censorship.tls_fetch]
-    deterministic = false
-    ```
-<a id="cfg-censorship-tls_fetch-profile_cache_ttl_secs"></a>
-- `profile_cache_ttl_secs`
-  - **Ограничения / валидация**: `u64` (секунды). `0` отключает кеш.
-  - **Описание**: TTL для записей кэша профиля победителя, используемых путем выборки TLS.
-  - **Пример**:
-
-    ```toml
-    [censorship.tls_fetch]
-    profile_cache_ttl_secs = 600
-    ```
-
-
-### Shape-channel hardening notes (`[censorship]`)
+## Shape-channel hardening notes (`[censorship]`)
 
 Эти параметры предназначены для уменьшения одного конкретного источника отпечатков пальцев во время маскировки: точного количества байтов, отправленных с прокси-сервера на «mask_host» для недействительного или пробного трафика.
 
@@ -2908,7 +2839,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
 - `mask_shape_bucket_floor_bytes = 512`
 - `mask_shape_bucket_cap_bytes = 4096`
 
-### Aggressive mode notes (`[censorship]`)
+## Aggressive mode notes (`[censorship]`)
 
 «mask_shape_hardening_aggressive_mode» — это дополнительный профиль для более высокого давления антиклассификатора.
 
@@ -2933,7 +2864,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
 
 Используйте этот режим только в том случае, если ваша модель угроз отдает приоритет устойчивости классификатора над строгой совместимостью с консервативной семантикой маскировки.
 
-### Above-cap blur notes (`[censorship]`)
+## Above-cap blur notes (`[censorship]`)
 
 «mask_shape_above_cap_blur» добавляет размытие второго этапа для очень больших зондов, которые уже находятся выше «mask_shape_bucket_cap_bytes».
 
@@ -2954,7 +2885,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
 Небольшие значения снижают затраты, но сохраняют большую степень разделения между удаленными друг от друга негабаритными классами.
 Большие значения размывают слишком большие классы более агрессивно, но добавляют больше исходящих издержек и большую дисперсию выходных данных.
 
-### Timing normalization envelope notes (`[censorship]`)
+## Timing normalization envelope notes (`[censorship]`)
 
 `mask_timing_normalization_enabled` сглаживает разницу во времени между результатами маскировки, применяя целевой диапазон длительности.
 
@@ -2970,7 +2901,92 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
 
 Если ваша серверная часть или сеть сильно ограничена в пропускной способности, сначала уменьшите ограничение. Если датчики все еще слишком различимы в вашей среде, постепенно увеличивайте минимальное значение.
 
-## [access]
+# [censorship.tls_fetch]
+
+
+| Ключ | Тип | По умолчанию |
+| --- | ---- | ------- |
+| [`profiles`](#cfg-censorship-tls_fetch-profiles) | `String[]` | `["modern_chrome_like", "modern_firefox_like", "compat_tls12", "legacy_minimal"]` |
+| [`strict_route`](#cfg-censorship-tls_fetch-strict_route) | `bool` | `true` |
+| [`attempt_timeout_ms`](#cfg-censorship-tls_fetch-attempt_timeout_ms) | `u64` | `5000` |
+| [`total_budget_ms`](#cfg-censorship-tls_fetch-total_budget_ms) | `u64` | `15000` |
+| [`grease_enabled`](#cfg-censorship-tls_fetch-grease_enabled) | `bool` | `false` |
+| [`deterministic`](#cfg-censorship-tls_fetch-deterministic) | `bool` | `false` |
+| [`profile_cache_ttl_secs`](#cfg-censorship-tls_fetch-profile_cache_ttl_secs) | `u64` | `600` |
+
+## "cfg-censorship-tls_fetch-profiles"
+- `profiles`
+  - **Ограничения / валидация**: `Строка[]`. Пустой список возвращает значения по умолчанию; значения дедуплицируются с сохранением порядка.
+  - **Описание**: Упорядоченная резервная цепочка профиля ClientHello для выборки метаданных TLS-фронт.
+  - **Пример**:
+
+    ```toml
+    [censorship.tls_fetch]
+    profiles = ["modern_chrome_like", "compat_tls12"]
+    ```
+## "cfg-censorship-tls_fetch-strict_route"
+- `strict_route`
+  - **Ограничения / валидация**: `бул`.
+  - **Описание**: Если true и восходящий маршрут настроен, выборка TLS не закрывается из-за ошибок восходящего соединения вместо возврата к прямому TCP.
+  - **Пример**:
+
+    ```toml
+    [censorship.tls_fetch]
+    strict_route = true
+    ```
+## "cfg-censorship-tls_fetch-attempt_timeout_ms"
+- `attempt_timeout_ms`
+  - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
+  - **Описание**: Бюджет таймаута на одну попытку получения профиля TLS (мс).
+  - **Пример**:
+
+    ```toml
+    [censorship.tls_fetch]
+    attempt_timeout_ms = 5000
+    ```
+## "cfg-censorship-tls_fetch-total_budget_ms"
+- `total_budget_ms`
+  - **Ограничения / валидация**: Должно быть `> 0` (миллисекунды).
+  - **Описание**: Общий бюджет настенных часов для всех попыток TLS-выборки (мс).
+  - **Пример**:
+
+    ```toml
+    [censorship.tls_fetch]
+    total_budget_ms = 15000
+    ```
+## "cfg-censorship-tls_fetch-grease_enabled"
+- `grease_enabled`
+  - **Ограничения / валидация**: `бул`.
+  - **Описание**: Включает случайные значения в стиле GREASE в выбранных расширениях ClientHello для получения трафика.
+  - **Пример**:
+
+    ```toml
+    [censorship.tls_fetch]
+    grease_enabled = false
+    ```
+## "cfg-censorship-tls_fetch-deterministic"
+- `deterministic`
+  - **Ограничения / валидация**: `бул`.
+  - **Описание**: Включает детерминированную случайность ClientHello для отладки/тестирования.
+  - **Пример**:
+
+    ```toml
+    [censorship.tls_fetch]
+    deterministic = false
+    ```
+## "cfg-censorship-tls_fetch-profile_cache_ttl_secs"
+- `profile_cache_ttl_secs`
+  - **Ограничения / валидация**: `u64` (секунды). `0` отключает кеш.
+  - **Описание**: TTL для записей кэша профиля победителя, используемых путем выборки TLS.
+  - **Пример**:
+
+    ```toml
+    [censorship.tls_fetch]
+    profile_cache_ttl_secs = 600
+    ```
+
+
+# [access]
 
 
 | Ключ | Тип | По умолчанию |
@@ -2989,7 +3005,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
 | [`replay_window_secs`](#cfg-access-replay_window_secs) | `u64` | `120` |
 | [`ignore_time_skew`](#cfg-access-ignore_time_skew) | `bool` | `false` |
 
-<a id="cfg-access-users"></a>
+## "cfg-access-users"
 - `users`
   - **Ограничения / валидация**: Не должно быть пустым (должен существовать хотя бы один пользователь). Каждое значение должно состоять **ровно из 32 шестнадцатеричных символов**.
   - **Описание**: Карта учетных данных пользователя, используемая для аутентификации клиента. Ключи — это имена пользователей; значения являются секретами MTProxy.
@@ -3000,7 +3016,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     alice = "00112233445566778899aabbccddeeff"
     bob   = "0123456789abcdef0123456789abcdef"
     ```
-<a id="cfg-access-user_ad_tags"></a>
+## "cfg-access-user_ad_tags"
 - `user_ad_tags`
   - **Ограничения / валидация**: Каждое значение должно содержать **ровно 32 шестнадцатеричных символа** (тот же формат, что и `general.ad_tag`). Тег со всеми нулями разрешен, но регистрирует предупреждение.
   - **Описание**: Переопределение рекламного тега спонсируемого канала для каждого пользователя. Когда у пользователя есть запись здесь, она имеет приоритет над `general.ad_tag`.
@@ -3013,7 +3029,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access.user_ad_tags]
     alice = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     ```
-<a id="cfg-access-user_max_tcp_conns"></a>
+## "cfg-access-user_max_tcp_conns"
 - `user_max_tcp_conns`
   - **Ограничения / валидация**: `Карта<String, использовать>`.
   - **Описание**: Максимальное количество одновременных TCP-соединений для каждого пользователя.
@@ -3023,7 +3039,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access.user_max_tcp_conns]
     alice = 500
     ```
-<a id="cfg-access-user_max_tcp_conns_global_each"></a>
+## "cfg-access-user_max_tcp_conns_global_each"
 - `user_max_tcp_conns_global_each`
   - **Ограничения / валидация**: `использовать`. `0` отключает унаследованный лимит.
   - **Описание**: Глобальное максимальное количество одновременных TCP-соединений для каждого пользователя, применяется, когда у пользователя **нет положительной** записи в `[access.user_max_tcp_conns]` (отсутствующий ключ или значение `0` подпадают под этот параметр). Ограничения на пользователя, превышающие «0» в «user_max_tcp_conns», имеют приоритет.
@@ -3037,7 +3053,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     alice = 500   # uses 500, not the global cap
     # bob has no entry → uses 200
     ```
-<a id="cfg-access-user_expirations"></a>
+## "cfg-access-user_expirations"
 - `user_expirations`
   - **Ограничения / валидация**: `Карта<String, DateTime<Utc>>`. Каждое значение должно быть допустимой датой и временем RFC3339/ISO-8601.
   - **Описание**: Временные метки истечения срока действия учетной записи пользователя (UTC).
@@ -3047,7 +3063,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access.user_expirations]
     alice = "2026-12-31T23:59:59Z"
     ```
-<a id="cfg-access-user_data_quota"></a>
+## "cfg-access-user_data_quota"
 - `user_data_quota`
   - **Ограничения / валидация**: `Карта<String, u64>`.
   - **Описание**: Квота трафика на пользователя в байтах.
@@ -3057,7 +3073,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access.user_data_quota]
     alice = 1073741824 # 1 GiB
     ```
-<a id="cfg-access-user_max_unique_ips"></a>
+## "cfg-access-user_max_unique_ips"
 - `user_max_unique_ips`
   - **Ограничения / валидация**: `Карта<String, использовать>`.
   - **Описание**: Ограничения на уникальные исходные IP-адреса для каждого пользователя.
@@ -3067,7 +3083,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access.user_max_unique_ips]
     alice = 16
     ```
-<a id="cfg-access-user_max_unique_ips_global_each"></a>
+## "cfg-access-user_max_unique_ips_global_each"
 - `user_max_unique_ips_global_each`
   - **Ограничения / валидация**: `использовать`. `0` отключает унаследованный лимит.
   - **Описание**: Глобальный лимит уникального IP-адреса для каждого пользователя применяется, когда у пользователя нет индивидуального переопределения в `[access.user_max_unique_ips]`.
@@ -3077,7 +3093,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access]
     user_max_unique_ips_global_each = 8
     ```
-<a id="cfg-access-user_max_unique_ips_mode"></a>
+## "cfg-access-user_max_unique_ips_mode"
 - `user_max_unique_ips_mode`
   - **Ограничения / валидация**: Должно быть одно из «active_window», «time_window», «combined».
   - **Описание**: Режим учета лимита уникальных IP-адресов источника.
@@ -3087,7 +3103,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access]
     user_max_unique_ips_mode = "active_window"
     ```
-<a id="cfg-access-user_max_unique_ips_window_secs"></a>
+## "cfg-access-user_max_unique_ips_window_secs"
 - `user_max_unique_ips_window_secs`
   - **Ограничения / валидация**: Должно быть `> 0`.
   - **Описание**: Размер окна (в секундах), используемый режимами учета уникальных IP-адресов, включающими временное окно («time_window» и «комбинированный»).
@@ -3097,7 +3113,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access]
     user_max_unique_ips_window_secs = 30
     ```
-<a id="cfg-access-replay_check_len"></a>
+## "cfg-access-replay_check_len"
 - `replay_check_len`
   - **Ограничения / валидация**: `использовать`.
   - **Описание**: Длина хранилища для защиты от повторения (количество записей, отслеживаемых на предмет обнаружения дубликатов).
@@ -3107,7 +3123,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access]
     replay_check_len = 65536
     ```
-<a id="cfg-access-replay_window_secs"></a>
+## "cfg-access-replay_window_secs"
 - `replay_window_secs`
   - **Ограничения / валидация**: `u64`.
   - **Описание**: Временное окно защиты от повтора в секундах.
@@ -3117,7 +3133,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     [access]
     replay_window_secs = 120
     ```
-<a id="cfg-access-ignore_time_skew"></a>
+## "cfg-access-ignore_time_skew"
 - `ignore_time_skew`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Отключает проверку перекоса временных меток клиента и сервера при проверке воспроизведения, если она включена.
@@ -3129,7 +3145,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     ```
 
 
-## [[upstreams]]
+# [[upstreams]]
 
 
 | Ключ | Тип | По умолчанию |
@@ -3146,7 +3162,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
 | [`username`](#cfg-upstreams-username) | `String` | — |
 | [`password`](#cfg-upstreams-password) | `String` | — |
 
-<a id="cfg-upstreams-type"></a>
+## "cfg-upstreams-type"
 - `type`
   - **Ограничения / валидация**: Обязательное поле. Должен быть одним из: `"direct"`, `"socks4"`, `"socks5"`, `"shadowsocks"`.
   - **Описание**: Выбирает реализацию восходящего транспорта для этой записи `[[upstreams]]`.
@@ -3164,7 +3180,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     type = "shadowsocks"
     url = "ss://2022-blake3-aes-256-gcm:BASE64PASSWORD@127.0.0.1:8388"
     ```
-<a id="cfg-upstreams-weight"></a>
+## "cfg-upstreams-weight"
 - `weight`
   - **Ограничения / валидация**: `u16` (0..=65535).
   - **Описание**: Базовый вес, используемый взвешенно-случайным выбором в восходящем направлении (выше = выбирается чаще).
@@ -3175,7 +3191,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     type = "direct"
     weight = 10
     ```
-<a id="cfg-upstreams-enabled"></a>
+## "cfg-upstreams-enabled"
 - `enabled`
   - **Ограничения / валидация**: `бул`.
   - **Описание**: Если установлено значение false, эта запись игнорируется и не используется для выбора в восходящем направлении.
@@ -3187,7 +3203,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     address = "127.0.0.1:9050"
     enabled = false
     ```
-<a id="cfg-upstreams-scopes"></a>
+## "cfg-upstreams-scopes"
 - `scopes`
   - **Ограничения / валидация**: `Строка`. Список, разделенный запятыми; пробелы обрезаются во время сопоставления.
   - **Описание**: Теги области, используемые для восходящей фильтрации на уровне запроса. Если в запросе указана область, могут быть выбраны только восходящие потоки, чьи `области` содержат этот тег. Если в запросе не указана область, допускаются только восходящие потоки с пустыми «областями».
@@ -3199,7 +3215,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     address = "10.0.0.10:1080"
     scopes = "me, fetch, dc2"
     ```
-<a id="cfg-upstreams-interface"></a>
+## "cfg-upstreams-interface"
 - `interface`
   - **Ограничения / валидация**: `Строка` (необязательно).
 - Для «прямого»: может быть IP-адрес (используемый как явная локальная привязка) или имя интерфейса ОС (преобразующееся в IP-адрес во время выполнения; только для Unix).
@@ -3218,7 +3234,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     address = "203.0.113.10:1080"
     interface = "192.0.2.10" # explicit local bind IP
     ```
-<a id="cfg-upstreams-bind_addresses"></a>
+## "cfg-upstreams-bind_addresses"
 - `bind_addresses`
   - **Ограничения / валидация**: `String[]` (необязательно). Применяется только к `type = "direct"`.
 - Каждая запись должна представлять собой строку IP-адреса.
@@ -3231,7 +3247,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     type = "direct"
     bind_addresses = ["192.0.2.10", "192.0.2.11"]
     ```
-<a id="cfg-upstreams-url"></a>
+## "cfg-upstreams-url"
 - `url`
   - **Ограничения / валидация**: Применяется только к `type = "shadowsocks"`.
 - Должен быть действительный URL-адрес Shadowsocks, принятый ящиком Shadowsocks.
@@ -3248,7 +3264,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     type = "shadowsocks"
     url = "ss://2022-blake3-aes-256-gcm:BASE64PASSWORD@127.0.0.1:8388"
     ```
-<a id="cfg-upstreams-address"></a>
+## "cfg-upstreams-address"
 - `address`
   - **Ограничения / валидация**: Требуется для `type = "socks4"` и `type = "socks5"`. Должно быть `host:port` или `ip:port`.
   - **Описание**: Конечная точка прокси-сервера SOCKS, используемая для восходящих подключений.
@@ -3259,7 +3275,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     type = "socks5"
     address = "127.0.0.1:9050"
     ```
-<a id="cfg-upstreams-user_id"></a>
+## "cfg-upstreams-user_id"
 - `user_id`
   - **Ограничения / валидация**: `Строка` (необязательно). Только для `type="socks4"`.
   - **Описание**: Идентификатор пользователя SOCKS4 CONNECT. Примечание. Когда выбрана область запроса, Telemt может переопределить ее с помощью выбранного значения области.
@@ -3271,7 +3287,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     address = "127.0.0.1:1080"
     user_id = "telemt"
     ```
-<a id="cfg-upstreams-username"></a>
+## "cfg-upstreams-username"
 - `username`
   - **Ограничения / валидация**: `Строка` (необязательно). Только для `type="socks5"`.
   - **Описание**: Имя пользователя SOCKS5 (для аутентификации по имени пользователя и паролю). Примечание. Когда выбрана область запроса, Telemt может переопределить ее с помощью выбранного значения области.
@@ -3283,7 +3299,7 @@ When `mask_shape_hardening = true`, Telemt pads the **client->mask** stream tail
     address = "127.0.0.1:9050"
     username = "alice"
     ```
-<a id="cfg-upstreams-password"></a>
+## "cfg-upstreams-password"
 - `password`
   - **Ограничения / валидация**: `Строка` (необязательно). Только для `type="socks5"`.
   - **Описание**: Пароль SOCKS5 (для аутентификации по имени пользователя и паролю). Примечание. Когда выбрана область запроса, Telemt может переопределить ее с помощью выбранного значения области.

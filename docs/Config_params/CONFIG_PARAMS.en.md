@@ -10,7 +10,24 @@ This document lists all configuration keys accepted by `config.toml`.
 >
 > The configuration parameters detailed in this document are intended for advanced users and fine-tuning purposes. Modifying these settings without a clear understanding of their function may lead to application instability or other unexpected behavior. Please proceed with caution and at your own risk.
 
-## Top-level keys
+# Table of contents
+ - [Top-level keys](#top-level-keys)
+ - [general](#general)
+ - [general.modes](#generalmodes)
+ - [general.links](#generallinks)
+ - [general.telemetry](#generaltelemetry)
+ - [network](#network)
+ - [server](#server)
+ - [server.conntrack_control](#serverconntrack_control)
+ - [server.api](#serverapi)
+ - [[server.listeners]](#serverlisteners)
+ - [timeouts](#timeouts)
+ - [censorship](#censorship)
+ - [censorship.tls_fetch](#censorshiptls_fetch)
+ - [access](#access)
+ - [[upstreams]](#upstreams)
+
+# Top-level keys
 
 | Key | Type | Default |
 | --- | ---- | ------- |
@@ -19,7 +36,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`dc_overrides`](#cfg-top-dc_overrides) | `Map<String, String or String[]>` | `{}` |
 | [`default_dc`](#cfg-top-default_dc) | `u8` | — (effective fallback: `2` in ME routing) |
 
-<a id="cfg-top-include"></a>
+## "cfg-top-include"
 - `include`
   - **Constraints / validation**: Must be a single-line directive in the form `include = "path/to/file.toml"`. Includes are expanded before TOML parsing. Maximum include depth is 10.
   - **Description**: Includes another TOML file with `include = "relative/or/absolute/path.toml"`; includes are processed recursively before parsing.
@@ -28,7 +45,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```toml
     include = "secrets.toml"
     ```
-<a id="cfg-top-show_link"></a>
+## "cfg-top-show_link"
 - `show_link`
   - **Constraints / validation**: Accepts `"*"` or an array of usernames. Empty array means "show none".
   - **Description**: Legacy top-level link visibility selector (`"*"` for all users or explicit usernames list).
@@ -41,7 +58,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # or: show links only for selected users
     # show_link = ["alice", "bob"]
     ```
-<a id="cfg-top-dc_overrides"></a>
+## "cfg-top-dc_overrides"
 - `dc_overrides`
   - **Constraints / validation**: Key must be a positive integer DC index encoded as string (e.g. `"203"`). Values must parse as `SocketAddr` (`ip:port`). Empty strings are ignored.
   - **Description**: Overrides DC endpoints for non-standard DCs; key is DC index string, value is one or more `ip:port` addresses.
@@ -52,7 +69,7 @@ This document lists all configuration keys accepted by `config.toml`.
     "201" = "149.154.175.50:443"
     "203" = ["149.154.175.100:443", "91.105.192.100:443"]
     ```
-<a id="cfg-top-default_dc"></a>
+## "cfg-top-default_dc"
 - `default_dc`
   - **Constraints / validation**: Intended range is `1..=5`. If set out of range, runtime falls back to DC1 behavior in direct relay; Middle-End routing falls back to `2` when not set.
   - **Description**: Default DC index used for unmapped non-standard DCs.
@@ -64,7 +81,7 @@ This document lists all configuration keys accepted by `config.toml`.
     default_dc = 2
     ```
 
-## [general]
+# [general]
 
 | Key | Type | Default |
 | --- | ---- | ------- |
@@ -203,7 +220,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`auto_degradation_enabled`](#cfg-general-auto_degradation_enabled) | `bool` | `true` |
 | [`degradation_min_unavailable_dc_groups`](#cfg-general-degradation_min_unavailable_dc_groups) | `u8` | `2` |
 
-<a id="cfg-general-data_path"></a>
+## "cfg-general-data_path"
 - `data_path`
   - **Constraints / validation**: `String` (optional).
   - **Description**: Optional runtime data directory path.
@@ -213,7 +230,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     data_path = "/var/lib/telemt"
     ```
-<a id="cfg-general-prefer_ipv6"></a>
+## "cfg-general-prefer_ipv6"
 - `prefer_ipv6`
   - **Constraints / validation**: Deprecated. Use `network.prefer`.
   - **Description**: Deprecated legacy IPv6 preference flag migrated to `network.prefer`.
@@ -223,7 +240,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     prefer = 6
     ```
-<a id="cfg-general-fast_mode"></a>
+## "cfg-general-fast_mode"
 - `fast_mode`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables fast-path optimizations for traffic processing.
@@ -233,7 +250,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     fast_mode = true
     ```
-<a id="cfg-general-use_middle_proxy"></a>
+## "cfg-general-use_middle_proxy"
 - `use_middle_proxy`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables ME transport mode; if `false`, runtime falls back to direct DC routing.
@@ -243,7 +260,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     use_middle_proxy = true
     ```
-<a id="cfg-general-proxy_secret_path"></a>
+## "cfg-general-proxy_secret_path"
 - `proxy_secret_path`
   - **Constraints / validation**: `String`. When omitted, the default path is `"proxy-secret"`. Empty values are accepted by TOML/serde but will likely fail at runtime (invalid file path).
   - **Description**: Path to Telegram infrastructure `proxy-secret` cache file used by ME handshake/RPC auth. Telemt always tries a fresh download from `https://core.telegram.org/getProxySecret` first, caches it to this path on success, and falls back to reading the cached file (any age) on download failure.
@@ -253,7 +270,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     proxy_secret_path = "proxy-secret"
     ```
-<a id="cfg-general-proxy_config_v4_cache_path"></a>
+## "cfg-general-proxy_config_v4_cache_path"
 - `proxy_config_v4_cache_path`
   - **Constraints / validation**: `String`. When set, must not be empty/whitespace-only.
   - **Description**: Optional disk cache path for raw `getProxyConfig` (IPv4) snapshot. At startup Telemt tries to fetch a fresh snapshot first; on fetch failure or empty snapshot it falls back to this cache file when present and non-empty.
@@ -263,7 +280,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     proxy_config_v4_cache_path = "cache/proxy-config-v4.txt"
     ```
-<a id="cfg-general-proxy_config_v6_cache_path"></a>
+## "cfg-general-proxy_config_v6_cache_path"
 - `proxy_config_v6_cache_path`
   - **Constraints / validation**: `String`. When set, must not be empty/whitespace-only.
   - **Description**: Optional disk cache path for raw `getProxyConfigV6` (IPv6) snapshot. At startup Telemt tries to fetch a fresh snapshot first; on fetch failure or empty snapshot it falls back to this cache file when present and non-empty.
@@ -273,7 +290,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     proxy_config_v6_cache_path = "cache/proxy-config-v6.txt"
     ```
-<a id="cfg-general-ad_tag"></a>
+## "cfg-general-ad_tag"
 - `ad_tag`
   - **Constraints / validation**: `String` (optional). When set, must be exactly 32 hex characters; invalid values are disabled during config load.
   - **Description**: Global fallback sponsored-channel `ad_tag` (used when user has no override in `access.user_ad_tags`). An all-zero tag is accepted but has no effect (and is warned about) until replaced with a real tag from `@MTProxybot`.
@@ -283,7 +300,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     ad_tag = "00112233445566778899aabbccddeeff"
     ```
-<a id="cfg-general-middle_proxy_nat_ip"></a>
+## "cfg-general-middle_proxy_nat_ip"
 - `middle_proxy_nat_ip`
   - **Constraints / validation**: `IpAddr` (optional).
   - **Description**: Manual public NAT IP override used as ME address material when set.
@@ -293,7 +310,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     middle_proxy_nat_ip = "203.0.113.10"
     ```
-<a id="cfg-general-middle_proxy_nat_probe"></a>
+## "cfg-general-middle_proxy_nat_probe"
 - `middle_proxy_nat_probe`
   - **Constraints / validation**: `bool`. Effective probing is gated by `network.stun_use` (when `network.stun_use = false`, STUN probing is disabled even if this flag is `true`).
   - **Description**: Enables STUN-based NAT probing to discover public IP:port used by ME key derivation in NAT environments.
@@ -303,7 +320,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     middle_proxy_nat_probe = true
     ```
-<a id="cfg-general-middle_proxy_nat_stun"></a>
+## "cfg-general-middle_proxy_nat_stun"
 - `middle_proxy_nat_stun`
   - **Constraints / validation**: Deprecated. Use `network.stun_servers`.
   - **Description**: Deprecated legacy single STUN server for NAT probing. During config load it is merged into `network.stun_servers` unless `network.stun_servers` is explicitly set.
@@ -313,7 +330,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     stun_servers = ["stun.l.google.com:19302"]
     ```
-<a id="cfg-general-middle_proxy_nat_stun_servers"></a>
+## "cfg-general-middle_proxy_nat_stun_servers"
 - `middle_proxy_nat_stun_servers`
   - **Constraints / validation**: Deprecated. Use `network.stun_servers`.
   - **Description**: Deprecated legacy STUN list for NAT probing fallback. During config load it is merged into `network.stun_servers` unless `network.stun_servers` is explicitly set.
@@ -323,7 +340,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     stun_servers = ["stun.l.google.com:19302"]
     ```
-<a id="cfg-general-stun_nat_probe_concurrency"></a>
+## "cfg-general-stun_nat_probe_concurrency"
 - `stun_nat_probe_concurrency`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Maximum number of parallel STUN probes during NAT/public endpoint discovery.
@@ -333,7 +350,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     stun_nat_probe_concurrency = 8
     ```
-<a id="cfg-general-middle_proxy_pool_size"></a>
+## "cfg-general-middle_proxy_pool_size"
 - `middle_proxy_pool_size`
   - **Constraints / validation**: `usize`. Effective value is `max(value, 1)` at runtime (so `0` behaves as `1`).
   - **Description**: Target size of active ME writer pool.
@@ -343,7 +360,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     middle_proxy_pool_size = 8
     ```
-<a id="cfg-general-middle_proxy_warm_standby"></a>
+## "cfg-general-middle_proxy_warm_standby"
 - `middle_proxy_warm_standby`
   - **Constraints / validation**: `usize`.
   - **Description**: Number of warm standby ME connections kept pre-initialized.
@@ -353,7 +370,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     middle_proxy_warm_standby = 16
     ```
-<a id="cfg-general-me_init_retry_attempts"></a>
+## "cfg-general-me_init_retry_attempts"
 - `me_init_retry_attempts`
   - **Constraints / validation**: `0..=1_000_000` (`0` means unlimited retries).
   - **Description**: Startup retries for ME pool initialization.
@@ -363,7 +380,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_init_retry_attempts = 0
     ```
-<a id="cfg-general-me2dc_fallback"></a>
+## "cfg-general-me2dc_fallback"
 - `me2dc_fallback`
   - **Constraints / validation**: `bool`.
   - **Description**: Allows fallback from ME mode to direct DC when ME startup fails.
@@ -373,7 +390,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me2dc_fallback = true
     ```
-<a id="cfg-general-me2dc_fast"></a>
+## "cfg-general-me2dc_fast"
 - `me2dc_fast`
   - **Constraints / validation**: `bool`. Active only when `use_middle_proxy = true` and `me2dc_fallback = true`.
   - **Description**: Fast ME->Direct fallback mode for new sessions.
@@ -385,7 +402,7 @@ This document lists all configuration keys accepted by `config.toml`.
     me2dc_fallback = true
     me2dc_fast = false
     ```
-<a id="cfg-general-me_keepalive_enabled"></a>
+## "cfg-general-me_keepalive_enabled"
 - `me_keepalive_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables periodic ME keepalive padding frames.
@@ -395,7 +412,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_keepalive_enabled = true
     ```
-<a id="cfg-general-me_keepalive_interval_secs"></a>
+## "cfg-general-me_keepalive_interval_secs"
 - `me_keepalive_interval_secs`
   - **Constraints / validation**: `u64` (seconds).
   - **Description**: Base ME keepalive interval in seconds.
@@ -405,7 +422,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_keepalive_interval_secs = 8
     ```
-<a id="cfg-general-me_keepalive_jitter_secs"></a>
+## "cfg-general-me_keepalive_jitter_secs"
 - `me_keepalive_jitter_secs`
   - **Constraints / validation**: `u64` (seconds).
   - **Description**: Keepalive jitter in seconds to reduce synchronized bursts.
@@ -415,7 +432,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_keepalive_jitter_secs = 2
     ```
-<a id="cfg-general-me_keepalive_payload_random"></a>
+## "cfg-general-me_keepalive_payload_random"
 - `me_keepalive_payload_random`
   - **Constraints / validation**: `bool`.
   - **Description**: Randomizes keepalive payload bytes instead of fixed zero payload.
@@ -425,7 +442,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_keepalive_payload_random = true
     ```
-<a id="cfg-general-rpc_proxy_req_every"></a>
+## "cfg-general-rpc_proxy_req_every"
 - `rpc_proxy_req_every`
   - **Constraints / validation**: `0` or within `10..=300` (seconds).
   - **Description**: Interval for service `RPC_PROXY_REQ` activity signals to ME (`0` disables).
@@ -435,7 +452,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     rpc_proxy_req_every = 0
     ```
-<a id="cfg-general-me_writer_cmd_channel_capacity"></a>
+## "cfg-general-me_writer_cmd_channel_capacity"
 - `me_writer_cmd_channel_capacity`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Capacity of per-writer command channel.
@@ -445,7 +462,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_writer_cmd_channel_capacity = 4096
     ```
-<a id="cfg-general-me_route_channel_capacity"></a>
+## "cfg-general-me_route_channel_capacity"
 - `me_route_channel_capacity`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Capacity of per-connection ME response route channel.
@@ -455,7 +472,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_channel_capacity = 768
     ```
-<a id="cfg-general-me_c2me_channel_capacity"></a>
+## "cfg-general-me_c2me_channel_capacity"
 - `me_c2me_channel_capacity`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Capacity of per-client command queue (client reader -> ME sender).
@@ -465,7 +482,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_c2me_channel_capacity = 1024
     ```
-<a id="cfg-general-me_c2me_send_timeout_ms"></a>
+## "cfg-general-me_c2me_send_timeout_ms"
 - `me_c2me_send_timeout_ms`
   - **Constraints / validation**: `0..=60000` (milliseconds).
   - **Description**: Maximum wait for enqueueing client->ME commands when the per-client queue is full (`0` keeps legacy unbounded wait).
@@ -475,7 +492,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_c2me_send_timeout_ms = 4000
     ```
-<a id="cfg-general-me_reader_route_data_wait_ms"></a>
+## "cfg-general-me_reader_route_data_wait_ms"
 - `me_reader_route_data_wait_ms`
   - **Constraints / validation**: `0..=20` (milliseconds).
   - **Description**: Bounded wait for routing ME DATA to per-connection queue (`0` = no wait).
@@ -485,7 +502,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reader_route_data_wait_ms = 2
     ```
-<a id="cfg-general-me_d2c_flush_batch_max_frames"></a>
+## "cfg-general-me_d2c_flush_batch_max_frames"
 - `me_d2c_flush_batch_max_frames`
   - **Constraints / validation**: Must be within `1..=512`.
   - **Description**: Max ME->client frames coalesced before flush.
@@ -495,7 +512,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_d2c_flush_batch_max_frames = 32
     ```
-<a id="cfg-general-me_d2c_flush_batch_max_bytes"></a>
+## "cfg-general-me_d2c_flush_batch_max_bytes"
 - `me_d2c_flush_batch_max_bytes`
   - **Constraints / validation**: Must be within `4096..=2097152` (bytes).
   - **Description**: Max ME->client payload bytes coalesced before flush.
@@ -505,7 +522,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_d2c_flush_batch_max_bytes = 131072
     ```
-<a id="cfg-general-me_d2c_flush_batch_max_delay_us"></a>
+## "cfg-general-me_d2c_flush_batch_max_delay_us"
 - `me_d2c_flush_batch_max_delay_us`
   - **Constraints / validation**: `0..=5000` (microseconds).
   - **Description**: Max microsecond wait for coalescing more ME->client frames (`0` disables timed coalescing).
@@ -515,7 +532,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_d2c_flush_batch_max_delay_us = 500
     ```
-<a id="cfg-general-me_d2c_ack_flush_immediate"></a>
+## "cfg-general-me_d2c_ack_flush_immediate"
 - `me_d2c_ack_flush_immediate`
   - **Constraints / validation**: `bool`.
   - **Description**: Flushes client writer immediately after quick-ack write.
@@ -525,7 +542,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_d2c_ack_flush_immediate = true
     ```
-<a id="cfg-general-me_quota_soft_overshoot_bytes"></a>
+## "cfg-general-me_quota_soft_overshoot_bytes"
 - `me_quota_soft_overshoot_bytes`
   - **Constraints / validation**: `0..=16777216` (bytes).
   - **Description**: Extra per-route quota allowance (bytes) tolerated before writer-side quota enforcement drops route data.
@@ -535,7 +552,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_quota_soft_overshoot_bytes = 65536
     ```
-<a id="cfg-general-me_d2c_frame_buf_shrink_threshold_bytes"></a>
+## "cfg-general-me_d2c_frame_buf_shrink_threshold_bytes"
 - `me_d2c_frame_buf_shrink_threshold_bytes`
   - **Constraints / validation**: Must be within `4096..=16777216` (bytes).
   - **Description**: Threshold for shrinking oversized ME->client frame-aggregation buffers after flush.
@@ -545,7 +562,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_d2c_frame_buf_shrink_threshold_bytes = 262144
     ```
-<a id="cfg-general-direct_relay_copy_buf_c2s_bytes"></a>
+## "cfg-general-direct_relay_copy_buf_c2s_bytes"
 - `direct_relay_copy_buf_c2s_bytes`
   - **Constraints / validation**: Must be within `4096..=1048576` (bytes).
   - **Description**: Copy buffer size for client->DC direction in direct relay.
@@ -555,7 +572,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     direct_relay_copy_buf_c2s_bytes = 65536
     ```
-<a id="cfg-general-direct_relay_copy_buf_s2c_bytes"></a>
+## "cfg-general-direct_relay_copy_buf_s2c_bytes"
 - `direct_relay_copy_buf_s2c_bytes`
   - **Constraints / validation**: Must be within `8192..=2097152` (bytes).
   - **Description**: Copy buffer size for DC->client direction in direct relay.
@@ -565,7 +582,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     direct_relay_copy_buf_s2c_bytes = 262144
     ```
-<a id="cfg-general-crypto_pending_buffer"></a>
+## "cfg-general-crypto_pending_buffer"
 - `crypto_pending_buffer`
   - **Constraints / validation**: `usize` (bytes).
   - **Description**: Max pending ciphertext buffer per client writer (bytes).
@@ -575,7 +592,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     crypto_pending_buffer = 262144
     ```
-<a id="cfg-general-max_client_frame"></a>
+## "cfg-general-max_client_frame"
 - `max_client_frame`
   - **Constraints / validation**: `usize` (bytes).
   - **Description**: Maximum allowed client MTProto frame size (bytes).
@@ -585,7 +602,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     max_client_frame = 16777216
     ```
-<a id="cfg-general-desync_all_full"></a>
+## "cfg-general-desync_all_full"
 - `desync_all_full`
   - **Constraints / validation**: `bool`.
   - **Description**: Emits full crypto-desync forensic logs for every event.
@@ -595,7 +612,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     desync_all_full = false
     ```
-<a id="cfg-general-beobachten"></a>
+## "cfg-general-beobachten"
 - `beobachten`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables per-IP forensic observation buckets.
@@ -605,7 +622,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     beobachten = true
     ```
-<a id="cfg-general-beobachten_minutes"></a>
+## "cfg-general-beobachten_minutes"
 - `beobachten_minutes`
   - **Constraints / validation**: Must be `> 0` (minutes).
   - **Description**: Retention window (minutes) for per-IP observation buckets.
@@ -615,7 +632,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     beobachten_minutes = 10
     ```
-<a id="cfg-general-beobachten_flush_secs"></a>
+## "cfg-general-beobachten_flush_secs"
 - `beobachten_flush_secs`
   - **Constraints / validation**: Must be `> 0` (seconds).
   - **Description**: Snapshot flush interval (seconds) for observation output file.
@@ -625,7 +642,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     beobachten_flush_secs = 15
     ```
-<a id="cfg-general-beobachten_file"></a>
+## "cfg-general-beobachten_file"
 - `beobachten_file`
   - **Constraints / validation**: Must not be empty/whitespace-only.
   - **Description**: Observation snapshot output file path.
@@ -635,7 +652,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     beobachten_file = "cache/beobachten.txt"
     ```
-<a id="cfg-general-hardswap"></a>
+## "cfg-general-hardswap"
 - `hardswap`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables generation-based ME hardswap strategy.
@@ -645,7 +662,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     hardswap = true
     ```
-<a id="cfg-general-me_warmup_stagger_enabled"></a>
+## "cfg-general-me_warmup_stagger_enabled"
 - `me_warmup_stagger_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Staggers extra ME warmup dials to avoid connection spikes.
@@ -655,7 +672,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_warmup_stagger_enabled = true
     ```
-<a id="cfg-general-me_warmup_step_delay_ms"></a>
+## "cfg-general-me_warmup_step_delay_ms"
 - `me_warmup_step_delay_ms`
   - **Constraints / validation**: `u64` (milliseconds).
   - **Description**: Base delay in milliseconds between warmup dial steps.
@@ -665,7 +682,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_warmup_step_delay_ms = 500
     ```
-<a id="cfg-general-me_warmup_step_jitter_ms"></a>
+## "cfg-general-me_warmup_step_jitter_ms"
 - `me_warmup_step_jitter_ms`
   - **Constraints / validation**: `u64` (milliseconds).
   - **Description**: Additional random delay in milliseconds for warmup steps.
@@ -675,7 +692,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_warmup_step_jitter_ms = 300
     ```
-<a id="cfg-general-me_reconnect_max_concurrent_per_dc"></a>
+## "cfg-general-me_reconnect_max_concurrent_per_dc"
 - `me_reconnect_max_concurrent_per_dc`
   - **Constraints / validation**: `u32`. Effective value is `max(value, 1)` at runtime (so `0` behaves as `1`).
   - **Description**: Limits concurrent reconnect workers per DC during health recovery.
@@ -685,7 +702,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reconnect_max_concurrent_per_dc = 8
     ```
-<a id="cfg-general-me_reconnect_backoff_base_ms"></a>
+## "cfg-general-me_reconnect_backoff_base_ms"
 - `me_reconnect_backoff_base_ms`
   - **Constraints / validation**: `u64` (milliseconds).
   - **Description**: Initial reconnect backoff in milliseconds.
@@ -695,7 +712,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reconnect_backoff_base_ms = 500
     ```
-<a id="cfg-general-me_reconnect_backoff_cap_ms"></a>
+## "cfg-general-me_reconnect_backoff_cap_ms"
 - `me_reconnect_backoff_cap_ms`
   - **Constraints / validation**: `u64` (milliseconds).
   - **Description**: Maximum reconnect backoff cap in milliseconds.
@@ -705,7 +722,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reconnect_backoff_cap_ms = 30000
     ```
-<a id="cfg-general-me_reconnect_fast_retry_count"></a>
+## "cfg-general-me_reconnect_fast_retry_count"
 - `me_reconnect_fast_retry_count`
   - **Constraints / validation**: `u32`. Effective value is `max(value, 1)` at runtime (so `0` behaves as `1`).
   - **Description**: Immediate retry budget before long backoff behavior applies.
@@ -715,7 +732,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reconnect_fast_retry_count = 16
     ```
-<a id="cfg-general-me_single_endpoint_shadow_writers"></a>
+## "cfg-general-me_single_endpoint_shadow_writers"
 - `me_single_endpoint_shadow_writers`
   - **Constraints / validation**: Must be within `0..=32`.
   - **Description**: Additional reserve writers for DC groups with exactly one endpoint.
@@ -725,7 +742,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_single_endpoint_shadow_writers = 2
     ```
-<a id="cfg-general-me_single_endpoint_outage_mode_enabled"></a>
+## "cfg-general-me_single_endpoint_outage_mode_enabled"
 - `me_single_endpoint_outage_mode_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables aggressive outage recovery mode for DC groups with exactly one endpoint.
@@ -735,7 +752,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_single_endpoint_outage_mode_enabled = true
     ```
-<a id="cfg-general-me_single_endpoint_outage_disable_quarantine"></a>
+## "cfg-general-me_single_endpoint_outage_disable_quarantine"
 - `me_single_endpoint_outage_disable_quarantine`
   - **Constraints / validation**: `bool`.
   - **Description**: Ignores endpoint quarantine while in single-endpoint outage mode.
@@ -745,7 +762,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_single_endpoint_outage_disable_quarantine = true
     ```
-<a id="cfg-general-me_single_endpoint_outage_backoff_min_ms"></a>
+## "cfg-general-me_single_endpoint_outage_backoff_min_ms"
 - `me_single_endpoint_outage_backoff_min_ms`
   - **Constraints / validation**: Must be `> 0` (milliseconds) and `<= me_single_endpoint_outage_backoff_max_ms`.
   - **Description**: Minimum reconnect backoff in single-endpoint outage mode.
@@ -755,7 +772,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_single_endpoint_outage_backoff_min_ms = 250
     ```
-<a id="cfg-general-me_single_endpoint_outage_backoff_max_ms"></a>
+## "cfg-general-me_single_endpoint_outage_backoff_max_ms"
 - `me_single_endpoint_outage_backoff_max_ms`
   - **Constraints / validation**: Must be `> 0` (milliseconds) and `>= me_single_endpoint_outage_backoff_min_ms`.
   - **Description**: Maximum reconnect backoff in single-endpoint outage mode.
@@ -765,7 +782,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_single_endpoint_outage_backoff_max_ms = 3000
     ```
-<a id="cfg-general-me_single_endpoint_shadow_rotate_every_secs"></a>
+## "cfg-general-me_single_endpoint_shadow_rotate_every_secs"
 - `me_single_endpoint_shadow_rotate_every_secs`
   - **Constraints / validation**: `u64` (seconds). `0` disables periodic shadow rotation.
   - **Description**: Periodic shadow writer rotation interval for single-endpoint DC groups.
@@ -775,7 +792,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_single_endpoint_shadow_rotate_every_secs = 900
     ```
-<a id="cfg-general-me_floor_mode"></a>
+## "cfg-general-me_floor_mode"
 - `me_floor_mode`
   - **Constraints / validation**: `"static"` or `"adaptive"`.
   - **Description**: Floor policy mode for ME writer targets.
@@ -785,7 +802,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_floor_mode = "adaptive"
     ```
-<a id="cfg-general-me_adaptive_floor_idle_secs"></a>
+## "cfg-general-me_adaptive_floor_idle_secs"
 - `me_adaptive_floor_idle_secs`
   - **Constraints / validation**: `u64` (seconds).
   - **Description**: Idle time before adaptive floor may reduce the single-endpoint writer target.
@@ -795,7 +812,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_idle_secs = 90
     ```
-<a id="cfg-general-me_adaptive_floor_min_writers_single_endpoint"></a>
+## "cfg-general-me_adaptive_floor_min_writers_single_endpoint"
 - `me_adaptive_floor_min_writers_single_endpoint`
   - **Constraints / validation**: Must be within `1..=32`.
   - **Description**: Minimum writer target for single-endpoint DC groups in adaptive floor mode.
@@ -805,7 +822,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_min_writers_single_endpoint = 1
     ```
-<a id="cfg-general-me_adaptive_floor_min_writers_multi_endpoint"></a>
+## "cfg-general-me_adaptive_floor_min_writers_multi_endpoint"
 - `me_adaptive_floor_min_writers_multi_endpoint`
   - **Constraints / validation**: Must be within `1..=32`.
   - **Description**: Minimum writer target for multi-endpoint DC groups in adaptive floor mode.
@@ -815,7 +832,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_min_writers_multi_endpoint = 1
     ```
-<a id="cfg-general-me_adaptive_floor_recover_grace_secs"></a>
+## "cfg-general-me_adaptive_floor_recover_grace_secs"
 - `me_adaptive_floor_recover_grace_secs`
   - **Constraints / validation**: `u64` (seconds).
   - **Description**: Grace period to hold static floor after activity in adaptive mode.
@@ -825,7 +842,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_recover_grace_secs = 180
     ```
-<a id="cfg-general-me_adaptive_floor_writers_per_core_total"></a>
+## "cfg-general-me_adaptive_floor_writers_per_core_total"
 - `me_adaptive_floor_writers_per_core_total`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Global ME writer budget per logical CPU core in adaptive mode.
@@ -835,7 +852,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_writers_per_core_total = 48
     ```
-<a id="cfg-general-me_adaptive_floor_cpu_cores_override"></a>
+## "cfg-general-me_adaptive_floor_cpu_cores_override"
 - `me_adaptive_floor_cpu_cores_override`
   - **Constraints / validation**: `u16`. `0` uses runtime auto-detection.
   - **Description**: Override logical CPU core count used for adaptive floor calculations.
@@ -845,7 +862,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_cpu_cores_override = 0
     ```
-<a id="cfg-general-me_adaptive_floor_max_extra_writers_single_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_extra_writers_single_per_core"
 - `me_adaptive_floor_max_extra_writers_single_per_core`
   - **Constraints / validation**: `u16`.
   - **Description**: Per-core max extra writers above base required floor for single-endpoint DC groups.
@@ -855,7 +872,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_max_extra_writers_single_per_core = 1
     ```
-<a id="cfg-general-me_adaptive_floor_max_extra_writers_multi_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_extra_writers_multi_per_core"
 - `me_adaptive_floor_max_extra_writers_multi_per_core`
   - **Constraints / validation**: `u16`.
   - **Description**: Per-core max extra writers above base required floor for multi-endpoint DC groups.
@@ -865,7 +882,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_max_extra_writers_multi_per_core = 2
     ```
-<a id="cfg-general-me_adaptive_floor_max_active_writers_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_active_writers_per_core"
 - `me_adaptive_floor_max_active_writers_per_core`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Hard cap for active ME writers per logical CPU core.
@@ -875,7 +892,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_max_active_writers_per_core = 64
     ```
-<a id="cfg-general-me_adaptive_floor_max_warm_writers_per_core"></a>
+## "cfg-general-me_adaptive_floor_max_warm_writers_per_core"
 - `me_adaptive_floor_max_warm_writers_per_core`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Hard cap for warm ME writers per logical CPU core.
@@ -885,7 +902,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_max_warm_writers_per_core = 64
     ```
-<a id="cfg-general-me_adaptive_floor_max_active_writers_global"></a>
+## "cfg-general-me_adaptive_floor_max_active_writers_global"
 - `me_adaptive_floor_max_active_writers_global`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Hard global cap for active ME writers.
@@ -895,7 +912,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_max_active_writers_global = 256
     ```
-<a id="cfg-general-me_adaptive_floor_max_warm_writers_global"></a>
+## "cfg-general-me_adaptive_floor_max_warm_writers_global"
 - `me_adaptive_floor_max_warm_writers_global`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Hard global cap for warm ME writers.
@@ -905,7 +922,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_adaptive_floor_max_warm_writers_global = 256
     ```
-<a id="cfg-general-upstream_connect_retry_attempts"></a>
+## "cfg-general-upstream_connect_retry_attempts"
 - `upstream_connect_retry_attempts`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Connect attempts for the selected upstream before returning error/fallback.
@@ -915,7 +932,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     upstream_connect_retry_attempts = 2
     ```
-<a id="cfg-general-upstream_connect_retry_backoff_ms"></a>
+## "cfg-general-upstream_connect_retry_backoff_ms"
 - `upstream_connect_retry_backoff_ms`
   - **Constraints / validation**: `u64` (milliseconds). `0` disables backoff delay (retries become immediate).
   - **Description**: Delay in milliseconds between upstream connect attempts.
@@ -925,7 +942,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     upstream_connect_retry_backoff_ms = 100
     ```
-<a id="cfg-general-upstream_connect_budget_ms"></a>
+## "cfg-general-upstream_connect_budget_ms"
 - `upstream_connect_budget_ms`
   - **Constraints / validation**: Must be `> 0` (milliseconds).
   - **Description**: Total wall-clock budget in milliseconds for one upstream connect request across retries.
@@ -935,7 +952,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     upstream_connect_budget_ms = 3000
     ```
-<a id="cfg-general-upstream_unhealthy_fail_threshold"></a>
+## "cfg-general-upstream_unhealthy_fail_threshold"
 - `upstream_unhealthy_fail_threshold`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Consecutive failed requests before upstream is marked unhealthy.
@@ -945,7 +962,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     upstream_unhealthy_fail_threshold = 5
     ```
-<a id="cfg-general-upstream_connect_failfast_hard_errors"></a>
+## "cfg-general-upstream_connect_failfast_hard_errors"
 - `upstream_connect_failfast_hard_errors`
   - **Constraints / validation**: `bool`.
   - **Description**: When true, skips additional retries for hard non-transient upstream connect errors.
@@ -955,7 +972,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     upstream_connect_failfast_hard_errors = false
     ```
-<a id="cfg-general-stun_iface_mismatch_ignore"></a>
+## "cfg-general-stun_iface_mismatch_ignore"
 - `stun_iface_mismatch_ignore`
   - **Constraints / validation**: `bool`.
   - **Description**: Compatibility flag reserved for future use. Currently this key is parsed but not used by the runtime.
@@ -965,7 +982,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     stun_iface_mismatch_ignore = false
     ```
-<a id="cfg-general-unknown_dc_log_path"></a>
+## "cfg-general-unknown_dc_log_path"
 - `unknown_dc_log_path`
   - **Constraints / validation**: `String` (optional). Must be a safe path (no `..` components, parent directory must exist); unsafe paths are rejected at runtime.
   - **Description**: Log file path for unknown (non-standard) DC requests when `unknown_dc_file_log_enabled = true`. Omit this key to disable file logging.
@@ -975,7 +992,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     unknown_dc_log_path = "unknown-dc.txt"
     ```
-<a id="cfg-general-unknown_dc_file_log_enabled"></a>
+## "cfg-general-unknown_dc_file_log_enabled"
 - `unknown_dc_file_log_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables unknown-DC file logging (writes `dc_idx=<N>` lines). Requires `unknown_dc_log_path` to be set and, on non-Unix platforms, may be unsupported. Logging is deduplicated and capped (only the first ~1024 distinct unknown DC indices are recorded).
@@ -985,7 +1002,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     unknown_dc_file_log_enabled = false
     ```
-<a id="cfg-general-log_level"></a>
+## "cfg-general-log_level"
 - `log_level`
   - **Constraints / validation**: `"debug"`, `"verbose"`, `"normal"`, or `"silent"`.
   - **Description**: Runtime logging verbosity level (used when `RUST_LOG` is not set). If `RUST_LOG` is set in the environment, it takes precedence over this setting.
@@ -995,7 +1012,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     log_level = "normal"
     ```
-<a id="cfg-general-disable_colors"></a>
+## "cfg-general-disable_colors"
 - `disable_colors`
   - **Constraints / validation**: `bool`.
   - **Description**: Disables ANSI colors in logs (useful for files/systemd). This affects log formatting only and does not change the log level/filtering.
@@ -1005,7 +1022,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     disable_colors = false
     ```
-<a id="cfg-general-me_socks_kdf_policy"></a>
+## "cfg-general-me_socks_kdf_policy"
 - `me_socks_kdf_policy`
   - **Constraints / validation**: `"strict"` or `"compat"`.
   - **Description**: SOCKS-bound KDF fallback policy for Middle-End handshake.
@@ -1015,7 +1032,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_socks_kdf_policy = "strict"
     ```
-<a id="cfg-general-me_route_backpressure_base_timeout_ms"></a>
+## "cfg-general-me_route_backpressure_base_timeout_ms"
 - `me_route_backpressure_base_timeout_ms`
   - **Constraints / validation**: Must be within `1..=5000` (milliseconds).
   - **Description**: Base backpressure timeout in milliseconds for ME route-channel send.
@@ -1025,7 +1042,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_backpressure_base_timeout_ms = 25
     ```
-<a id="cfg-general-me_route_backpressure_high_timeout_ms"></a>
+## "cfg-general-me_route_backpressure_high_timeout_ms"
 - `me_route_backpressure_high_timeout_ms`
   - **Constraints / validation**: Must be within `1..=5000` (milliseconds) and `>= me_route_backpressure_base_timeout_ms`.
   - **Description**: High backpressure timeout in milliseconds when queue occupancy is above watermark.
@@ -1035,7 +1052,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_backpressure_high_timeout_ms = 120
     ```
-<a id="cfg-general-me_route_backpressure_high_watermark_pct"></a>
+## "cfg-general-me_route_backpressure_high_watermark_pct"
 - `me_route_backpressure_high_watermark_pct`
   - **Constraints / validation**: Must be within `1..=100` (percent).
   - **Description**: Queue occupancy percent threshold for switching to high backpressure timeout.
@@ -1045,7 +1062,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_backpressure_high_watermark_pct = 80
     ```
-<a id="cfg-general-me_health_interval_ms_unhealthy"></a>
+## "cfg-general-me_health_interval_ms_unhealthy"
 - `me_health_interval_ms_unhealthy`
   - **Constraints / validation**: Must be `> 0` (milliseconds).
   - **Description**: Health monitor interval while ME writer coverage is degraded.
@@ -1055,7 +1072,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_health_interval_ms_unhealthy = 1000
     ```
-<a id="cfg-general-me_health_interval_ms_healthy"></a>
+## "cfg-general-me_health_interval_ms_healthy"
 - `me_health_interval_ms_healthy`
   - **Constraints / validation**: Must be `> 0` (milliseconds).
   - **Description**: Health monitor interval while ME writer coverage is stable/healthy.
@@ -1065,7 +1082,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_health_interval_ms_healthy = 3000
     ```
-<a id="cfg-general-me_admission_poll_ms"></a>
+## "cfg-general-me_admission_poll_ms"
 - `me_admission_poll_ms`
   - **Constraints / validation**: Must be `> 0` (milliseconds).
   - **Description**: Poll interval for conditional-admission state checks.
@@ -1075,7 +1092,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_admission_poll_ms = 1000
     ```
-<a id="cfg-general-me_warn_rate_limit_ms"></a>
+## "cfg-general-me_warn_rate_limit_ms"
 - `me_warn_rate_limit_ms`
   - **Constraints / validation**: Must be `> 0` (milliseconds).
   - **Description**: Cooldown for repetitive ME warning logs.
@@ -1085,7 +1102,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_warn_rate_limit_ms = 5000
     ```
-<a id="cfg-general-me_route_no_writer_mode"></a>
+## "cfg-general-me_route_no_writer_mode"
 - `me_route_no_writer_mode`
   - **Constraints / validation**: `"async_recovery_failfast"`, `"inline_recovery_legacy"`, or `"hybrid_async_persistent"`.
   - **Description**: ME route behavior when no writer is immediately available.
@@ -1095,7 +1112,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_no_writer_mode = "hybrid_async_persistent"
     ```
-<a id="cfg-general-me_route_no_writer_wait_ms"></a>
+## "cfg-general-me_route_no_writer_wait_ms"
 - `me_route_no_writer_wait_ms`
   - **Constraints / validation**: Must be within `10..=5000` (milliseconds).
   - **Description**: Max wait time used by async-recovery failfast mode before falling back.
@@ -1105,7 +1122,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_no_writer_wait_ms = 250
     ```
-<a id="cfg-general-me_route_hybrid_max_wait_ms"></a>
+## "cfg-general-me_route_hybrid_max_wait_ms"
 - `me_route_hybrid_max_wait_ms`
   - **Constraints / validation**: Must be within `50..=60000` (milliseconds).
   - **Description**: Maximum cumulative wait in hybrid no-writer mode before failfast fallback.
@@ -1115,7 +1132,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_hybrid_max_wait_ms = 3000
     ```
-<a id="cfg-general-me_route_blocking_send_timeout_ms"></a>
+## "cfg-general-me_route_blocking_send_timeout_ms"
 - `me_route_blocking_send_timeout_ms`
   - **Constraints / validation**: Must be within `0..=5000` (milliseconds). `0` keeps legacy unbounded wait behavior.
   - **Description**: Maximum wait for blocking route-channel send fallback.
@@ -1125,7 +1142,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_blocking_send_timeout_ms = 250
     ```
-<a id="cfg-general-me_route_inline_recovery_attempts"></a>
+## "cfg-general-me_route_inline_recovery_attempts"
 - `me_route_inline_recovery_attempts`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Number of inline recovery attempts in legacy mode.
@@ -1135,7 +1152,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_inline_recovery_attempts = 3
     ```
-<a id="cfg-general-me_route_inline_recovery_wait_ms"></a>
+## "cfg-general-me_route_inline_recovery_wait_ms"
 - `me_route_inline_recovery_wait_ms`
   - **Constraints / validation**: Must be within `10..=30000` (milliseconds).
   - **Description**: Max inline recovery wait in legacy mode.
@@ -1145,7 +1162,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_route_inline_recovery_wait_ms = 3000
     ```
-<a id="cfg-general-fast_mode_min_tls_record"></a>
+## "cfg-general-fast_mode_min_tls_record"
 - `fast_mode_min_tls_record`
   - **Constraints / validation**: `usize` (bytes). `0` disables the limit.
   - **Description**: Minimum TLS record size when fast-mode coalescing is enabled.
@@ -1155,7 +1172,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     fast_mode_min_tls_record = 0
     ```
-<a id="cfg-general-update_every"></a>
+## "cfg-general-update_every"
 - `update_every`
   - **Constraints / validation**: `u64` (seconds). If set, must be `> 0`. If this key is not explicitly set, legacy `proxy_secret_auto_reload_secs` and `proxy_config_auto_reload_secs` may be used (their effective minimum must be `> 0`).
   - **Description**: Unified refresh interval for ME updater tasks (`getProxyConfig`, `getProxyConfigV6`, `getProxySecret`). When set, it overrides legacy proxy reload intervals.
@@ -1165,7 +1182,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     update_every = 300
     ```
-<a id="cfg-general-me_reinit_every_secs"></a>
+## "cfg-general-me_reinit_every_secs"
 - `me_reinit_every_secs`
   - **Constraints / validation**: Must be `> 0` (seconds).
   - **Description**: Periodic interval for zero-downtime ME reinit cycle.
@@ -1175,7 +1192,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reinit_every_secs = 900
     ```
-<a id="cfg-general-me_hardswap_warmup_delay_min_ms"></a>
+## "cfg-general-me_hardswap_warmup_delay_min_ms"
 - `me_hardswap_warmup_delay_min_ms`
   - **Constraints / validation**: `u64` (milliseconds). Must be `<= me_hardswap_warmup_delay_max_ms`.
   - **Description**: Lower bound for hardswap warmup dial spacing.
@@ -1185,7 +1202,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_hardswap_warmup_delay_min_ms = 1000
     ```
-<a id="cfg-general-me_hardswap_warmup_delay_max_ms"></a>
+## "cfg-general-me_hardswap_warmup_delay_max_ms"
 - `me_hardswap_warmup_delay_max_ms`
   - **Constraints / validation**: Must be `> 0` (milliseconds).
   - **Description**: Upper bound for hardswap warmup dial spacing.
@@ -1195,7 +1212,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_hardswap_warmup_delay_max_ms = 2000
     ```
-<a id="cfg-general-me_hardswap_warmup_extra_passes"></a>
+## "cfg-general-me_hardswap_warmup_extra_passes"
 - `me_hardswap_warmup_extra_passes`
   - **Constraints / validation**: Must be within `[0, 10]`.
   - **Description**: Additional warmup passes after the base pass in one hardswap cycle.
@@ -1206,7 +1223,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 3 (allowed range: 0..=10)
     me_hardswap_warmup_extra_passes = 3
     ```
-<a id="cfg-general-me_hardswap_warmup_pass_backoff_base_ms"></a>
+## "cfg-general-me_hardswap_warmup_pass_backoff_base_ms"
 - `me_hardswap_warmup_pass_backoff_base_ms`
   - **Constraints / validation**: `u64` (milliseconds). Must be `> 0`.
   - **Description**: Base backoff between extra hardswap warmup passes when the floor is still incomplete.
@@ -1217,7 +1234,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 500
     me_hardswap_warmup_pass_backoff_base_ms = 500
     ```
-<a id="cfg-general-me_config_stable_snapshots"></a>
+## "cfg-general-me_config_stable_snapshots"
 - `me_config_stable_snapshots`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Number of identical ME config snapshots required before apply.
@@ -1228,7 +1245,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # require 3 identical snapshots before applying ME endpoint map updates
     me_config_stable_snapshots = 3
     ```
-<a id="cfg-general-me_config_apply_cooldown_secs"></a>
+## "cfg-general-me_config_apply_cooldown_secs"
 - `me_config_apply_cooldown_secs`
   - **Constraints / validation**: `u64`.
   - **Description**: Cooldown between applied ME endpoint-map updates. `0` disables the cooldown.
@@ -1239,7 +1256,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # allow applying stable snapshots immediately (no cooldown)
     me_config_apply_cooldown_secs = 0
     ```
-<a id="cfg-general-me_snapshot_require_http_2xx"></a>
+## "cfg-general-me_snapshot_require_http_2xx"
 - `me_snapshot_require_http_2xx`
   - **Constraints / validation**: `bool`.
   - **Description**: Requires 2xx HTTP responses for applying ME config snapshots. When `false`, non-2xx responses may still be parsed/considered by the updater.
@@ -1250,7 +1267,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # allow applying snapshots even when the HTTP status is non-2xx
     me_snapshot_require_http_2xx = false
     ```
-<a id="cfg-general-me_snapshot_reject_empty_map"></a>
+## "cfg-general-me_snapshot_reject_empty_map"
 - `me_snapshot_reject_empty_map`
   - **Constraints / validation**: `bool`.
   - **Description**: Rejects empty ME config snapshots (no endpoints). When `false`, an empty snapshot can be applied (subject to other gates), which may temporarily reduce/clear the ME map.
@@ -1261,7 +1278,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # allow applying empty snapshots (use with care)
     me_snapshot_reject_empty_map = false
     ```
-<a id="cfg-general-me_snapshot_min_proxy_for_lines"></a>
+## "cfg-general-me_snapshot_min_proxy_for_lines"
 - `me_snapshot_min_proxy_for_lines`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Minimum parsed `proxy_for` rows required to accept snapshot.
@@ -1272,7 +1289,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # require at least 10 proxy_for rows before accepting a snapshot
     me_snapshot_min_proxy_for_lines = 10
     ```
-<a id="cfg-general-proxy_secret_stable_snapshots"></a>
+## "cfg-general-proxy_secret_stable_snapshots"
 - `proxy_secret_stable_snapshots`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Number of identical proxy-secret snapshots required before rotation.
@@ -1283,7 +1300,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # require 2 identical getProxySecret snapshots before rotating at runtime
     proxy_secret_stable_snapshots = 2
     ```
-<a id="cfg-general-proxy_secret_rotate_runtime"></a>
+## "cfg-general-proxy_secret_rotate_runtime"
 - `proxy_secret_rotate_runtime`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables runtime proxy-secret rotation from updater snapshots.
@@ -1294,7 +1311,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # disable runtime proxy-secret rotation (startup still uses proxy_secret_path/proxy_secret_len_max)
     proxy_secret_rotate_runtime = false
     ```
-<a id="cfg-general-me_secret_atomic_snapshot"></a>
+## "cfg-general-me_secret_atomic_snapshot"
 - `me_secret_atomic_snapshot`
   - **Constraints / validation**: `bool`.
   - **Description**: Keeps selector and secret bytes from the same snapshot atomically. When `general.use_middle_proxy = true`, this is auto-enabled during config load to keep ME KDF material coherent.
@@ -1305,7 +1322,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # NOTE: when use_middle_proxy=true, Telemt will auto-enable this during load
     me_secret_atomic_snapshot = false
     ```
-<a id="cfg-general-proxy_secret_len_max"></a>
+## "cfg-general-proxy_secret_len_max"
 - `proxy_secret_len_max`
   - **Constraints / validation**: Must be within `[32, 4096]`.
   - **Description**: Upper length limit (bytes) for accepted proxy-secret during startup and runtime refresh.
@@ -1316,7 +1333,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 256 (bytes)
     proxy_secret_len_max = 256
     ```
-<a id="cfg-general-me_pool_drain_ttl_secs"></a>
+## "cfg-general-me_pool_drain_ttl_secs"
 - `me_pool_drain_ttl_secs`
   - **Constraints / validation**: `u64` (seconds). `0` disables the drain-TTL window (and suppresses drain-TTL warnings for non-empty draining writers).
   - **Description**: Drain-TTL time window for stale ME writers after endpoint map changes. During the TTL, stale writers may be used only as fallback for new bindings (depending on bind policy).
@@ -1327,7 +1344,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # disable drain TTL (draining writers won't emit "past drain TTL" warnings)
     me_pool_drain_ttl_secs = 0
     ```
-<a id="cfg-general-me_instadrain"></a>
+## "cfg-general-me_instadrain"
 - `me_instadrain`
   - **Constraints / validation**: `bool`.
   - **Description**: Forces draining stale writers to be removed on the next cleanup tick, bypassing TTL/deadline waiting.
@@ -1338,7 +1355,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: false
     me_instadrain = false
     ```
-<a id="cfg-general-me_pool_drain_threshold"></a>
+## "cfg-general-me_pool_drain_threshold"
 - `me_pool_drain_threshold`
   - **Constraints / validation**: `u64`. Set to `0` to disable threshold-based cleanup.
   - **Description**: Maximum number of draining stale writers before oldest ones are force-closed in batches.
@@ -1349,7 +1366,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 32
     me_pool_drain_threshold = 32
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_enabled"></a>
+## "cfg-general-me_pool_drain_soft_evict_enabled"
 - `me_pool_drain_soft_evict_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables gradual soft-eviction of stale writers during drain/reinit instead of immediate hard close.
@@ -1360,7 +1377,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: true
     me_pool_drain_soft_evict_enabled = true
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_grace_secs"></a>
+## "cfg-general-me_pool_drain_soft_evict_grace_secs"
 - `me_pool_drain_soft_evict_grace_secs`
   - **Constraints / validation**: `u64` (seconds). Must be within `[0, 3600]`.
   - **Description**: Extra grace (after drain TTL) before soft-eviction stage starts.
@@ -1371,7 +1388,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 10
     me_pool_drain_soft_evict_grace_secs = 10
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_per_writer"></a>
+## "cfg-general-me_pool_drain_soft_evict_per_writer"
 - `me_pool_drain_soft_evict_per_writer`
   - **Constraints / validation**: `1..=16`.
   - **Description**: Maximum stale routes soft-evicted per writer in one eviction pass.
@@ -1382,7 +1399,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 2
     me_pool_drain_soft_evict_per_writer = 2
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_budget_per_core"></a>
+## "cfg-general-me_pool_drain_soft_evict_budget_per_core"
 - `me_pool_drain_soft_evict_budget_per_core`
   - **Constraints / validation**: `1..=64`.
   - **Description**: Per-core budget limiting aggregate soft-eviction work per pass.
@@ -1393,7 +1410,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 16
     me_pool_drain_soft_evict_budget_per_core = 16
     ```
-<a id="cfg-general-me_pool_drain_soft_evict_cooldown_ms"></a>
+## "cfg-general-me_pool_drain_soft_evict_cooldown_ms"
 - `me_pool_drain_soft_evict_cooldown_ms`
   - **Constraints / validation**: `u64` (milliseconds). Must be `> 0`.
   - **Description**: Cooldown between repetitive soft-eviction on the same writer.
@@ -1404,7 +1421,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # default: 1000
     me_pool_drain_soft_evict_cooldown_ms = 1000
     ```
-<a id="cfg-general-me_bind_stale_mode"></a>
+## "cfg-general-me_bind_stale_mode"
 - `me_bind_stale_mode`
   - **Constraints / validation**: `"never"`, `"ttl"`, or `"always"`.
   - **Description**: Policy for new binds on stale draining writers.
@@ -1415,7 +1432,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # allow stale binds only for a limited time window
     me_bind_stale_mode = "ttl"
     ```
-<a id="cfg-general-me_bind_stale_ttl_secs"></a>
+## "cfg-general-me_bind_stale_ttl_secs"
 - `me_bind_stale_ttl_secs`
   - **Constraints / validation**: `u64`.
   - **Description**: TTL for stale bind allowance when stale mode is `ttl`.
@@ -1426,7 +1443,7 @@ This document lists all configuration keys accepted by `config.toml`.
     me_bind_stale_mode = "ttl"
     me_bind_stale_ttl_secs = 90
     ```
-<a id="cfg-general-me_pool_min_fresh_ratio"></a>
+## "cfg-general-me_pool_min_fresh_ratio"
 - `me_pool_min_fresh_ratio`
   - **Constraints / validation**: Must be within `[0.0, 1.0]`.
   - **Description**: Minimum fresh desired-DC coverage ratio before stale writers are drained.
@@ -1437,7 +1454,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # require >=90% desired-DC coverage before draining stale writers
     me_pool_min_fresh_ratio = 0.9
     ```
-<a id="cfg-general-me_reinit_drain_timeout_secs"></a>
+## "cfg-general-me_reinit_drain_timeout_secs"
 - `me_reinit_drain_timeout_secs`
   - **Constraints / validation**: `u64`. `0` uses the runtime safety fallback force-close timeout. If `> 0` and `< me_pool_drain_ttl_secs`, runtime bumps it to TTL.
   - **Description**: Force-close timeout for draining stale writers. When set to `0`, the effective timeout is the runtime safety fallback (300 seconds).
@@ -1448,7 +1465,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # use runtime safety fallback force-close timeout (300s)
     me_reinit_drain_timeout_secs = 0
     ```
-<a id="cfg-general-proxy_secret_auto_reload_secs"></a>
+## "cfg-general-proxy_secret_auto_reload_secs"
 - `proxy_secret_auto_reload_secs`
   - **Constraints / validation**: Deprecated. Use `general.update_every`. When `general.update_every` is not explicitly set, the effective legacy refresh interval is `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` and must be `> 0`.
   - **Description**: Deprecated legacy proxy-secret refresh interval. Used only when `general.update_every` is not set.
@@ -1461,7 +1478,7 @@ This document lists all configuration keys accepted by `config.toml`.
     proxy_config_auto_reload_secs = 120
     # effective updater interval = min(600, 120) = 120 seconds
     ```
-<a id="cfg-general-proxy_config_auto_reload_secs"></a>
+## "cfg-general-proxy_config_auto_reload_secs"
 - `proxy_config_auto_reload_secs`
   - **Constraints / validation**: Deprecated. Use `general.update_every`. When `general.update_every` is not explicitly set, the effective legacy refresh interval is `min(proxy_secret_auto_reload_secs, proxy_config_auto_reload_secs)` and must be `> 0`.
   - **Description**: Deprecated legacy ME config refresh interval. Used only when `general.update_every` is not set.
@@ -1474,7 +1491,7 @@ This document lists all configuration keys accepted by `config.toml`.
     proxy_config_auto_reload_secs = 120
     # effective updater interval = min(600, 120) = 120 seconds
     ```
-<a id="cfg-general-me_reinit_singleflight"></a>
+## "cfg-general-me_reinit_singleflight"
 - `me_reinit_singleflight`
   - **Constraints / validation**: `bool`.
   - **Description**: Serializes ME reinit cycles across trigger sources.
@@ -1484,7 +1501,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reinit_singleflight = true
     ```
-<a id="cfg-general-me_reinit_trigger_channel"></a>
+## "cfg-general-me_reinit_trigger_channel"
 - `me_reinit_trigger_channel`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Trigger queue capacity for reinit scheduler.
@@ -1494,7 +1511,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reinit_trigger_channel = 64
     ```
-<a id="cfg-general-me_reinit_coalesce_window_ms"></a>
+## "cfg-general-me_reinit_coalesce_window_ms"
 - `me_reinit_coalesce_window_ms`
   - **Constraints / validation**: `u64`.
   - **Description**: Trigger coalescing window before starting reinit (ms).
@@ -1504,7 +1521,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_reinit_coalesce_window_ms = 200
     ```
-<a id="cfg-general-me_deterministic_writer_sort"></a>
+## "cfg-general-me_deterministic_writer_sort"
 - `me_deterministic_writer_sort`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables deterministic candidate sort for writer binding path.
@@ -1514,7 +1531,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_deterministic_writer_sort = true
     ```
-<a id="cfg-general-me_writer_pick_mode"></a>
+## "cfg-general-me_writer_pick_mode"
 - `me_writer_pick_mode`
   - **Constraints / validation**: `"sorted_rr"` or `"p2c"`.
   - **Description**: Writer selection mode for route bind path.
@@ -1524,7 +1541,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_writer_pick_mode = "p2c"
     ```
-<a id="cfg-general-me_writer_pick_sample_size"></a>
+## "cfg-general-me_writer_pick_sample_size"
 - `me_writer_pick_sample_size`
   - **Constraints / validation**: `2..=4`.
   - **Description**: Number of candidates sampled by picker in `p2c` mode.
@@ -1535,7 +1552,7 @@ This document lists all configuration keys accepted by `config.toml`.
     me_writer_pick_mode = "p2c"
     me_writer_pick_sample_size = 3
     ```
-<a id="cfg-general-ntp_check"></a>
+## "cfg-general-ntp_check"
 - `ntp_check`
   - **Constraints / validation**: `bool`.
   - **Description**: Reserved for future use. Currently this key is parsed but not used by the runtime.
@@ -1545,7 +1562,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     ntp_check = true
     ```
-<a id="cfg-general-ntp_servers"></a>
+## "cfg-general-ntp_servers"
 - `ntp_servers`
   - **Constraints / validation**: `String[]`.
   - **Description**: Reserved for future use. Currently this key is parsed but not used by the runtime.
@@ -1555,7 +1572,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     ntp_servers = ["pool.ntp.org"]
     ```
-<a id="cfg-general-auto_degradation_enabled"></a>
+## "cfg-general-auto_degradation_enabled"
 - `auto_degradation_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Reserved for future use. Currently this key is parsed but not used by the runtime.
@@ -1565,7 +1582,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     auto_degradation_enabled = true
     ```
-<a id="cfg-general-degradation_min_unavailable_dc_groups"></a>
+## "cfg-general-degradation_min_unavailable_dc_groups"
 - `degradation_min_unavailable_dc_groups`
   - **Constraints / validation**: `u8`.
   - **Description**: Reserved for future use. Currently this key is parsed but not used by the runtime.
@@ -1577,7 +1594,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 
 
-## [general.modes]
+# [general.modes]
 
 
 | Key | Type | Default |
@@ -1586,7 +1603,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`secure`](#cfg-general-modes-secure) | `bool` | `false` |
 | [`tls`](#cfg-general-modes-tls) | `bool` | `true` |
 
-<a id="cfg-general-modes-classic"></a>
+## "cfg-general-modes-classic"
 - `classic`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables classic MTProxy mode.
@@ -1596,7 +1613,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general.modes]
     classic = true
     ```
-<a id="cfg-general-modes-secure"></a>
+## "cfg-general-modes-secure"
 - `secure`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables secure mode.
@@ -1606,7 +1623,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general.modes]
     secure = true
     ```
-<a id="cfg-general-modes-tls"></a>
+## "cfg-general-modes-tls"
 - `tls`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables TLS mode.
@@ -1618,7 +1635,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 
 
-## [general.links]
+# [general.links]
 
 
 | Key | Type | Default |
@@ -1627,7 +1644,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`public_host`](#cfg-general-links-public_host) | `String` | — |
 | [`public_port`](#cfg-general-links-public_port) | `u16` | — |
 
-<a id="cfg-general-links-show"></a>
+## "cfg-general-links-show"
 - `show`
   - **Constraints / validation**: `"*"` or `String[]`. An empty array means "show none".
   - **Description**: Selects users whose `tg://` proxy links are shown at startup.
@@ -1639,7 +1656,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # or:
     # show = ["alice", "bob"]
     ```
-<a id="cfg-general-links-public_host"></a>
+## "cfg-general-links-public_host"
 - `public_host`
   - **Constraints / validation**: `String` (optional).
   - **Description**: Public hostname/IP override used for generated `tg://` links (overrides detected IP).
@@ -1649,7 +1666,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general.links]
     public_host = "proxy.example.com"
     ```
-<a id="cfg-general-links-public_port"></a>
+## "cfg-general-links-public_port"
 - `public_port`
   - **Constraints / validation**: `u16` (optional).
   - **Description**: Public port override used for generated `tg://` links (overrides `server.port`).
@@ -1661,7 +1678,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 
 
-## [general.telemetry]
+# [general.telemetry]
 
 
 | Key | Type | Default |
@@ -1670,7 +1687,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`user_enabled`](#cfg-general-telemetry-user_enabled) | `bool` | `true` |
 | [`me_level`](#cfg-general-telemetry-me_level) | `"silent"`, `"normal"`, or `"debug"` | `"normal"` |
 
-<a id="cfg-general-telemetry-core_enabled"></a>
+## "cfg-general-telemetry-core_enabled"
 - `core_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables core hot-path telemetry counters.
@@ -1680,7 +1697,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general.telemetry]
     core_enabled = true
     ```
-<a id="cfg-general-telemetry-user_enabled"></a>
+## "cfg-general-telemetry-user_enabled"
 - `user_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables per-user telemetry counters.
@@ -1690,7 +1707,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [general.telemetry]
     user_enabled = true
     ```
-<a id="cfg-general-telemetry-me_level"></a>
+## "cfg-general-telemetry-me_level"
 - `me_level`
   - **Constraints / validation**: `"silent"`, `"normal"`, or `"debug"`.
   - **Description**: Middle-End telemetry verbosity level.
@@ -1702,7 +1719,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 
 
-## [network]
+# [network]
 
 
 | Key | Type | Default |
@@ -1718,7 +1735,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`cache_public_ip_path`](#cfg-network-cache_public_ip_path) | `String` | `"cache/public_ip.txt"` |
 | [`dns_overrides`](#cfg-network-dns_overrides) | `String[]` | `[]` |
 
-<a id="cfg-network-ipv4"></a>
+## "cfg-network-ipv4"
 - `ipv4`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables IPv4 networking.
@@ -1728,7 +1745,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     ipv4 = true
     ```
-<a id="cfg-network-ipv6"></a>
+## "cfg-network-ipv6"
 - `ipv6`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables/disables IPv6 networking. When omitted, defaults to `false`.
@@ -1742,7 +1759,7 @@ This document lists all configuration keys accepted by `config.toml`.
     # or: disable IPv6 explicitly
     # ipv6 = false
     ```
-<a id="cfg-network-prefer"></a>
+## "cfg-network-prefer"
 - `prefer`
   - **Constraints / validation**: Must be `4` or `6`. If `prefer = 4` while `ipv4 = false`, Telemt forces `prefer = 6`. If `prefer = 6` while `ipv6 = false`, Telemt forces `prefer = 4`.
   - **Description**: Preferred IP family for selection when both families are available.
@@ -1752,7 +1769,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     prefer = 6
     ```
-<a id="cfg-network-multipath"></a>
+## "cfg-network-multipath"
 - `multipath`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables multipath behavior where supported by the platform and runtime.
@@ -1762,7 +1779,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     multipath = true
     ```
-<a id="cfg-network-stun_use"></a>
+## "cfg-network-stun_use"
 - `stun_use`
   - **Constraints / validation**: `bool`.
   - **Description**: Global STUN switch; when `false`, STUN probing is disabled and only non-STUN detection remains.
@@ -1772,7 +1789,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     stun_use = false
     ```
-<a id="cfg-network-stun_servers"></a>
+## "cfg-network-stun_servers"
 - `stun_servers`
   - **Constraints / validation**: `String[]`. Values are trimmed; empty values are removed; list is deduplicated. If this key is **not** explicitly set, Telemt keeps the built-in default STUN list.
   - **Description**: STUN servers list for public IP discovery.
@@ -1785,7 +1802,7 @@ This document lists all configuration keys accepted by `config.toml`.
       "stun.stunprotocol.org:3478",
     ]
     ```
-<a id="cfg-network-stun_tcp_fallback"></a>
+## "cfg-network-stun_tcp_fallback"
 - `stun_tcp_fallback`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables TCP fallback for STUN when the UDP path is blocked/unavailable.
@@ -1795,7 +1812,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     stun_tcp_fallback = true
     ```
-<a id="cfg-network-http_ip_detect_urls"></a>
+## "cfg-network-http_ip_detect_urls"
 - `http_ip_detect_urls`
   - **Constraints / validation**: `String[]`.
   - **Description**: HTTP endpoints used for public IP detection (fallback after STUN).
@@ -1805,7 +1822,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     http_ip_detect_urls = ["https://ifconfig.me/ip", "https://api.ipify.org"]
     ```
-<a id="cfg-network-cache_public_ip_path"></a>
+## "cfg-network-cache_public_ip_path"
 - `cache_public_ip_path`
   - **Constraints / validation**: `String`.
   - **Description**: File path used to cache the detected public IP.
@@ -1815,7 +1832,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [network]
     cache_public_ip_path = "cache/public_ip.txt"
     ```
-<a id="cfg-network-dns_overrides"></a>
+## "cfg-network-dns_overrides"
 - `dns_overrides`
   - **Constraints / validation**: `String[]`. Each entry must use `host:port:ip` format.
     - `host`: domain name (must be non-empty and must not contain `:`)
@@ -1833,7 +1850,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 
 
-## [server]
+# [server]
 
 
 | Key | Type | Default |
@@ -1853,7 +1870,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`max_connections`](#cfg-server-max_connections) | `u32` | `10000` |
 | [`accept_permit_timeout_ms`](#cfg-server-accept_permit_timeout_ms) | `u64` | `250` |
 
-<a id="cfg-server-port"></a>
+## "cfg-server-port"
 - `port`
   - **Constraints / validation**: `u16`.
   - **Description**: Main proxy listen port (TCP).
@@ -1863,7 +1880,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     port = 443
     ```
-<a id="cfg-server-listen_addr_ipv4"></a>
+## "cfg-server-listen_addr_ipv4"
 - `listen_addr_ipv4`
   - **Constraints / validation**: `String` (optional). When set, must be a valid IPv4 address string.
   - **Description**: IPv4 bind address for TCP listener (omit this key to disable IPv4 bind).
@@ -1873,7 +1890,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     listen_addr_ipv4 = "0.0.0.0"
     ```
-<a id="cfg-server-listen_addr_ipv6"></a>
+## "cfg-server-listen_addr_ipv6"
 - `listen_addr_ipv6`
   - **Constraints / validation**: `String` (optional). When set, must be a valid IPv6 address string.
   - **Description**: IPv6 bind address for TCP listener (omit this key to disable IPv6 bind).
@@ -1883,7 +1900,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     listen_addr_ipv6 = "::"
     ```
-<a id="cfg-server-listen_unix_sock"></a>
+## "cfg-server-listen_unix_sock"
 - `listen_unix_sock`
   - **Constraints / validation**: `String` (optional). Must not be empty when set. Unix only.
   - **Description**: Unix socket path for listener. When set, `server.listen_tcp` defaults to `false` (unless explicitly overridden).
@@ -1893,7 +1910,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     listen_unix_sock = "/run/telemt.sock"
     ```
-<a id="cfg-server-listen_unix_sock_perm"></a>
+## "cfg-server-listen_unix_sock_perm"
 - `listen_unix_sock_perm`
   - **Constraints / validation**: `String` (optional). When set, should be an octal permission string like `"0666"` or `"0777"`.
   - **Description**: Optional Unix socket file permissions applied after bind (chmod). When omitted, permissions are not changed (inherits umask).
@@ -1904,7 +1921,7 @@ This document lists all configuration keys accepted by `config.toml`.
     listen_unix_sock = "/run/telemt.sock"
     listen_unix_sock_perm = "0666"
     ```
-<a id="cfg-server-listen_tcp"></a>
+## "cfg-server-listen_tcp"
 - `listen_tcp`
   - **Constraints / validation**: `bool` (optional). When omitted, Telemt auto-detects:
     - `true` when `listen_unix_sock` is not set
@@ -1918,7 +1935,7 @@ This document lists all configuration keys accepted by `config.toml`.
     listen_unix_sock = "/run/telemt.sock"
     listen_tcp = true
     ```
-<a id="cfg-server-proxy_protocol"></a>
+## "cfg-server-proxy_protocol"
 - `proxy_protocol`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables HAProxy PROXY protocol parsing on incoming connections (PROXY v1/v2). When enabled, client source address is taken from the PROXY header.
@@ -1928,7 +1945,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     proxy_protocol = true
     ```
-<a id="cfg-server-proxy_protocol_header_timeout_ms"></a>
+## "cfg-server-proxy_protocol_header_timeout_ms"
 - `proxy_protocol_header_timeout_ms`
   - **Constraints / validation**: Must be `> 0` (milliseconds).
   - **Description**: Timeout for reading and parsing PROXY protocol headers (ms).
@@ -1939,7 +1956,7 @@ This document lists all configuration keys accepted by `config.toml`.
     proxy_protocol = true
     proxy_protocol_header_timeout_ms = 500
     ```
-<a id="cfg-server-proxy_protocol_trusted_cidrs"></a>
+## "cfg-server-proxy_protocol_trusted_cidrs"
 - `proxy_protocol_trusted_cidrs`
   - **Constraints / validation**: `IpNetwork[]`.
     - If omitted, defaults to trust-all CIDRs (`0.0.0.0/0` and `::/0`). 
@@ -1953,7 +1970,7 @@ This document lists all configuration keys accepted by `config.toml`.
     proxy_protocol = true
     proxy_protocol_trusted_cidrs = ["127.0.0.1/32", "10.0.0.0/8"]
     ```
-<a id="cfg-server-metrics_port"></a>
+## "cfg-server-metrics_port"
 - `metrics_port`
   - **Constraints / validation**: `u16` (optional).
   - **Description**: Prometheus-compatible metrics endpoint port. When set, enables the metrics listener (bind behavior can be overridden by `metrics_listen`).
@@ -1963,7 +1980,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     metrics_port = 9090
     ```
-<a id="cfg-server-metrics_listen"></a>
+## "cfg-server-metrics_listen"
 - `metrics_listen`
   - **Constraints / validation**: `String` (optional). When set, must be in `IP:PORT` format.
   - **Description**: Full metrics bind address (`IP:PORT`), overrides `metrics_port` and binds on the specified address only.
@@ -1973,7 +1990,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     metrics_listen = "127.0.0.1:9090"
     ```
-<a id="cfg-server-metrics_whitelist"></a>
+## "cfg-server-metrics_whitelist"
 - `metrics_whitelist`
   - **Constraints / validation**: `IpNetwork[]`.
   - **Description**: CIDR whitelist for metrics endpoint access.
@@ -1984,7 +2001,7 @@ This document lists all configuration keys accepted by `config.toml`.
     metrics_port = 9090
     metrics_whitelist = ["127.0.0.1/32", "::1/128"]
     ```
-<a id="cfg-server-max_connections"></a>
+## "cfg-server-max_connections"
 - `max_connections`
   - **Constraints / validation**: `u32`. `0` means unlimited.
   - **Description**: Maximum number of concurrent client connections.
@@ -1994,7 +2011,7 @@ This document lists all configuration keys accepted by `config.toml`.
     [server]
     max_connections = 10000
     ```
-<a id="cfg-server-accept_permit_timeout_ms"></a>
+## "cfg-server-accept_permit_timeout_ms"
 - `accept_permit_timeout_ms`
   - **Constraints / validation**: `0..=60000` (milliseconds). `0` keeps legacy unbounded wait behavior.
   - **Description**: Maximum wait for acquiring a connection-slot permit before the accepted connection is dropped.
@@ -2008,7 +2025,7 @@ This document lists all configuration keys accepted by `config.toml`.
 
 Note: When `server.proxy_protocol` is enabled, incoming PROXY protocol headers are parsed from the first bytes of the connection and the client source address is replaced with `src_addr` from the header. For security, the peer source IP (the direct connection address) is verified against `server.proxy_protocol_trusted_cidrs`; if this list is empty, PROXY headers are rejected and the connection is considered untrusted.
 
-## [server.conntrack_control]
+# [server.conntrack_control]
 
 Note: The conntrack-control worker runs **only on Linux**. On other operating systems it is not started; if `inline_conntrack_control` is `true`, a warning is logged. Effective operation also requires **CAP_NET_ADMIN** and a usable backend (`nft` or `iptables` / `ip6tables` on `PATH`). The `conntrack` utility is used for optional table entry deletes under pressure.
 
@@ -2024,7 +2041,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
 | [`pressure_low_watermark_pct`](#cfg-server-conntrack_control-pressure_low_watermark_pct) | `u8` | `70` |
 | [`delete_budget_per_sec`](#cfg-server-conntrack_control-delete_budget_per_sec) | `u64` | `4096` |
 
-<a id="cfg-server-conntrack_control-inline_conntrack_control"></a>
+## "cfg-server-conntrack_control-inline_conntrack_control"
 - `inline_conntrack_control`
   - **Constraints / validation**: `bool`.
   - **Description**: Master switch for the runtime conntrack-control task: reconciles **raw/notrack** netfilter rules for listener ingress (see `mode`), samples load every second, and may run **`conntrack -D`** deletes for qualifying close events while **pressure mode** is active (see `delete_budget_per_sec`). When `false`, notrack rules are cleared and pressure-driven deletes are disabled.
@@ -2034,7 +2051,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     [server.conntrack_control]
     inline_conntrack_control = true
     ```
-<a id="cfg-server-conntrack_control-mode"></a>
+## "cfg-server-conntrack_control-mode"
 - `mode`
   - **Constraints / validation**: One of `tracked`, `notrack`, `hybrid` (case-insensitive; serialized lowercase).
   - **Description**: **`tracked`**: do not install telemt notrack rules (connections stay in conntrack). **`notrack`**: mark matching ingress TCP to `server.port` as notrack — targets are derived from `[[server.listeners]]` if any, otherwise from `server.listen_addr_ipv4` / `server.listen_addr_ipv6` (unspecified addresses mean “any” for that family). **`hybrid`**: notrack only for addresses listed in `hybrid_listener_ips` (must be non-empty; validated at load).
@@ -2044,7 +2061,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     [server.conntrack_control]
     mode = "notrack"
     ```
-<a id="cfg-server-conntrack_control-backend"></a>
+## "cfg-server-conntrack_control-backend"
 - `backend`
   - **Constraints / validation**: One of `auto`, `nftables`, `iptables` (case-insensitive; serialized lowercase).
   - **Description**: Which command set applies notrack rules. **`auto`**: use `nft` if present on `PATH`, else `iptables`/`ip6tables` if present. **`nftables`** / **`iptables`**: force that backend; missing binary means rules cannot be applied. The nft path uses table `inet telemt_conntrack` and a prerouting raw hook; iptables uses chain `TELEMT_NOTRACK` in the `raw` table.
@@ -2054,7 +2071,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     [server.conntrack_control]
     backend = "auto"
     ```
-<a id="cfg-server-conntrack_control-profile"></a>
+## "cfg-server-conntrack_control-profile"
 - `profile`
   - **Constraints / validation**: One of `conservative`, `balanced`, `aggressive` (case-insensitive; serialized lowercase).
   - **Description**: When **conntrack pressure mode** is active (`pressure_*` watermarks), caps idle and activity timeouts to reduce conntrack churn: e.g. **client first-byte idle** (`client.rs`), **direct relay activity timeout** (`direct_relay.rs`), and **middle-relay idle policy** caps (`middle_relay.rs` via `ConntrackPressureProfile::*_cap_secs` / `direct_activity_timeout_secs`). More aggressive profiles use shorter caps.
@@ -2064,7 +2081,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     [server.conntrack_control]
     profile = "balanced"
     ```
-<a id="cfg-server-conntrack_control-hybrid_listener_ips"></a>
+## "cfg-server-conntrack_control-hybrid_listener_ips"
 - `hybrid_listener_ips`
   - **Constraints / validation**: `IpAddr[]`. Required to be **non-empty** when `mode = "hybrid"`. Ignored for `tracked` / `notrack`.
   - **Description**: Explicit listener addresses that receive notrack rules in hybrid mode (split into IPv4 vs IPv6 rules by the implementation).
@@ -2075,7 +2092,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     mode = "hybrid"
     hybrid_listener_ips = ["203.0.113.10", "2001:db8::1"]
     ```
-<a id="cfg-server-conntrack_control-pressure_high_watermark_pct"></a>
+## "cfg-server-conntrack_control-pressure_high_watermark_pct"
 - `pressure_high_watermark_pct`
   - **Constraints / validation**: Must be within `[1, 100]`.
   - **Description**: Pressure mode **enters** when any of: connection fill vs `server.max_connections` (percentage, if `max_connections > 0`), **file-descriptor** usage vs process soft `RLIMIT_NOFILE`, **non-zero** `accept_permit_timeout` events in the last sample window, or **ME c2me send-full** counter delta. Entry compares relevant percentages against this high watermark (see `update_pressure_state` in `conntrack_control.rs`).
@@ -2085,7 +2102,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     [server.conntrack_control]
     pressure_high_watermark_pct = 85
     ```
-<a id="cfg-server-conntrack_control-pressure_low_watermark_pct"></a>
+## "cfg-server-conntrack_control-pressure_low_watermark_pct"
 - `pressure_low_watermark_pct`
   - **Constraints / validation**: Must be **strictly less than** `pressure_high_watermark_pct`.
   - **Description**: Pressure mode **clears** only after **three** consecutive one-second samples where all signals are at or below this low watermark and the accept-timeout / ME-queue deltas are zero (hysteresis).
@@ -2095,7 +2112,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     [server.conntrack_control]
     pressure_low_watermark_pct = 70
     ```
-<a id="cfg-server-conntrack_control-delete_budget_per_sec"></a>
+## "cfg-server-conntrack_control-delete_budget_per_sec"
 - `delete_budget_per_sec`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Maximum number of **`conntrack -D`** attempts **per second** while pressure mode is active (token bucket refilled each second). Deletes run only for close events with reasons **timeout**, **pressure**, or **reset**; each attempt consumes a token regardless of outcome.
@@ -2107,7 +2124,7 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
     ```
 
 
-## [server.api]
+# [server.api]
 
 Note: This section also accepts the legacy alias `[server.admin_api]` (same schema as `[server.api]`).
 
@@ -2127,7 +2144,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`runtime_edge_events_capacity`](#cfg-server-api-runtime_edge_events_capacity) | `usize` | `256` |
 | [`read_only`](#cfg-server-api-read_only) | `bool` | `false` |
 
-<a id="cfg-server-api-enabled"></a>
+## "cfg-server-api-enabled"
 - `enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables control-plane REST API.
@@ -2137,7 +2154,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     enabled = true
     ```
-<a id="cfg-server-api-listen"></a>
+## "cfg-server-api-listen"
 - `listen`
   - **Constraints / validation**: `String`. Must be in `IP:PORT` format.
   - **Description**: API bind address in `IP:PORT` format.
@@ -2147,7 +2164,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     listen = "0.0.0.0:9091"
     ```
-<a id="cfg-server-api-whitelist"></a>
+## "cfg-server-api-whitelist"
 - `whitelist`
   - **Constraints / validation**: `IpNetwork[]`.
   - **Description**: CIDR whitelist allowed to access API.
@@ -2157,7 +2174,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     whitelist = ["127.0.0.0/8"]
     ```
-<a id="cfg-server-api-auth_header"></a>
+## "cfg-server-api-auth_header"
 - `auth_header`
   - **Constraints / validation**: `String`. Empty string disables auth-header validation.
   - **Description**: Exact expected `Authorization` header value (static shared secret).
@@ -2167,7 +2184,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     auth_header = "Bearer MY_TOKEN"
     ```
-<a id="cfg-server-api-request_body_limit_bytes"></a>
+## "cfg-server-api-request_body_limit_bytes"
 - `request_body_limit_bytes`
   - **Constraints / validation**: Must be `> 0` (bytes).
   - **Description**: Maximum accepted HTTP request body size (bytes).
@@ -2177,7 +2194,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     request_body_limit_bytes = 65536
     ```
-<a id="cfg-server-api-minimal_runtime_enabled"></a>
+## "cfg-server-api-minimal_runtime_enabled"
 - `minimal_runtime_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables minimal runtime snapshots endpoint logic.
@@ -2187,7 +2204,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     minimal_runtime_enabled = true
     ```
-<a id="cfg-server-api-minimal_runtime_cache_ttl_ms"></a>
+## "cfg-server-api-minimal_runtime_cache_ttl_ms"
 - `minimal_runtime_cache_ttl_ms`
   - **Constraints / validation**: `0..=60000` (milliseconds). `0` disables cache.
   - **Description**: Cache TTL for minimal runtime snapshots (ms).
@@ -2197,7 +2214,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     minimal_runtime_cache_ttl_ms = 1000
     ```
-<a id="cfg-server-api-runtime_edge_enabled"></a>
+## "cfg-server-api-runtime_edge_enabled"
 - `runtime_edge_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables runtime edge endpoints.
@@ -2207,7 +2224,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     runtime_edge_enabled = false
     ```
-<a id="cfg-server-api-runtime_edge_cache_ttl_ms"></a>
+## "cfg-server-api-runtime_edge_cache_ttl_ms"
 - `runtime_edge_cache_ttl_ms`
   - **Constraints / validation**: `0..=60000` (milliseconds).
   - **Description**: Cache TTL for runtime edge aggregation payloads (ms).
@@ -2217,7 +2234,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     runtime_edge_cache_ttl_ms = 1000
     ```
-<a id="cfg-server-api-runtime_edge_top_n"></a>
+## "cfg-server-api-runtime_edge_top_n"
 - `runtime_edge_top_n`
   - **Constraints / validation**: `1..=1000`.
   - **Description**: Top-N size for edge connection leaderboard.
@@ -2227,7 +2244,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     runtime_edge_top_n = 10
     ```
-<a id="cfg-server-api-runtime_edge_events_capacity"></a>
+## "cfg-server-api-runtime_edge_events_capacity"
 - `runtime_edge_events_capacity`
   - **Constraints / validation**: `16..=4096`.
   - **Description**: Ring-buffer capacity for runtime edge events.
@@ -2237,7 +2254,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [server.api]
     runtime_edge_events_capacity = 256
     ```
-<a id="cfg-server-api-read_only"></a>
+## "cfg-server-api-read_only"
 - `read_only`
   - **Constraints / validation**: `bool`.
   - **Description**: Rejects mutating API endpoints when enabled.
@@ -2249,7 +2266,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 
 
-## [[server.listeners]]
+# [[server.listeners]]
 
 
 | Key | Type | Default |
@@ -2260,7 +2277,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`proxy_protocol`](#cfg-server-listeners-proxy_protocol) | `bool` | — |
 | [`reuse_allow`](#cfg-server-listeners-reuse_allow) | `bool` | `false` |
 
-<a id="cfg-server-listeners-ip"></a>
+## "cfg-server-listeners-ip"
 - `ip`
   - **Constraints / validation**: Required field. Must be an `IpAddr`.
   - **Description**: Listener bind IP.
@@ -2270,7 +2287,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [[server.listeners]]
     ip = "0.0.0.0"
     ```
-<a id="cfg-server-listeners-announce"></a>
+## "cfg-server-listeners-announce"
 - `announce`
   - **Constraints / validation**: `String` (optional). Must not be empty when set.
   - **Description**: Public IP/domain announced in proxy links for this listener. Takes precedence over `announce_ip`.
@@ -2281,7 +2298,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "0.0.0.0"
     announce = "proxy.example.com"
     ```
-<a id="cfg-server-listeners-announce_ip"></a>
+## "cfg-server-listeners-announce_ip"
 - `announce_ip`
   - **Constraints / validation**: `IpAddr` (optional). Deprecated. Use `announce`.
   - **Description**: Deprecated legacy announce IP. During config load it is migrated to `announce` when `announce` is not set.
@@ -2292,7 +2309,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "0.0.0.0"
     announce_ip = "203.0.113.10"
     ```
-<a id="cfg-server-listeners-proxy_protocol"></a>
+## "cfg-server-listeners-proxy_protocol"
 - `proxy_protocol`
   - **Constraints / validation**: `bool` (optional). When set, overrides `server.proxy_protocol` for this listener.
   - **Description**: Per-listener PROXY protocol override.
@@ -2306,7 +2323,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "0.0.0.0"
     proxy_protocol = true
     ```
-<a id="cfg-server-listeners-reuse_allow"></a>
+## "cfg-server-listeners-reuse_allow"
 - `reuse_allow`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables `SO_REUSEPORT` for multi-instance bind sharing (allows multiple telemt instances to listen on the same `ip:port`).
@@ -2319,7 +2336,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 
 
-## [timeouts]
+# [timeouts]
 
 
 | Key | Type | Default |
@@ -2335,7 +2352,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`me_one_retry`](#cfg-timeouts-me_one_retry) | `u8` | `12` |
 | [`me_one_timeout_ms`](#cfg-timeouts-me_one_timeout_ms) | `u64` | `1200` |
 
-<a id="cfg-timeouts-client_handshake"></a>
+## "cfg-timeouts-client_handshake"
 - `client_handshake`
   - **Constraints / validation**: Must be `> 0`. Value is in seconds. Also used as an upper bound for some TLS emulation delays (see `censorship.server_hello_delay_max_ms`).
   - **Description**: Client handshake timeout (seconds).
@@ -2345,7 +2362,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     client_handshake = 30
     ```
-<a id="cfg-timeouts-relay_idle_policy_v2_enabled"></a>
+## "cfg-timeouts-relay_idle_policy_v2_enabled"
 - `relay_idle_policy_v2_enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables soft/hard middle-relay client idle policy.
@@ -2355,7 +2372,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     relay_idle_policy_v2_enabled = true
     ```
-<a id="cfg-timeouts-relay_client_idle_soft_secs"></a>
+## "cfg-timeouts-relay_client_idle_soft_secs"
 - `relay_client_idle_soft_secs`
   - **Constraints / validation**: Must be `> 0`; must be `<= relay_client_idle_hard_secs`.
   - **Description**: Soft idle threshold (seconds) for middle-relay client uplink inactivity. Hitting this threshold marks the session as an idle-candidate (it may be eligible for cleanup depending on policy).
@@ -2365,7 +2382,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     relay_client_idle_soft_secs = 120
     ```
-<a id="cfg-timeouts-relay_client_idle_hard_secs"></a>
+## "cfg-timeouts-relay_client_idle_hard_secs"
 - `relay_client_idle_hard_secs`
   - **Constraints / validation**: Must be `> 0`; must be `>= relay_client_idle_soft_secs`.
   - **Description**: Hard idle threshold (seconds) for middle-relay client uplink inactivity. Hitting this threshold closes the session.
@@ -2375,7 +2392,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     relay_client_idle_hard_secs = 360
     ```
-<a id="cfg-timeouts-relay_idle_grace_after_downstream_activity_secs"></a>
+## "cfg-timeouts-relay_idle_grace_after_downstream_activity_secs"
 - `relay_idle_grace_after_downstream_activity_secs`
   - **Constraints / validation**: Must be `<= relay_client_idle_hard_secs`.
   - **Description**: Extra hard-idle grace period (seconds) added after recent downstream activity.
@@ -2385,7 +2402,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     relay_idle_grace_after_downstream_activity_secs = 30
     ```
-<a id="cfg-timeouts-tg_connect"></a>
+## "cfg-timeouts-tg_connect"
 - `tg_connect`
   - **Constraints / validation**: `u64`. Value is in seconds.
   - **Description**: Upstream Telegram connect timeout (seconds).
@@ -2395,7 +2412,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     tg_connect = 10
     ```
-<a id="cfg-timeouts-client_keepalive"></a>
+## "cfg-timeouts-client_keepalive"
 - `client_keepalive`
   - **Constraints / validation**: `u64`. Value is in seconds.
   - **Description**: Client keepalive timeout (seconds).
@@ -2405,7 +2422,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     client_keepalive = 15
     ```
-<a id="cfg-timeouts-client_ack"></a>
+## "cfg-timeouts-client_ack"
 - `client_ack`
   - **Constraints / validation**: `u64`. Value is in seconds.
   - **Description**: Client ACK timeout (seconds).
@@ -2415,7 +2432,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     client_ack = 90
     ```
-<a id="cfg-timeouts-me_one_retry"></a>
+## "cfg-timeouts-me_one_retry"
 - `me_one_retry`
   - **Constraints / validation**: `u8`.
   - **Description**: Fast reconnect attempts budget for single-endpoint DC scenarios.
@@ -2425,7 +2442,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     me_one_retry = 12
     ```
-<a id="cfg-timeouts-me_one_timeout_ms"></a>
+## "cfg-timeouts-me_one_timeout_ms"
 - `me_one_timeout_ms`
   - **Constraints / validation**: `u64`. Value is in milliseconds.
   - **Description**: Timeout per quick attempt (ms) for single-endpoint DC reconnect logic.
@@ -2437,14 +2454,14 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 
 
-## [censorship]
+# [censorship]
 
 
 | Key | Type | Default |
 | --- | ---- | ------- |
 | [`tls_domain`](#cfg-censorship-tls_domain) | `String` | `"petrovich.ru"` |
 | [`tls_domains`](#cfg-censorship-tls_domains) | `String[]` | `[]` |
-| [`unknown_sni_action`](#cfg-censorship-unknown_sni_action) | `"drop"` or `"mask"` | `"drop"` |
+| [`unknown_sni_action`](#cfg-censorship-unknown_sni_action) | `"drop"`, `"mask"`, `"accept"` | `"drop"` |
 | [`tls_fetch_scope`](#cfg-censorship-tls_fetch_scope) | `String` | `""` |
 | [`tls_fetch`](#cfg-censorship-tls_fetch) | `Table` | built-in defaults |
 | [`mask`](#cfg-censorship-mask) | `bool` | `true` |
@@ -2472,7 +2489,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`mask_timing_normalization_floor_ms`](#cfg-censorship-mask_timing_normalization_floor_ms) | `u64` | `0` |
 | [`mask_timing_normalization_ceiling_ms`](#cfg-censorship-mask_timing_normalization_ceiling_ms) | `u64` | `0` |
 
-<a id="cfg-censorship-tls_domain"></a>
+## "cfg-censorship-tls_domain"
 - `tls_domain`
   - **Constraints / validation**: Must be a non-empty domain name. Must not contain spaces or `/`.
   - **Description**: Primary domain used for Fake-TLS masking / fronting profile and as the default SNI domain presented to clients. 
@@ -2483,7 +2500,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     tls_domain = "example.com"
     ```
-<a id="cfg-censorship-tls_domains"></a>
+## "cfg-censorship-tls_domains"
 - `tls_domains`
   - **Constraints / validation**: `String[]`. When set, values are merged with `tls_domain` and deduplicated (primary `tls_domain` always stays first).
   - **Description**: Additional TLS domains for generating multiple proxy links.
@@ -2494,9 +2511,9 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     tls_domain = "example.com"
     tls_domains = ["example.net", "example.org"]
     ```
-<a id="cfg-censorship-unknown_sni_action"></a>
+## "cfg-censorship-unknown_sni_action"
 - `unknown_sni_action`
-  - **Constraints / validation**: `"drop"` or `"mask"`.
+  - **Constraints / validation**: `"drop"`, `"mask"` or `"accept"`.
   - **Description**: Action for TLS ClientHello with unknown / non-configured SNI.
   - **Example**:
 
@@ -2504,7 +2521,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     unknown_sni_action = "drop"
     ```
-<a id="cfg-censorship-tls_fetch_scope"></a>
+## "cfg-censorship-tls_fetch_scope"
 - `tls_fetch_scope`
   - **Constraints / validation**: `String`. Value is trimmed during load; whitespace-only becomes empty.
   - **Description**: Upstream scope tag used for TLS-front metadata fetches. Empty value keeps default upstream routing behavior.
@@ -2514,7 +2531,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     tls_fetch_scope = "fetch"
     ```
-<a id="cfg-censorship-tls_fetch"></a>
+## "cfg-censorship-tls_fetch"
 - `tls_fetch`
   - **Constraints / validation**: Table. See `[censorship.tls_fetch]` section below.
   - **Description**: TLS-front metadata fetch strategy settings (bootstrap + refresh behavior for TLS emulation data).
@@ -2526,7 +2543,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     attempt_timeout_ms = 5000
     total_budget_ms = 15000
     ```
-<a id="cfg-censorship-mask"></a>
+## "cfg-censorship-mask"
 - `mask`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables masking / fronting relay mode.
@@ -2536,7 +2553,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask = true
     ```
-<a id="cfg-censorship-mask_host"></a>
+## "cfg-censorship-mask_host"
 - `mask_host`
   - **Constraints / validation**: `String` (optional).
     - If `mask_unix_sock` is set, `mask_host` must be omitted (mutually exclusive).
@@ -2548,7 +2565,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_host = "www.cloudflare.com"
     ```
-<a id="cfg-censorship-mask_port"></a>
+## "cfg-censorship-mask_port"
 - `mask_port`
   - **Constraints / validation**: `u16`.
   - **Description**: Upstream mask port for TLS fronting relay.
@@ -2558,7 +2575,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_port = 443
     ```
-<a id="cfg-censorship-mask_unix_sock"></a>
+## "cfg-censorship-mask_unix_sock"
 - `mask_unix_sock`
   - **Constraints / validation**: `String` (optional).
     - Must not be empty when set.
@@ -2572,7 +2589,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_unix_sock = "/run/telemt/mask.sock"
     ```
-<a id="cfg-censorship-fake_cert_len"></a>
+## "cfg-censorship-fake_cert_len"
 - `fake_cert_len`
   - **Constraints / validation**: `usize`. When `tls_emulation = false` and the default value is in use, Telemt may randomize this at startup for variability.
   - **Description**: Length of synthetic certificate payload when emulation data is unavailable.
@@ -2582,7 +2599,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     fake_cert_len = 2048
     ```
-<a id="cfg-censorship-tls_emulation"></a>
+## "cfg-censorship-tls_emulation"
 - `tls_emulation`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables certificate/TLS behavior emulation from cached real fronts.
@@ -2592,7 +2609,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     tls_emulation = true
     ```
-<a id="cfg-censorship-tls_front_dir"></a>
+## "cfg-censorship-tls_front_dir"
 - `tls_front_dir`
   - **Constraints / validation**: `String`.
   - **Description**: Directory path for TLS front cache storage.
@@ -2602,7 +2619,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     tls_front_dir = "tlsfront"
     ```
-<a id="cfg-censorship-server_hello_delay_min_ms"></a>
+## "cfg-censorship-server_hello_delay_min_ms"
 - `server_hello_delay_min_ms`
   - **Constraints / validation**: `u64` (milliseconds).
   - **Description**: Minimum `server_hello` delay for anti-fingerprint behavior (ms).
@@ -2612,7 +2629,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     server_hello_delay_min_ms = 0
     ```
-<a id="cfg-censorship-server_hello_delay_max_ms"></a>
+## "cfg-censorship-server_hello_delay_max_ms"
 - `server_hello_delay_max_ms`
   - **Constraints / validation**: `u64` (milliseconds). Must be \(<\) `timeouts.client_handshake * 1000`.
   - **Description**: Maximum `server_hello` delay for anti-fingerprint behavior (ms).
@@ -2625,7 +2642,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     server_hello_delay_max_ms = 0
     ```
-<a id="cfg-censorship-tls_new_session_tickets"></a>
+## "cfg-censorship-tls_new_session_tickets"
 - `tls_new_session_tickets`
   - **Constraints / validation**: `u8`.
   - **Description**: Number of `NewSessionTicket` messages to emit after handshake.
@@ -2635,7 +2652,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     tls_new_session_tickets = 0
     ```
-<a id="cfg-censorship-tls_full_cert_ttl_secs"></a>
+## "cfg-censorship-tls_full_cert_ttl_secs"
 - `tls_full_cert_ttl_secs`
   - **Constraints / validation**: `u64` (seconds).
   - **Description**: TTL for sending full cert payload per (domain, client IP) tuple.
@@ -2645,7 +2662,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     tls_full_cert_ttl_secs = 90
     ```
-<a id="cfg-censorship-alpn_enforce"></a>
+## "cfg-censorship-alpn_enforce"
 - `alpn_enforce`
   - **Constraints / validation**: `bool`.
   - **Description**: Enforces ALPN echo behavior based on client preference.
@@ -2655,7 +2672,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     alpn_enforce = true
     ```
-<a id="cfg-censorship-mask_proxy_protocol"></a>
+## "cfg-censorship-mask_proxy_protocol"
 - `mask_proxy_protocol`
   - **Constraints / validation**: `u8`. `0` = disabled, `1` = v1 (text), `2` = v2 (binary).
   - **Description**: Sends PROXY protocol header when connecting to mask backend, allowing the backend to see the real client IP.
@@ -2665,7 +2682,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_proxy_protocol = 0
     ```
-<a id="cfg-censorship-mask_shape_hardening"></a>
+## "cfg-censorship-mask_shape_hardening"
 - `mask_shape_hardening`
   - **Constraints / validation**: `bool`.
   - **Description**: Enables client->mask shape-channel hardening by applying controlled tail padding to bucket boundaries on mask relay shutdown.
@@ -2675,7 +2692,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_shape_hardening = true
     ```
-<a id="cfg-censorship-mask_shape_hardening_aggressive_mode"></a>
+## "cfg-censorship-mask_shape_hardening_aggressive_mode"
 - `mask_shape_hardening_aggressive_mode`
   - **Constraints / validation**: Requires `mask_shape_hardening = true`.
   - **Description**: Opt-in aggressive shaping profile (stronger anti-classifier behavior with different shaping semantics).
@@ -2686,7 +2703,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     mask_shape_hardening = true
     mask_shape_hardening_aggressive_mode = false
     ```
-<a id="cfg-censorship-mask_shape_bucket_floor_bytes"></a>
+## "cfg-censorship-mask_shape_bucket_floor_bytes"
 - `mask_shape_bucket_floor_bytes`
   - **Constraints / validation**: Must be `> 0`; must be `<= mask_shape_bucket_cap_bytes`.
   - **Description**: Minimum bucket size used by shape-channel hardening.
@@ -2696,7 +2713,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_shape_bucket_floor_bytes = 512
     ```
-<a id="cfg-censorship-mask_shape_bucket_cap_bytes"></a>
+## "cfg-censorship-mask_shape_bucket_cap_bytes"
 - `mask_shape_bucket_cap_bytes`
   - **Constraints / validation**: Must be `>= mask_shape_bucket_floor_bytes`.
   - **Description**: Maximum bucket size used by shape-channel hardening; traffic above cap is not bucket-padded further.
@@ -2706,7 +2723,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_shape_bucket_cap_bytes = 4096
     ```
-<a id="cfg-censorship-mask_shape_above_cap_blur"></a>
+## "cfg-censorship-mask_shape_above_cap_blur"
 - `mask_shape_above_cap_blur`
   - **Constraints / validation**: Requires `mask_shape_hardening = true`.
   - **Description**: Adds bounded randomized tail bytes even when forwarded size already exceeds cap.
@@ -2717,7 +2734,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     mask_shape_hardening = true
     mask_shape_above_cap_blur = false
     ```
-<a id="cfg-censorship-mask_shape_above_cap_blur_max_bytes"></a>
+## "cfg-censorship-mask_shape_above_cap_blur_max_bytes"
 - `mask_shape_above_cap_blur_max_bytes`
   - **Constraints / validation**: Must be `<= 1048576`. Must be `> 0` when `mask_shape_above_cap_blur = true`.
   - **Description**: Maximum randomized extra bytes appended above cap when above-cap blur is enabled.
@@ -2728,7 +2745,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     mask_shape_above_cap_blur = true
     mask_shape_above_cap_blur_max_bytes = 64
     ```
-<a id="cfg-censorship-mask_relay_max_bytes"></a>
+## "cfg-censorship-mask_relay_max_bytes"
 - `mask_relay_max_bytes`
   - **Constraints / validation**: Must be `> 0`; must be `<= 67108864`.
   - **Description**: Maximum relayed bytes per direction on unauthenticated masking fallback path.
@@ -2738,7 +2755,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_relay_max_bytes = 5242880
     ```
-<a id="cfg-censorship-mask_classifier_prefetch_timeout_ms"></a>
+## "cfg-censorship-mask_classifier_prefetch_timeout_ms"
 - `mask_classifier_prefetch_timeout_ms`
   - **Constraints / validation**: Must be within `[5, 50]` (milliseconds).
   - **Description**: Timeout budget (ms) for extending fragmented initial classifier window on masking fallback.
@@ -2748,7 +2765,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_classifier_prefetch_timeout_ms = 5
     ```
-<a id="cfg-censorship-mask_timing_normalization_enabled"></a>
+## "cfg-censorship-mask_timing_normalization_enabled"
 - `mask_timing_normalization_enabled`
   - **Constraints / validation**: When `true`, requires `mask_timing_normalization_floor_ms > 0` and `mask_timing_normalization_ceiling_ms >= mask_timing_normalization_floor_ms`. Ceiling must be `<= 60000`.
   - **Description**: Enables timing envelope normalization on masking outcomes.
@@ -2758,7 +2775,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_timing_normalization_enabled = false
     ```
-<a id="cfg-censorship-mask_timing_normalization_floor_ms"></a>
+## "cfg-censorship-mask_timing_normalization_floor_ms"
 - `mask_timing_normalization_floor_ms`
   - **Constraints / validation**: Must be `> 0` when timing normalization is enabled; must be `<= mask_timing_normalization_ceiling_ms`.
   - **Description**: Lower bound (ms) for masking outcome normalization target.
@@ -2768,7 +2785,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [censorship]
     mask_timing_normalization_floor_ms = 0
     ```
-<a id="cfg-censorship-mask_timing_normalization_ceiling_ms"></a>
+## "cfg-censorship-mask_timing_normalization_ceiling_ms"
 - `mask_timing_normalization_ceiling_ms`
   - **Constraints / validation**: Must be `>= mask_timing_normalization_floor_ms`; must be `<= 60000`.
   - **Description**: Upper bound (ms) for masking outcome normalization target.
@@ -2779,93 +2796,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     mask_timing_normalization_ceiling_ms = 0
     ```
 
-
-## [censorship.tls_fetch]
-
-
-| Key | Type | Default |
-| --- | ---- | ------- |
-| [`profiles`](#cfg-censorship-tls_fetch-profiles) | `String[]` | `["modern_chrome_like", "modern_firefox_like", "compat_tls12", "legacy_minimal"]` |
-| [`strict_route`](#cfg-censorship-tls_fetch-strict_route) | `bool` | `true` |
-| [`attempt_timeout_ms`](#cfg-censorship-tls_fetch-attempt_timeout_ms) | `u64` | `5000` |
-| [`total_budget_ms`](#cfg-censorship-tls_fetch-total_budget_ms) | `u64` | `15000` |
-| [`grease_enabled`](#cfg-censorship-tls_fetch-grease_enabled) | `bool` | `false` |
-| [`deterministic`](#cfg-censorship-tls_fetch-deterministic) | `bool` | `false` |
-| [`profile_cache_ttl_secs`](#cfg-censorship-tls_fetch-profile_cache_ttl_secs) | `u64` | `600` |
-
-<a id="cfg-censorship-tls_fetch-profiles"></a>
-- `profiles`
-  - **Constraints / validation**: `String[]`. Empty list falls back to defaults; values are deduplicated preserving order.
-  - **Description**: Ordered ClientHello profile fallback chain for TLS-front metadata fetch.
-  - **Example**:
-
-    ```toml
-    [censorship.tls_fetch]
-    profiles = ["modern_chrome_like", "compat_tls12"]
-    ```
-<a id="cfg-censorship-tls_fetch-strict_route"></a>
-- `strict_route`
-  - **Constraints / validation**: `bool`.
-  - **Description**: When `true` and an upstream route is configured, TLS fetch fails closed on upstream connect errors instead of falling back to direct TCP.
-  - **Example**:
-
-    ```toml
-    [censorship.tls_fetch]
-    strict_route = true
-    ```
-<a id="cfg-censorship-tls_fetch-attempt_timeout_ms"></a>
-- `attempt_timeout_ms`
-  - **Constraints / validation**: Must be `> 0` (milliseconds).
-  - **Description**: Timeout budget per one TLS-fetch profile attempt (ms).
-  - **Example**:
-
-    ```toml
-    [censorship.tls_fetch]
-    attempt_timeout_ms = 5000
-    ```
-<a id="cfg-censorship-tls_fetch-total_budget_ms"></a>
-- `total_budget_ms`
-  - **Constraints / validation**: Must be `> 0` (milliseconds).
-  - **Description**: Total wall-clock budget across all TLS-fetch attempts (ms).
-  - **Example**:
-
-    ```toml
-    [censorship.tls_fetch]
-    total_budget_ms = 15000
-    ```
-<a id="cfg-censorship-tls_fetch-grease_enabled"></a>
-- `grease_enabled`
-  - **Constraints / validation**: `bool`.
-  - **Description**: Enables GREASE-style random values in selected ClientHello extensions for fetch traffic.
-  - **Example**:
-
-    ```toml
-    [censorship.tls_fetch]
-    grease_enabled = false
-    ```
-<a id="cfg-censorship-tls_fetch-deterministic"></a>
-- `deterministic`
-  - **Constraints / validation**: `bool`.
-  - **Description**: Enables deterministic ClientHello randomness for debugging/tests.
-  - **Example**:
-
-    ```toml
-    [censorship.tls_fetch]
-    deterministic = false
-    ```
-<a id="cfg-censorship-tls_fetch-profile_cache_ttl_secs"></a>
-- `profile_cache_ttl_secs`
-  - **Constraints / validation**: `u64` (seconds). `0` disables cache.
-  - **Description**: TTL for winner-profile cache entries used by TLS fetch path.
-  - **Example**:
-
-    ```toml
-    [censorship.tls_fetch]
-    profile_cache_ttl_secs = 600
-    ```
-
-
-### Shape-channel hardening notes (`[censorship]`)
+## Shape-channel hardening notes (`[censorship]`)
 
 These parameters are designed to reduce one specific fingerprint source during masking: the exact number of bytes sent from proxy to `mask_host` for invalid or probing traffic.
 
@@ -2910,7 +2841,7 @@ Recommended starting profile:
 - `mask_shape_bucket_floor_bytes = 512`
 - `mask_shape_bucket_cap_bytes = 4096`
 
-### Aggressive mode notes (`[censorship]`)
+## Aggressive mode notes (`[censorship]`)
 
 `mask_shape_hardening_aggressive_mode` is an opt-in profile for higher anti-classifier pressure.
 
@@ -2935,7 +2866,7 @@ What changes when aggressive mode is enabled:
 
 Use this mode only when your threat model prioritizes classifier resistance over strict compatibility with conservative masking semantics.
 
-### Above-cap blur notes (`[censorship]`)
+## Above-cap blur notes (`[censorship]`)
 
 `mask_shape_above_cap_blur` adds a second-stage blur for very large probes that are already above `mask_shape_bucket_cap_bytes`.
 
@@ -2956,7 +2887,7 @@ Operational meaning:
   Small values reduce cost but preserve more separability between far-apart oversized classes.
   Larger values blur oversized classes more aggressively, but add more egress overhead and more output variance.
 
-### Timing normalization envelope notes (`[censorship]`)
+## Timing normalization envelope notes (`[censorship]`)
 
 `mask_timing_normalization_enabled` smooths timing differences between masking outcomes by applying a target duration envelope.
 
@@ -2972,7 +2903,92 @@ Recommended starting profile for timing shaping:
 
 If your backend or network is very bandwidth-constrained, reduce cap first. If probes are still too distinguishable in your environment, increase floor gradually.
 
-## [access]
+
+# [censorship.tls_fetch]
+
+
+| Key | Type | Default |
+| --- | ---- | ------- |
+| [`profiles`](#cfg-censorship-tls_fetch-profiles) | `String[]` | `["modern_chrome_like", "modern_firefox_like", "compat_tls12", "legacy_minimal"]` |
+| [`strict_route`](#cfg-censorship-tls_fetch-strict_route) | `bool` | `true` |
+| [`attempt_timeout_ms`](#cfg-censorship-tls_fetch-attempt_timeout_ms) | `u64` | `5000` |
+| [`total_budget_ms`](#cfg-censorship-tls_fetch-total_budget_ms) | `u64` | `15000` |
+| [`grease_enabled`](#cfg-censorship-tls_fetch-grease_enabled) | `bool` | `false` |
+| [`deterministic`](#cfg-censorship-tls_fetch-deterministic) | `bool` | `false` |
+| [`profile_cache_ttl_secs`](#cfg-censorship-tls_fetch-profile_cache_ttl_secs) | `u64` | `600` |
+
+## "cfg-censorship-tls_fetch-profiles"
+- `profiles`
+  - **Constraints / validation**: `String[]`. Empty list falls back to defaults; values are deduplicated preserving order.
+  - **Description**: Ordered ClientHello profile fallback chain for TLS-front metadata fetch.
+  - **Example**:
+
+    ```toml
+    [censorship.tls_fetch]
+    profiles = ["modern_chrome_like", "compat_tls12"]
+    ```
+## "cfg-censorship-tls_fetch-strict_route"
+- `strict_route`
+  - **Constraints / validation**: `bool`.
+  - **Description**: When `true` and an upstream route is configured, TLS fetch fails closed on upstream connect errors instead of falling back to direct TCP.
+  - **Example**:
+
+    ```toml
+    [censorship.tls_fetch]
+    strict_route = true
+    ```
+## "cfg-censorship-tls_fetch-attempt_timeout_ms"
+- `attempt_timeout_ms`
+  - **Constraints / validation**: Must be `> 0` (milliseconds).
+  - **Description**: Timeout budget per one TLS-fetch profile attempt (ms).
+  - **Example**:
+
+    ```toml
+    [censorship.tls_fetch]
+    attempt_timeout_ms = 5000
+    ```
+## "cfg-censorship-tls_fetch-total_budget_ms"
+- `total_budget_ms`
+  - **Constraints / validation**: Must be `> 0` (milliseconds).
+  - **Description**: Total wall-clock budget across all TLS-fetch attempts (ms).
+  - **Example**:
+
+    ```toml
+    [censorship.tls_fetch]
+    total_budget_ms = 15000
+    ```
+## "cfg-censorship-tls_fetch-grease_enabled"
+- `grease_enabled`
+  - **Constraints / validation**: `bool`.
+  - **Description**: Enables GREASE-style random values in selected ClientHello extensions for fetch traffic.
+  - **Example**:
+
+    ```toml
+    [censorship.tls_fetch]
+    grease_enabled = false
+    ```
+## "cfg-censorship-tls_fetch-deterministic"
+- `deterministic`
+  - **Constraints / validation**: `bool`.
+  - **Description**: Enables deterministic ClientHello randomness for debugging/tests.
+  - **Example**:
+
+    ```toml
+    [censorship.tls_fetch]
+    deterministic = false
+    ```
+## "cfg-censorship-tls_fetch-profile_cache_ttl_secs"
+- `profile_cache_ttl_secs`
+  - **Constraints / validation**: `u64` (seconds). `0` disables cache.
+  - **Description**: TTL for winner-profile cache entries used by TLS fetch path.
+  - **Example**:
+
+    ```toml
+    [censorship.tls_fetch]
+    profile_cache_ttl_secs = 600
+    ```
+
+# [access]
 
 
 | Key | Type | Default |
@@ -2991,7 +3007,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`replay_window_secs`](#cfg-access-replay_window_secs) | `u64` | `120` |
 | [`ignore_time_skew`](#cfg-access-ignore_time_skew) | `bool` | `false` |
 
-<a id="cfg-access-users"></a>
+## "cfg-access-users"
 - `users`
   - **Constraints / validation**: Must not be empty (at least one user must exist). Each value must be **exactly 32 hex characters**.
   - **Description**: User credentials map used for client authentication. Keys are user names; values are MTProxy secrets.
@@ -3002,7 +3018,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     alice = "00112233445566778899aabbccddeeff"
     bob   = "0123456789abcdef0123456789abcdef"
     ```
-<a id="cfg-access-user_ad_tags"></a>
+## "cfg-access-user_ad_tags"
 - `user_ad_tags`
   - **Constraints / validation**: Each value must be **exactly 32 hex characters** (same format as `general.ad_tag`). An all-zero tag is allowed but logs a warning.
   - **Description**: Per-user sponsored-channel ad tag override. When a user has an entry here, it takes precedence over `general.ad_tag`.
@@ -3015,7 +3031,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access.user_ad_tags]
     alice = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     ```
-<a id="cfg-access-user_max_tcp_conns"></a>
+## "cfg-access-user_max_tcp_conns"
 - `user_max_tcp_conns`
   - **Constraints / validation**: `Map<String, usize>`.
   - **Description**: Per-user maximum concurrent TCP connections.
@@ -3025,7 +3041,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access.user_max_tcp_conns]
     alice = 500
     ```
-<a id="cfg-access-user_max_tcp_conns_global_each"></a>
+## "cfg-access-user_max_tcp_conns_global_each"
 - `user_max_tcp_conns_global_each`
   - **Constraints / validation**: `usize`. `0` disables the inherited limit.
   - **Description**: Global per-user maximum concurrent TCP connections, applied when a user has **no positive** entry in `[access.user_max_tcp_conns]` (a missing key, or a value of `0`, both fall through to this setting). Per-user limits greater than `0` in `user_max_tcp_conns` take precedence.
@@ -3039,7 +3055,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     alice = 500   # uses 500, not the global cap
     # bob has no entry → uses 200
     ```
-<a id="cfg-access-user_expirations"></a>
+## "cfg-access-user_expirations"
 - `user_expirations`
   - **Constraints / validation**: `Map<String, DateTime<Utc>>`. Each value must be a valid RFC3339 / ISO-8601 datetime.
   - **Description**: Per-user account expiration timestamps (UTC).
@@ -3049,7 +3065,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access.user_expirations]
     alice = "2026-12-31T23:59:59Z"
     ```
-<a id="cfg-access-user_data_quota"></a>
+## "cfg-access-user_data_quota"
 - `user_data_quota`
   - **Constraints / validation**: `Map<String, u64>`.
   - **Description**: Per-user traffic quota in bytes.
@@ -3059,7 +3075,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access.user_data_quota]
     alice = 1073741824 # 1 GiB
     ```
-<a id="cfg-access-user_max_unique_ips"></a>
+## "cfg-access-user_max_unique_ips"
 - `user_max_unique_ips`
   - **Constraints / validation**: `Map<String, usize>`.
   - **Description**: Per-user unique source IP limits.
@@ -3069,7 +3085,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access.user_max_unique_ips]
     alice = 16
     ```
-<a id="cfg-access-user_max_unique_ips_global_each"></a>
+## "cfg-access-user_max_unique_ips_global_each"
 - `user_max_unique_ips_global_each`
   - **Constraints / validation**: `usize`. `0` disables the inherited limit.
   - **Description**: Global per-user unique IP limit applied when a user has no individual override in `[access.user_max_unique_ips]`.
@@ -3079,7 +3095,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access]
     user_max_unique_ips_global_each = 8
     ```
-<a id="cfg-access-user_max_unique_ips_mode"></a>
+## "cfg-access-user_max_unique_ips_mode"
 - `user_max_unique_ips_mode`
   - **Constraints / validation**: Must be one of `"active_window"`, `"time_window"`, `"combined"`.
   - **Description**: Unique source IP limit accounting mode.
@@ -3089,7 +3105,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access]
     user_max_unique_ips_mode = "active_window"
     ```
-<a id="cfg-access-user_max_unique_ips_window_secs"></a>
+## "cfg-access-user_max_unique_ips_window_secs"
 - `user_max_unique_ips_window_secs`
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Window size (seconds) used by unique-IP accounting modes that include a time window (`"time_window"` and `"combined"`).
@@ -3099,7 +3115,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access]
     user_max_unique_ips_window_secs = 30
     ```
-<a id="cfg-access-replay_check_len"></a>
+## "cfg-access-replay_check_len"
 - `replay_check_len`
   - **Constraints / validation**: `usize`.
   - **Description**: Replay-protection storage length (number of entries tracked for duplicate detection).
@@ -3109,7 +3125,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access]
     replay_check_len = 65536
     ```
-<a id="cfg-access-replay_window_secs"></a>
+## "cfg-access-replay_window_secs"
 - `replay_window_secs`
   - **Constraints / validation**: `u64`.
   - **Description**: Replay-protection time window in seconds.
@@ -3119,7 +3135,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access]
     replay_window_secs = 120
     ```
-<a id="cfg-access-ignore_time_skew"></a>
+## "cfg-access-ignore_time_skew"
 - `ignore_time_skew`
   - **Constraints / validation**: `bool`.
   - **Description**: Disables client/server timestamp skew checks in replay validation when enabled.
@@ -3131,7 +3147,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 
 
-## [[upstreams]]
+# [[upstreams]]
 
 
 | Key | Type | Default |
@@ -3148,7 +3164,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`username`](#cfg-upstreams-username) | `String` | — |
 | [`password`](#cfg-upstreams-password) | `String` | — |
 
-<a id="cfg-upstreams-type"></a>
+## "cfg-upstreams-type"
 - `type`
   - **Constraints / validation**: Required field. Must be one of: `"direct"`, `"socks4"`, `"socks5"`, `"shadowsocks"`.
   - **Description**: Selects the upstream transport implementation for this `[[upstreams]]` entry.
@@ -3166,7 +3182,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     type = "shadowsocks"
     url = "ss://2022-blake3-aes-256-gcm:BASE64PASSWORD@127.0.0.1:8388"
     ```
-<a id="cfg-upstreams-weight"></a>
+## "cfg-upstreams-weight"
 - `weight`
   - **Constraints / validation**: `u16` (0..=65535).
   - **Description**: Base weight used by weighted-random upstream selection (higher = chosen more often).
@@ -3177,7 +3193,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     type = "direct"
     weight = 10
     ```
-<a id="cfg-upstreams-enabled"></a>
+## "cfg-upstreams-enabled"
 - `enabled`
   - **Constraints / validation**: `bool`.
   - **Description**: When `false`, this entry is ignored and not used for any upstream selection.
@@ -3189,7 +3205,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     address = "127.0.0.1:9050"
     enabled = false
     ```
-<a id="cfg-upstreams-scopes"></a>
+## "cfg-upstreams-scopes"
 - `scopes`
   - **Constraints / validation**: `String`. Comma-separated list; whitespace is trimmed during matching.
   - **Description**: Scope tags used for request-level upstream filtering. If a request specifies a scope, only upstreams whose `scopes` contains that tag can be selected. If a request does not specify a scope, only upstreams with empty `scopes` are eligible.
@@ -3201,7 +3217,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     address = "10.0.0.10:1080"
     scopes = "me, fetch, dc2"
     ```
-<a id="cfg-upstreams-interface"></a>
+## "cfg-upstreams-interface"
 - `interface`
   - **Constraints / validation**: `String` (optional).
     - For `"direct"`: may be an IP address (used as explicit local bind) or an OS interface name (resolved to an IP at runtime; Unix only).
@@ -3220,7 +3236,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     address = "203.0.113.10:1080"
     interface = "192.0.2.10" # explicit local bind IP
     ```
-<a id="cfg-upstreams-bind_addresses"></a>
+## "cfg-upstreams-bind_addresses"
 - `bind_addresses`
   - **Constraints / validation**: `String[]` (optional). Applies only to `type = "direct"`.
     - Each entry should be an IP address string.
@@ -3233,7 +3249,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     type = "direct"
     bind_addresses = ["192.0.2.10", "192.0.2.11"]
     ```
-<a id="cfg-upstreams-url"></a>
+## "cfg-upstreams-url"
 - `url`
   - **Constraints / validation**: Applies only to `type = "shadowsocks"`.
     - Must be a valid Shadowsocks URL accepted by the `shadowsocks` crate.
@@ -3250,7 +3266,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     type = "shadowsocks"
     url = "ss://2022-blake3-aes-256-gcm:BASE64PASSWORD@127.0.0.1:8388"
     ```
-<a id="cfg-upstreams-address"></a>
+## "cfg-upstreams-address"
 - `address`
   - **Constraints / validation**: Required for `type = "socks4"` and `type = "socks5"`. Must be `host:port` or `ip:port`.
   - **Description**: SOCKS proxy server endpoint used for upstream connects.
@@ -3261,7 +3277,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     type = "socks5"
     address = "127.0.0.1:9050"
     ```
-<a id="cfg-upstreams-user_id"></a>
+## "cfg-upstreams-user_id"
 - `user_id`
   - **Constraints / validation**: `String` (optional). Only for `type = "socks4"`.
   - **Description**: SOCKS4 CONNECT user ID. Note: when a request scope is selected, Telemt may override this with the selected scope value.
@@ -3273,7 +3289,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     address = "127.0.0.1:1080"
     user_id = "telemt"
     ```
-<a id="cfg-upstreams-username"></a>
+## "cfg-upstreams-username"
 - `username`
   - **Constraints / validation**: `String` (optional). Only for `type = "socks5"`.
   - **Description**: SOCKS5 username (for username/password authentication). Note: when a request scope is selected, Telemt may override this with the selected scope value.
@@ -3285,7 +3301,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     address = "127.0.0.1:9050"
     username = "alice"
     ```
-<a id="cfg-upstreams-password"></a>
+## "cfg-upstreams-password"
 - `password`
   - **Constraints / validation**: `String` (optional). Only for `type = "socks5"`.
   - **Description**: SOCKS5 password (for username/password authentication). Note: when a request scope is selected, Telemt may override this with the selected scope value.

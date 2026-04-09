@@ -1,32 +1,32 @@
 # Telemt — MTProxy на Rust + Tokio
 
+![Latest Release](https://img.shields.io/github/v/release/telemt/telemt?color=neon) ![Stars](https://img.shields.io/github/stars/telemt/telemt?style=social) ![Forks](https://img.shields.io/github/forks/telemt/telemt?style=social) [![Telegram](https://img.shields.io/badge/Telegram-Chat-24a1de?logo=telegram&logoColor=24a1de)](https://t.me/telemtrs)
+
 ***Решает проблемы раньше, чем другие узнают об их существовании***
 
 > [!NOTE]
 >
-> Исправленный TLS ClientHello доступен:
-> - в **Telegram Desktop** начиная с версии **6.7.2**
-> - в **Telegram Android** начиная с версии **12.6.4**
-> - **официальный релиз для iOS находится в процессе разработки**.
->
-> Для работы с EE-MTProxy обновите клиент!
+> Исправленный TLS ClientHello доступен в Telegram для настольных ПК, Android и iOS.
+> 
+> Пожалуйста, обновите клиентское приложение для работы с EE-MTProxy.
 
 <p align="center">
   <a href="https://t.me/telemtrs">
-    <img src="/docs/assets/telegram_button.svg" width="200"/>
+    <img src="/docs/assets/telegram_button.svg" width="150"/>
   </a>
 </p>
 
 **Telemt** — это быстрый, безопасный и функциональный сервер, написанный на Rust. Он полностью реализует официальный алгоритм прокси Telegram и добавляет множество улучшений для продакшена:
-- [ME Pool + Reader/Writer + Registry + Refill + Adaptive Floor + Trio-State + жизненный цикл генераций](https://github.com/telemt/telemt/blob/main/docs/Architecture/Model/MODEL.en.md);
-- [Полноценный API с управлением](https://github.com/telemt/telemt/blob/main/docs/Architecture/API/API.md);
-- Защита от повторных атак (Anti-Replay on Sliding Window);
-- Метрики в формате Prometheus;
-- TLS-fronting и TCP-splicing для маскировки от DPI.
 
-![telemt_scheme](docs/assets/telemt.png)
+## Установка и обновление одной командой
 
-## Особенности
+```bash
+curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
+```
+
+- [Инструкция по быстрому запуску](docs/Quick_start/QUICK_START_GUIDE.ru.md)
+- [Quick Start Guide](docs/Quick_start/QUICK_START_GUIDE.en.md)
+
 Реализация **TLS-fronting** максимально приближена к поведению реального HTTPS-трафика (подробнее - [FAQ](docs/FAQ.ru.md#распознаваемость-для-dpi-и-сканеров)).
 
 ***Middle-End Pool*** оптимизирован для высокой производительности.
@@ -41,27 +41,13 @@
 - Корректное завершение работы (Ctrl+C);
 - Подробное логирование через `trace` и `debug`.
 
-
-## Быстрая установка (обновление при повторном запуске)
-```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
-```
-
-Подробнее об установке в [Quick Start Guide](docs/Quick_start/QUICK_START_GUIDE.ru.md).
-
-# Навигация
+# Подробнее о Telemt
 - [FAQ](#faq)
 - [Архитектура](docs/Architecture)
-- [Быстрый старт](#quick-start-guide)
 - [Параметры конфигурационного файла](docs/Config_params)
 - [Сборка](#build)
+- [Установка на BSD](#%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-%D0%BD%D0%B0-bsd)
 - [Почему Rust?](#why-rust)
-- [Известные проблемы](#issues)
-- [Планы](#roadmap)
-
-## Быстрый старт
-- [Quick Start Guide RU](docs/Quick_start/QUICK_START_GUIDE.ru.md)
-- [Quick Start Guide EN](docs/Quick_start/QUICK_START_GUIDE.en.md)
 
 ## FAQ
 - [FAQ RU](docs/FAQ.ru.md)
@@ -87,7 +73,7 @@ chmod +x /bin/telemt
 telemt config.toml
 ```
 
-### OpenBSD
+## Установка на BSD
 - Руководство по сборке и настройке на английском языке [OpenBSD Guide (EN)](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md);
 - Пример rc.d скрипта: [contrib/openbsd/telemt.rcd](contrib/openbsd/telemt.rcd);
 - Поддержка sandbox с `pledge(2)` и `unveil(2)` пока не реализована.
@@ -98,3 +84,5 @@ telemt config.toml
 - Отсутствие сборщика мусора;
 - Безопасность памяти;
 - Асинхронная архитектура Tokio.
+
+![telemt_scheme](docs/assets/telemt.png)

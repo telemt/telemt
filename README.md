@@ -1,30 +1,29 @@
 # Telemt - MTProxy on Rust + Tokio
 
+![Latest Release](https://img.shields.io/github/v/release/telemt/telemt?color=neon) ![Stars](https://img.shields.io/github/stars/telemt/telemt?style=social) ![Forks](https://img.shields.io/github/forks/telemt/telemt?style=social) [![Telegram](https://img.shields.io/badge/Telegram-Chat-24a1de?logo=telegram&logoColor=24a1de)](https://t.me/telemtrs)
+
 ***Löst Probleme, bevor andere überhaupt wissen, dass sie existieren*** / ***It solves problems before others even realize they exist***
 
 > [!NOTE]
 >
-> Fixed TLS ClientHello is now available:
-> - in **Telegram Desktop** starting from version **6.7.2**
-> - in **Telegram Android Client** starting from version **12.6.4**
-> - **release for iOS is "work in progress"**
+> Fixed TLS ClientHello is now available in official clients for Desktop / Android / iOS
 >
 > To work with EE-MTProxy, please update your client!
 
 <p align="center">
   <a href="https://t.me/telemtrs">
-    <img src="/docs/assets/telegram_button.svg" width="200"/>
+    <img src="/docs/assets/telegram_button.svg" width="150"/>
   </a>
 </p>
 
-**Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements such as:
-- [ME Pool + Reader/Writer + Registry + Refill + Adaptive Floor + Trio-State + Generation Lifecycle](https://github.com/telemt/telemt/blob/main/docs/Architecture/Model/MODEL.en.md);
-- [Full-covered API w/ management](https://github.com/telemt/telemt/blob/main/docs/Architecture/API/API.md);
-- Anti-Replay on Sliding Window;
-- Prometheus-format Metrics;
-- TLS-Fronting and TCP-Splicing for masking from "prying" eyes.
+**Telemt** is a fast, secure, and feature-rich server written in Rust: it fully implements the official Telegram proxy algo and adds many production-ready improvements
 
-![telemt_scheme](docs/assets/telemt.png)
+### One-command Install and Update
+```bash
+curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
+```
+- [Quick Start Guide](docs/Quick_start/QUICK_START_GUIDE.en.md)
+- [Инструкция по быстрому запуску](docs/Quick_start/QUICK_START_GUIDE.ru.md)
 
 ## Features
 Our implementation of **TLS-fronting** is one of the most deeply debugged, focused, advanced and *almost* **"behaviorally consistent to real"**:  we are confident we have it right - [see evidence on our validation and traces](docs/FAQ.en.md#recognizability-for-dpi-and-crawler)
@@ -41,27 +40,16 @@ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared t
 - Graceful shutdown on Ctrl+C;
 - Extensive logging via `trace` and `debug` with `RUST_LOG` method.
 
-## One-command installation (update on re-ru)
-```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
-```
-See more in the [Quick Start Guide](docs/Quick_start/QUICK_START_GUIDE.en.md).
-
-# GOTO
-- [FAQ](#faq)
-- [Architecture](docs/Architecture)
-- [Quick Start Guide](#quick-start-guide)
-- [Config parameters](docs/Config_params)
-- [Build](#build)
-- [Why Rust?](#why-rust)
-
-## Quick Start Guide
-- [Quick Start Guide RU](docs/Quick_start/QUICK_START_GUIDE.ru.md)
-- [Quick Start Guide EN](docs/Quick_start/QUICK_START_GUIDE.en.md)
-
 ## FAQ
 - [FAQ RU](docs/FAQ.ru.md)
 - [FAQ EN](docs/FAQ.en.md)
+
+# Learn more about Telemt
+- [Our Architecture](docs/Architecture)
+- [All Config Options](docs/Config_params)
+- [How to build your own Telemt?](#build)
+- [Running on BSD](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md)
+- [Why Rust?](#why-rust)
 
 ## Build
 ```bash
@@ -83,15 +71,11 @@ chmod +x /bin/telemt
 telemt config.toml
 ```
 
-### OpenBSD
-- Build and service setup guide: [OpenBSD Guide (EN)](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md)
-- Example rc.d script: [contrib/openbsd/telemt.rcd](contrib/openbsd/telemt.rcd)
-- Status: OpenBSD sandbox hardening with `pledge(2)` and `unveil(2)` is not implemented yet.
-
-
 ## Why Rust?
 - Long-running reliability and idempotent behavior
 - Rust's deterministic resource management - RAII 
 - No garbage collector
 - Memory safety and reduced attack surface
 - Tokio's asynchronous architecture
+
+![telemt_scheme](docs/assets/telemt.png)

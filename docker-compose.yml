@@ -9,11 +9,11 @@ services:
       - "127.0.0.1:9090:9090"
       - "127.0.0.1:9091:9091"
     # Allow caching 'proxy-secret' in read-only container
-    working_dir: /run/telemt
+    working_dir: /etc/telemt
     volumes:
-      - ./config.toml:/run/telemt/config.toml:ro
+      - ./config.toml:/etc/telemt/config.toml:ro
     tmpfs:
-      - /run/telemt:rw,mode=1777,size=1m
+      - /etc/telemt:rw,mode=1777,size=4m
     environment:
       - RUST_LOG=info
     # Uncomment this line if you want to use host network for IPv6, but bridge is default and usually better
@@ -21,11 +21,12 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - NET_BIND_SERVICE   # allow binding to port 443
+      - NET_BIND_SERVICE
+      - NET_ADMIN
     read_only: true
     security_opt:
       - no-new-privileges:true
     ulimits:
       nofile:
         soft: 65536
-        hard: 65536
+        hard: 262144

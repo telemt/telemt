@@ -3,50 +3,39 @@
 ## Purpose
 
 **Telemt exists to solve technical problems.**
+- Telemt is open to contributors who want to learn, improve and build meaningful systems together.
+- It is a place for building, testing, reasoning, documenting, and improving systems.
+- Discussions that advance this work are in scope, discussions that divert it are not.
+- Technology has consequences, responsibility is inherent.
 
-Telemt is open to contributors who want to learn, improve and build meaningful systems together.
+> **Absicht bestimmt die Form**
 
-It is a place for building, testing, reasoning, documenting, and improving systems.
-
-Discussions that advance this work are in scope. Discussions that divert it are not.
-
-Technology has consequences. Responsibility is inherent.
-
-> **Zweck bestimmt die Form.**
-
-> Purpose defines form.
+> Purpose defines form
 
 ---
 
 ## Principles
 
 * **Technical over emotional**
-
-  Arguments are grounded in data, logs, reproducible cases, or clear reasoning.
+  - Arguments are grounded in data, logs, reproducible cases, or clear reasoning.
 
 * **Clarity over noise**
-
-  Communication is structured, concise, and relevant.
+  - Communication is structured, concise, and relevant.
 
 * **Openness with standards**
-
-  Participation is open. The work remains disciplined.
+  - Participation is open. The work remains disciplined.
 
 * **Independence of judgment**
-
-  Claims are evaluated on technical merit, not affiliation or posture.
+  - Claims are evaluated on technical merit, not affiliation or posture.
 
 * **Responsibility over capability**
-
-  Capability does not justify careless use.
+  - Capability does not justify careless use.
 
 * **Cooperation over friction**
-
-  Progress depends on coordination, mutual support, and honest review.
+  - Progress depends on coordination, mutual support, and honest review.
 
 * **Good intent, rigorous method**
-
-  Assume good intent, but require rigor.
+  - Assume good intent, but require rigor.
 
 > **Aussagen gelten nach ihrer Begründung.**
 
@@ -68,7 +57,9 @@ Participants are expected to:
 
 Precision is learned.
 
-New contributors are welcome. They are expected to grow into these standards. Existing contributors are expected to make that growth possible.
+- New contributors are welcome
+- They are expected to grow into these standards
+- Existing contributors are expected to make that growth possible
 
 > **Wer behauptet, belegt.**
 
@@ -112,7 +103,7 @@ Security is both technical and behavioral.
 
 ---
 
-## 6. Openness
+## Openness
 
 Telemt is open to contributors of different backgrounds, experience levels, and working styles.
 
@@ -148,10 +139,9 @@ Judgment should be exercised with restraint, consistency, and institutional resp
 
 All decisions are expected to serve the durability, clarity, and integrity of Telemt.
 
-> **Ordnung ist Voraussetzung der Funktion.**
+> **Klarheit vor Zustimmung - Bestand vor Beifall**
 
-> Order is the precondition of function.
-
+> Clarity above approval - substantiality before success
 ---
 
 ## Enforcement
@@ -171,42 +161,41 @@ Actions are taken to maintain function, continuity, and signal quality.
 
 ## Final
 
-Telemt is built on discipline, structure, and shared intent.
-- Signal over noise.
-- Facts over opinion.
-- Systems over rhetoric.
+**Telemt is built on discipline, structure, and shared intent**
+- Signal over noise
+- Facts over opinion
+- Systems over rhetoric
+- Work is collective
+- Outcomes are shared
+- Responsibility is distributed
+- Precision is learned
+- Rigor is expected
+- Help is part of the work
 
-- Work is collective.
-- Outcomes are shared.
-- Responsibility is distributed.
+> **Ordnung ist Voraussetzung der Freiheit**
 
-- Precision is learned.
-- Rigor is expected.
-- Help is part of the work.
-
-> **Ordnung ist Voraussetzung der Freiheit.**
-
-- If you contribute — contribute with care.
-- If you speak — speak with substance.
-- If you engage — engage constructively.
+- If you contribute — contribute with care
+- If you speak — speak with substance
+- If you engage — engage constructively
 
 ---
 
 ## After All
 
-Systems outlive intentions.
-- What is built will be used.
-- What is released will propagate.
-- What is maintained will define the future state.
+Systems outlive intentions
+- What is built will be used
+- What is released will propagate
+- What is maintained will define the future state
 
-There is no neutral infrastructure, only infrastructure shaped well or poorly.
+There is no neutral infrastructure, only infrastructure shaped well or poorly
 
-> **Jedes System trägt Verantwortung.**
+> **Ordnung → Umsetzung → Ergebnis**
 
-> Every system carries responsibility.
+> Order → Implementation → Result
 
-- Stability requires discipline.
-- Freedom requires structure.
-- Trust requires honesty.
+- Stability requires discipline
+- Freedom requires structure
+- Trust requires honesty
 
-In the end: the system reflects its contributors.
+In the end: the system reflects its contributors
+
