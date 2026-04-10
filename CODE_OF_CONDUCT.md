@@ -10,7 +10,7 @@
 
 > **Absicht bestimmt die Form**
 
-> Purpose defines form
+> Design follows intent
 
 ---
 

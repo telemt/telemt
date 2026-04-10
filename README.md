@@ -78,4 +78,26 @@ telemt config.toml
 - Memory safety and reduced attack surface
 - Tokio's asynchronous architecture
 
+## Support Telemt
+
+Telemt is free, open-source, and built in personal time.
+If it helps you — consider supporting continued development.
+
+Any cryptocurrency (BTC, ETH, USDT, 350+ coins):
+
+<p align="center">
+  <a href="https://nowpayments.io/donation?api_key=2bf1afd2-abc2-49f9-a012-f1e715b37223" target="_blank" rel="noreferrer noopener">
+    <img src="https://nowpayments.io/images/embeds/donation-button-white.svg" alt="Cryptocurrency & Bitcoin donation button by NOWPayments" height="80">
+  </a>
+</p>
+
+Monero (XMR) directly:
+
+```
+8Bk4tZEYPQWSypeD2hrUXG2rKbAKF16GqEN942ZdAP5cFdSqW6h4DwkP5cJMAdszzuPeHeHZPTyjWWFwzeFdjuci3ktfMoB
+```
+
+All donations go toward infrastructure, development, and research.
+
+
 ![telemt_scheme](docs/assets/telemt.png)
