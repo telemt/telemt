@@ -219,6 +219,7 @@
 | [`ntp_servers`](#cfg-general-ntp_servers) | `String[]` | `["pool.ntp.org"]` |
 | [`auto_degradation_enabled`](#cfg-general-auto_degradation_enabled) | `bool` | `true` |
 | [`degradation_min_unavailable_dc_groups`](#cfg-general-degradation_min_unavailable_dc_groups) | `u8` | `2` |
+| [`rst_on_close`](#cfg-general-rst_on_close) | `"off"`, `"errors"` или `"always"` | `"off"` |
 
 ## "cfg-general-data_path"
 - `data_path`
@@ -1592,7 +1593,21 @@
     [general]
     degradation_min_unavailable_dc_groups = 2
     ```
+## "cfg-general-rst_on_close"
+- `rst_on_close`
+  - **Ограничения / валидация**: одно из `"off"`, `"errors"`, `"always"`.
+  - **Описание**: Управляет поведением `SO_LINGER(0)` на принятых клиентских TCP-сокетах.
+    На высоконагруженных прокси-серверах накапливаются `FIN-WAIT-1` и осиротевшие (orphan) сокеты от соединений, которые не завершают Telegram-рукопожатие (сканеры, DPI-зонды, боты).
+    Эта опция позволяет отправлять немедленный `RST` вместо корректного `FIN` для таких соединений, мгновенно освобождая ресурсы ядра.
+    - `"off"` — по умолчанию. Обычный `FIN` при закрытии всех соединений; поведение не меняется.
+    - `"errors"` — `SO_LINGER(0)` устанавливается при `accept()`. Если клиент успешно проходит аутентификацию, linger сбрасывается и relay-сессия закрывается корректно через `FIN`. Соединения, закрытые до завершения рукопожатия (таймауты, ошибки крипто, сканеры), отправляют `RST`.
+    - `"always"` — `SO_LINGER(0)` устанавливается при `accept()` и никогда не сбрасывается. Все закрытия отправляют `RST` независимо от результата рукопожатия.
+  - **Пример**:
 
+    ```toml
+    [general]
+    rst_on_close = "errors"
+    ```
 
 # [general.modes]
 

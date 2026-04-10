@@ -159,6 +159,21 @@ impl MeBindStaleMode {
     }
 }
 
+/// RST-on-close mode for accepted client sockets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RstOnCloseMode {
+    /// Normal FIN on all closes (default, no behaviour change).
+    #[default]
+    Off,
+    /// SO_LINGER(0) on accept; cleared after successful auth.
+    /// Pre-handshake failures (scanners, DPI, timeouts) send RST;
+    /// authenticated relay sessions close gracefully with FIN.
+    Errors,
+    /// SO_LINGER(0) on accept, never cleared — all closes send RST.
+    Always,
+}
+
 /// Middle-End writer floor policy mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -925,6 +940,14 @@ pub struct GeneralConfig {
     /// Minimum unavailable ME DC groups before degrading.
     #[serde(default = "default_degradation_min_unavailable_dc_groups")]
     pub degradation_min_unavailable_dc_groups: u8,
+
+    /// RST-on-close mode for accepted client sockets.
+    /// `off`    — normal FIN on all closes (default).
+    /// `errors` — SO_LINGER(0) on accept, cleared after successful auth;
+    ///            pre-handshake failures send RST, relayed sessions close gracefully.
+    /// `always` — SO_LINGER(0) on accept, never cleared; all closes send RST.
+    #[serde(default)]
+    pub rst_on_close: RstOnCloseMode,
 }
 
 impl Default for GeneralConfig {
@@ -1086,6 +1109,7 @@ impl Default for GeneralConfig {
             ntp_servers: default_ntp_servers(),
             auto_degradation_enabled: default_true(),
             degradation_min_unavailable_dc_groups: default_degradation_min_unavailable_dc_groups(),
+            rst_on_close: RstOnCloseMode::default(),
         }
     }
 }
