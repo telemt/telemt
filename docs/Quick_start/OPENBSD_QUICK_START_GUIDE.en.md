@@ -27,7 +27,8 @@ cargo build --release
 ./target/release/telemt --version
 ```
 
-For low-RAM systems, this repository already uses `lto = "thin"` in release profile.
+For low-RAM systems, note that this repository currently uses `lto = "fat"` in release profile.  
+On constrained builders, a local override to `lto = "thin"` may be more practical.
 
 ## 3. Install binary and config
 

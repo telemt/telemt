@@ -1974,7 +1974,8 @@ This document lists all configuration keys accepted by `config.toml`.
 ## "cfg-server-proxy_protocol_trusted_cidrs"
 - `proxy_protocol_trusted_cidrs`
   - **Constraints / validation**: `IpNetwork[]`.
-    - If omitted, defaults to trust-all CIDRs (`0.0.0.0/0` and `::/0`).
+    - If omitted, defaults to trust-all CIDRs (`0.0.0.0/0` and `::/0`). 
+      > In production behind HAProxy/nginx, prefer setting explicit trusted CIDRs instead of relying on this fallback.
     - If explicitly set to an empty array, all PROXY headers are rejected.
   - **Description**: Trusted source CIDRs allowed to provide PROXY protocol headers (security control).
   - **Example**:
@@ -2506,7 +2507,8 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 ## "cfg-censorship-tls_domain"
 - `tls_domain`
   - **Constraints / validation**: Must be a non-empty domain name. Must not contain spaces or `/`.
-  - **Description**: Primary TLS domain used in FakeTLS handshake profile and as the default SNI domain.
+  - **Description**: Primary domain used for Fake-TLS masking / fronting profile and as the default SNI domain presented to clients. 
+    This value becomes part of generated `ee` links, and changing it invalidates previously generated links.
   - **Example**:
 
     ```toml

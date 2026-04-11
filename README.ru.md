@@ -54,7 +54,6 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 - [FAQ EN](docs/FAQ.en.md)
 
 ## Сборка
-
 ```bash
 # Клонируйте репозиторий
 git clone https://github.com/telemt/telemt 
@@ -63,7 +62,6 @@ cd telemt
 # Начните процесс сборки
 cargo build --release
 
-# Устройства с небольшим объёмом оперативной памяти (1 ГБ, например NanoPi Neo3 / Raspberry Pi Zero 2):
 # В текущем release-профиле используется lto = "fat" для максимальной оптимизации (см. Cargo.toml).
 # На системах с малым объёмом RAM (~1 ГБ) можно переопределить это значение на "thin".
 

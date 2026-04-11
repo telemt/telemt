@@ -32,13 +32,13 @@ show = "*"
 port = 443
 # proxy_protocol = false           # Enable if behind HAProxy/nginx with PROXY protocol
 # metrics_port = 9090
-# metrics_listen = "0.0.0.0:9090"  # Listen address for metrics (overrides metrics_port)
-# metrics_whitelist = ["127.0.0.1", "::1", "0.0.0.0/0"]
+# metrics_listen = "127.0.0.1:9090" # Listen address for metrics (overrides metrics_port)
+# metrics_whitelist = ["127.0.0.1/32", "::1/128"]
 
 [server.api]
 enabled = true
-listen = "0.0.0.0:9091"
-whitelist = ["127.0.0.0/8"]
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1/32", "::1/128"]
 minimal_runtime_enabled = false
 minimal_runtime_cache_ttl_ms = 1000
 
@@ -48,9 +48,12 @@ ip = "0.0.0.0"
 
 # === Anti-Censorship & Masking ===
 [censorship]
+# Fake-TLS / SNI masking domain used in generated ee-links.
+# Changing tls_domain invalidates previously generated TLS links.
 tls_domain = "petrovich.ru"
+
 mask = true
-tls_emulation = true        # Fetch real cert lengths and emulate TLS records
+tls_emulation = true         # Fetch real cert lengths and emulate TLS records
 tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 
 [access.users]

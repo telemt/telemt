@@ -110,15 +110,15 @@ show = "*"
 # === Server Binding ===
 [server]
 port = 443
-# proxy_protocol = false           # Enable if behind HAProxy/nginx with PROXY protocol
+# proxy_protocol = false            # Enable if behind HAProxy/nginx with PROXY protocol
 # metrics_port = 9090
-# metrics_listen = "0.0.0.0:9090"  # Listen address for metrics (overrides metrics_port)
-# metrics_whitelist = ["127.0.0.1", "::1", "0.0.0.0/0"]
+# metrics_listen = "127.0.0.1:9090" # Listen address for metrics (overrides metrics_port)
+# metrics_whitelist = ["127.0.0.1/32", "::1/128"]
 
 [server.api]
 enabled = true
-listen = "0.0.0.0:9091"
-whitelist = ["127.0.0.0/8"]
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1/32", "::1/128"]
 minimal_runtime_enabled = false
 minimal_runtime_cache_ttl_ms = 1000
 
@@ -128,9 +128,9 @@ ip = "0.0.0.0"
 
 # === Anti-Censorship & Masking ===
 [censorship]
-tls_domain = "petrovich.ru"
+tls_domain = "petrovich.ru"  # Fake-TLS / SNI masking domain used in generated ee-links
 mask = true
-tls_emulation = true        # Fetch real cert lengths and emulate TLS records
+tls_emulation = true         # Fetch real cert lengths and emulate TLS records
 tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 
 [access.users]
@@ -141,9 +141,9 @@ hello = "00000000000000000000000000000000"
 then Ctrl+S -> Ctrl+X to save
 
 > [!WARNING]
-> Replace the value of the hello parameter with the value you obtained in step 0.  
-> Additionally, change the value of the tls_domain parameter to a different website.
-> Changing the tls_domain parameter will break all links that use the old domain!
+> Replace the value of the `hello` parameter with the value you obtained in step 0.  
+> Additionally, change the value of the `tls_domain` parameter to a different website.
+> Changing the `tls_domain` parameter will break all links that use the old domain!
 
 ---
 
