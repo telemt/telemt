@@ -55,6 +55,7 @@ const STICKY_HINT_MAX_ENTRIES: usize = 65_536;
 const CANDIDATE_HINT_TRACK_CAP: usize = 64;
 const OVERLOAD_CANDIDATE_BUDGET_HINTED: usize = 16;
 const OVERLOAD_CANDIDATE_BUDGET_UNHINTED: usize = 8;
+const OVERLOAD_FULL_SCAN_USER_THRESHOLD: usize = CANDIDATE_HINT_TRACK_CAP;
 const RECENT_USER_RING_SCAN_LIMIT: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -242,12 +243,37 @@ fn budget_for_validation(total_users: usize, overload: bool, has_hint: bool) -> 
     if !overload {
         return total_users;
     }
+    if total_users <= OVERLOAD_FULL_SCAN_USER_THRESHOLD {
+        return total_users;
+    }
     let cap = if has_hint {
         OVERLOAD_CANDIDATE_BUDGET_HINTED
     } else {
         OVERLOAD_CANDIDATE_BUDGET_UNHINTED
     };
     total_users.min(cap.max(1))
+}
+
+// Rotate partial overload scans across larger snapshots so one truncated
+// validation window does not permanently starve the same cold users.
+fn candidate_scan_start_offset_in(
+    shared: &ProxySharedState,
+    peer_ip: IpAddr,
+    total_users: usize,
+    candidate_budget: usize,
+) -> usize {
+    if total_users == 0 || candidate_budget >= total_users {
+        return 0;
+    }
+
+    let seq = shared
+        .handshake
+        .auth_candidate_scan_seq
+        .fetch_add(1, Ordering::Relaxed);
+    let mut hasher = shared.handshake.auth_probe_eviction_hasher.build_hasher();
+    peer_ip.hash(&mut hasher);
+    seq.hash(&mut hasher);
+    hasher.finish() as usize % total_users
 }
 
 fn parse_tls_auth_material(
@@ -1312,7 +1338,14 @@ where
         }
 
         if !matched && !budget_exhausted {
-            for idx in 0..snapshot.entries().len() {
+            let fallback_start = candidate_scan_start_offset_in(
+                shared,
+                peer.ip(),
+                snapshot.entries().len(),
+                candidate_budget,
+            );
+            for offset in 0..snapshot.entries().len() {
+                let idx = (fallback_start + offset) % snapshot.entries().len();
                 let Some(user_id) = u32::try_from(idx).ok() else {
                     break;
                 };
@@ -1679,7 +1712,14 @@ where
         }
 
         if !matched && !budget_exhausted {
-            for idx in 0..snapshot.entries().len() {
+            let fallback_start = candidate_scan_start_offset_in(
+                shared,
+                peer.ip(),
+                snapshot.entries().len(),
+                candidate_budget,
+            );
+            for offset in 0..snapshot.entries().len() {
+                let idx = (fallback_start + offset) % snapshot.entries().len();
                 let Some(user_id) = u32::try_from(idx).ok() else {
                     break;
                 };

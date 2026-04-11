@@ -1146,9 +1146,9 @@ async fn tls_overload_budget_limits_candidate_scan_depth() {
     let mut config = ProxyConfig::default();
     config.access.users.clear();
     config.access.ignore_time_skew = true;
-    for idx in 0..32u8 {
+    for idx in 0..96u8 {
         config.access.users.insert(
-            format!("user-{idx}"),
+            format!("user-{idx:02}"),
             format!("{:032x}", u128::from(idx) + 1),
         );
     }
@@ -1204,6 +1204,64 @@ async fn tls_overload_budget_limits_candidate_scan_depth() {
 }
 
 #[tokio::test]
+async fn tls_overload_full_scans_small_runtime_snapshot_to_preserve_cold_user_auth() {
+    let mut config = ProxyConfig::default();
+    config.access.users.clear();
+    config.access.ignore_time_skew = true;
+    for idx in 0..32u8 {
+        config.access.users.insert(
+            format!("user-{idx:02}"),
+            format!("{:032x}", u128::from(idx) + 1),
+        );
+    }
+    config.rebuild_runtime_user_auth().unwrap();
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let shared = ProxySharedState::new();
+    let now = Instant::now();
+    {
+        let mut saturation = shared.handshake.auth_probe_saturation.lock().unwrap();
+        *saturation = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_millis(200),
+            last_seen: now,
+        });
+    }
+
+    let peer: SocketAddr = "198.51.100.214:44326".parse().unwrap();
+    let mut secret = [0u8; 16];
+    secret[15] = 32;
+    let handshake = make_valid_tls_handshake(&secret, 0);
+
+    let result = handle_tls_handshake_with_shared(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+        shared.as_ref(),
+    )
+    .await;
+
+    assert!(
+        matches!(result, HandshakeResult::Success(_)),
+        "overload mode must still authenticate valid cold users when runtime snapshot stays small"
+    );
+    assert_eq!(
+        shared
+            .handshake
+            .auth_expensive_checks_total
+            .load(Ordering::Relaxed),
+        32,
+        "small saturated snapshots must remain fully scannable"
+    );
+}
+
+#[tokio::test]
 async fn mtproto_runtime_snapshot_prefers_preferred_user_hint() {
     let mut config = ProxyConfig::default();
     config.general.modes.secure = true;
@@ -1252,6 +1310,66 @@ async fn mtproto_runtime_snapshot_prefers_preferred_user_hint() {
             .load(Ordering::Relaxed),
         1,
         "preferred user hint must produce single-candidate success in snapshot path"
+    );
+}
+
+#[tokio::test]
+async fn mtproto_overload_full_scans_small_runtime_snapshot_to_preserve_cold_user_auth() {
+    let mut config = ProxyConfig::default();
+    config.general.modes.secure = true;
+    config.access.users.clear();
+    config.access.ignore_time_skew = true;
+    for idx in 0..32u8 {
+        config.access.users.insert(
+            format!("user-{idx:02}"),
+            format!("{:032x}", u128::from(idx) + 1),
+        );
+    }
+    config.rebuild_runtime_user_auth().unwrap();
+
+    let shared = ProxySharedState::new();
+    let now = Instant::now();
+    {
+        let mut saturation = shared.handshake.auth_probe_saturation.lock().unwrap();
+        *saturation = Some(AuthProbeSaturationState {
+            fail_streak: AUTH_PROBE_BACKOFF_START_FAILS,
+            blocked_until: now + Duration::from_millis(200),
+            last_seen: now,
+        });
+    }
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let handshake = make_valid_mtproto_handshake(
+        "00000000000000000000000000000020",
+        ProtoTag::Secure,
+        2,
+    );
+    let peer: SocketAddr = "198.51.100.215:44326".parse().unwrap();
+
+    let result = handle_mtproto_handshake_with_shared(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        peer,
+        &config,
+        &replay_checker,
+        false,
+        None,
+        shared.as_ref(),
+    )
+    .await;
+
+    assert!(
+        matches!(result, HandshakeResult::Success(_)),
+        "overload mode must still authenticate valid direct MTProto users when runtime snapshot stays small"
+    );
+    assert_eq!(
+        shared
+            .handshake
+            .auth_expensive_checks_total
+            .load(Ordering::Relaxed),
+        32,
+        "small saturated MTProto snapshots must remain fully scannable"
     );
 }
 

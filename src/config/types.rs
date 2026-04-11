@@ -1387,9 +1387,8 @@ pub struct ServerConfig {
 
     /// Trusted source CIDRs allowed to send incoming PROXY protocol headers.
     ///
-    /// If this field is omitted in config, it defaults to trust-all CIDRs
-    /// (`0.0.0.0/0` and `::/0`). If it is explicitly set to an empty list,
-    /// all PROXY protocol headers are rejected.
+    /// If this field is omitted in config, it defaults to an empty list and
+    /// all PROXY protocol headers are rejected until trusted CIDRs are set.
     #[serde(default = "default_proxy_protocol_trusted_cidrs")]
     pub proxy_protocol_trusted_cidrs: Vec<IpNetwork>,
 

@@ -48,6 +48,7 @@ pub(crate) struct HandshakeSharedState {
     pub(crate) sticky_user_by_sni_hash: DashMap<u64, u32>,
     pub(crate) recent_user_ring: Box<[AtomicU32]>,
     pub(crate) recent_user_ring_seq: AtomicU64,
+    pub(crate) auth_candidate_scan_seq: AtomicU64,
     pub(crate) auth_expensive_checks_total: AtomicU64,
     pub(crate) auth_budget_exhausted_total: AtomicU64,
 }
@@ -86,6 +87,7 @@ impl ProxySharedState {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 recent_user_ring_seq: AtomicU64::new(0),
+                auth_candidate_scan_seq: AtomicU64::new(0),
                 auth_expensive_checks_total: AtomicU64::new(0),
                 auth_budget_exhausted_total: AtomicU64::new(0),
             },

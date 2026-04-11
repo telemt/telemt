@@ -507,6 +507,40 @@ fn is_mask_target_local_listener_with_interfaces(
     resolved_override: Option<SocketAddr>,
     interface_ips: &[IpAddr],
 ) -> bool {
+    let resolved_candidates = resolved_override
+        .as_ref()
+        .map(std::slice::from_ref)
+        .unwrap_or(&[]);
+    is_mask_target_local_listener_candidates_with_interfaces(
+        mask_host,
+        mask_port,
+        local_addr,
+        resolved_candidates,
+        interface_ips,
+    )
+}
+
+fn mask_ip_targets_local_listener(
+    mask_ip: IpAddr,
+    local_ip: IpAddr,
+    interface_ips: &[IpAddr],
+) -> bool {
+    let mask_ip = canonical_ip(mask_ip);
+    if mask_ip == local_ip {
+        return true;
+    }
+
+    local_ip.is_unspecified()
+        && (mask_ip.is_loopback() || mask_ip.is_unspecified() || interface_ips.contains(&mask_ip))
+}
+
+fn is_mask_target_local_listener_candidates_with_interfaces(
+    mask_host: &str,
+    mask_port: u16,
+    local_addr: SocketAddr,
+    resolved_candidates: &[SocketAddr],
+    interface_ips: &[IpAddr],
+) -> bool {
     if mask_port != local_addr.port() {
         return false;
     }
@@ -514,31 +548,14 @@ fn is_mask_target_local_listener_with_interfaces(
     let local_ip = canonical_ip(local_addr.ip());
     let literal_mask_ip = parse_mask_host_ip_literal(mask_host).map(canonical_ip);
 
-    if let Some(addr) = resolved_override {
-        let resolved_ip = canonical_ip(addr.ip());
-        if resolved_ip == local_ip {
-            return true;
-        }
-
-        if local_ip.is_unspecified()
-            && (resolved_ip.is_loopback()
-                || resolved_ip.is_unspecified()
-                || interface_ips.contains(&resolved_ip))
-        {
+    for addr in resolved_candidates {
+        if mask_ip_targets_local_listener(addr.ip(), local_ip, interface_ips) {
             return true;
         }
     }
 
     if let Some(mask_ip) = literal_mask_ip {
-        if mask_ip == local_ip {
-            return true;
-        }
-
-        if local_ip.is_unspecified()
-            && (mask_ip.is_loopback()
-                || mask_ip.is_unspecified()
-                || interface_ips.contains(&mask_ip))
-        {
+        if mask_ip_targets_local_listener(mask_ip, local_ip, interface_ips) {
             return true;
         }
     }
@@ -573,18 +590,64 @@ async fn is_mask_target_local_listener_async(
     local_addr: SocketAddr,
     resolved_override: Option<SocketAddr>,
 ) -> bool {
+    let resolved_candidates = resolved_override
+        .as_ref()
+        .map(std::slice::from_ref)
+        .unwrap_or(&[]);
+    is_mask_target_local_listener_candidates_async(
+        mask_host,
+        mask_port,
+        local_addr,
+        resolved_candidates,
+    )
+    .await
+}
+
+async fn is_mask_target_local_listener_candidates_async(
+    mask_host: &str,
+    mask_port: u16,
+    local_addr: SocketAddr,
+    resolved_candidates: &[SocketAddr],
+) -> bool {
     if mask_port != local_addr.port() {
         return false;
     }
 
     let interfaces = local_interface_ips_async().await;
-    is_mask_target_local_listener_with_interfaces(
+    is_mask_target_local_listener_candidates_with_interfaces(
         mask_host,
         mask_port,
         local_addr,
-        resolved_override,
+        resolved_candidates,
         &interfaces,
     )
+}
+
+// Resolve hostnames through the same OS DNS path `TcpStream::connect` uses so
+// self-target rejection also catches loopback and local-interface hostnames.
+async fn resolve_mask_target_candidates(
+    mask_host: &str,
+    mask_port: u16,
+    resolved_override: Option<SocketAddr>,
+) -> Vec<SocketAddr> {
+    if let Some(addr) = resolved_override {
+        return vec![addr];
+    }
+
+    if parse_mask_host_ip_literal(mask_host).is_some() {
+        return Vec::new();
+    }
+
+    let mut resolved = Vec::new();
+    if let Ok(addrs) = tokio::net::lookup_host((mask_host, mask_port)).await {
+        for addr in addrs {
+            if !resolved.contains(&addr) {
+                resolved.push(addr);
+            }
+        }
+    }
+
+    resolved
 }
 
 fn masking_beobachten_ttl(config: &ProxyConfig) -> Duration {
@@ -731,8 +794,15 @@ pub async fn handle_bad_client<R, W>(
     // Self-referential masking can create recursive proxy loops under
     // misconfiguration and leak distinguishable load spikes to adversaries.
     let resolved_mask_addr = resolve_socket_addr(mask_host, mask_port);
-    if is_mask_target_local_listener_async(mask_host, mask_port, local_addr, resolved_mask_addr)
-        .await
+    let resolved_mask_candidates =
+        resolve_mask_target_candidates(mask_host, mask_port, resolved_mask_addr).await;
+    if is_mask_target_local_listener_candidates_async(
+        mask_host,
+        mask_port,
+        local_addr,
+        &resolved_mask_candidates,
+    )
+    .await
     {
         let outcome_started = Instant::now();
         debug!(

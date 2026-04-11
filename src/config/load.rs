@@ -47,12 +47,18 @@ pub(crate) struct UserAuthEntry {
 
 impl UserAuthSnapshot {
     fn from_users(users: &HashMap<String, String>) -> Result<Self> {
+        // Keep runtime user ids stable across reloads so overload scans and
+        // sticky hints do not depend on HashMap iteration order.
+        let mut sorted_users: Vec<_> = users.iter().collect();
+        sorted_users
+            .sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+
         let mut entries = Vec::with_capacity(users.len());
         let mut by_name = HashMap::with_capacity(users.len());
         let mut sni_index = HashMap::with_capacity(users.len());
         let mut sni_initial_index = HashMap::with_capacity(users.len());
 
-        for (user, secret_hex) in users {
+        for (user, secret_hex) in sorted_users {
             let decoded = hex::decode(secret_hex).map_err(|_| ProxyError::InvalidSecret {
                 user: user.clone(),
                 reason: "Must be 32 hex characters".to_string(),
@@ -1734,10 +1740,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(
-            cfg_missing.server.proxy_protocol_trusted_cidrs,
-            default_proxy_protocol_trusted_cidrs()
-        );
+        assert!(cfg_missing.server.proxy_protocol_trusted_cidrs.is_empty());
 
         let cfg_explicit_empty: ProxyConfig = toml::from_str(
             r#"
@@ -1756,6 +1759,46 @@ mod tests {
                 .proxy_protocol_trusted_cidrs
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn runtime_user_auth_snapshot_order_is_stable_across_hashmap_insertion_orders() {
+        let mut left_users = HashMap::new();
+        left_users.insert(
+            "beta".to_string(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        );
+        left_users.insert(
+            "alpha".to_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        );
+
+        let mut right_users = HashMap::new();
+        right_users.insert(
+            "alpha".to_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        );
+        right_users.insert(
+            "beta".to_string(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        );
+
+        let left_snapshot = UserAuthSnapshot::from_users(&left_users).unwrap();
+        let right_snapshot = UserAuthSnapshot::from_users(&right_users).unwrap();
+
+        let left_names: Vec<_> = left_snapshot
+            .entries()
+            .iter()
+            .map(|entry| entry.user.as_str())
+            .collect();
+        let right_names: Vec<_> = right_snapshot
+            .entries()
+            .iter()
+            .map(|entry| entry.user.as_str())
+            .collect();
+
+        assert_eq!(left_names, ["alpha", "beta"]);
+        assert_eq!(left_names, right_names);
     }
 
     #[test]

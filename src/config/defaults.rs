@@ -210,7 +210,7 @@ pub(crate) fn default_proxy_protocol_header_timeout_ms() -> u64 {
 }
 
 pub(crate) fn default_proxy_protocol_trusted_cidrs() -> Vec<IpNetwork> {
-    vec!["0.0.0.0/0".parse().unwrap(), "::/0".parse().unwrap()]
+    Vec::new()
 }
 
 pub(crate) fn default_server_max_connections() -> u32 {
