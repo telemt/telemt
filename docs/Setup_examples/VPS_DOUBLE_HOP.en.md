@@ -163,7 +163,7 @@ PING 10.10.10.1 (10.10.10.1) 56(84) bytes of data.
 ---
 
 ## Step 2. Installing telemt on Server B (conditionally Netherlands)
-Installation and configuration are described [here](https://github.com/telemt/telemt/blob/main/docs/QUICK_START_GUIDE.ru.md) or [here](https://gitlab.com/An0nX/telemt-docker#-quick-start-docker-compose).\
+Installation and configuration are described [here](https://github.com/telemt/telemt/blob/main/docs/Quick_start/QUICK_START_GUIDE.en.md) or [here](https://gitlab.com/An0nX/telemt-docker#-quick-start-docker-compose).\
 It is assumed that telemt expects connections on port `443\tcp`.
 
 In the telemt config, you must enable the `Proxy` protocol and restrict connections to it only through the tunnel.

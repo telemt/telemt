@@ -102,11 +102,26 @@ pub fn configure_client_socket(
     Ok(())
 }
 
-/// Set socket to send RST on close (for masking)
-#[allow(dead_code)]
+/// Set socket to send RST on close instead of FIN, eliminating
+/// FIN-WAIT-1 and orphan socket accumulation on high-churn workloads.
 pub fn set_linger_zero(stream: &TcpStream) -> Result<()> {
     let socket = socket2::SockRef::from(stream);
     socket.set_linger(Some(Duration::ZERO))?;
+    Ok(())
+}
+
+/// Restore default linger behaviour (graceful FIN) on a socket
+/// identified by its raw file descriptor.  Safe to call after
+/// `TcpStream::into_split()` because the fd remains valid until
+/// both halves are dropped.
+#[cfg(unix)]
+pub fn clear_linger_fd(fd: std::os::unix::io::RawFd) -> Result<()> {
+    use std::os::unix::io::BorrowedFd;
+    // SAFETY: the fd is still open — the caller guarantees the
+    // TcpStream (or its split halves) is alive.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let socket = socket2::SockRef::from(&borrowed);
+    socket.set_linger(None)?;
     Ok(())
 }
 

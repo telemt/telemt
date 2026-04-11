@@ -219,6 +219,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`ntp_servers`](#cfg-general-ntp_servers) | `String[]` | `["pool.ntp.org"]` |
 | [`auto_degradation_enabled`](#cfg-general-auto_degradation_enabled) | `bool` | `true` |
 | [`degradation_min_unavailable_dc_groups`](#cfg-general-degradation_min_unavailable_dc_groups) | `u8` | `2` |
+| [`rst_on_close`](#cfg-general-rst_on_close) | `"off"`, `"errors"`, or `"always"` | `"off"` |
 
 ## "cfg-general-data_path"
 - `data_path`
@@ -1592,7 +1593,21 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     degradation_min_unavailable_dc_groups = 2
     ```
+## "cfg-general-rst_on_close"
+- `rst_on_close`
+  - **Constraints / validation**: one of `"off"`, `"errors"`, `"always"`.
+  - **Description**: Controls `SO_LINGER(0)` behaviour on accepted client TCP sockets.
+    High-traffic proxy servers accumulate `FIN-WAIT-1` and orphaned sockets from connections that never complete the Telegram handshake (scanners, DPI probes, bots).
+    This option allows sending an immediate `RST` instead of a graceful `FIN` for such connections, freeing kernel resources instantly.
+    - `"off"` — default. Normal `FIN` on all closes; no behaviour change.
+    - `"errors"` — `SO_LINGER(0)` is set on `accept()`. If the client successfully completes authentication, linger is cleared and the relay session closes gracefully with `FIN`. Connections closed before handshake completion (timeouts, bad crypto, scanners) send `RST`.
+    - `"always"` — `SO_LINGER(0)` is set on `accept()` and never cleared. All closes send `RST` regardless of handshake outcome.
+  - **Example**:
 
+    ```toml
+    [general]
+    rst_on_close = "errors"
+    ```
 
 # [general.modes]
 

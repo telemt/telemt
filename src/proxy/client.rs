@@ -804,6 +804,9 @@ pub struct RunningClientHandler {
     beobachten: Arc<BeobachtenStore>,
     shared: Arc<ProxySharedState>,
     proxy_protocol_enabled: bool,
+    #[cfg(unix)]
+    raw_fd: std::os::unix::io::RawFd,
+    rst_on_close: crate::config::RstOnCloseMode,
 }
 
 impl ClientHandler {
@@ -825,6 +828,11 @@ impl ClientHandler {
         proxy_protocol_enabled: bool,
         real_peer_report: Arc<std::sync::Mutex<Option<SocketAddr>>>,
     ) -> RunningClientHandler {
+        #[cfg(unix)]
+        let raw_fd = {
+            use std::os::unix::io::AsRawFd;
+            stream.as_raw_fd()
+        };
         Self::new_with_shared(
             stream,
             peer,
@@ -842,6 +850,9 @@ impl ClientHandler {
             ProxySharedState::new(),
             proxy_protocol_enabled,
             real_peer_report,
+            #[cfg(unix)]
+            raw_fd,
+            crate::config::RstOnCloseMode::Off,
         )
     }
 
@@ -863,6 +874,8 @@ impl ClientHandler {
         shared: Arc<ProxySharedState>,
         proxy_protocol_enabled: bool,
         real_peer_report: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+        #[cfg(unix)] raw_fd: std::os::unix::io::RawFd,
+        rst_on_close: crate::config::RstOnCloseMode,
     ) -> RunningClientHandler {
         let normalized_peer = normalize_ip(peer);
         RunningClientHandler {
@@ -883,6 +896,9 @@ impl ClientHandler {
             beobachten,
             shared,
             proxy_protocol_enabled,
+            #[cfg(unix)]
+            raw_fd,
+            rst_on_close,
         }
     }
 }
@@ -901,6 +917,10 @@ impl RunningClientHandler {
             debug!(peer = %peer, error = %e, "Failed to configure client socket");
         }
 
+        #[cfg(unix)]
+        let raw_fd = self.raw_fd;
+        let rst_on_close = self.rst_on_close;
+
         let outcome = match self.do_handshake().await? {
             Some(outcome) => outcome,
             None => return Ok(()),
@@ -908,7 +928,14 @@ impl RunningClientHandler {
 
         // Phase 2: relay (WITHOUT handshake timeout — relay has its own activity timeouts)
         match outcome {
-            HandshakeOutcome::NeedsRelay(fut) | HandshakeOutcome::NeedsMasking(fut) => fut.await,
+            HandshakeOutcome::NeedsRelay(fut) => {
+                #[cfg(unix)]
+                if matches!(rst_on_close, crate::config::RstOnCloseMode::Errors) {
+                    let _ = crate::transport::socket::clear_linger_fd(raw_fd);
+                }
+                fut.await
+            }
+            HandshakeOutcome::NeedsMasking(fut) => fut.await,
         }
     }
 

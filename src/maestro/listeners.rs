@@ -9,7 +9,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{Semaphore, watch};
 use tracing::{debug, error, info, warn};
 
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, RstOnCloseMode};
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::proxy::ClientHandler;
@@ -21,6 +21,7 @@ use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::tls_front::TlsFrontCache;
 use crate::transport::middle_proxy::MePool;
+use crate::transport::socket::set_linger_zero;
 use crate::transport::{ListenOptions, UpstreamManager, create_listener, find_listener_processes};
 
 use super::helpers::{is_expected_handshake_eof, print_proxy_links};
@@ -380,6 +381,15 @@ pub(crate) fn spawn_tcp_accept_loops(
             loop {
                 match listener.accept().await {
                     Ok((stream, peer_addr)) => {
+                        let rst_mode = config_rx.borrow().general.rst_on_close;
+                        #[cfg(unix)]
+                        let raw_fd = {
+                            use std::os::unix::io::AsRawFd;
+                            stream.as_raw_fd()
+                        };
+                        if matches!(rst_mode, RstOnCloseMode::Errors | RstOnCloseMode::Always) {
+                            let _ = set_linger_zero(&stream);
+                        }
                         if !*admission_rx_tcp.borrow() {
                             debug!(peer = %peer_addr, "Admission gate closed, dropping connection");
                             drop(stream);
@@ -454,6 +464,9 @@ pub(crate) fn spawn_tcp_accept_loops(
                                 shared,
                                 proxy_protocol_enabled,
                                 real_peer_report_for_handler,
+                                #[cfg(unix)]
+                                raw_fd,
+                                rst_mode,
                             )
                             .run()
                             .await

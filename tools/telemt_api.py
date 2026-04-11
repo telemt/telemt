@@ -24,7 +24,7 @@ from urllib.request import Request, urlopen
 # Exceptions
 # ---------------------------------------------------------------------------
 
-class TememtAPIError(Exception):
+class TelemtAPIError(Exception):
     """Raised when the API returns an error envelope or a transport error."""
 
     def __init__(self, message: str, code: str | None = None,
@@ -35,7 +35,7 @@ class TememtAPIError(Exception):
         self.request_id = request_id
 
     def __repr__(self) -> str:
-        return (f"TememtAPIError(message={str(self)!r}, code={self.code!r}, "
+        return (f"TelemtAPIError(message={str(self)!r}, code={self.code!r}, "
                 f"http_status={self.http_status}, request_id={self.request_id})")
 
 
@@ -58,7 +58,7 @@ class APIResponse:
 # Main client
 # ---------------------------------------------------------------------------
 
-class TememtAPI:
+class TelemtAPI:
     """
     HTTP client for the Telemt Control API.
 
@@ -75,10 +75,10 @@ class TememtAPI:
     """
 
     def __init__(
-        self,
-        base_url: str = "http://127.0.0.1:9091",
-        auth_header: str | None = None,
-        timeout: int = 10,
+            self,
+            base_url: str = "http://127.0.0.1:9091",
+            auth_header: str | None = None,
+            timeout: int = 10,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.auth_header = auth_header
@@ -98,12 +98,12 @@ class TememtAPI:
         return h
 
     def _request(
-        self,
-        method: str,
-        path: str,
-        body: dict | None = None,
-        if_match: str | None = None,
-        query: dict | None = None,
+            self,
+            method: str,
+            path: str,
+            body: dict | None = None,
+            if_match: str | None = None,
+            query: dict | None = None,
     ) -> APIResponse:
         url = self.base_url + path
         if query:
@@ -133,22 +133,22 @@ class TememtAPI:
             try:
                 payload = json.loads(raw)
             except Exception:
-                raise TememtAPIError(
+                raise TelemtAPIError(
                     str(exc), http_status=exc.code
                 ) from exc
             err = payload.get("error", {})
-            raise TememtAPIError(
+            raise TelemtAPIError(
                 err.get("message", str(exc)),
                 code=err.get("code"),
                 http_status=exc.code,
                 request_id=payload.get("request_id"),
             ) from exc
         except URLError as exc:
-            raise TememtAPIError(str(exc)) from exc
+            raise TelemtAPIError(str(exc)) from exc
 
         if not payload.get("ok"):
             err = payload.get("error", {})
-            raise TememtAPIError(
+            raise TelemtAPIError(
                 err.get("message", "unknown error"),
                 code=err.get("code"),
                 request_id=payload.get("request_id"),
@@ -298,16 +298,16 @@ class TememtAPI:
     # ------------------------------------------------------------------
 
     def create_user(
-        self,
-        username: str,
-        *,
-        secret: str | None = None,
-        user_ad_tag: str | None = None,
-        max_tcp_conns: int | None = None,
-        expiration_rfc3339: str | None = None,
-        data_quota_bytes: int | None = None,
-        max_unique_ips: int | None = None,
-        if_match: str | None = None,
+            self,
+            username: str,
+            *,
+            secret: str | None = None,
+            user_ad_tag: str | None = None,
+            max_tcp_conns: int | None = None,
+            expiration_rfc3339: str | None = None,
+            data_quota_bytes: int | None = None,
+            max_unique_ips: int | None = None,
+            if_match: str | None = None,
     ) -> APIResponse:
         """POST /v1/users — create a new user.
 
@@ -340,16 +340,16 @@ class TememtAPI:
         return self._post("/v1/users", body=body, if_match=if_match)
 
     def patch_user(
-        self,
-        username: str,
-        *,
-        secret: str | None = None,
-        user_ad_tag: str | None = None,
-        max_tcp_conns: int | None = None,
-        expiration_rfc3339: str | None = None,
-        data_quota_bytes: int | None = None,
-        max_unique_ips: int | None = None,
-        if_match: str | None = None,
+            self,
+            username: str,
+            *,
+            secret: str | None = None,
+            user_ad_tag: str | None = None,
+            max_tcp_conns: int | None = None,
+            expiration_rfc3339: str | None = None,
+            data_quota_bytes: int | None = None,
+            max_unique_ips: int | None = None,
+            if_match: str | None = None,
     ) -> APIResponse:
         """PATCH /v1/users/{username} — partial update; only provided fields change.
 
@@ -385,10 +385,10 @@ class TememtAPI:
                            if_match=if_match)
 
     def delete_user(
-        self,
-        username: str,
-        *,
-        if_match: str | None = None,
+            self,
+            username: str,
+            *,
+            if_match: str | None = None,
     ) -> APIResponse:
         """DELETE /v1/users/{username} — remove user; blocks deletion of last user.
 
@@ -403,11 +403,11 @@ class TememtAPI:
     # in the route matcher (documented limitation). The method is provided
     # for completeness and future compatibility.
     def rotate_secret(
-        self,
-        username: str,
-        *,
-        secret: str | None = None,
-        if_match: str | None = None,
+            self,
+            username: str,
+            *,
+            secret: str | None = None,
+            if_match: str | None = None,
     ) -> APIResponse:
         """POST /v1/users/{username}/rotate-secret — rotate user secret.
 
@@ -533,12 +533,12 @@ EXAMPLES
                    help="Username for user commands")
 
     # user create/patch fields
-    p.add_argument("--secret",    default=None)
-    p.add_argument("--ad-tag",    dest="ad_tag", default=None)
+    p.add_argument("--secret", default=None)
+    p.add_argument("--ad-tag", dest="ad_tag", default=None)
     p.add_argument("--max-conns", dest="max_conns", type=int, default=None)
-    p.add_argument("--expires",   default=None)
-    p.add_argument("--quota",     type=int, default=None)
-    p.add_argument("--max-ips",   dest="max_ips", type=int, default=None)
+    p.add_argument("--expires", default=None)
+    p.add_argument("--quota", type=int, default=None)
+    p.add_argument("--max-ips", dest="max_ips", type=int, default=None)
 
     # events
     p.add_argument("--limit", type=int, default=None,
@@ -564,10 +564,10 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if cmd == "gen-secret":
-        print(TememtAPI.generate_secret())
+        print(TelemtAPI.generate_secret())
         sys.exit(0)
 
-    api = TememtAPI(args.url, auth_header=args.auth, timeout=args.timeout)
+    api = TelemtAPI(args.url, auth_header=args.auth, timeout=args.timeout)
 
     try:
         # -- read endpoints --------------------------------------------------
@@ -690,7 +690,8 @@ if __name__ == "__main__":
                 parser.error("patch command requires <username>")
             if not any([args.secret, args.ad_tag, args.max_conns,
                         args.expires, args.quota, args.max_ips]):
-                parser.error("patch requires at least one field (--secret, --max-conns, --expires, --quota, --max-ips, --ad-tag)")
+                parser.error(
+                    "patch requires at least one field (--secret, --max-conns, --expires, --quota, --max-ips, --ad-tag)")
             _print(api.patch_user(
                 args.arg,
                 secret=args.secret,
@@ -721,7 +722,7 @@ if __name__ == "__main__":
                   file=sys.stderr)
             sys.exit(1)
 
-    except TememtAPIError as exc:
+    except TelemtAPIError as exc:
         print(f"API error [{exc.http_status}] {exc.code}: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:

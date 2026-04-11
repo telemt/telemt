@@ -1,14 +1,8 @@
 {
   "apiVersion": "dashboard.grafana.app/v1beta1",
-  "kind": "Dashboard",
+  "kind": "DashboardWithAccessInfo",
   "metadata": {
-    "annotations": {
-      "grafana.app/folder": "afd9kjusw2jnkb",
-      "grafana.app/saved-from-ui": "Grafana v12.4.0-21693836646 (f059795f04)"
-    },
-    "labels": {},
-    "name": "pi9trh5",
-    "namespace": "default"
+    "name": "Telemt MtProto proxy"
   },
   "spec": {
     "annotations": {
@@ -30,7 +24,20 @@
     "editable": true,
     "fiscalYearStartMonth": 0,
     "graphTooltip": 0,
-    "links": [],
+    "links": [
+      {
+        "asDropdown": false,
+        "icon": "bolt",
+        "includeVars": false,
+        "keepTime": false,
+        "tags": [],
+        "targetBlank": true,
+        "title": "Official GitHub repository",
+        "tooltip": "Official GitHub repository",
+        "type": "link",
+        "url": "https://github.com/telemt/telemt"
+      }
+    ],
     "panels": [
       {
         "collapsed": false,
@@ -40,9 +47,9 @@
           "x": 0,
           "y": 0
         },
-        "id": 5,
+        "id": 200,
         "panels": [],
-        "title": "Common",
+        "title": "General metrics",
         "type": "row"
       },
       {
@@ -50,22 +57,84 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Build version reported by telemt.",
         "fieldConfig": {
           "defaults": {
-            "color": {
-              "mode": "thresholds"
-            },
             "mappings": [],
             "thresholds": {
               "mode": "absolute",
               "steps": [
                 {
-                  "color": "red",
+                  "color": "green",
                   "value": 0
                 },
                 {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 0,
+          "y": 1
+        },
+        "id": 301,
+        "options": {
+          "colorMode": "none",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "name",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "max by (version) (telemt_build_info{job=~\"$job\"})",
+            "instant": true,
+            "legendFormat": "{{version}}",
+            "refId": "A"
+          }
+        ],
+        "title": "Build version",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "telemt process uptime in seconds.",
+        "fieldConfig": {
+          "defaults": {
+            "decimals": 1,
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
                   "color": "green",
-                  "value": 300
+                  "value": 0
                 }
               ]
             },
@@ -74,15 +143,15 @@
           "overrides": []
         },
         "gridPos": {
-          "h": 8,
-          "w": 6,
-          "x": 0,
+          "h": 4,
+          "w": 4,
+          "x": 4,
           "y": 1
         },
-        "id": 1,
+        "id": 309,
         "options": {
-          "colorMode": "value",
-          "graphMode": "area",
+          "colorMode": "none",
+          "graphMode": "none",
           "justifyMode": "auto",
           "orientation": "auto",
           "percentChangeColorMode": "standard",
@@ -97,22 +166,15 @@
           "textMode": "auto",
           "wideLayout": true
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
-            "datasource": {
-              "type": "prometheus",
-              "uid": "${datasource}"
-            },
             "editorMode": "code",
-            "expr": "max(telemt_uptime_seconds) by (service)",
-            "format": "time_series",
-            "legendFormat": "__auto",
-            "range": true,
+            "expr": "max(telemt_uptime_seconds{job=~\"$job\"})",
             "refId": "A"
           }
         ],
-        "title": "uptime",
+        "title": "Uptime",
         "type": "stat"
       },
       {
@@ -120,22 +182,16 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Configured user count derived from per-user unique IP limit series.",
         "fieldConfig": {
           "defaults": {
-            "color": {
-              "mode": "thresholds"
-            },
             "mappings": [],
             "thresholds": {
               "mode": "absolute",
               "steps": [
                 {
-                  "color": "green",
+                  "color": "blue",
                   "value": 0
-                },
-                {
-                  "color": "red",
-                  "value": 80
                 }
               ]
             },
@@ -144,15 +200,15 @@
           "overrides": []
         },
         "gridPos": {
-          "h": 8,
-          "w": 6,
-          "x": 6,
+          "h": 4,
+          "w": 4,
+          "x": 8,
           "y": 1
         },
-        "id": 2,
+        "id": 317,
         "options": {
           "colorMode": "value",
-          "graphMode": "area",
+          "graphMode": "none",
           "justifyMode": "auto",
           "orientation": "auto",
           "percentChangeColorMode": "standard",
@@ -167,22 +223,16 @@
           "textMode": "auto",
           "wideLayout": true
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
-            "datasource": {
-              "type": "prometheus",
-              "uid": "${datasource}"
-            },
             "editorMode": "code",
-            "expr": "max(telemt_connections_total) by (service)",
-            "format": "time_series",
-            "legendFormat": "__auto",
-            "range": true,
+            "expr": "count(telemt_user_unique_ips_limit{job=~\"$job\"})",
+            "instant": true,
             "refId": "A"
           }
         ],
-        "title": "connections_total",
+        "title": "Configured users",
         "type": "stat"
       },
       {
@@ -190,36 +240,385 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Total inbound and outbound user traffic bytes since process start.",
         "fieldConfig": {
           "defaults": {
-            "color": {
-              "mode": "thresholds"
-            },
             "mappings": [],
             "thresholds": {
               "mode": "absolute",
               "steps": [
                 {
-                  "color": "green",
+                  "color": "blue",
                   "value": 0
-                },
-                {
-                  "color": "red",
-                  "value": 80
                 }
               ]
             },
-            "unit": "none"
+            "unit": "decbytes"
           },
-          "overrides": []
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "In total"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Out total"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
         },
         "gridPos": {
-          "h": 8,
-          "w": 6,
+          "h": 4,
+          "w": 4,
           "x": 12,
           "y": 1
         },
-        "id": 3,
+        "id": 318,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "horizontal",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "value_and_name",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(telemt_user_octets_from_client{job=~\"$job\"})",
+            "instant": true,
+            "legendFormat": "In total",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(telemt_user_octets_to_client{job=~\"$job\"})",
+            "instant": true,
+            "legendFormat": "Out total",
+            "refId": "B"
+          }
+        ],
+        "title": "Total traffic",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current number of in-use shared buffers.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "fixedColor": "blue",
+              "mode": "fixed"
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "blue",
+                  "value": 0
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 16,
+          "y": 1
+        },
+        "id": 312,
+        "options": {
+          "colorMode": "none",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_buffer_pool_buffers_total{kind=\"in_use\",job=~\"$job\"})",
+            "legendFormat": "in use",
+            "refId": "A"
+          }
+        ],
+        "title": "Buffer pool state",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "User-series export state (1 enabled, 0 suppressed).",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "max": 1,
+            "min": 0,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 20,
+          "y": 1
+        },
+        "id": 311,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "max(1 - telemt_telemetry_user_series_suppressed{job=~\"$job\"})",
+            "instant": true,
+            "refId": "A"
+          }
+        ],
+        "title": "User series enabled",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Accepted client connections in the selected time range.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 0,
+          "y": 5
+        },
+        "id": 7,
+        "options": {
+          "colorMode": "none",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(increase(telemt_connections_total{job=~\"$job\"}[$__range]))",
+            "refId": "A"
+          }
+        ],
+        "title": "Accepted connections",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Failed or rejected client connections in the selected time range.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 1
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 4,
+          "y": 5
+        },
+        "id": 8,
+        "options": {
+          "colorMode": "none",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(increase(telemt_connections_bad_total{job=~\"$job\"}[$__range]))",
+            "refId": "A"
+          }
+        ],
+        "title": "Bad connections",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Bad connection ratio over the selected interval.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "max": 100,
+            "min": 0,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "unit": "percent"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 8,
+          "y": 5
+        },
+        "id": 10,
         "options": {
           "colorMode": "value",
           "graphMode": "area",
@@ -237,22 +636,15 @@
           "textMode": "auto",
           "wideLayout": true
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
-            "datasource": {
-              "type": "prometheus",
-              "uid": "${datasource}"
-            },
             "editorMode": "code",
-            "expr": "max(telemt_connections_bad_total) by (service)",
-            "format": "time_series",
-            "legendFormat": "__auto",
-            "range": true,
+            "expr": "100 * sum(rate(telemt_connections_bad_total{job=~\"$job\"}[$__rate_interval])) / clamp_min(sum(rate(telemt_connections_total{job=~\"$job\"}[$__rate_interval])), 1e-9)",
             "refId": "A"
           }
         ],
-        "title": "connections_bad",
+        "title": "Bad connection ratio",
         "type": "stat"
       },
       {
@@ -260,10 +652,45 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Per-second rates for total, bad, handshake-timeout, and permit-timeout connection events.",
         "fieldConfig": {
           "defaults": {
             "color": {
-              "mode": "thresholds"
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
             },
             "mappings": [],
             "thresholds": {
@@ -279,19 +706,160 @@
                 }
               ]
             },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Connections/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Bad/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Timeouts/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Permit waits/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 5
+        },
+        "id": 11,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_connections_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Connections/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_connections_bad_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Bad/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_handshake_timeouts_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Timeouts/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_accept_permit_timeout_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Permit waits/s",
+            "refId": "D"
+          }
+        ],
+        "title": "Connection and permit rates",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Accepted connections dropped by permit-acquisition timeout in the selected time range.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
             "unit": "none"
           },
           "overrides": []
         },
         "gridPos": {
-          "h": 8,
-          "w": 6,
-          "x": 18,
-          "y": 1
+          "h": 4,
+          "w": 4,
+          "x": 0,
+          "y": 9
         },
-        "id": 4,
+        "id": 302,
         "options": {
-          "colorMode": "value",
+          "colorMode": "none",
           "graphMode": "area",
           "justifyMode": "auto",
           "orientation": "auto",
@@ -307,22 +875,141 @@
           "textMode": "auto",
           "wideLayout": true
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
-            "datasource": {
-              "type": "prometheus",
-              "uid": "${datasource}"
-            },
             "editorMode": "code",
-            "expr": "max(telemt_handshake_timeouts_total) by (service)",
-            "format": "time_series",
-            "legendFormat": "__auto",
-            "range": true,
+            "expr": "sum(increase(telemt_accept_permit_timeout_total{job=~\"$job\"}[$__range]))",
             "refId": "A"
           }
         ],
-        "title": "handshake_timeouts",
+        "title": "Permit wait timeouts",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Handshake validations that exhausted the authentication candidate budget in the selected time range.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 4,
+          "y": 9
+        },
+        "id": 303,
+        "options": {
+          "colorMode": "none",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(increase(telemt_auth_budget_exhausted_total{job=~\"$job\"}[$__range]))",
+            "refId": "A"
+          }
+        ],
+        "title": "Auth budget exhausted",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Handshake timeouts in the selected time range.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 1
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 8,
+          "y": 9
+        },
+        "id": 9,
+        "options": {
+          "colorMode": "none",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(increase(telemt_handshake_timeouts_total{job=~\"$job\"}[$__range]))",
+            "refId": "A"
+          }
+        ],
+        "title": "Handshake timeouts",
         "type": "stat"
       },
       {
@@ -331,12 +1018,11 @@
           "h": 1,
           "w": 24,
           "x": 0,
-          "y": 9
+          "y": 13
         },
-        "id": 6,
+        "id": 320,
         "panels": [],
-        "repeat": "user",
-        "title": "$user",
+        "title": "Upstream connectivity",
         "type": "row"
       },
       {
@@ -344,6 +1030,1788 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Upstream connect attempt/success/fail rates for Telegram/DC connectivity path.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "bars",
+              "fillOpacity": 70,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "never",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "normal"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Attempt/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Success/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Fail/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 0,
+          "y": 14
+        },
+        "id": 12,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_attempt_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Attempt/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_success_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Success/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_fail_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Fail/s",
+            "refId": "C"
+          }
+        ],
+        "title": "Upstream connect outcomes",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of upstream connect-attempt buckets per request.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "1 attempt/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "2 attempts/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "3-4 attempts/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": ">4 attempts/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 8,
+          "y": 14
+        },
+        "id": 321,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_attempts_per_request{bucket=\"1\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "1 attempt/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_attempts_per_request{bucket=\"2\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "2 attempts/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_attempts_per_request{bucket=\"3_4\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "3-4 attempts/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_attempts_per_request{bucket=\"gt_4\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": ">4 attempts/s",
+            "refId": "D"
+          }
+        ],
+        "title": "Upstream connect attempts per request",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of slow upstream connect buckets and hard-error failfast events.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "success >1s/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "fail >1s/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "failfast hard/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 16,
+          "y": 14
+        },
+        "id": 322,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_duration_success_total{bucket=\"gt_1000ms\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "success >1s/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_duration_fail_total{bucket=\"gt_1000ms\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "fail >1s/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_upstream_connect_failfast_hard_error_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "failfast hard/s",
+            "refId": "C"
+          }
+        ],
+        "title": "Upstream connect duration and failfast",
+        "type": "timeseries"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 22
+        },
+        "id": 330,
+        "panels": [],
+        "title": "Authentication and security",
+        "type": "row"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of authentication expensive checks and budget exhaustion.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Expensive checks/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Budget exhausted/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 23
+        },
+        "id": 304,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_auth_expensive_checks_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Expensive checks/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_auth_budget_exhausted_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Budget exhausted/s",
+            "refId": "B"
+          }
+        ],
+        "title": "Auth validation pressure",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of invalid secure padding and permit wait timeouts.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "secure padding invalid/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "permit wait timeout/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 23
+        },
+        "id": 331,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_secure_padding_invalid_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "secure padding invalid/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_accept_permit_timeout_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "permit wait timeout/s",
+            "refId": "B"
+          }
+        ],
+        "title": "Security rejects",
+        "type": "timeseries"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 31
+        },
+        "id": 340,
+        "panels": [],
+        "title": "Conntrack control",
+        "type": "row"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current conntrack-control state flags (enabled, available, pressure_active, rule_apply_ok).",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "max": 1,
+            "min": 0,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "pressure_active"
+              },
+              "properties": [
+                {
+                  "id": "thresholds",
+                  "value": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "color": "green",
+                        "value": 0
+                      },
+                      {
+                        "color": "red",
+                        "value": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 8,
+          "x": 0,
+          "y": 32
+        },
+        "id": 305,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": false
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_conntrack_control_state{flag=\"enabled\",job=~\"$job\"})",
+            "instant": true,
+            "legendFormat": "enabled",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_conntrack_control_state{flag=\"available\",job=~\"$job\"})",
+            "instant": true,
+            "legendFormat": "available",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_conntrack_control_state{flag=\"pressure_active\",job=~\"$job\"})",
+            "instant": true,
+            "legendFormat": "pressure_active",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_conntrack_control_state{flag=\"rule_apply_ok\",job=~\"$job\"})",
+            "instant": true,
+            "legendFormat": "rule_apply_ok",
+            "refId": "D"
+          }
+        ],
+        "title": "Conntrack state flags",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of conntrack delete outcomes and dropped close events.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Delete attempt/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Delete success/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Delete not_found/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#6B7280",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Delete error/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Close-event drop/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 16,
+          "x": 8,
+          "y": 32
+        },
+        "id": 306,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_conntrack_delete_total{result=\"attempt\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Delete attempt/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_conntrack_delete_total{result=\"success\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Delete success/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_conntrack_delete_total{result=\"not_found\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Delete not_found/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_conntrack_delete_total{result=\"error\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Delete error/s",
+            "refId": "D"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_conntrack_close_event_drop_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Close-event drop/s",
+            "refId": "E"
+          }
+        ],
+        "title": "Conntrack delete and drop rates",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current conntrack close-event queue depth.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 2,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 10
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 8,
+          "x": 0,
+          "y": 36
+        },
+        "id": 307,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_conntrack_event_queue_depth{job=~\"$job\"})",
+            "legendFormat": "Queue depth",
+            "refId": "A"
+          }
+        ],
+        "title": "Conntrack event queue depth",
+        "type": "timeseries"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 40
+        },
+        "id": 310,
+        "panels": [],
+        "title": "ME metrics",
+        "type": "row"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current ME telemetry mode level.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "options": {
+                  "0": {
+                    "color": "#6B7280",
+                    "text": "silent"
+                  },
+                  "1": {
+                    "color": "green",
+                    "text": "normal"
+                  },
+                  "2": {
+                    "color": "orange",
+                    "text": "debug"
+                  }
+                },
+                "type": "value"
+              }
+            ],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "#6B7280",
+                  "value": 0
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                },
+                {
+                  "color": "orange",
+                  "value": 2
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 0,
+          "y": 41
+        },
+        "id": 316,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "value",
+          "wideLayout": false
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_telemetry_me_level{level=\"normal\",job=~\"$job\"}) + 2 * max(telemt_telemetry_me_level{level=\"debug\",job=~\"$job\"})",
+            "instant": true,
+            "refId": "A"
+          }
+        ],
+        "title": "ME telemetry mode",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "ME handshake rejects in the selected time range.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 4,
+          "x": 4,
+          "y": 41
+        },
+        "id": 308,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(increase(telemt_me_handshake_reject_total{job=~\"$job\"}[$__range]))",
+            "refId": "A"
+          }
+        ],
+        "title": "ME handshake rejects",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Reconnect attempts/success and reader EOF event rates in Middle-End (ME) subsystem.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Reconnect attempt/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Reconnect success/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Reader EOF/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 8,
+          "y": 41
+        },
+        "id": 14,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_reconnect_attempts_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Reconnect attempt/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_reconnect_success_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Reconnect success/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_reader_eof_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Reader EOF/s",
+            "refId": "C"
+          }
+        ],
+        "title": "ME reconnect and reader EOF rates",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Rates of Middle-End (ME) route drops by reason and total crypto desync detections.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Drop no_conn/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Drop channel_closed/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Drop queue_full/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Desync/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 16,
+          "y": 41
+        },
+        "id": 15,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_route_drop_no_conn_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Drop no_conn/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_route_drop_channel_closed_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Drop channel_closed/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_route_drop_queue_full_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Drop queue_full/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_desync_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Desync/s",
+            "refId": "D"
+          }
+        ],
+        "title": "ME route drops and crypto desync",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rate of ME handshake rejects, including error-code breakdown.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "reject total/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 8,
+          "x": 0,
+          "y": 45
+        },
+        "id": 353,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_handshake_reject_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "reject total/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum by (error_code) (rate(telemt_me_handshake_error_code_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "Code {{error_code}}/s",
+            "refId": "B"
+          }
+        ],
+        "title": "ME handshake reject rate by code",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current counts of active and warm ME writers.",
         "fieldConfig": {
           "defaults": {
             "color": {
@@ -399,21 +2867,52 @@
             },
             "unit": "none"
           },
-          "overrides": []
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Active"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Warm"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#6B7280",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
         },
         "gridPos": {
           "h": 8,
-          "w": 12,
+          "w": 8,
           "x": 0,
-          "y": 10
+          "y": 49
         },
-        "id": 7,
+        "id": 13,
         "options": {
           "legend": {
             "calcs": [],
             "displayMode": "list",
             "placement": "bottom",
-            "showLegend": false
+            "showLegend": true
           },
           "tooltip": {
             "hideZeros": false,
@@ -421,18 +2920,22 @@
             "sort": "none"
           }
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
             "editorMode": "code",
-            "expr": "sum(telemt_user_connections_total{user=\"$user\"}) by (user)",
-            "format": "time_series",
-            "legendFormat": "{{ user }}",
-            "range": true,
+            "expr": "sum(telemt_me_writers_active_current{job=~\"$job\"})",
+            "legendFormat": "Active",
             "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(telemt_me_writers_warm_current{job=~\"$job\"})",
+            "legendFormat": "Warm",
+            "refId": "B"
           }
         ],
-        "title": "user_connections",
+        "title": "ME writers state",
         "type": "timeseries"
       },
       {
@@ -440,6 +2943,334 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Keepalive sent, pong, failed and timeout rates for ME.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "sent/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "pong/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "failed/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "timeout/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 16,
+          "x": 8,
+          "y": 49
+        },
+        "id": 313,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_keepalive_sent_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "sent/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_keepalive_pong_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "pong/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_keepalive_failed_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "failed/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_keepalive_timeout_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "timeout/s",
+            "refId": "D"
+          }
+        ],
+        "title": "ME keepalive health",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of ME pool forced closes and refill events.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "forced close/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "refill triggered/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "refill failed/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 57
+        },
+        "id": 314,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_pool_force_close_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "forced close/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_refill_triggered_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "refill triggered/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_refill_failed_total{job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "refill failed/s",
+            "refId": "C"
+          }
+        ],
+        "title": "ME refill activity",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current ME capacity target, active writers, and warm writers.",
         "fieldConfig": {
           "defaults": {
             "color": {
@@ -495,21 +3326,67 @@
             },
             "unit": "none"
           },
-          "overrides": []
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "target writers"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "active writers"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "warm writers"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#6B7280",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
         },
         "gridPos": {
           "h": 8,
           "w": 12,
           "x": 12,
-          "y": 10
+          "y": 57
         },
-        "id": 8,
+        "id": 315,
         "options": {
           "legend": {
             "calcs": [],
             "displayMode": "list",
             "placement": "bottom",
-            "showLegend": false
+            "showLegend": true
           },
           "tooltip": {
             "hideZeros": false,
@@ -517,25 +3394,49 @@
             "sort": "none"
           }
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
             "editorMode": "code",
-            "expr": "sum(telemt_user_connections_current{user=\"$user\"}) by (user)",
-            "format": "time_series",
-            "legendFormat": "{{ user }}",
-            "range": true,
+            "expr": "max(telemt_me_adaptive_floor_target_writers_total{job=~\"$job\"})",
+            "legendFormat": "target writers",
             "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(telemt_me_writers_active_current{job=~\"$job\"})",
+            "legendFormat": "active writers",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(telemt_me_writers_warm_current{job=~\"$job\"})",
+            "legendFormat": "warm writers",
+            "refId": "C"
           }
         ],
-        "title": "user_connections_current",
+        "title": "ME capacity",
         "type": "timeseries"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 65
+        },
+        "id": 355,
+        "panels": [],
+        "title": "ME debug metrics",
+        "type": "row"
       },
       {
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Per-second rates of ME debug D2C batch-byte buckets.",
         "fieldConfig": {
           "defaults": {
             "color": {
@@ -589,7 +3490,1021 @@
                 }
               ]
             },
-            "unit": "binBps"
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "0-1 KiB/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "1-4 KiB/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "4-16 KiB/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "16-64 KiB/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "orange",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "64-128 KiB/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#F97316",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": ">128 KiB/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 0,
+          "y": 66
+        },
+        "id": 356,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_bytes_bucket_total{bucket=\"0_1k\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "0-1 KiB/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_bytes_bucket_total{bucket=\"1k_4k\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "1-4 KiB/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_bytes_bucket_total{bucket=\"4k_16k\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "4-16 KiB/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_bytes_bucket_total{bucket=\"16k_64k\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "16-64 KiB/s",
+            "refId": "D"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_bytes_bucket_total{bucket=\"64k_128k\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "64-128 KiB/s",
+            "refId": "E"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_bytes_bucket_total{bucket=\"gt_128k\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": ">128 KiB/s",
+            "refId": "F"
+          }
+        ],
+        "title": "ME debug D2C batch bytes",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of ME debug D2C batch-size buckets.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "1 frame/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "2-4 frames/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "5-8 frames/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "9-16 frames/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "orange",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "17-32 frames/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#F97316",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": ">32 frames/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 8,
+          "y": 66
+        },
+        "id": 357,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_frames_bucket_total{bucket=\"1\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "1 frame/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_frames_bucket_total{bucket=\"2_4\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "2-4 frames/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_frames_bucket_total{bucket=\"5_8\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "5-8 frames/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_frames_bucket_total{bucket=\"9_16\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "9-16 frames/s",
+            "refId": "D"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_frames_bucket_total{bucket=\"17_32\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "17-32 frames/s",
+            "refId": "E"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_batch_frames_bucket_total{bucket=\"gt_32\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": ">32 frames/s",
+            "refId": "F"
+          }
+        ],
+        "title": "ME debug D2C batch size",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-second rates of ME debug D2C flush-duration buckets.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "0-50 us/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "green",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "51-200 us/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "201-1000 us/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "1-5 ms/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "orange",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "5-20 ms/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#F97316",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": ">20 ms/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 8,
+          "x": 16,
+          "y": 66
+        },
+        "id": 358,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_flush_duration_us_bucket_total{bucket=\"0_50\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "0-50 us/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_flush_duration_us_bucket_total{bucket=\"51_200\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "51-200 us/s",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_flush_duration_us_bucket_total{bucket=\"201_1000\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "201-1000 us/s",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_flush_duration_us_bucket_total{bucket=\"1001_5000\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "1-5 ms/s",
+            "refId": "D"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_flush_duration_us_bucket_total{bucket=\"5001_20000\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "5-20 ms/s",
+            "refId": "E"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_me_d2c_flush_duration_us_bucket_total{bucket=\"gt_20000\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": ">20 ms/s",
+            "refId": "F"
+          }
+        ],
+        "title": "ME debug D2C flush duration",
+        "type": "timeseries"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 74
+        },
+        "id": 350,
+        "panels": [],
+        "title": "Access and limits",
+        "type": "row"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current active and recent user/IP tracker sizes and cleanup queue depth.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "users active"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "users recent"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#6B7280",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "IPs active"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "blue",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "IPs recent"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "#6B7280",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "cleanup queue"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 75
+        },
+        "id": 351,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_ip_tracker_users{scope=\"active\",job=~\"$job\"})",
+            "legendFormat": "users active",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_ip_tracker_users{scope=\"recent\",job=~\"$job\"})",
+            "legendFormat": "users recent",
+            "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_ip_tracker_entries{scope=\"active\",job=~\"$job\"})",
+            "legendFormat": "IPs active",
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_ip_tracker_entries{scope=\"recent\",job=~\"$job\"})",
+            "legendFormat": "IPs recent",
+            "refId": "D"
+          },
+          {
+            "editorMode": "code",
+            "expr": "max(telemt_ip_tracker_cleanup_queue_len{job=~\"$job\"})",
+            "legendFormat": "cleanup queue",
+            "refId": "E"
+          }
+        ],
+        "title": "IP tracker state",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "IP reservation rollbacks in the selected time range.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 12,
+          "x": 12,
+          "y": 75
+        },
+        "id": 352,
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto",
+          "percentChangeColorMode": "standard",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showPercentChange": false,
+          "textMode": "auto",
+          "wideLayout": true
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(increase(telemt_ip_reservation_rollback_total{job=~\"$job\"}[$__range]))",
+            "refId": "A"
+          }
+        ],
+        "title": "IP reservation rollbacks",
+        "type": "stat"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Reservation rollback rate by reason.",
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisBorderShow": false,
+              "axisCenteredZero": false,
+              "axisColorMode": "text",
+              "axisLabel": "",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "barWidthFactor": 0.6,
+              "drawStyle": "line",
+              "fillOpacity": 0,
+              "gradientMode": "none",
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false,
+                "viz": false
+              },
+              "insertNulls": false,
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 5,
+              "scaleDistribution": {
+                "type": "linear"
+              },
+              "showPoints": "auto",
+              "showValues": false,
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "red",
+                  "value": 80
+                }
+              ]
+            },
+            "unit": "cps"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "tcp_limit/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "yellow",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "quota_limit/s"
+              },
+              "properties": [
+                {
+                  "id": "color",
+                  "value": {
+                    "fixedColor": "red",
+                    "mode": "fixed"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 12,
+          "x": 12,
+          "y": 79
+        },
+        "id": 354,
+        "options": {
+          "legend": {
+            "calcs": [],
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "hideZeros": false,
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_ip_reservation_rollback_total{reason=\"tcp_limit\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "tcp_limit/s",
+            "refId": "A"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum(rate(telemt_ip_reservation_rollback_total{reason=\"quota_limit\",job=~\"$job\"}[$__rate_interval]))",
+            "legendFormat": "quota_limit/s",
+            "refId": "B"
+          }
+        ],
+        "title": "IP reservation rollback rate by reason",
+        "type": "timeseries"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Current per-user unique IP utilization percentage.",
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [],
+            "max": 100,
+            "min": 0,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 60
+                },
+                {
+                  "color": "red",
+                  "value": 85
+                }
+              ]
+            },
+            "unit": "percent"
           },
           "overrides": []
         },
@@ -597,91 +4512,63 @@
           "h": 8,
           "w": 12,
           "x": 0,
-          "y": 18
+          "y": 83
         },
-        "id": 9,
+        "id": 23,
         "options": {
+          "displayMode": "basic",
           "legend": {
             "calcs": [],
             "displayMode": "list",
             "placement": "bottom",
             "showLegend": false
           },
-          "tooltip": {
-            "hideZeros": false,
-            "mode": "single",
-            "sort": "none"
-          }
+          "maxVizHeight": 300,
+          "minVizHeight": 16,
+          "minVizWidth": 8,
+          "namePlacement": "auto",
+          "orientation": "horizontal",
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "showUnfilled": true,
+          "sizing": "auto",
+          "valueMode": "color"
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
             "editorMode": "code",
-            "expr": "- sum(rate(telemt_user_octets_from_client{user=\"$user\"}[$__rate_interval])) by (user)",
-            "format": "time_series",
-            "legendFormat": "{{ user }} TX",
-            "range": true,
+            "expr": "sort_desc(100 * max by (user) (telemt_user_unique_ips_utilization{job=~\"$job\",user=~\"$user\"}))",
+            "instant": true,
+            "legendFormat": "{{user}}",
             "refId": "A"
-          },
-          {
-            "datasource": {
-              "type": "prometheus",
-              "uid": "${datasource}"
-            },
-            "editorMode": "code",
-            "expr": "sum(rate(telemt_user_octets_to_client{user=\"$user\"}[$__rate_interval])) by (user)",
-            "format": "time_series",
-            "legendFormat": "{{ user }} RX",
-            "range": true,
-            "refId": "B"
           }
         ],
-        "title": "user_octets",
-        "type": "timeseries"
+        "title": "User unique IP utilization",
+        "type": "bargauge"
       },
       {
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
+        "description": "Current unique IP count per selected user.",
         "fieldConfig": {
           "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
             "custom": {
-              "axisBorderShow": false,
-              "axisCenteredZero": false,
-              "axisColorMode": "text",
-              "axisLabel": "",
-              "axisPlacement": "auto",
-              "barAlignment": 0,
-              "barWidthFactor": 0.6,
-              "drawStyle": "line",
-              "fillOpacity": 0,
-              "gradientMode": "none",
-              "hideFrom": {
-                "legend": false,
-                "tooltip": false,
-                "viz": false
+              "align": "auto",
+              "cellOptions": {
+                "type": "auto"
               },
-              "insertNulls": false,
-              "lineInterpolation": "linear",
-              "lineWidth": 1,
-              "pointSize": 5,
-              "scaleDistribution": {
-                "type": "linear"
+              "footer": {
+                "reducers": []
               },
-              "showPoints": "auto",
-              "showValues": false,
-              "spanNulls": false,
-              "stacking": {
-                "group": "A",
-                "mode": "none"
-              },
-              "thresholdsStyle": {
-                "mode": "off"
-              }
+              "inspect": false
             },
             "mappings": [],
             "thresholds": {
@@ -697,7 +4584,7 @@
                 }
               ]
             },
-            "unit": "pps"
+            "unit": "none"
           },
           "overrides": []
         },
@@ -705,95 +4592,368 @@
           "h": 8,
           "w": 12,
           "x": 12,
-          "y": 18
+          "y": 83
         },
-        "id": 10,
+        "id": 21,
         "options": {
-          "legend": {
-            "calcs": [],
-            "displayMode": "list",
-            "placement": "bottom",
-            "showLegend": false
-          },
-          "tooltip": {
-            "hideZeros": false,
-            "mode": "single",
-            "sort": "none"
-          }
+          "cellHeight": "sm",
+          "showHeader": true
         },
-        "pluginVersion": "12.4.0-21693836646",
+        "pluginVersion": "12.4.2",
         "targets": [
           {
             "editorMode": "code",
-            "expr": "- sum(rate(telemt_user_msgs_from_client{user=\"$user\"}[$__rate_interval])) by (user)",
-            "format": "time_series",
-            "legendFormat": "{{ user }} TX",
-            "range": true,
+            "expr": "sum by (user) (telemt_user_unique_ips_current{job=~\"$job\",user=~\"$user\"})",
+            "format": "table",
+            "instant": true,
+            "refId": "A"
+          }
+        ],
+        "title": "User unique IPs",
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {
+                "Time": true
+              },
+              "renameByName": {
+                "Value": "Unique IPs",
+                "user": "User"
+              }
+            }
+          },
+          {
+            "id": "sortBy",
+            "options": {
+              "fields": {
+                "Unique IPs": true
+              },
+              "sort": [
+                {
+                  "desc": true,
+                  "field": "Unique IPs"
+                }
+              ]
+            }
+          }
+        ],
+        "type": "table"
+      },
+      {
+        "collapsed": false,
+        "gridPos": {
+          "h": 1,
+          "w": 24,
+          "x": 0,
+          "y": 91
+        },
+        "id": 300,
+        "panels": [],
+        "title": "Users",
+        "type": "row"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "description": "Per-user active connections, traffic totals, message rates, and traffic rates.",
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "align": "auto",
+              "cellOptions": {
+                "type": "auto"
+              },
+              "footer": {
+                "reducers": []
+              },
+              "inspect": false
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                }
+              ]
+            },
+            "unit": "none"
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "In Total"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "decbytes"
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Out Total"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "decbytes"
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "In msg/s"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "pps"
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Out msg/s"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "pps"
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "In traffic"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "binBps"
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "Out traffic"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "binBps"
+                }
+              ]
+            }
+          ]
+        },
+        "gridPos": {
+          "h": 16,
+          "w": 24,
+          "x": 0,
+          "y": 92
+        },
+        "id": 16,
+        "options": {
+          "cellHeight": "sm",
+          "showHeader": true,
+          "sortBy": [
+            {
+              "desc": true,
+              "displayName": "Active Connections"
+            }
+          ]
+        },
+        "pluginVersion": "12.4.2",
+        "targets": [
+          {
+            "editorMode": "code",
+            "expr": "sum by (user) (telemt_user_connections_current{job=~\"$job\",user=~\"$user\"})",
+            "format": "table",
+            "instant": true,
             "refId": "A"
           },
           {
-            "datasource": {
-              "type": "prometheus",
-              "uid": "${datasource}"
-            },
             "editorMode": "code",
-            "expr": "sum(rate(telemt_user_msgs_to_client{user=\"$user\"}[$__rate_interval])) by (user)",
-            "format": "time_series",
-            "legendFormat": "{{ user }} RX",
-            "range": true,
+            "expr": "sum by (user) (telemt_user_octets_from_client{job=~\"$job\",user=~\"$user\"})",
+            "format": "table",
+            "instant": true,
             "refId": "B"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum by (user) (telemt_user_octets_to_client{job=~\"$job\",user=~\"$user\"})",
+            "format": "table",
+            "instant": true,
+            "refId": "C"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum by (user) (rate(telemt_user_msgs_from_client{job=~\"$job\",user=~\"$user\"}[$__rate_interval]))",
+            "format": "table",
+            "instant": true,
+            "refId": "D"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum by (user) (rate(telemt_user_msgs_to_client{job=~\"$job\",user=~\"$user\"}[$__rate_interval]))",
+            "format": "table",
+            "instant": true,
+            "refId": "E"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum by (user) (rate(telemt_user_octets_from_client{job=~\"$job\",user=~\"$user\"}[$__rate_interval]))",
+            "format": "table",
+            "instant": true,
+            "refId": "F"
+          },
+          {
+            "editorMode": "code",
+            "expr": "sum by (user) (rate(telemt_user_octets_to_client{job=~\"$job\",user=~\"$user\"}[$__rate_interval]))",
+            "format": "table",
+            "instant": true,
+            "refId": "G"
           }
         ],
-        "title": "user_msgs",
-        "type": "timeseries"
+        "title": "User connections, traffic, and message rates",
+        "transformations": [
+          {
+            "id": "joinByField",
+            "options": {
+              "byField": "user",
+              "mode": "outer"
+            }
+          },
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {
+                "Time": true,
+                "Time #A": true,
+                "Time #B": true,
+                "Time #C": true,
+                "Time #D": true,
+                "Time #E": true,
+                "Time #F": true,
+                "Time #G": true,
+                "Time 1": true,
+                "Time 2": true,
+                "Time 3": true,
+                "Time 4": true,
+                "Time 5": true,
+                "Time 6": true
+              },
+              "renameByName": {
+                "Value": "Active Connections",
+                "Value #A": "Active Connections",
+                "Value #B": "In Total",
+                "Value #C": "Out Total",
+                "Value #D": "In msg/s",
+                "Value #E": "Out msg/s",
+                "Value #F": "In traffic",
+                "Value #G": "Out traffic",
+                "Value 1": "In Total",
+                "Value 2": "Out Total",
+                "Value 3": "In msg/s",
+                "Value 4": "Out msg/s",
+                "Value 5": "In traffic",
+                "Value 6": "Out traffic",
+                "user": "User"
+              }
+            }
+          },
+          {
+            "id": "sortBy",
+            "options": {
+              "fields": {
+                "Active Connections": true
+              },
+              "sort": [
+                {
+                  "desc": true,
+                  "field": "Active Connections"
+                }
+              ]
+            }
+          }
+        ],
+        "type": "table"
       }
     ],
     "preload": false,
+    "refresh": "30s",
     "schemaVersion": 42,
-    "tags": [],
+    "tags": [
+      "telemt",
+      "mtproto",
+      "telegram"
+    ],
     "templating": {
       "list": [
         {
-          "current": {
-            "text": "docker",
-            "value": "docker"
-          },
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "definition": "label_values(telemt_user_connections_total,user)",
-          "hide": 2,
-          "multi": true,
-          "name": "user",
-          "options": [],
-          "query": {
-            "qryType": 1,
-            "query": "label_values(telemt_user_connections_total,user)",
-            "refId": "VariableQueryEditor-VariableQuery"
-          },
-          "refresh": 1,
-          "regex": "",
-          "regexApplyTo": "value",
-          "sort": 1,
-          "type": "query"
-        },
-        {
-          "current": {
-            "text": "VM long-term",
-            "value": "P7D3016A027385E71"
-          },
+          "label": "Datasource",
           "name": "datasource",
           "options": [],
           "query": "prometheus",
           "refresh": 1,
-          "regex": "",
           "type": "datasource"
+        },
+        {
+          "allValue": ".*",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "definition": "label_values(telemt_build_info, job)",
+          "includeAll": true,
+          "label": "Job",
+          "multi": true,
+          "name": "job",
+          "options": [],
+          "query": {
+            "query": "label_values(telemt_build_info, job)",
+            "refId": "VarJob"
+          },
+          "refresh": 1,
+          "regexApplyTo": "value",
+          "type": "query"
+        },
+        {
+          "allValue": ".*",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "definition": "label_values(telemt_user_connections_total{job=~\"$job\"}, user)",
+          "includeAll": true,
+          "label": "User",
+          "multi": true,
+          "name": "user",
+          "options": [],
+          "query": {
+            "query": "label_values(telemt_user_connections_total{job=~\"$job\"}, user)",
+            "refId": "VarUser"
+          },
+          "refresh": 1,
+          "regexApplyTo": "value",
+          "type": "query"
         }
       ]
     },
     "time": {
-      "from": "now-6h",
+      "from": "now-1h",
       "to": "now"
     },
     "timepicker": {},
