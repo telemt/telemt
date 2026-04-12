@@ -44,6 +44,7 @@ async fn run_relay_case(
             above_cap_blur_max_bytes,
             false,
             5 * 1024 * 1024,
+            MASK_RELAY_IDLE_TIMEOUT,
         )
         .await;
     });

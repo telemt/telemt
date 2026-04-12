@@ -47,7 +47,7 @@ async fn consume_client_data_stops_after_byte_cap_without_eof() {
     };
     let cap = 10_000usize;
 
-    consume_client_data(reader, cap).await;
+    consume_client_data(reader, cap, MASK_RELAY_IDLE_TIMEOUT).await;
 
     let total = produced.load(Ordering::Relaxed);
     assert!(

@@ -28,14 +28,10 @@ use tracing::debug;
 const MASK_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const MASK_TIMEOUT: Duration = Duration::from_millis(50);
-/// Maximum duration for the entire masking relay.
-/// Limits resource consumption from slow-loris attacks and port scanners.
-#[cfg(not(test))]
-const MASK_RELAY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum duration for the entire masking relay under test (replaced by config at runtime).
 #[cfg(test)]
 const MASK_RELAY_TIMEOUT: Duration = Duration::from_millis(200);
-#[cfg(not(test))]
-const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-read idle timeout for masking relay and drain paths under test (replaced by config at runtime).
 #[cfg(test)]
 const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const MASK_BUFFER_SIZE: usize = 8192;
@@ -55,6 +51,7 @@ async fn copy_with_idle_timeout<R, W>(
     writer: &mut W,
     byte_cap: usize,
     shutdown_on_eof: bool,
+    idle_timeout: Duration,
 ) -> CopyOutcome
 where
     R: AsyncRead + Unpin,
@@ -78,7 +75,7 @@ where
         }
 
         let read_len = remaining_budget.min(MASK_BUFFER_SIZE);
-        let read_res = timeout(MASK_RELAY_IDLE_TIMEOUT, reader.read(&mut buf[..read_len])).await;
+        let read_res = timeout(idle_timeout, reader.read(&mut buf[..read_len])).await;
         let n = match read_res {
             Ok(Ok(n)) => n,
             Ok(Err(_)) | Err(_) => break,
@@ -86,13 +83,13 @@ where
         if n == 0 {
             ended_by_eof = true;
             if shutdown_on_eof {
-                let _ = timeout(MASK_RELAY_IDLE_TIMEOUT, writer.shutdown()).await;
+                let _ = timeout(idle_timeout, writer.shutdown()).await;
             }
             break;
         }
         total = total.saturating_add(n);
 
-        let write_res = timeout(MASK_RELAY_IDLE_TIMEOUT, writer.write_all(&buf[..n])).await;
+        let write_res = timeout(idle_timeout, writer.write_all(&buf[..n])).await;
         match write_res {
             Ok(Ok(())) => {}
             Ok(Err(_)) | Err(_) => break,
@@ -230,13 +227,20 @@ where
     }
 }
 
-async fn consume_client_data_with_timeout_and_cap<R>(reader: R, byte_cap: usize)
-where
+async fn consume_client_data_with_timeout_and_cap<R>(
+    reader: R,
+    byte_cap: usize,
+    relay_timeout: Duration,
+    idle_timeout: Duration,
+) where
     R: AsyncRead + Unpin,
 {
-    if timeout(MASK_RELAY_TIMEOUT, consume_client_data(reader, byte_cap))
-        .await
-        .is_err()
+    if timeout(
+        relay_timeout,
+        consume_client_data(reader, byte_cap, idle_timeout),
+    )
+    .await
+    .is_err()
     {
         debug!("Timed out while consuming client data on masking fallback path");
     }
@@ -639,10 +643,18 @@ pub async fn handle_bad_client<R, W>(
         beobachten.record(client_type, peer.ip(), ttl);
     }
 
+    let relay_timeout = Duration::from_millis(config.censorship.mask_relay_timeout_ms);
+    let idle_timeout = Duration::from_millis(config.censorship.mask_relay_idle_timeout_ms);
+
     if !config.censorship.mask {
         // Masking disabled, just consume data
-        consume_client_data_with_timeout_and_cap(reader, config.censorship.mask_relay_max_bytes)
-            .await;
+        consume_client_data_with_timeout_and_cap(
+            reader,
+            config.censorship.mask_relay_max_bytes,
+            relay_timeout,
+            idle_timeout,
+        )
+        .await;
         return;
     }
 
@@ -674,7 +686,7 @@ pub async fn handle_bad_client<R, W>(
                     return;
                 }
                 if timeout(
-                    MASK_RELAY_TIMEOUT,
+                    relay_timeout,
                     relay_to_mask(
                         reader,
                         writer,
@@ -688,6 +700,7 @@ pub async fn handle_bad_client<R, W>(
                         config.censorship.mask_shape_above_cap_blur_max_bytes,
                         config.censorship.mask_shape_hardening_aggressive_mode,
                         config.censorship.mask_relay_max_bytes,
+                        idle_timeout,
                     ),
                 )
                 .await
@@ -703,6 +716,8 @@ pub async fn handle_bad_client<R, W>(
                 consume_client_data_with_timeout_and_cap(
                     reader,
                     config.censorship.mask_relay_max_bytes,
+                    relay_timeout,
+                    idle_timeout,
                 )
                 .await;
                 wait_mask_outcome_budget(outcome_started, config).await;
@@ -712,6 +727,8 @@ pub async fn handle_bad_client<R, W>(
                 consume_client_data_with_timeout_and_cap(
                     reader,
                     config.censorship.mask_relay_max_bytes,
+                    relay_timeout,
+                    idle_timeout,
                 )
                 .await;
                 wait_mask_outcome_budget(outcome_started, config).await;
@@ -742,8 +759,13 @@ pub async fn handle_bad_client<R, W>(
             local = %local_addr,
             "Mask target resolves to local listener; refusing self-referential masking fallback"
         );
-        consume_client_data_with_timeout_and_cap(reader, config.censorship.mask_relay_max_bytes)
-            .await;
+        consume_client_data_with_timeout_and_cap(
+            reader,
+            config.censorship.mask_relay_max_bytes,
+            relay_timeout,
+            idle_timeout,
+        )
+        .await;
         wait_mask_outcome_budget(outcome_started, config).await;
         return;
     }
@@ -777,7 +799,7 @@ pub async fn handle_bad_client<R, W>(
                 return;
             }
             if timeout(
-                MASK_RELAY_TIMEOUT,
+                relay_timeout,
                 relay_to_mask(
                     reader,
                     writer,
@@ -791,6 +813,7 @@ pub async fn handle_bad_client<R, W>(
                     config.censorship.mask_shape_above_cap_blur_max_bytes,
                     config.censorship.mask_shape_hardening_aggressive_mode,
                     config.censorship.mask_relay_max_bytes,
+                    idle_timeout,
                 ),
             )
             .await
@@ -806,6 +829,8 @@ pub async fn handle_bad_client<R, W>(
             consume_client_data_with_timeout_and_cap(
                 reader,
                 config.censorship.mask_relay_max_bytes,
+                relay_timeout,
+                idle_timeout,
             )
             .await;
             wait_mask_outcome_budget(outcome_started, config).await;
@@ -815,6 +840,8 @@ pub async fn handle_bad_client<R, W>(
             consume_client_data_with_timeout_and_cap(
                 reader,
                 config.censorship.mask_relay_max_bytes,
+                relay_timeout,
+                idle_timeout,
             )
             .await;
             wait_mask_outcome_budget(outcome_started, config).await;
@@ -836,6 +863,7 @@ async fn relay_to_mask<R, W, MR, MW>(
     shape_above_cap_blur_max_bytes: usize,
     shape_hardening_aggressive_mode: bool,
     mask_relay_max_bytes: usize,
+    idle_timeout: Duration,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -857,11 +885,19 @@ async fn relay_to_mask<R, W, MR, MW>(
                 &mut mask_write,
                 mask_relay_max_bytes,
                 !shape_hardening_enabled,
+                idle_timeout,
             )
             .await
         },
         async {
-            copy_with_idle_timeout(&mut mask_read, &mut writer, mask_relay_max_bytes, true).await
+            copy_with_idle_timeout(
+                &mut mask_read,
+                &mut writer,
+                mask_relay_max_bytes,
+                true,
+                idle_timeout,
+            )
+            .await
         }
     );
 
@@ -889,7 +925,11 @@ async fn relay_to_mask<R, W, MR, MW>(
 }
 
 /// Just consume all data from client without responding.
-async fn consume_client_data<R: AsyncRead + Unpin>(mut reader: R, byte_cap: usize) {
+async fn consume_client_data<R: AsyncRead + Unpin>(
+    mut reader: R,
+    byte_cap: usize,
+    idle_timeout: Duration,
+) {
     if byte_cap == 0 {
         return;
     }
@@ -905,7 +945,7 @@ async fn consume_client_data<R: AsyncRead + Unpin>(mut reader: R, byte_cap: usiz
         }
 
         let read_len = remaining_budget.min(MASK_BUFFER_SIZE);
-        let n = match timeout(MASK_RELAY_IDLE_TIMEOUT, reader.read(&mut buf[..read_len])).await {
+        let n = match timeout(idle_timeout, reader.read(&mut buf[..read_len])).await {
             Ok(Ok(n)) => n,
             Ok(Err(_)) | Err(_) => break,
         };

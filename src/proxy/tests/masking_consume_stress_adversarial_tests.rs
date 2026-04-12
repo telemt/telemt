@@ -34,7 +34,11 @@ async fn consume_stall_stress_finishes_within_idle_budget() {
         set.spawn(async {
             tokio::time::timeout(
                 MASK_RELAY_TIMEOUT,
-                consume_client_data(OneByteThenStall { sent: false }, usize::MAX),
+                consume_client_data(
+                    OneByteThenStall { sent: false },
+                    usize::MAX,
+                    MASK_RELAY_IDLE_TIMEOUT,
+                ),
             )
             .await
             .expect("consume_client_data exceeded relay timeout under stall load");
@@ -56,7 +60,7 @@ async fn consume_stall_stress_finishes_within_idle_budget() {
 #[tokio::test]
 async fn consume_zero_cap_returns_immediately() {
     let started = Instant::now();
-    consume_client_data(tokio::io::empty(), 0).await;
+    consume_client_data(tokio::io::empty(), 0, MASK_RELAY_IDLE_TIMEOUT).await;
     assert!(
         started.elapsed() < MASK_RELAY_IDLE_TIMEOUT,
         "zero byte cap must return immediately"

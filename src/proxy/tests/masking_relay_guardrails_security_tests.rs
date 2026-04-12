@@ -26,6 +26,7 @@ async fn relay_to_mask_enforces_masking_session_byte_cap() {
             0,
             false,
             32 * 1024,
+            MASK_RELAY_IDLE_TIMEOUT,
         )
         .await;
     });
@@ -81,6 +82,7 @@ async fn relay_to_mask_propagates_client_half_close_without_waiting_for_other_di
             0,
             false,
             32 * 1024,
+            MASK_RELAY_IDLE_TIMEOUT,
         )
         .await;
     });

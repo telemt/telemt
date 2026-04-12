@@ -228,6 +228,7 @@ async fn relay_path_idle_timeout_eviction_remains_effective() {
         0,
         false,
         5 * 1024 * 1024,
+        MASK_RELAY_IDLE_TIMEOUT,
     )
     .await;
 

@@ -31,7 +31,7 @@ async fn stalling_client_terminates_at_idle_not_relay_timeout() {
 
     let result = tokio::time::timeout(
         MASK_RELAY_TIMEOUT,
-        consume_client_data(reader, MASK_BUFFER_SIZE * 4),
+        consume_client_data(reader, MASK_BUFFER_SIZE * 4, MASK_RELAY_IDLE_TIMEOUT),
     )
     .await;
 
@@ -57,9 +57,12 @@ async fn fast_reader_drains_to_eof() {
     let data = vec![0xAAu8; 32 * 1024];
     let reader = std::io::Cursor::new(data);
 
-    tokio::time::timeout(MASK_RELAY_TIMEOUT, consume_client_data(reader, usize::MAX))
-        .await
-        .expect("consume_client_data did not complete for fast EOF reader");
+    tokio::time::timeout(
+        MASK_RELAY_TIMEOUT,
+        consume_client_data(reader, usize::MAX, MASK_RELAY_IDLE_TIMEOUT),
+    )
+    .await
+    .expect("consume_client_data did not complete for fast EOF reader");
 }
 
 #[tokio::test]
@@ -81,7 +84,7 @@ async fn io_error_terminates_cleanly() {
 
     tokio::time::timeout(
         MASK_RELAY_TIMEOUT,
-        consume_client_data(ErrReader, usize::MAX),
+        consume_client_data(ErrReader, usize::MAX, MASK_RELAY_IDLE_TIMEOUT),
     )
     .await
     .expect("consume_client_data did not return on I/O error");

@@ -127,7 +127,14 @@ async fn positive_copy_with_production_cap_stops_exactly_at_budget() {
     let mut reader = FinitePatternReader::new(PROD_CAP_BYTES + (256 * 1024), 4096, read_calls);
     let mut writer = CountingWriter::default();
 
-    let outcome = copy_with_idle_timeout(&mut reader, &mut writer, PROD_CAP_BYTES, true).await;
+    let outcome = copy_with_idle_timeout(
+        &mut reader,
+        &mut writer,
+        PROD_CAP_BYTES,
+        true,
+        MASK_RELAY_IDLE_TIMEOUT,
+    )
+    .await;
 
     assert_eq!(
         outcome.total, PROD_CAP_BYTES,
@@ -145,7 +152,13 @@ async fn negative_consume_with_zero_cap_performs_no_reads() {
     let read_calls = Arc::new(AtomicUsize::new(0));
     let reader = FinitePatternReader::new(1024, 64, Arc::clone(&read_calls));
 
-    consume_client_data_with_timeout_and_cap(reader, 0).await;
+    consume_client_data_with_timeout_and_cap(
+        reader,
+        0,
+        MASK_RELAY_TIMEOUT,
+        MASK_RELAY_IDLE_TIMEOUT,
+    )
+    .await;
 
     assert_eq!(
         read_calls.load(Ordering::Relaxed),
@@ -161,7 +174,14 @@ async fn edge_copy_below_cap_reports_eof_without_overread() {
     let mut reader = FinitePatternReader::new(payload, 3072, read_calls);
     let mut writer = CountingWriter::default();
 
-    let outcome = copy_with_idle_timeout(&mut reader, &mut writer, PROD_CAP_BYTES, true).await;
+    let outcome = copy_with_idle_timeout(
+        &mut reader,
+        &mut writer,
+        PROD_CAP_BYTES,
+        true,
+        MASK_RELAY_IDLE_TIMEOUT,
+    )
+    .await;
 
     assert_eq!(outcome.total, payload);
     assert_eq!(writer.written, payload);
@@ -175,7 +195,13 @@ async fn edge_copy_below_cap_reports_eof_without_overread() {
 async fn adversarial_blackhat_never_ready_reader_is_bounded_by_timeout_guards() {
     let started = Instant::now();
 
-    consume_client_data_with_timeout_and_cap(NeverReadyReader, PROD_CAP_BYTES).await;
+    consume_client_data_with_timeout_and_cap(
+        NeverReadyReader,
+        PROD_CAP_BYTES,
+        MASK_RELAY_TIMEOUT,
+        MASK_RELAY_IDLE_TIMEOUT,
+    )
+    .await;
 
     assert!(
         started.elapsed() < Duration::from_millis(350),
@@ -190,7 +216,12 @@ async fn integration_consume_path_honors_production_cap_for_large_payload() {
 
     let bounded = timeout(
         Duration::from_millis(350),
-        consume_client_data_with_timeout_and_cap(reader, PROD_CAP_BYTES),
+        consume_client_data_with_timeout_and_cap(
+            reader,
+            PROD_CAP_BYTES,
+            MASK_RELAY_TIMEOUT,
+            MASK_RELAY_IDLE_TIMEOUT,
+        ),
     )
     .await;
 
@@ -206,7 +237,13 @@ async fn adversarial_consume_path_never_reads_beyond_declared_byte_cap() {
     let total_read = Arc::new(AtomicUsize::new(0));
     let reader = BudgetProbeReader::new(256 * 1024, Arc::clone(&total_read));
 
-    consume_client_data_with_timeout_and_cap(reader, byte_cap).await;
+    consume_client_data_with_timeout_and_cap(
+        reader,
+        byte_cap,
+        MASK_RELAY_TIMEOUT,
+        MASK_RELAY_IDLE_TIMEOUT,
+    )
+    .await;
 
     assert!(
         total_read.load(Ordering::Relaxed) <= byte_cap,
@@ -231,7 +268,9 @@ async fn light_fuzz_cap_and_payload_matrix_preserves_min_budget_invariant() {
         let mut reader = FinitePatternReader::new(payload, chunk, read_calls);
         let mut writer = CountingWriter::default();
 
-        let outcome = copy_with_idle_timeout(&mut reader, &mut writer, cap, true).await;
+        let outcome =
+            copy_with_idle_timeout(&mut reader, &mut writer, cap, true, MASK_RELAY_IDLE_TIMEOUT)
+                .await;
         let expected = payload.min(cap);
 
         assert_eq!(
@@ -261,7 +300,14 @@ async fn stress_parallel_copy_tasks_with_production_cap_complete_without_leaks()
                 read_calls,
             );
             let mut writer = CountingWriter::default();
-            copy_with_idle_timeout(&mut reader, &mut writer, PROD_CAP_BYTES, true).await
+            copy_with_idle_timeout(
+                &mut reader,
+                &mut writer,
+                PROD_CAP_BYTES,
+                true,
+                MASK_RELAY_IDLE_TIMEOUT,
+            )
+            .await
         }));
     }
 

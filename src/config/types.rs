@@ -1710,6 +1710,19 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_mask_relay_max_bytes")]
     pub mask_relay_max_bytes: usize,
 
+    /// Wall-clock cap for the full masking relay on non-MTProto fallback paths.
+    /// Raise when the mask target is a long-lived service (e.g. WebSocket).
+    /// Default: 60 000 ms (60 s).
+    #[serde(default = "default_mask_relay_timeout_ms")]
+    pub mask_relay_timeout_ms: u64,
+
+    /// Per-read idle timeout on masking relay and drain paths.
+    /// Limits resource consumption by slow-loris attacks and port scanners.
+    /// A read call stalling beyond this is treated as an abandoned connection.
+    /// Default: 5 000 ms (5 s).
+    #[serde(default = "default_mask_relay_idle_timeout_ms")]
+    pub mask_relay_idle_timeout_ms: u64,
+
     /// Prefetch timeout (ms) for extending fragmented masking classifier window.
     #[serde(default = "default_mask_classifier_prefetch_timeout_ms")]
     pub mask_classifier_prefetch_timeout_ms: u64,
@@ -1755,6 +1768,8 @@ impl Default for AntiCensorshipConfig {
             mask_shape_above_cap_blur: default_mask_shape_above_cap_blur(),
             mask_shape_above_cap_blur_max_bytes: default_mask_shape_above_cap_blur_max_bytes(),
             mask_relay_max_bytes: default_mask_relay_max_bytes(),
+            mask_relay_timeout_ms: default_mask_relay_timeout_ms(),
+            mask_relay_idle_timeout_ms: default_mask_relay_idle_timeout_ms(),
             mask_classifier_prefetch_timeout_ms: default_mask_classifier_prefetch_timeout_ms(),
             mask_timing_normalization_enabled: default_mask_timing_normalization_enabled(),
             mask_timing_normalization_floor_ms: default_mask_timing_normalization_floor_ms(),

@@ -615,6 +615,26 @@ pub(crate) fn default_mask_relay_max_bytes() -> usize {
     32 * 1024
 }
 
+#[cfg(not(test))]
+pub(crate) fn default_mask_relay_timeout_ms() -> u64 {
+    60_000
+}
+
+#[cfg(test)]
+pub(crate) fn default_mask_relay_timeout_ms() -> u64 {
+    200
+}
+
+#[cfg(not(test))]
+pub(crate) fn default_mask_relay_idle_timeout_ms() -> u64 {
+    5_000
+}
+
+#[cfg(test)]
+pub(crate) fn default_mask_relay_idle_timeout_ms() -> u64 {
+    100
+}
+
 pub(crate) fn default_mask_classifier_prefetch_timeout_ms() -> u64 {
     5
 }
