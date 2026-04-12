@@ -37,13 +37,13 @@ xray x25519
 ```
 3. **Short ID (идентификатор Reality):**
 ```bash
-openssl rand -hex 16
-# Сохраните вывод (например: 0123456789abcdef0123456789abcdef) — это <SHORT_ID>
+openssl rand -hex 8
+# Сохраните вывод (например: abc123def456) — это <SHORT_ID>
 ```
 4. **Random Path (путь для xhttp):**
 ```bash
 openssl rand -hex 8
-# Сохраните вывод (например, abc123def456), чтобы заменить <YOUR_RANDOM_PATH> в конфигах
+# Сохраните вывод (например, 0123456789abcdef0123456789abcdef), чтобы заменить <YOUR_RANDOM_PATH> в конфигах
 ```
 
 ---
