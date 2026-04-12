@@ -274,7 +274,7 @@ fn candidate_scan_start_offset_in(
     candidate_budget: usize,
 ) -> usize {
     if total_users == 0 || candidate_budget >= total_users {
-        return 0;
+        return total_users.saturating_sub(total_users);
     }
 
     let seq = shared
