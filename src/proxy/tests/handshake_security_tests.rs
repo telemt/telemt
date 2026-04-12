@@ -1339,7 +1339,8 @@ async fn mtproto_overload_full_scans_small_runtime_snapshot_to_preserve_cold_use
     }
 
     let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
-    let handshake = make_valid_mtproto_handshake("00000000000000000000000000000020", ProtoTag::Secure, 2);
+    let handshake =
+        make_valid_mtproto_handshake("00000000000000000000000000000020", ProtoTag::Secure, 2);
     let peer: SocketAddr = "198.51.100.215:44326".parse().unwrap();
 
     let result = handle_mtproto_handshake_with_shared(

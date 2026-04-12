@@ -281,9 +281,7 @@ fn candidate_scan_start_offset_in(
         .handshake
         .auth_candidate_scan_seq
         .fetch_add(1, Ordering::Relaxed);
-    candidate_scan_peer_seed(peer_ip)
-        .wrapping_add(seq as usize)
-        % total_users
+    candidate_scan_peer_seed(peer_ip).wrapping_add(seq as usize) % total_users
 }
 
 fn parse_tls_auth_material(
