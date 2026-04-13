@@ -1,9 +1,36 @@
+# Installation Options 
+There are three options for installing Telemt:
+ - [Automated installation using a script](#very-quick-start).
+ - [Manual installation of Telemt as a service](#telemt-via-systemd).
+ - [Installation using Docker Compose](#telemt-via-docker-compose).
+
 # Very quick start
 
 ### One-command installation / update on re-run
 ```bash
 curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 ```
+
+After starting, the script will prompt for:
+ - Your language (1 - English, 2 - Russian);
+ - Your TLS domain (press Enter for petrovich.ru).
+
+The script checks if the port (default **443**) is free. If the port is already in use, installation will fail. You need to free up the port or use the **-p** flag with a different port to retry the installation.
+
+To modify the script’s startup parameters, you can use the following flags:
+ - **-d, --domain** - TLS domain;
+ - **-p, --port** - server port (1–65535);
+ - **-s, --secret** - 32 hex secret;
+ - **-a, --ad-tag** - ad_tag;
+ - **-l, --lan**g - language (1/en or 2/ru);
+
+Providing all options skips interactive prompts.
+
+After completion, the script will provide a link for client connections:
+```bash
+tg://proxy?server=IP&port=PORT&secret=SECRET
+```
+
 ### Installing a specific version
 ```bash
 curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- 3.3.39
