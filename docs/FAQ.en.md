@@ -36,8 +36,11 @@ hello2 = "ad_tag2"
 On April 1, 2026, we became aware of a method for detecting MTProxy Fake-TLS, 
 based on the ECH extension and the ordering of cipher suites, 
 as well as an overall unique JA3/JA4 fingerprint 
-that does not occur in modern browsers: 
-we have already submitted initial changes to the Telegram Desktop developers and are working on updates for other clients.
+that does not occur in modern browsers.
+
+> [!IMPORTANT]
+> TLS fingerprint has been fixed in latest version of clients for Desktop / Android / iOS.  
+> Please update your cleint for MTProxy Fake-TLS to work correctly.
 
 - We consider this a breakthrough aspect, which has no stable analogues today
 - Based on this: if `telemt` configured correctly, **TLS mode is completely identical to real-life handshake + communication** with a specified host
