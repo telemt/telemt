@@ -111,7 +111,10 @@ fn probe_target(listen: SocketAddr) -> SocketAddr {
 }
 
 fn build_request(target: SocketAddr, path: &str, auth_header: &str) -> String {
-    let mut request = format!("GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n", target);
+    let mut request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+        target
+    );
     if !auth_header.is_empty() {
         request.push_str("Authorization: ");
         request.push_str(auth_header);

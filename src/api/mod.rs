@@ -41,8 +41,8 @@ use config_store::{current_revision, load_config_from_disk, parse_if_match};
 use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
-    ApiFailure, CreateUserRequest, DeleteUserResponse, HealthData, HealthReadyData, PatchUserRequest,
-    RotateSecretRequest, SummaryData, UserActiveIps,
+    ApiFailure, CreateUserRequest, DeleteUserResponse, HealthData, HealthReadyData,
+    PatchUserRequest, RotateSecretRequest, SummaryData, UserActiveIps,
 };
 use runtime_edge::{
     EdgeConnectionsCacheEntry, build_runtime_connections_summary_data,

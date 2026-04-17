@@ -1903,7 +1903,11 @@ mod tests {
             [access]
             "#,
         );
-        assert!(!cfg.server.conntrack_control.inline_conntrack_control_explicit);
+        assert!(
+            !cfg.server
+                .conntrack_control
+                .inline_conntrack_control_explicit
+        );
     }
 
     #[test]
@@ -1918,7 +1922,11 @@ mod tests {
             [access]
             "#,
         );
-        assert!(cfg.server.conntrack_control.inline_conntrack_control_explicit);
+        assert!(
+            cfg.server
+                .conntrack_control
+                .inline_conntrack_control_explicit
+        );
     }
 
     #[test]

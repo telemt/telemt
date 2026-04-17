@@ -72,7 +72,12 @@ pub(crate) fn spawn_conntrack_controller(
         stats.set_conntrack_rule_apply_ok(false);
         shared.disable_conntrack_close_sender();
         shared.set_conntrack_pressure_active(false);
-        if enabled && cfg.server.conntrack_control.inline_conntrack_control_explicit {
+        if enabled
+            && cfg
+                .server
+                .conntrack_control
+                .inline_conntrack_control_explicit
+        {
             warn!(
                 "conntrack control explicitly enabled but unsupported on this OS; disabling runtime worker"
             );
@@ -187,7 +192,13 @@ fn apply_runtime_state(
 ) {
     let enabled = cfg.server.conntrack_control.inline_conntrack_control;
     let available = effective_conntrack_enabled(cfg, runtime_support);
-    if enabled && !available && cfg.server.conntrack_control.inline_conntrack_control_explicit {
+    if enabled
+        && !available
+        && cfg
+            .server
+            .conntrack_control
+            .inline_conntrack_control_explicit
+    {
         warn!(
             has_cap_net_admin = runtime_support.has_cap_net_admin,
             backend_available = runtime_support.netfilter_backend.is_some(),
@@ -297,7 +308,11 @@ fn update_pressure_state(
     state.low_streak = 0;
 }
 
-async fn reconcile_rules(cfg: &ProxyConfig, runtime_support: ConntrackRuntimeSupport, stats: &Stats) {
+async fn reconcile_rules(
+    cfg: &ProxyConfig,
+    runtime_support: ConntrackRuntimeSupport,
+    stats: &Stats,
+) {
     if !cfg.server.conntrack_control.inline_conntrack_control {
         clear_notrack_rules_all_backends().await;
         stats.set_conntrack_rule_apply_ok(true);
@@ -335,7 +350,10 @@ fn probe_runtime_support(configured_backend: ConntrackBackend) -> ConntrackRunti
     }
 }
 
-fn effective_conntrack_enabled(cfg: &ProxyConfig, runtime_support: ConntrackRuntimeSupport) -> bool {
+fn effective_conntrack_enabled(
+    cfg: &ProxyConfig,
+    runtime_support: ConntrackRuntimeSupport,
+) -> bool {
     cfg.server.conntrack_control.inline_conntrack_control
         && runtime_support.has_cap_net_admin
         && runtime_support.netfilter_backend.is_some()
@@ -758,7 +776,14 @@ mod tests {
             accept_timeout_delta: 0,
             me_queue_pressure_delta: 0,
         };
-        update_pressure_state(&stats, shared.as_ref(), &cfg, true, &high_sample, &mut state);
+        update_pressure_state(
+            &stats,
+            shared.as_ref(),
+            &cfg,
+            true,
+            &high_sample,
+            &mut state,
+        );
         assert!(state.active);
 
         let low_sample = PressureSample {
