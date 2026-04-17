@@ -41,8 +41,8 @@ use config_store::{current_revision, load_config_from_disk, parse_if_match};
 use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
-    ApiFailure, CreateUserRequest, DeleteUserResponse, HealthData, PatchUserRequest,
-    RotateSecretRequest, SummaryData, UserActiveIps,
+    ApiFailure, CreateUserRequest, DeleteUserResponse, HealthData, HealthReadyData,
+    PatchUserRequest, RotateSecretRequest, SummaryData, UserActiveIps,
 };
 use runtime_edge::{
     EdgeConnectionsCacheEntry, build_runtime_connections_summary_data,
@@ -274,6 +274,33 @@ async fn handle(
                     read_only: api_cfg.read_only,
                 };
                 Ok(success_response(StatusCode::OK, data, revision))
+            }
+            ("GET", "/v1/health/ready") => {
+                let revision = current_revision(&shared.config_path).await?;
+                let admission_open = shared.runtime_state.admission_open.load(Ordering::Relaxed);
+                let upstream_health = shared.upstream_manager.api_health_summary().await;
+                let ready = admission_open && upstream_health.healthy_total > 0;
+                let reason = if ready {
+                    None
+                } else if !admission_open {
+                    Some("admission_closed")
+                } else {
+                    Some("no_healthy_upstreams")
+                };
+                let data = HealthReadyData {
+                    ready,
+                    status: if ready { "ready" } else { "not_ready" },
+                    reason,
+                    admission_open,
+                    healthy_upstreams: upstream_health.healthy_total,
+                    total_upstreams: upstream_health.configured_total,
+                };
+                let status_code = if ready {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                };
+                Ok(success_response(status_code, data, revision))
             }
             ("GET", "/v1/system/info") => {
                 let revision = current_revision(&shared.config_path).await?;

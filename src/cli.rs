@@ -6,11 +6,14 @@
 //! - `reload [--pid-file PATH]` - Reload configuration (SIGHUP)
 //! - `status [--pid-file PATH]` - Check daemon status
 //! - `run [OPTIONS] [config.toml]` - Run in foreground (default behavior)
+//! - `healthcheck [OPTIONS] [config.toml]` - Run control-plane health probe
 
 use rand::RngExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::healthcheck::{self, HealthcheckMode};
 
 #[cfg(unix)]
 use crate::daemon::{self, DEFAULT_PID_FILE, DaemonOptions};
@@ -28,6 +31,8 @@ pub enum Subcommand {
     Reload,
     /// Check daemon status (`status` subcommand).
     Status,
+    /// Run health probe and exit with status code.
+    Healthcheck,
     /// Fire-and-forget setup (`--init`).
     Init,
 }
@@ -38,6 +43,8 @@ pub struct ParsedCommand {
     pub subcommand: Subcommand,
     pub pid_file: PathBuf,
     pub config_path: String,
+    pub healthcheck_mode: HealthcheckMode,
+    pub healthcheck_mode_invalid: Option<String>,
     #[cfg(unix)]
     pub daemon_opts: DaemonOptions,
     pub init_opts: Option<InitOptions>,
@@ -52,6 +59,8 @@ impl Default for ParsedCommand {
             #[cfg(not(unix))]
             pid_file: PathBuf::from("/var/run/telemt.pid"),
             config_path: "config.toml".to_string(),
+            healthcheck_mode: HealthcheckMode::Liveness,
+            healthcheck_mode_invalid: None,
             #[cfg(unix)]
             daemon_opts: DaemonOptions::default(),
             init_opts: None,
@@ -91,6 +100,9 @@ pub fn parse_command(args: &[String]) -> ParsedCommand {
             "status" => {
                 cmd.subcommand = Subcommand::Status;
             }
+            "healthcheck" => {
+                cmd.subcommand = Subcommand::Healthcheck;
+            }
             "run" => {
                 cmd.subcommand = Subcommand::Run;
                 #[cfg(unix)]
@@ -113,7 +125,35 @@ pub fn parse_command(args: &[String]) -> ParsedCommand {
     while i < args.len() {
         match args[i].as_str() {
             // Skip subcommand names
-            "start" | "stop" | "reload" | "status" | "run" => {}
+            "start" | "stop" | "reload" | "status" | "run" | "healthcheck" => {}
+            "--mode" => {
+                i += 1;
+                if i < args.len() {
+                    match HealthcheckMode::from_cli_arg(&args[i]) {
+                        Some(mode) => {
+                            cmd.healthcheck_mode = mode;
+                            cmd.healthcheck_mode_invalid = None;
+                        }
+                        None => {
+                            cmd.healthcheck_mode_invalid = Some(args[i].clone());
+                        }
+                    }
+                } else {
+                    cmd.healthcheck_mode_invalid = Some(String::new());
+                }
+            }
+            s if s.starts_with("--mode=") => {
+                let raw = s.trim_start_matches("--mode=");
+                match HealthcheckMode::from_cli_arg(raw) {
+                    Some(mode) => {
+                        cmd.healthcheck_mode = mode;
+                        cmd.healthcheck_mode_invalid = None;
+                    }
+                    None => {
+                        cmd.healthcheck_mode_invalid = Some(raw.to_string());
+                    }
+                }
+            }
             // PID file option (for stop/reload/status)
             "--pid-file" => {
                 i += 1;
@@ -152,6 +192,20 @@ pub fn execute_subcommand(cmd: &ParsedCommand) -> Option<i32> {
         Subcommand::Stop => Some(cmd_stop(&cmd.pid_file)),
         Subcommand::Reload => Some(cmd_reload(&cmd.pid_file)),
         Subcommand::Status => Some(cmd_status(&cmd.pid_file)),
+        Subcommand::Healthcheck => {
+            if let Some(invalid_mode) = cmd.healthcheck_mode_invalid.as_ref() {
+                if invalid_mode.is_empty() {
+                    eprintln!("[telemt] Missing value for --mode (supported: liveness, ready)");
+                } else {
+                    eprintln!(
+                        "[telemt] Invalid --mode value '{invalid_mode}' (supported: liveness, ready)"
+                    );
+                }
+                Some(2)
+            } else {
+                Some(healthcheck::run(&cmd.config_path, cmd.healthcheck_mode))
+            }
+        }
         Subcommand::Init => {
             if let Some(opts) = cmd.init_opts.clone() {
                 match run_init(opts) {
@@ -176,6 +230,20 @@ pub fn execute_subcommand(cmd: &ParsedCommand) -> Option<i32> {
         Subcommand::Stop | Subcommand::Reload | Subcommand::Status => {
             eprintln!("[telemt] Subcommand not supported on this platform");
             Some(1)
+        }
+        Subcommand::Healthcheck => {
+            if let Some(invalid_mode) = cmd.healthcheck_mode_invalid.as_ref() {
+                if invalid_mode.is_empty() {
+                    eprintln!("[telemt] Missing value for --mode (supported: liveness, ready)");
+                } else {
+                    eprintln!(
+                        "[telemt] Invalid --mode value '{invalid_mode}' (supported: liveness, ready)"
+                    );
+                }
+                Some(2)
+            } else {
+                Some(healthcheck::run(&cmd.config_path, cmd.healthcheck_mode))
+            }
         }
         Subcommand::Init => {
             if let Some(opts) = cmd.init_opts.clone() {

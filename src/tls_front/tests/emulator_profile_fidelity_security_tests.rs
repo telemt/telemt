@@ -52,7 +52,7 @@ fn record_lengths_by_type(response: &[u8], wanted_type: u8) -> Vec<usize> {
 }
 
 #[test]
-fn emulated_server_hello_replays_profile_change_cipher_spec_count() {
+fn emulated_server_hello_keeps_single_change_cipher_spec_for_client_compatibility() {
     let cached = make_cached();
     let rng = SecureRandom::new();
 
@@ -69,12 +69,12 @@ fn emulated_server_hello_replays_profile_change_cipher_spec_count() {
 
     assert_eq!(response[0], TLS_RECORD_HANDSHAKE);
     let ccs_records = record_lengths_by_type(&response, TLS_RECORD_CHANGE_CIPHER);
-    assert_eq!(ccs_records.len(), 2);
+    assert_eq!(ccs_records.len(), 1);
     assert!(ccs_records.iter().all(|len| *len == 1));
 }
 
 #[test]
-fn emulated_server_hello_replays_profile_ticket_tail_lengths() {
+fn emulated_server_hello_does_not_emit_profile_ticket_tail_when_disabled() {
     let cached = make_cached();
     let rng = SecureRandom::new();
 
@@ -90,6 +90,25 @@ fn emulated_server_hello_replays_profile_ticket_tail_lengths() {
     );
 
     let app_records = record_lengths_by_type(&response, TLS_RECORD_APPLICATION);
-    assert!(app_records.len() >= 4);
-    assert_eq!(&app_records[app_records.len() - 2..], &[220, 180]);
+    assert_eq!(app_records, vec![1200]);
+}
+
+#[test]
+fn emulated_server_hello_uses_profile_ticket_lengths_when_enabled() {
+    let cached = make_cached();
+    let rng = SecureRandom::new();
+
+    let response = build_emulated_server_hello(
+        b"secret",
+        &[0x91; 32],
+        &[0x92; 16],
+        &cached,
+        false,
+        &rng,
+        None,
+        2,
+    );
+
+    let app_records = record_lengths_by_type(&response, TLS_RECORD_APPLICATION);
+    assert_eq!(app_records, vec![1200, 220, 180]);
 }

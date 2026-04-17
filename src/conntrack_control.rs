@@ -25,6 +25,13 @@ enum NetfilterBackend {
 }
 
 #[derive(Clone, Copy)]
+struct ConntrackRuntimeSupport {
+    netfilter_backend: Option<NetfilterBackend>,
+    has_cap_net_admin: bool,
+    has_conntrack_binary: bool,
+}
+
+#[derive(Clone, Copy)]
 struct PressureSample {
     conn_pct: Option<u8>,
     fd_pct: Option<u8>,
@@ -56,11 +63,8 @@ pub(crate) fn spawn_conntrack_controller(
     shared: Arc<ProxySharedState>,
 ) {
     if !cfg!(target_os = "linux") {
-        let enabled = config_rx
-            .borrow()
-            .server
-            .conntrack_control
-            .inline_conntrack_control;
+        let cfg = config_rx.borrow();
+        let enabled = cfg.server.conntrack_control.inline_conntrack_control;
         stats.set_conntrack_control_enabled(enabled);
         stats.set_conntrack_control_available(false);
         stats.set_conntrack_pressure_active(false);
@@ -68,9 +72,14 @@ pub(crate) fn spawn_conntrack_controller(
         stats.set_conntrack_rule_apply_ok(false);
         shared.disable_conntrack_close_sender();
         shared.set_conntrack_pressure_active(false);
-        if enabled {
+        if enabled
+            && cfg
+                .server
+                .conntrack_control
+                .inline_conntrack_control_explicit
+        {
             warn!(
-                "conntrack control is configured but unsupported on this OS; disabling runtime worker"
+                "conntrack control explicitly enabled but unsupported on this OS; disabling runtime worker"
             );
         }
         return;
@@ -92,16 +101,17 @@ async fn run_conntrack_controller(
     let mut cfg = config_rx.borrow().clone();
     let mut pressure_state = PressureState::new(stats.as_ref());
     let mut delete_budget_tokens = cfg.server.conntrack_control.delete_budget_per_sec;
-    let mut backend = pick_backend(cfg.server.conntrack_control.backend);
+    let mut runtime_support = probe_runtime_support(cfg.server.conntrack_control.backend);
+    let mut effective_enabled = effective_conntrack_enabled(&cfg, runtime_support);
 
     apply_runtime_state(
         stats.as_ref(),
         shared.as_ref(),
         &cfg,
-        backend.is_some(),
+        runtime_support,
         false,
     );
-    reconcile_rules(&cfg, backend, stats.as_ref()).await;
+    reconcile_rules(&cfg, runtime_support, stats.as_ref()).await;
 
     loop {
         tokio::select! {
@@ -110,17 +120,18 @@ async fn run_conntrack_controller(
                     break;
                 }
                 cfg = config_rx.borrow_and_update().clone();
-                backend = pick_backend(cfg.server.conntrack_control.backend);
+                runtime_support = probe_runtime_support(cfg.server.conntrack_control.backend);
+                effective_enabled = effective_conntrack_enabled(&cfg, runtime_support);
                 delete_budget_tokens = cfg.server.conntrack_control.delete_budget_per_sec;
-                apply_runtime_state(stats.as_ref(), shared.as_ref(), &cfg, backend.is_some(), pressure_state.active);
-                reconcile_rules(&cfg, backend, stats.as_ref()).await;
+                apply_runtime_state(stats.as_ref(), shared.as_ref(), &cfg, runtime_support, pressure_state.active);
+                reconcile_rules(&cfg, runtime_support, stats.as_ref()).await;
             }
             event = close_rx.recv() => {
                 let Some(event) = event else {
                     break;
                 };
                 stats.set_conntrack_event_queue_depth(close_rx.len() as u64);
-                if !cfg.server.conntrack_control.inline_conntrack_control {
+                if !effective_enabled {
                     continue;
                 }
                 if !pressure_state.active {
@@ -156,6 +167,7 @@ async fn run_conntrack_controller(
                     stats.as_ref(),
                     shared.as_ref(),
                     &cfg,
+                    effective_enabled,
                     &sample,
                     &mut pressure_state,
                 );
@@ -175,20 +187,30 @@ fn apply_runtime_state(
     stats: &Stats,
     shared: &ProxySharedState,
     cfg: &ProxyConfig,
-    backend_available: bool,
+    runtime_support: ConntrackRuntimeSupport,
     pressure_active: bool,
 ) {
     let enabled = cfg.server.conntrack_control.inline_conntrack_control;
-    let available = enabled && backend_available && has_cap_net_admin();
-    if enabled && !available {
+    let available = effective_conntrack_enabled(cfg, runtime_support);
+    if enabled
+        && !available
+        && cfg
+            .server
+            .conntrack_control
+            .inline_conntrack_control_explicit
+    {
         warn!(
-            "conntrack control enabled but unavailable (missing CAP_NET_ADMIN or backend binaries)"
+            has_cap_net_admin = runtime_support.has_cap_net_admin,
+            backend_available = runtime_support.netfilter_backend.is_some(),
+            conntrack_binary_available = runtime_support.has_conntrack_binary,
+            configured_backend = ?cfg.server.conntrack_control.backend,
+            "conntrack control explicitly enabled but unavailable; disabling runtime features"
         );
     }
     stats.set_conntrack_control_enabled(enabled);
     stats.set_conntrack_control_available(available);
-    shared.set_conntrack_pressure_active(enabled && pressure_active);
-    stats.set_conntrack_pressure_active(enabled && pressure_active);
+    shared.set_conntrack_pressure_active(available && pressure_active);
+    stats.set_conntrack_pressure_active(available && pressure_active);
 }
 
 fn collect_pressure_sample(
@@ -228,10 +250,11 @@ fn update_pressure_state(
     stats: &Stats,
     shared: &ProxySharedState,
     cfg: &ProxyConfig,
+    effective_enabled: bool,
     sample: &PressureSample,
     state: &mut PressureState,
 ) {
-    if !cfg.server.conntrack_control.inline_conntrack_control {
+    if !effective_enabled {
         if state.active {
             state.active = false;
             state.low_streak = 0;
@@ -285,22 +308,26 @@ fn update_pressure_state(
     state.low_streak = 0;
 }
 
-async fn reconcile_rules(cfg: &ProxyConfig, backend: Option<NetfilterBackend>, stats: &Stats) {
+async fn reconcile_rules(
+    cfg: &ProxyConfig,
+    runtime_support: ConntrackRuntimeSupport,
+    stats: &Stats,
+) {
     if !cfg.server.conntrack_control.inline_conntrack_control {
         clear_notrack_rules_all_backends().await;
         stats.set_conntrack_rule_apply_ok(true);
         return;
     }
 
-    if !has_cap_net_admin() {
+    if !effective_conntrack_enabled(cfg, runtime_support) {
+        clear_notrack_rules_all_backends().await;
         stats.set_conntrack_rule_apply_ok(false);
         return;
     }
 
-    let Some(backend) = backend else {
-        stats.set_conntrack_rule_apply_ok(false);
-        return;
-    };
+    let backend = runtime_support
+        .netfilter_backend
+        .expect("netfilter backend must be available for effective conntrack control");
 
     let apply_result = match backend {
         NetfilterBackend::Nftables => apply_nft_rules(cfg).await,
@@ -313,6 +340,24 @@ async fn reconcile_rules(cfg: &ProxyConfig, backend: Option<NetfilterBackend>, s
     } else {
         stats.set_conntrack_rule_apply_ok(true);
     }
+}
+
+fn probe_runtime_support(configured_backend: ConntrackBackend) -> ConntrackRuntimeSupport {
+    ConntrackRuntimeSupport {
+        netfilter_backend: pick_backend(configured_backend),
+        has_cap_net_admin: has_cap_net_admin(),
+        has_conntrack_binary: command_exists("conntrack"),
+    }
+}
+
+fn effective_conntrack_enabled(
+    cfg: &ProxyConfig,
+    runtime_support: ConntrackRuntimeSupport,
+) -> bool {
+    cfg.server.conntrack_control.inline_conntrack_control
+        && runtime_support.has_cap_net_admin
+        && runtime_support.netfilter_backend.is_some()
+        && runtime_support.has_conntrack_binary
 }
 
 fn pick_backend(configured: ConntrackBackend) -> Option<NetfilterBackend> {
@@ -710,7 +755,7 @@ mod tests {
             me_queue_pressure_delta: 0,
         };
 
-        update_pressure_state(&stats, shared.as_ref(), &cfg, &sample, &mut state);
+        update_pressure_state(&stats, shared.as_ref(), &cfg, true, &sample, &mut state);
 
         assert!(state.active);
         assert!(shared.conntrack_pressure_active());
@@ -731,7 +776,14 @@ mod tests {
             accept_timeout_delta: 0,
             me_queue_pressure_delta: 0,
         };
-        update_pressure_state(&stats, shared.as_ref(), &cfg, &high_sample, &mut state);
+        update_pressure_state(
+            &stats,
+            shared.as_ref(),
+            &cfg,
+            true,
+            &high_sample,
+            &mut state,
+        );
         assert!(state.active);
 
         let low_sample = PressureSample {
@@ -740,11 +792,11 @@ mod tests {
             accept_timeout_delta: 0,
             me_queue_pressure_delta: 0,
         };
-        update_pressure_state(&stats, shared.as_ref(), &cfg, &low_sample, &mut state);
+        update_pressure_state(&stats, shared.as_ref(), &cfg, true, &low_sample, &mut state);
         assert!(state.active);
-        update_pressure_state(&stats, shared.as_ref(), &cfg, &low_sample, &mut state);
+        update_pressure_state(&stats, shared.as_ref(), &cfg, true, &low_sample, &mut state);
         assert!(state.active);
-        update_pressure_state(&stats, shared.as_ref(), &cfg, &low_sample, &mut state);
+        update_pressure_state(&stats, shared.as_ref(), &cfg, true, &low_sample, &mut state);
 
         assert!(!state.active);
         assert!(!shared.conntrack_pressure_active());
@@ -765,7 +817,7 @@ mod tests {
             me_queue_pressure_delta: 10,
         };
 
-        update_pressure_state(&stats, shared.as_ref(), &cfg, &sample, &mut state);
+        update_pressure_state(&stats, shared.as_ref(), &cfg, false, &sample, &mut state);
 
         assert!(!state.active);
         assert!(!shared.conntrack_pressure_active());

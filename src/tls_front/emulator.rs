@@ -18,9 +18,6 @@ fn jitter_and_clamp_sizes(sizes: &[usize], rng: &SecureRandom) -> Vec<usize> {
         .iter()
         .map(|&size| {
             let base = size.clamp(MIN_APP_DATA, MAX_APP_DATA);
-            if base == MIN_APP_DATA || base == MAX_APP_DATA {
-                return base;
-            }
             let jitter_range = ((base as f64) * 0.03).round() as i64;
             if jitter_range == 0 {
                 return base;
@@ -69,9 +66,19 @@ fn ensure_payload_capacity(mut sizes: Vec<usize>, payload_len: usize) -> Vec<usi
 fn emulated_app_data_sizes(cached: &CachedTlsData) -> Vec<usize> {
     match cached.behavior_profile.source {
         TlsProfileSource::Raw | TlsProfileSource::Merged => {
-            if !cached.behavior_profile.app_data_record_sizes.is_empty() {
-                return cached.behavior_profile.app_data_record_sizes.clone();
-            }
+            return cached
+                .app_data_records_sizes
+                .first()
+                .copied()
+                .or_else(|| {
+                    cached
+                        .behavior_profile
+                        .app_data_record_sizes
+                        .first()
+                        .copied()
+                })
+                .map(|size| vec![size])
+                .unwrap_or_else(|| vec![cached.total_app_data_len.max(1024)]);
         }
         TlsProfileSource::Default | TlsProfileSource::Rustls => {}
     }
@@ -83,8 +90,8 @@ fn emulated_app_data_sizes(cached: &CachedTlsData) -> Vec<usize> {
     sizes
 }
 
-fn emulated_change_cipher_spec_count(cached: &CachedTlsData) -> usize {
-    usize::from(cached.behavior_profile.change_cipher_spec_count.max(1))
+fn emulated_change_cipher_spec_count(_cached: &CachedTlsData) -> usize {
+    1
 }
 
 fn emulated_ticket_record_sizes(
@@ -92,19 +99,20 @@ fn emulated_ticket_record_sizes(
     new_session_tickets: u8,
     rng: &SecureRandom,
 ) -> Vec<usize> {
-    let mut sizes = match cached.behavior_profile.source {
+    let target_count = usize::from(new_session_tickets.min(MAX_TICKET_RECORDS as u8));
+    if target_count == 0 {
+        return Vec::new();
+    }
+
+    let profiled_sizes = match cached.behavior_profile.source {
         TlsProfileSource::Raw | TlsProfileSource::Merged => {
-            cached.behavior_profile.ticket_record_sizes.clone()
+            cached.behavior_profile.ticket_record_sizes.as_slice()
         }
-        TlsProfileSource::Default | TlsProfileSource::Rustls => Vec::new(),
+        TlsProfileSource::Default | TlsProfileSource::Rustls => &[],
     };
 
-    let target_count = sizes
-        .len()
-        .max(usize::from(
-            new_session_tickets.min(MAX_TICKET_RECORDS as u8),
-        ))
-        .min(MAX_TICKET_RECORDS);
+    let mut sizes = Vec::with_capacity(target_count);
+    sizes.extend(profiled_sizes.iter().copied().take(target_count));
 
     while sizes.len() < target_count {
         sizes.push(rng.range(48) + 48);
@@ -245,7 +253,18 @@ pub fn build_emulated_server_hello(
     }
 
     // --- ApplicationData (fake encrypted records) ---
-    let mut sizes = jitter_and_clamp_sizes(&emulated_app_data_sizes(cached), rng);
+    let mut sizes = {
+        let base_sizes = emulated_app_data_sizes(cached);
+        match cached.behavior_profile.source {
+            TlsProfileSource::Raw | TlsProfileSource::Merged => base_sizes
+                .into_iter()
+                .map(|size| size.clamp(MIN_APP_DATA, MAX_APP_DATA))
+                .collect(),
+            TlsProfileSource::Default | TlsProfileSource::Rustls => {
+                jitter_and_clamp_sizes(&base_sizes, rng)
+            }
+        }
+    };
     let compact_payload = cached
         .cert_info
         .as_ref()
@@ -511,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_emulated_server_hello_replays_tail_records_for_profiled_tls() {
+    fn test_build_emulated_server_hello_ignores_tail_records_for_profiled_tls() {
         let mut cached = make_cached(None);
         cached.app_data_records_sizes = vec![27, 3905, 537, 69];
         cached.total_app_data_len = 4538;
@@ -533,19 +552,11 @@ mod tests {
 
         let hello_len = u16::from_be_bytes([response[3], response[4]]) as usize;
         let ccs_start = 5 + hello_len;
-        let mut pos = ccs_start + 6;
-        let mut app_lengths = Vec::new();
-        while pos + 5 <= response.len() {
-            assert_eq!(response[pos], TLS_RECORD_APPLICATION);
-            let record_len = u16::from_be_bytes([response[pos + 3], response[pos + 4]]) as usize;
-            app_lengths.push(record_len);
-            pos += 5 + record_len;
-        }
-
-        assert_eq!(app_lengths.len(), 4);
-        assert_eq!(app_lengths[0], 64);
-        assert_eq!(app_lengths[3], 69);
-        assert!(app_lengths[1] >= 64);
-        assert!(app_lengths[2] >= 64);
+        let app_start = ccs_start + 6;
+        let app_len =
+            u16::from_be_bytes([response[app_start + 3], response[app_start + 4]]) as usize;
+        assert_eq!(response[app_start], TLS_RECORD_APPLICATION);
+        assert_eq!(app_len, 64);
+        assert_eq!(app_start + 5 + app_len, response.len());
     }
 }

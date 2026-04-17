@@ -279,6 +279,12 @@ pub struct UpstreamApiSummarySnapshot {
     pub shadowsocks_total: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UpstreamApiHealthSummary {
+    pub configured_total: usize,
+    pub healthy_total: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct UpstreamApiSnapshot {
     pub summary: UpstreamApiSummarySnapshot,
@@ -442,6 +448,20 @@ impl UpstreamManager {
         }
 
         Some(UpstreamApiSnapshot { summary, upstreams })
+    }
+
+    pub async fn api_health_summary(&self) -> UpstreamApiHealthSummary {
+        let guard = self.upstreams.read().await;
+        let mut summary = UpstreamApiHealthSummary {
+            configured_total: guard.len(),
+            healthy_total: 0,
+        };
+        for upstream in guard.iter() {
+            if upstream.healthy {
+                summary.healthy_total += 1;
+            }
+        }
+        summary
     }
 
     fn describe_upstream(upstream_type: &UpstreamType) -> (UpstreamRouteKind, String) {

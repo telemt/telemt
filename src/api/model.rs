@@ -61,6 +61,17 @@ pub(super) struct HealthData {
 }
 
 #[derive(Serialize)]
+pub(super) struct HealthReadyData {
+    pub(super) ready: bool,
+    pub(super) status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reason: Option<&'static str>,
+    pub(super) admission_open: bool,
+    pub(super) healthy_upstreams: usize,
+    pub(super) total_upstreams: usize,
+}
+
+#[derive(Serialize)]
 pub(super) struct SummaryData {
     pub(super) uptime_seconds: f64,
     pub(super) connections_total: u64,

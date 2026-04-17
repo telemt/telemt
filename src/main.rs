@@ -8,6 +8,7 @@ mod crypto;
 #[cfg(unix)]
 mod daemon;
 mod error;
+mod healthcheck;
 mod ip_tracker;
 #[cfg(test)]
 #[path = "tests/ip_tracker_encapsulation_adversarial_tests.rs"]

@@ -1329,6 +1329,10 @@ pub struct ConntrackControlConfig {
     #[serde(default = "default_conntrack_control_enabled")]
     pub inline_conntrack_control: bool,
 
+    /// Tracks whether inline_conntrack_control was explicitly set in config.
+    #[serde(skip)]
+    pub inline_conntrack_control_explicit: bool,
+
     /// Conntrack mode for listener ingress traffic.
     #[serde(default)]
     pub mode: ConntrackMode,
@@ -1363,6 +1367,7 @@ impl Default for ConntrackControlConfig {
     fn default() -> Self {
         Self {
             inline_conntrack_control: default_conntrack_control_enabled(),
+            inline_conntrack_control_explicit: false,
             mode: ConntrackMode::default(),
             backend: ConntrackBackend::default(),
             profile: ConntrackPressureProfile::default(),

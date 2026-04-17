@@ -343,6 +343,10 @@ impl ProxyConfig {
         let network_table = parsed_toml
             .get("network")
             .and_then(|value| value.as_table());
+        let server_table = parsed_toml.get("server").and_then(|value| value.as_table());
+        let conntrack_control_table = server_table
+            .and_then(|table| table.get("conntrack_control"))
+            .and_then(|value| value.as_table());
         let update_every_is_explicit = general_table
             .map(|table| table.contains_key("update_every"))
             .unwrap_or(false);
@@ -372,10 +376,17 @@ impl ProxyConfig {
         let stun_servers_is_explicit = network_table
             .map(|table| table.contains_key("stun_servers"))
             .unwrap_or(false);
+        let inline_conntrack_control_is_explicit = conntrack_control_table
+            .map(|table| table.contains_key("inline_conntrack_control"))
+            .unwrap_or(false);
 
         let mut config: ProxyConfig = parsed_toml
             .try_into()
             .map_err(|e| ProxyError::Config(e.to_string()))?;
+        config
+            .server
+            .conntrack_control
+            .inline_conntrack_control_explicit = inline_conntrack_control_is_explicit;
 
         if !update_every_is_explicit && (legacy_secret_is_explicit || legacy_config_is_explicit) {
             config.general.update_every = None;
@@ -1878,6 +1889,43 @@ mod tests {
                 .server
                 .proxy_protocol_trusted_cidrs
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn conntrack_inline_explicit_flag_is_false_when_omitted() {
+        let cfg = load_config_from_temp_toml(
+            r#"
+            [general]
+            [network]
+            [server]
+            [server.conntrack_control]
+            [access]
+            "#,
+        );
+        assert!(
+            !cfg.server
+                .conntrack_control
+                .inline_conntrack_control_explicit
+        );
+    }
+
+    #[test]
+    fn conntrack_inline_explicit_flag_is_true_when_present() {
+        let cfg = load_config_from_temp_toml(
+            r#"
+            [general]
+            [network]
+            [server]
+            [server.conntrack_control]
+            inline_conntrack_control = true
+            [access]
+            "#,
+        );
+        assert!(
+            cfg.server
+                .conntrack_control
+                .inline_conntrack_control_explicit
         );
     }
 

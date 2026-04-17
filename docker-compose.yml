@@ -1,7 +1,9 @@
 services:
   telemt:
     image: ghcr.io/telemt/telemt:latest
-    build: .
+    build:
+      context: .
+      target: prod
     container_name: telemt
     restart: unless-stopped
     ports:
@@ -16,13 +18,18 @@ services:
       - /etc/telemt:rw,mode=1777,size=4m
     environment:
       - RUST_LOG=info
+    healthcheck:
+      test: [ "CMD", "/app/telemt", "healthcheck", "/etc/telemt/config.toml", "--mode", "liveness" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     # Uncomment this line if you want to use host network for IPv6, but bridge is default and usually better
     # network_mode: host
     cap_drop:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
-      - NET_ADMIN
     read_only: true
     security_opt:
       - no-new-privileges:true

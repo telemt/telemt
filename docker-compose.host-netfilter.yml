@@ -1,0 +1,10 @@
+services:
+  telemt:
+    build:
+      context: .
+      target: prod-netfilter
+    network_mode: host
+    ports: []
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
