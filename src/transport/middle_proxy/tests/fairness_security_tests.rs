@@ -180,6 +180,12 @@ fn fairness_randomized_sequence_preserves_memory_bounds() {
         }
 
         let snapshot = fairness.snapshot();
+        let (standing_recomputed, backpressured_recomputed) =
+            fairness.debug_recompute_flow_counters(now);
         assert!(snapshot.total_queued_bytes <= 32 * 1024);
+        assert_eq!(snapshot.standing_flows, standing_recomputed);
+        assert_eq!(snapshot.backpressured_flows, backpressured_recomputed);
+        assert!(fairness.debug_check_active_ring_consistency());
+        assert!(fairness.debug_max_deficit_bytes() <= 4 * 1024);
     }
 }
