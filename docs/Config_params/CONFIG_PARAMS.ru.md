@@ -255,12 +255,21 @@
     ```
 ## proxy_secret_path
   - **Ограничения / валидация**: `String`. Если этот параметр не указан, используется путь по умолчанию — «proxy-secret». Пустые значения принимаются TOML/serde, но во время выполнения произойдет ошибка (invalid file path).
-  - **Описание**: Путь к файлу кэша `proxy-secret` инфраструктуры Telegram, используемому ME-handshake/аутентификацией RPC. Telemt всегда сначала пытается выполнить новую загрузку с https://core.telegram.org/getProxySecret, в случае успеха кэширует ее по этому пути и возвращается к чтению кэшированного файла в случае сбоя загрузки.
+  - **Описание**: Путь к файлу кэша `proxy-secret` инфраструктуры Telegram, используемому ME-handshake/аутентификацией RPC. Telemt всегда сначала пытается выполнить новую загрузку с https://core.telegram.org/getProxySecret (если не установлен `proxy_secret_url`), в случае успеха кэширует ее по этому пути и возвращается к чтению кэшированного файла в случае сбоя загрузки.
   - **Пример**:
 
     ```toml
     [general]
     proxy_secret_path = "proxy-secret"
+    ```
+## proxy_secret_url
+  - **Ограничения / валидация**: `String`. Если не указан, используется `"https://core.telegram.org/getProxySecret"`.
+  - **Описание**: Необязательный URL для получения файла `proxy-secret` используемого ME-handshake/аутентификацией RPC. Telemt всегда сначала пытается выполнить новую загрузку с этого URL (если не задан, используется https://core.telegram.org/getProxySecret).
+  - **Пример**:
+
+    ```toml
+    [general]
+    proxy_secret_url = "https://core.telegram.org/getProxySecret"
     ```
 ## proxy_config_v4_cache_path
   - **Ограничения / валидация**: `String`. Если используется, значение не должно быть пустым или содержать только пробелы.
@@ -271,6 +280,15 @@
     [general]
     proxy_config_v4_cache_path = "cache/proxy-config-v4.txt"
     ```
+## proxy_config_v4_url
+  - **Ограничения / валидация**: `String`. Если не указан, используется `"https://core.telegram.org/getProxyConfig"`.
+  - **Описание**: Необязательный URL для получения `getProxyConfig` (IPv4). Telemt при всегда пытается выполнить новую загрузку с этого URL (и если не задан, использует `https://core.telegram.org/getProxyConfig`).
+  - **Example**:
+  
+    ```toml
+    [general]
+    proxy_config_v4_url = "https://core.telegram.org/getProxyConfig"
+    ```
 ## proxy_config_v6_cache_path
   - **Ограничения / валидация**: `String`. Если используется, значение не должно быть пустым или содержать только пробелы.
   - **Описание**: Необязательный путь к кэшу для необработанного (raw) снимка getProxyConfigV6 (IPv6). При запуске Telemt сначала пытается получить свежий снимок; в случае сбоя выборки или пустого снимка он возвращается к этому файлу кэша, если он присутствует и не пуст.
@@ -280,6 +298,15 @@
     [general]
     proxy_config_v6_cache_path = "cache/proxy-config-v6.txt"
     ```
+## proxy_config_v6_url
+- **Ограничения / валидация**: `String`. Если не указан, используется `"https://core.telegram.org/getProxyConfigV6"`.
+- **Описание**: Необязательный URL для получения `getProxyConfigV6` (IPv6). Telemt при всегда пытается выполнить новую загрузку с этого URL (и если не задан, использует `https://core.telegram.org/getProxyConfigV6`).
+- **Example**:
+
+  ```toml
+  [general]
+  proxy_config_v6_url = "https://core.telegram.org/getProxyConfigV6"
+  ```
 ## ad_tag
   - **Ограничения / валидация**: `String` (необязательный параметр). Если используется, значение должно быть ровно 32 символа в шестнадцатеричной системе; недопустимые значения отключаются во время загрузки конфигурации.
   - **Описание**: Глобальный резервный спонсируемый канал `ad_tag` (используется, когда у пользователя нет переопределения в `access.user_ad_tags`). Тег со всеми нулями принимается, но не имеет никакого эффекта, пока не будет заменен реальным тегом от `@MTProxybot`.
@@ -2197,7 +2224,7 @@
     ```
 ## relay_client_idle_soft_secs
   - **Ограничения / валидация**: Должно быть `> 0`; Должно быть меньше или равно `relay_client_idle_hard_secs`.
-  - **Описание**: Мягкий порог простоя (в секундах) для неактивности uplink клиента в промежуточном узле. При достижении этого порога сессия помечается как кандидат на простой и может быть удалена в зависимости от политики.
+  - **Описание**: Мягкий порог простоя (в секундах) для неактивности uplink клиента в промежуточном узле. При достижении этого порога сессия помечается как кандидат на простой и может быть удалена в зависимости от политики.
   - **Пример**:
 
     ```toml
@@ -2276,7 +2303,7 @@
 | --- | ---- | ------- |
 | [`tls_domain`](#tls_domain) | `String` | `"petrovich.ru"` |
 | [`tls_domains`](#tls_domains) | `String[]` | `[]` |
-| [`unknown_sni_action`](#unknown_sni_action) | `"drop"`, `"mask"`, `"accept"` | `"drop"` |
+| [`unknown_sni_action`](#unknown_sni_action) | `"drop"`, `"mask"`, `"accept"`, `"reject_handshake"` | `"drop"` |
 | [`tls_fetch_scope`](#tls_fetch_scope) | `String` | `""` |
 | [`tls_fetch`](#tls_fetch) | `Table` | built-in defaults |
 | [`mask`](#mask) | `bool` | `true` |
@@ -2326,13 +2353,17 @@
     tls_domains = ["example.net", "example.org"]
     ```
 ## unknown_sni_action
-  - **Ограничения / валидация**: `"drop"`, `"mask"` или `"accept"`.
+  - **Ограничения / валидация**: `"drop"`, `"mask"`, `"accept"` или `"reject_handshake"`.
   - **Описание**: Действие для TLS ClientHello с неизвестным/ненастроенным SNI.
+    - `drop` — закрыть соединение без ответа (молчаливый FIN после применения `server_hello_delay`). Поведение, неотличимое по таймингу от Success-ветки, но более «тихое», чем у обычного веб-сервера.
+    - `mask` — прозрачно проксировать соединение на `mask_host:mask_port` (TLS-fronting). Клиент получает настоящий ServerHello от реального бэкенда с его сертификатом. Максимальный камуфляж, но порождает исходящее соединение на каждый чужой запрос.
+    - `accept` — притвориться, что SNI валиден, и продолжить auth-путь. Снижает защиту от активного пробинга; осмысленно только в узких сценариях.
+    - `reject_handshake` — отправить фатальный TLS-alert `unrecognized_name` (RFC 6066, AlertDescription = 112) и закрыть соединение. Поведение, идентичное современному nginx с `ssl_reject_handshake on;` на дефолтном vhost'е: на wire-уровне выглядит как обычный HTTPS-сервер, у которого просто нет такого домена. Рекомендуется, если цель — максимальная похожесть на стоковый веб-сервер, а не tls-fronting. `server_hello_delay` на эту ветку не применяется, чтобы alert улетал «мгновенно», как у эталонного nginx.
   - **Пример**:
 
     ```toml
     [censorship]
-    unknown_sni_action = "drop"
+    unknown_sni_action = "reject_handshake"
     ```
 ## tls_fetch_scope
   - **Ограничения / валидация**: `String`. Значение обрезается во время загрузки; значение, состоящее только из пробелов, становится пустым.
@@ -3090,5 +3121,3 @@
     username = "alice"
     password = "secret"
     ```
-
-

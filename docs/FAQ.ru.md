@@ -227,6 +227,13 @@ curl -s http://127.0.0.1:9091/v1/users | jq
 unknown_sni_action = "mask"
 ```
 
+Альтернатива: если вы хотите, чтобы telemt на неизвестный SNI вёл себя как обычный nginx с `ssl_reject_handshake on;` (отдавал TLS-alert `unrecognized_name` и закрывал соединение), используйте:
+```toml
+[censorship]
+unknown_sni_action = "reject_handshake"
+```
+Это не пропускает старых клиентов, но делает поведение на 443-м порту неотличимым от стокового веб-сервера, у которого просто нет такого виртуального хоста.
+
 ## Как посмотреть метрики
 
 1. Откройте файл конфигурации: `nano /etc/telemt/telemt.toml`.

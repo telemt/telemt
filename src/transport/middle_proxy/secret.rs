@@ -37,20 +37,26 @@ pub(super) fn validate_proxy_secret_len(data_len: usize, max_len: usize) -> Resu
 
 /// Fetch Telegram proxy-secret binary.
 #[allow(dead_code)]
-pub async fn fetch_proxy_secret(cache_path: Option<&str>, max_len: usize) -> Result<Vec<u8>> {
-    fetch_proxy_secret_with_upstream(cache_path, max_len, None).await
+pub async fn fetch_proxy_secret(
+    cache_path: Option<&str>,
+    max_len: usize,
+    proxy_secret_url: Option<&str>,
+) -> Result<Vec<u8>> {
+    fetch_proxy_secret_with_upstream(cache_path, max_len, proxy_secret_url, None).await
 }
 
 /// Fetch Telegram proxy-secret binary, optionally through upstream routing.
 pub async fn fetch_proxy_secret_with_upstream(
     cache_path: Option<&str>,
     max_len: usize,
+    proxy_secret_url: Option<&str>,
     upstream: Option<Arc<UpstreamManager>>,
 ) -> Result<Vec<u8>> {
     let cache = cache_path.unwrap_or("proxy-secret");
 
     // 1) Try fresh download first.
-    match download_proxy_secret_with_max_len_via_upstream(max_len, upstream).await {
+    match download_proxy_secret_with_max_len_via_upstream(max_len, upstream, proxy_secret_url).await
+    {
         Ok(data) => {
             if let Err(e) = tokio::fs::write(cache, &data).await {
                 warn!(error = %e, "Failed to cache proxy-secret (non-fatal)");
@@ -91,14 +97,19 @@ pub async fn fetch_proxy_secret_with_upstream(
 
 #[allow(dead_code)]
 pub async fn download_proxy_secret_with_max_len(max_len: usize) -> Result<Vec<u8>> {
-    download_proxy_secret_with_max_len_via_upstream(max_len, None).await
+    download_proxy_secret_with_max_len_via_upstream(max_len, None, None).await
 }
 
 pub async fn download_proxy_secret_with_max_len_via_upstream(
     max_len: usize,
     upstream: Option<Arc<UpstreamManager>>,
+    proxy_secret_url: Option<&str>,
 ) -> Result<Vec<u8>> {
-    let resp = https_get("https://core.telegram.org/getProxySecret", upstream).await?;
+    let resp = https_get(
+        proxy_secret_url.unwrap_or("https://core.telegram.org/getProxySecret"),
+        upstream,
+    )
+    .await?;
 
     if !(200..=299).contains(&resp.status) {
         return Err(ProxyError::Proxy(format!(

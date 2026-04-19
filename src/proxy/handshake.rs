@@ -1132,9 +1132,20 @@ where
                     "TLS handshake accepted by unknown SNI policy"
                 );
             }
-            action @ (UnknownSniAction::Drop | UnknownSniAction::Mask) => {
+            action @ (UnknownSniAction::Drop
+            | UnknownSniAction::Mask
+            | UnknownSniAction::RejectHandshake) => {
                 auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
-                maybe_apply_server_hello_delay(config).await;
+                // For Drop/Mask we apply the synthetic ServerHello delay so
+                // the fail-closed path is timing-indistinguishable from the
+                // success path. For RejectHandshake we deliberately skip the
+                // delay: a stock modern nginx with `ssl_reject_handshake on;`
+                // responds with the alert essentially immediately, so
+                // injecting 8-24ms here would itself become a distinguisher
+                // against the public baseline we are trying to blend into.
+                if !matches!(action, UnknownSniAction::RejectHandshake) {
+                    maybe_apply_server_hello_delay(config).await;
+                }
                 let log_now = Instant::now();
                 if should_emit_unknown_sni_warn_in(shared, log_now) {
                     warn!(
@@ -1153,8 +1164,33 @@ where
                         "TLS handshake rejected by unknown SNI policy"
                     );
                 }
+                if matches!(action, UnknownSniAction::RejectHandshake) {
+                    // TLS alert record layer:
+                    //   0x15            ContentType.alert
+                    //   0x03 0x03       legacy_record_version = TLS 1.2
+                    //                   (matches what modern nginx emits in
+                    //                   the first server -> client record,
+                    //                   per RFC 8446 5.1 guidance)
+                    //   0x00 0x02       length = 2
+                    // Alert payload:
+                    //   0x02            AlertLevel.fatal
+                    //   0x70            AlertDescription.unrecognized_name (112, RFC 6066)
+                    const TLS_ALERT_UNRECOGNIZED_NAME: [u8; 7] =
+                        [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x70];
+                    if let Err(e) = writer.write_all(&TLS_ALERT_UNRECOGNIZED_NAME).await {
+                        debug!(
+                            peer = %peer,
+                            error = %e,
+                            "Failed to write unrecognized_name TLS alert"
+                        );
+                    } else {
+                        let _ = writer.flush().await;
+                    }
+                }
                 return match action {
-                    UnknownSniAction::Drop => HandshakeResult::Error(ProxyError::UnknownTlsSni),
+                    UnknownSniAction::Drop | UnknownSniAction::RejectHandshake => {
+                        HandshakeResult::Error(ProxyError::UnknownTlsSni)
+                    }
                     UnknownSniAction::Mask => HandshakeResult::BadClient { reader, writer },
                     UnknownSniAction::Accept => unreachable!(),
                 };

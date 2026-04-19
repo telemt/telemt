@@ -1008,6 +1008,55 @@ async fn tls_unknown_sni_mask_policy_falls_back_to_bad_client() {
 }
 
 #[tokio::test]
+async fn tls_unknown_sni_reject_handshake_policy_emits_unrecognized_name_alert() {
+    use tokio::io::{AsyncReadExt, duplex};
+
+    let secret = [0x4Au8; 16];
+    let mut config = test_config_with_secret_hex("4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a");
+    config.censorship.unknown_sni_action = UnknownSniAction::RejectHandshake;
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let peer: SocketAddr = "198.51.100.192:44326".parse().unwrap();
+    let handshake =
+        make_valid_tls_client_hello_with_sni_and_alpn(&secret, 0, "unknown.example", &[b"h2"]);
+
+    // Wire up a duplex so we can inspect what the server writes towards the
+    // client. We own the "peer side" half to read from it.
+    let (server_side, mut peer_side) = duplex(1024);
+    let (server_read, server_write) = tokio::io::split(server_side);
+
+    let result = handle_tls_handshake(
+        &handshake,
+        server_read,
+        server_write,
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        HandshakeResult::Error(ProxyError::UnknownTlsSni)
+    ));
+
+    // Drain what the server wrote. We expect exactly one TLS alert record:
+    //   0x15 0x03 0x03 0x00 0x02 0x02 0x70
+    // (ContentType.alert, TLS 1.2, length=2, fatal, unrecognized_name)
+    drop(result); // drops the server-side writer so peer_side sees EOF
+    let mut buf = Vec::new();
+    peer_side.read_to_end(&mut buf).await.unwrap();
+    assert_eq!(
+        buf,
+        [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x70],
+        "reject_handshake must emit a fatal unrecognized_name TLS alert"
+    );
+}
+
+#[tokio::test]
 async fn tls_unknown_sni_accept_policy_continues_auth_path() {
     let secret = [0x4Bu8; 16];
     let mut config = test_config_with_secret_hex("4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b");

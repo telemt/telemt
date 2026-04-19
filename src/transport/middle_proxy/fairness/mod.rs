@@ -7,7 +7,6 @@ mod model;
 mod pressure;
 mod scheduler;
 
-#[cfg(test)]
 pub(crate) use model::PressureState;
 pub(crate) use model::{AdmissionDecision, DispatchAction, DispatchFeedback, SchedulerDecision};
 pub(crate) use scheduler::{WorkerFairnessConfig, WorkerFairnessSnapshot, WorkerFairnessState};

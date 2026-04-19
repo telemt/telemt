@@ -77,11 +77,12 @@ pub(crate) struct FlowFairnessState {
     pub(crate) standing_state: StandingQueueState,
     pub(crate) scheduler_state: FlowSchedulerState,
     pub(crate) bucket_id: usize,
+    pub(crate) weight_quanta: u8,
     pub(crate) in_active_ring: bool,
 }
 
 impl FlowFairnessState {
-    pub(crate) fn new(flow_id: u64, worker_id: u16, bucket_id: usize) -> Self {
+    pub(crate) fn new(flow_id: u64, worker_id: u16, bucket_id: usize, weight_quanta: u8) -> Self {
         Self {
             _flow_id: flow_id,
             _worker_id: worker_id,
@@ -97,6 +98,7 @@ impl FlowFairnessState {
             standing_state: StandingQueueState::Transient,
             scheduler_state: FlowSchedulerState::Idle,
             bucket_id,
+            weight_quanta: weight_quanta.max(1),
             in_active_ring: false,
         }
     }

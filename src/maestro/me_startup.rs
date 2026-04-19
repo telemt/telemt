@@ -66,6 +66,7 @@ pub(crate) async fn initialize_me_pool(
         match crate::transport::middle_proxy::fetch_proxy_secret_with_upstream(
             proxy_secret_path,
             config.general.proxy_secret_len_max,
+            config.general.proxy_secret_url.as_deref(),
             Some(upstream_manager.clone()),
         )
         .await
@@ -126,7 +127,11 @@ pub(crate) async fn initialize_me_pool(
                 .set_me_status(StartupMeStatus::Initializing, COMPONENT_ME_PROXY_CONFIG_V4)
                 .await;
             let cfg_v4 = load_startup_proxy_config_snapshot(
-                "https://core.telegram.org/getProxyConfig",
+                config
+                    .general
+                    .proxy_config_v4_url
+                    .as_deref()
+                    .unwrap_or("https://core.telegram.org/getProxyConfig"),
                 config.general.proxy_config_v4_cache_path.as_deref(),
                 me2dc_fallback,
                 "getProxyConfig",
@@ -158,7 +163,11 @@ pub(crate) async fn initialize_me_pool(
                 .set_me_status(StartupMeStatus::Initializing, COMPONENT_ME_PROXY_CONFIG_V6)
                 .await;
             let cfg_v6 = load_startup_proxy_config_snapshot(
-                "https://core.telegram.org/getProxyConfigV6",
+                config
+                    .general
+                    .proxy_config_v6_url
+                    .as_deref()
+                    .unwrap_or("https://core.telegram.org/getProxyConfigV6"),
                 config.general.proxy_config_v6_cache_path.as_deref(),
                 me2dc_fallback,
                 "getProxyConfigV6",

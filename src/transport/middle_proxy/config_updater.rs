@@ -321,7 +321,14 @@ async fn run_update_cycle(
     let mut maps_changed = false;
 
     let mut ready_v4: Option<(ProxyConfigData, u64)> = None;
-    let cfg_v4 = retry_fetch("https://core.telegram.org/getProxyConfig", upstream.clone()).await;
+    let cfg_v4 = retry_fetch(
+        cfg.general
+            .proxy_config_v4_url
+            .as_deref()
+            .unwrap_or("https://core.telegram.org/getProxyConfig"),
+        upstream.clone(),
+    )
+    .await;
     if let Some(cfg_v4) = cfg_v4
         && snapshot_passes_guards(cfg, &cfg_v4, "getProxyConfig")
     {
@@ -346,7 +353,10 @@ async fn run_update_cycle(
 
     let mut ready_v6: Option<(ProxyConfigData, u64)> = None;
     let cfg_v6 = retry_fetch(
-        "https://core.telegram.org/getProxyConfigV6",
+        cfg.general
+            .proxy_config_v6_url
+            .as_deref()
+            .unwrap_or("https://core.telegram.org/getProxyConfigV6"),
         upstream.clone(),
     )
     .await;
@@ -430,6 +440,7 @@ async fn run_update_cycle(
         match download_proxy_secret_with_max_len_via_upstream(
             cfg.general.proxy_secret_len_max,
             upstream,
+            cfg.general.proxy_secret_url.as_deref(),
         )
         .await
         {

@@ -1977,6 +1977,22 @@ mod tests {
             cfg_accept.censorship.unknown_sni_action,
             UnknownSniAction::Accept
         );
+
+        let cfg_reject: ProxyConfig = toml::from_str(
+            r#"
+            [server]
+            [general]
+            [network]
+            [access]
+            [censorship]
+            unknown_sni_action = "reject_handshake"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg_reject.censorship.unknown_sni_action,
+            UnknownSniAction::RejectHandshake
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use crate::protocol::constants::RPC_FLAG_QUICKACK;
 use crate::transport::middle_proxy::fairness::{
     AdmissionDecision, DispatchAction, DispatchFeedback, PressureState, SchedulerDecision,
     WorkerFairnessConfig, WorkerFairnessState,
@@ -115,6 +116,62 @@ fn fairness_keeps_fast_flow_progress_under_slow_neighbor() {
 }
 
 #[test]
+fn fairness_prioritizes_quickack_flow_when_weights_enabled() {
+    let mut now = Instant::now();
+    let mut fairness = WorkerFairnessState::new(
+        WorkerFairnessConfig {
+            max_total_queued_bytes: 256 * 1024,
+            max_flow_queued_bytes: 128 * 1024,
+            base_quantum_bytes: 8 * 1024,
+            pressured_quantum_bytes: 8 * 1024,
+            penalized_quantum_bytes: 8 * 1024,
+            default_flow_weight: 1,
+            quickack_flow_weight: 4,
+            ..WorkerFairnessConfig::default()
+        },
+        now,
+    );
+
+    for _ in 0..8 {
+        assert_eq!(
+            fairness.enqueue_data(10, RPC_FLAG_QUICKACK, enqueue_payload(16 * 1024), now),
+            AdmissionDecision::Admit
+        );
+        assert_eq!(
+            fairness.enqueue_data(20, 0, enqueue_payload(16 * 1024), now),
+            AdmissionDecision::Admit
+        );
+    }
+
+    let mut quickack_dispatched = 0u64;
+    let mut bulk_dispatched = 0u64;
+    for _ in 0..64 {
+        now += Duration::from_millis(1);
+        let SchedulerDecision::Dispatch(candidate) = fairness.next_decision(now) else {
+            break;
+        };
+
+        if candidate.frame.conn_id == 10 {
+            quickack_dispatched = quickack_dispatched.saturating_add(1);
+        } else if candidate.frame.conn_id == 20 {
+            bulk_dispatched = bulk_dispatched.saturating_add(1);
+        }
+
+        let _ = fairness.apply_dispatch_feedback(
+            candidate.frame.conn_id,
+            candidate,
+            DispatchFeedback::Routed,
+            now,
+        );
+    }
+
+    assert!(
+        quickack_dispatched > bulk_dispatched,
+        "quickack flow must receive higher dispatch rate with larger weight"
+    );
+}
+
+#[test]
 fn fairness_pressure_hysteresis_prevents_instant_flapping() {
     let mut now = Instant::now();
     let mut cfg = WorkerFairnessConfig::default();
@@ -128,7 +185,7 @@ fn fairness_pressure_hysteresis_prevents_instant_flapping() {
 
     let mut fairness = WorkerFairnessState::new(cfg, now);
 
-    for _ in 0..4 {
+    for _ in 0..3 {
         assert_eq!(
             fairness.enqueue_data(9, 0, enqueue_payload(900), now),
             AdmissionDecision::Admit
@@ -180,6 +237,12 @@ fn fairness_randomized_sequence_preserves_memory_bounds() {
         }
 
         let snapshot = fairness.snapshot();
+        let (standing_recomputed, backpressured_recomputed) =
+            fairness.debug_recompute_flow_counters(now);
         assert!(snapshot.total_queued_bytes <= 32 * 1024);
+        assert_eq!(snapshot.standing_flows, standing_recomputed);
+        assert_eq!(snapshot.backpressured_flows, backpressured_recomputed);
+        assert!(fairness.debug_check_active_ring_consistency());
+        assert!(fairness.debug_max_deficit_bytes() <= 4 * 1024);
     }
 }

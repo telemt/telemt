@@ -392,13 +392,25 @@ pub struct GeneralConfig {
     #[serde(default = "default_proxy_secret_path")]
     pub proxy_secret_path: Option<String>,
 
+    /// Optional custom URL for infrastructure secret (https://core.telegram.org/getProxySecret if absent).
+    #[serde(default)]
+    pub proxy_secret_url: Option<String>,
+
     /// Optional path to cache raw getProxyConfig (IPv4) snapshot for startup fallback.
     #[serde(default = "default_proxy_config_v4_cache_path")]
     pub proxy_config_v4_cache_path: Option<String>,
 
+    /// Optional custom URL for getProxyConfig (https://core.telegram.org/getProxyConfig if absent).
+    #[serde(default)]
+    pub proxy_config_v4_url: Option<String>,
+
     /// Optional path to cache raw getProxyConfigV6 snapshot for startup fallback.
     #[serde(default = "default_proxy_config_v6_cache_path")]
     pub proxy_config_v6_cache_path: Option<String>,
+
+    /// Optional custom URL for getProxyConfigV6 (https://core.telegram.org/getProxyConfigV6 if absent).
+    #[serde(default)]
+    pub proxy_config_v6_url: Option<String>,
 
     /// Global ad_tag (32 hex chars from @MTProxybot). Fallback when user has no per-user tag in access.user_ad_tags.
     #[serde(default)]
@@ -960,8 +972,11 @@ impl Default for GeneralConfig {
             use_middle_proxy: default_true(),
             ad_tag: None,
             proxy_secret_path: default_proxy_secret_path(),
+            proxy_secret_url: None,
             proxy_config_v4_cache_path: default_proxy_config_v4_cache_path(),
+            proxy_config_v4_url: None,
             proxy_config_v6_cache_path: default_proxy_config_v6_cache_path(),
+            proxy_config_v6_url: None,
             middle_proxy_nat_ip: None,
             middle_proxy_nat_probe: default_true(),
             middle_proxy_nat_stun: default_middle_proxy_nat_stun(),
@@ -1556,6 +1571,13 @@ pub enum UnknownSniAction {
     Drop,
     Mask,
     Accept,
+    /// Reject the TLS handshake by sending a fatal `unrecognized_name` alert
+    /// (RFC 6066, AlertDescription = 112) before closing the connection.
+    /// Mimics nginx `ssl_reject_handshake on;` behavior on the default vhost —
+    /// the wire response indistinguishable from a stock modern web server
+    /// that simply does not host the requested name.
+    #[serde(rename = "reject_handshake")]
+    RejectHandshake,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
