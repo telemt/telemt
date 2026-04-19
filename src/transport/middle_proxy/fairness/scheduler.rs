@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use crate::protocol::constants::RPC_FLAG_QUICKACK;
+use bytes::Bytes;
 
 use super::model::{
     AdmissionDecision, DispatchAction, DispatchCandidate, DispatchFeedback, FlowFairnessState,
@@ -310,11 +310,8 @@ impl WorkerFairnessState {
                 } else {
                     Self::classify_flow(&self.config, pressure_state, now, &mut flow.fairness);
 
-                    let quantum = Self::effective_quantum_bytes(
-                        &self.config,
-                        pressure_state,
-                        &flow.fairness,
-                    );
+                    let quantum =
+                        Self::effective_quantum_bytes(&self.config, pressure_state, &flow.fairness);
                     flow.fairness.deficit_bytes = flow
                         .fairness
                         .deficit_bytes
@@ -507,7 +504,8 @@ impl WorkerFairnessState {
             return;
         };
         self.active_ring_members.remove(&conn_id);
-        self.active_ring.retain(|queued_conn_id| *queued_conn_id != conn_id);
+        self.active_ring
+            .retain(|queued_conn_id| *queued_conn_id != conn_id);
         let (was_standing, was_backpressured) = Self::flow_membership(&entry.fairness);
         if was_standing {
             self.standing_flow_count = self.standing_flow_count.saturating_sub(1);

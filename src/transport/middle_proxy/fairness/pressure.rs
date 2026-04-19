@@ -149,7 +149,9 @@ impl PressureEvaluator {
         let mut pressured = false;
         let mut saturated = false;
 
-        let queue_saturated_pct = cfg.queue_ratio_shedding_pct.min(cfg.queue_ratio_saturated_pct);
+        let queue_saturated_pct = cfg
+            .queue_ratio_shedding_pct
+            .min(cfg.queue_ratio_saturated_pct);
         if queue_ratio_pct >= cfg.queue_ratio_pressured_pct {
             pressured = true;
         }

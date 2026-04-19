@@ -512,9 +512,18 @@ mod tests {
         assert!(is_data_route_queue_full(RouteResult::QueueFullHigh));
         assert!(!is_data_route_queue_full(RouteResult::NoConn));
         assert!(!should_close_on_queue_full_streak(1, PressureState::Normal));
-        assert!(!should_close_on_queue_full_streak(2, PressureState::Pressured));
-        assert!(!should_close_on_queue_full_streak(3, PressureState::Pressured));
-        assert!(should_close_on_queue_full_streak(3, PressureState::Shedding));
+        assert!(!should_close_on_queue_full_streak(
+            2,
+            PressureState::Pressured
+        ));
+        assert!(!should_close_on_queue_full_streak(
+            3,
+            PressureState::Pressured
+        ));
+        assert!(should_close_on_queue_full_streak(
+            3,
+            PressureState::Shedding
+        ));
         assert!(should_close_on_queue_full_streak(
             u8::MAX,
             PressureState::Saturated

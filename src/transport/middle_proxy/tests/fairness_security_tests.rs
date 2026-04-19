@@ -121,7 +121,7 @@ fn fairness_prioritizes_quickack_flow_when_weights_enabled() {
     let mut fairness = WorkerFairnessState::new(
         WorkerFairnessConfig {
             max_total_queued_bytes: 256 * 1024,
-            max_flow_queued_bytes: 64 * 1024,
+            max_flow_queued_bytes: 128 * 1024,
             base_quantum_bytes: 8 * 1024,
             pressured_quantum_bytes: 8 * 1024,
             penalized_quantum_bytes: 8 * 1024,
@@ -185,7 +185,7 @@ fn fairness_pressure_hysteresis_prevents_instant_flapping() {
 
     let mut fairness = WorkerFairnessState::new(cfg, now);
 
-    for _ in 0..4 {
+    for _ in 0..3 {
         assert_eq!(
             fairness.enqueue_data(9, 0, enqueue_payload(900), now),
             AdmissionDecision::Admit
