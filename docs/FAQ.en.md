@@ -210,6 +210,13 @@ If you need to allow connections with any domains (ignoring SNI mismatches), add
 unknown_sni_action = "mask"
 ```
 
+Alternatively, if you want telemt to behave like a vanilla nginx with `ssl_reject_handshake on;` on unknown SNI (emit a TLS `unrecognized_name` alert and close the connection), use:
+```toml
+[censorship]
+unknown_sni_action = "reject_handshake"
+```
+This does not recover stale clients, but it makes port 443 wire-indistinguishable from a stock web server that simply does not host the requested vhost.
+
 ### How to view metrics
 
 1. Open the configuration file: `nano /etc/telemt/telemt.toml`.
