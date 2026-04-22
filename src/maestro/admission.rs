@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use crate::config::ProxyConfig;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::startup::StartupTracker;
+use crate::stats::Stats;
 use crate::transport::middle_proxy::MePool;
 
 const STARTUP_FALLBACK_AFTER: Duration = Duration::from_secs(80);
@@ -70,9 +71,22 @@ fn log_admission_coverage_transition(
     }
 }
 
+fn update_admission_metrics(
+    stats: &Stats,
+    configured_dcs: &BTreeSet<i16>,
+    ready_dcs: &BTreeSet<i16>,
+) {
+    stats.set_me_admission_configured_dcs_gauge(configured_dcs.len() as u64);
+    stats.set_me_admission_ready_dcs_gauge(ready_dcs.len() as u64);
+    stats.set_me_partial_degradation_active_gauge(
+        !configured_dcs.is_empty() && !ready_dcs.is_empty() && ready_dcs.len() < configured_dcs.len(),
+    );
+}
+
 pub(crate) async fn configure_admission_gate(
     config: &Arc<ProxyConfig>,
     me_pool: Option<Arc<MePool>>,
+    stats: Arc<Stats>,
     route_runtime: Arc<RouteRuntimeController>,
     admission_tx: &watch::Sender<bool>,
     config_rx: watch::Receiver<Arc<ProxyConfig>>,
@@ -81,6 +95,11 @@ pub(crate) async fn configure_admission_gate(
     if config.general.use_middle_proxy {
         if let Some(pool) = me_pool.as_ref() {
             let initial_coverage = pool.admission_coverage_snapshot().await;
+            update_admission_metrics(
+                stats.as_ref(),
+                &initial_coverage.configured_dcs,
+                &initial_coverage.ready_dcs,
+            );
             let initial_ready = !initial_coverage.configured_dcs.is_empty()
                 && initial_coverage.ready_dcs == initial_coverage.configured_dcs;
             let initial_partial_ready = !initial_coverage.configured_dcs.is_empty()
@@ -121,6 +140,7 @@ pub(crate) async fn configure_admission_gate(
             }
 
             let pool_for_gate = pool.clone();
+            let stats_for_gate = stats.clone();
             let admission_tx_gate = admission_tx.clone();
             let route_runtime_gate = route_runtime.clone();
             let startup_tracker_gate = startup_tracker.clone();
@@ -156,6 +176,7 @@ pub(crate) async fn configure_admission_gate(
                     let coverage = pool_for_gate.admission_coverage_snapshot().await;
                     let configured_dcs = coverage.configured_dcs;
                     let ready_dcs = coverage.ready_dcs;
+                    update_admission_metrics(stats_for_gate.as_ref(), &configured_dcs, &ready_dcs);
                     let now = Instant::now();
                     let ready =
                         !configured_dcs.is_empty() && ready_dcs.len() == configured_dcs.len();
@@ -277,13 +298,42 @@ pub(crate) async fn configure_admission_gate(
                 }
             });
         } else {
+            update_admission_metrics(stats.as_ref(), &BTreeSet::new(), &BTreeSet::new());
             admission_tx.send_replace(false);
             let _ = route_runtime.set_mode(RelayRouteMode::Direct);
             startup_tracker.set_degraded(true).await;
             warn!("Conditional-admission gate: closed / ME pool is UNAVAILABLE");
         }
     } else {
+        update_admission_metrics(stats.as_ref(), &BTreeSet::new(), &BTreeSet::new());
         admission_tx.send_replace(true);
         let _ = route_runtime.set_mode(RelayRouteMode::Direct);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_metrics_follow_coverage_snapshot() {
+        let stats = Stats::new();
+        let configured_dcs = BTreeSet::from([1, 2, 3]);
+        let partial_ready_dcs = BTreeSet::from([1, 2]);
+
+        update_admission_metrics(&stats, &configured_dcs, &partial_ready_dcs);
+        assert_eq!(stats.get_me_admission_configured_dcs_gauge(), 3);
+        assert_eq!(stats.get_me_admission_ready_dcs_gauge(), 2);
+        assert_eq!(stats.get_me_partial_degradation_active_gauge(), 1);
+
+        update_admission_metrics(&stats, &configured_dcs, &configured_dcs);
+        assert_eq!(stats.get_me_admission_configured_dcs_gauge(), 3);
+        assert_eq!(stats.get_me_admission_ready_dcs_gauge(), 3);
+        assert_eq!(stats.get_me_partial_degradation_active_gauge(), 0);
+
+        update_admission_metrics(&stats, &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(stats.get_me_admission_configured_dcs_gauge(), 0);
+        assert_eq!(stats.get_me_admission_ready_dcs_gauge(), 0);
+        assert_eq!(stats.get_me_partial_degradation_active_gauge(), 0);
     }
 }

@@ -2565,6 +2565,48 @@ async fn render_metrics(
     );
     let _ = writeln!(
         out,
+        "# HELP telemt_me_admission_configured_dcs Current configured DC count considered by ME admission"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_admission_configured_dcs gauge");
+    let _ = writeln!(
+        out,
+        "telemt_me_admission_configured_dcs {}",
+        if me_allows_normal {
+            stats.get_me_admission_configured_dcs_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_admission_ready_dcs Current ready DC count considered by ME admission"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_admission_ready_dcs gauge");
+    let _ = writeln!(
+        out,
+        "telemt_me_admission_ready_dcs {}",
+        if me_allows_normal {
+            stats.get_me_admission_ready_dcs_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_partial_degradation_active Whether ME admission is currently in partial degradation mode"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_partial_degradation_active gauge");
+    let _ = writeln!(
+        out,
+        "telemt_me_partial_degradation_active {}",
+        if me_allows_normal {
+            stats.get_me_partial_degradation_active_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
         "# HELP telemt_me_floor_cap_block_total Reconnect attempts blocked by adaptive floor caps"
     );
     let _ = writeln!(out, "# TYPE telemt_me_floor_cap_block_total counter");
@@ -3397,6 +3439,9 @@ mod tests {
             output
                 .contains("# TYPE telemt_me_endpoint_quarantine_draining_suppressed_total counter")
         );
+        assert!(output.contains("# TYPE telemt_me_admission_configured_dcs gauge"));
+        assert!(output.contains("# TYPE telemt_me_admission_ready_dcs gauge"));
+        assert!(output.contains("# TYPE telemt_me_partial_degradation_active gauge"));
         assert!(output.contains("# TYPE telemt_me_writer_removed_total counter"));
         assert!(
             output
@@ -3485,5 +3530,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_render_me_admission_metrics() {
+        let stats = Stats::new();
+        let shared_state = ProxySharedState::new();
+        let tracker = UserIpTracker::new();
+        let config = ProxyConfig::default();
+        stats.set_me_admission_configured_dcs_gauge(12);
+        stats.set_me_admission_ready_dcs_gauge(11);
+        stats.set_me_partial_degradation_active_gauge(true);
+
+        let output = render_metrics(&stats, &shared_state, &config, &tracker).await;
+
+        assert!(output.contains("telemt_me_admission_configured_dcs 12"));
+        assert!(output.contains("telemt_me_admission_ready_dcs 11"));
+        assert!(output.contains("telemt_me_partial_degradation_active 1"));
     }
 }

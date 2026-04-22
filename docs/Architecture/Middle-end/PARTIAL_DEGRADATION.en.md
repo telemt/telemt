@@ -163,6 +163,12 @@ With the fix applied, the expected logs are:
 - `ME partial degradation activated covered_dcs=12 ready_dcs=11`
 - repeated single-endpoint outage reconnect attempts for the affected DC
 
+The admission metrics should also reflect the degraded state:
+
+- `telemt_me_admission_configured_dcs = 12`
+- `telemt_me_admission_ready_dcs < 12`
+- `telemt_me_partial_degradation_active = 1`
+
 What should not happen anymore:
 
 - `covered_dcs=0 ready_dcs=0`
@@ -188,6 +194,12 @@ Expected recovery logs:
 - `ME partial degradation cleared covered_dcs=12 ready_dcs=12`
 - `ME writer floor restored for DC`
 
+The admission metrics should return to the healthy baseline:
+
+- `telemt_me_admission_configured_dcs = 12`
+- `telemt_me_admission_ready_dcs = 12`
+- `telemt_me_partial_degradation_active = 0`
+
 ### Observed result
 
 After the admission hardening fix:
@@ -200,3 +212,73 @@ After the admission hardening fix:
 This confirms the branch now behaves as intended for the original partial
 degradation objective: one degraded DC no longer forces an unnecessary
 all-or-nothing collapse of ME admission for new sessions.
+
+## Complete test case
+
+The following end-to-end case was executed successfully on the live target.
+
+### 1. Healthy baseline
+
+Observed before fault injection:
+
+- log: `Conditional-admission gate: open / ME pool READY`
+- metrics:
+  - `telemt_me_admission_configured_dcs 12`
+  - `telemt_me_admission_ready_dcs 12`
+  - `telemt_me_partial_degradation_active 0`
+
+This confirms the admission layer starts from full coverage.
+
+### 2. Single-endpoint DC3 outage
+
+The ME endpoint `149.154.175.100:8888` was blocked with `iptables`.
+
+Observed during the fault window:
+
+- log: `ME target DC became unavailable for session routing dc=3`
+- log: `ME partial degradation activated covered_dcs=12 ready_dcs=11`
+- log: repeated `Single-endpoint outage reconnect scheduled` events for `dc=3` and `dc=-3`
+- no global `ME pool not-ready` fallback
+- no global cutover of unrelated middle sessions
+
+Observed metrics during the degraded state:
+
+- `telemt_me_admission_configured_dcs 12`
+- `telemt_me_admission_ready_dcs 10`
+- `telemt_me_partial_degradation_active 1`
+- `telemt_me_no_writer_failfast_total 0`
+- `telemt_me_hybrid_timeout_total 0`
+
+The `ready_dcs` value dropped below the first transition log because both `dc=3`
+and `dc=-3` later entered the outage state. This is expected and confirms that
+the metrics expose the actual depth of the degradation instead of only a binary
+state.
+
+### 3. Recovery after unblocking
+
+After removing the firewall rule, recovery completed without a global fallback.
+
+Observed recovery logs:
+
+- `Single-endpoint outage reconnect succeeded dc=-3`
+- `ME target DC recovered for session routing dc=-3`
+- `Single-endpoint outage reconnect succeeded dc=3`
+- `ME partial degradation cleared covered_dcs=12 ready_dcs=12`
+- `ME writer floor restored for DC dc=-3`
+- `ME writer floor restored for DC dc=3`
+
+Observed recovery metrics:
+
+- `telemt_me_admission_configured_dcs 12`
+- `telemt_me_admission_ready_dcs 12`
+- `telemt_me_partial_degradation_active 0`
+
+### Final conclusion
+
+This live test demonstrates the intended behavior end to end:
+
+- a single degraded DC no longer collapses global ME admission;
+- healthy DCs remain on Middle-End routing;
+- the degraded DC stays in localized retry and recovery handling;
+- admission metrics now expose both the transition and the recovery in a
+  directly observable form.

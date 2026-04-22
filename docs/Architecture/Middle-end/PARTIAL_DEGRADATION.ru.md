@@ -166,6 +166,12 @@ connectivity на `443` при этом сохраняется.
 - повторяющиеся single-endpoint outage reconnect attempts только для
   затронутого DC
 
+Admission-метрики тоже должны отражать деградацию:
+
+- `telemt_me_admission_configured_dcs = 12`
+- `telemt_me_admission_ready_dcs < 12`
+- `telemt_me_partial_degradation_active = 1`
+
 Что больше не должно происходить:
 
 - `covered_dcs=0 ready_dcs=0`
@@ -191,6 +197,12 @@ sudo iptables -D DOCKER-USER \
 - `ME partial degradation cleared covered_dcs=12 ready_dcs=12`
 - `ME writer floor restored for DC`
 
+Admission-метрики должны вернуться в healthy baseline:
+
+- `telemt_me_admission_configured_dcs = 12`
+- `telemt_me_admission_ready_dcs = 12`
+- `telemt_me_partial_degradation_active = 0`
+
 ### Результат
 
 После добавленного admission hardening фикса получилось следующее:
@@ -203,3 +215,73 @@ sudo iptables -D DOCKER-USER \
 Это подтверждает, что ветка теперь соответствует исходной цели partial
 degradation: один деградировавший DC больше не приводит к лишнему
 all-or-nothing collapse всей admission-логики для новых сессий.
+
+## Один полный тест-кейс
+
+Ниже зафиксирован полный end-to-end сценарий, который был успешно выполнен на
+live-инсталляции.
+
+### 1. Healthy baseline
+
+Перед fault injection наблюдалось:
+
+- лог: `Conditional-admission gate: open / ME pool READY`
+- метрики:
+  - `telemt_me_admission_configured_dcs 12`
+  - `telemt_me_admission_ready_dcs 12`
+  - `telemt_me_partial_degradation_active 0`
+
+Это подтверждает, что admission layer стартует из состояния полной готовности.
+
+### 2. Single-endpoint outage для DC3
+
+ME endpoint `149.154.175.100:8888` был заблокирован через `iptables`.
+
+Во время fault window наблюдалось:
+
+- лог: `ME target DC became unavailable for session routing dc=3`
+- лог: `ME partial degradation activated covered_dcs=12 ready_dcs=11`
+- лог: повторяющиеся `Single-endpoint outage reconnect scheduled` для `dc=3` и `dc=-3`
+- отсутствовал глобальный `ME pool not-ready` fallback
+- отсутствовал глобальный cutover для остальных middle sessions
+
+Метрики в деградированном состоянии:
+
+- `telemt_me_admission_configured_dcs 12`
+- `telemt_me_admission_ready_dcs 10`
+- `telemt_me_partial_degradation_active 1`
+- `telemt_me_no_writer_failfast_total 0`
+- `telemt_me_hybrid_timeout_total 0`
+
+Значение `ready_dcs` опустилось ниже первого transition log, потому что позже в
+outage вошли и `dc=3`, и `dc=-3`. Это ожидаемо и полезно: метрики показывают
+реальную глубину деградации, а не только бинарный флаг.
+
+### 3. Recovery после снятия блокировки
+
+После удаления firewall rule восстановление завершилось без глобального
+fallback.
+
+Наблюдавшиеся recovery-логи:
+
+- `Single-endpoint outage reconnect succeeded dc=-3`
+- `ME target DC recovered for session routing dc=-3`
+- `Single-endpoint outage reconnect succeeded dc=3`
+- `ME partial degradation cleared covered_dcs=12 ready_dcs=12`
+- `ME writer floor restored for DC dc=-3`
+- `ME writer floor restored for DC dc=3`
+
+Recovery-метрики:
+
+- `telemt_me_admission_configured_dcs 12`
+- `telemt_me_admission_ready_dcs 12`
+- `telemt_me_partial_degradation_active 0`
+
+### Итог
+
+Этот live-тест подтверждает целевое поведение end to end:
+
+- один деградировавший DC больше не схлопывает глобальный ME admission;
+- здоровые DC продолжают работать через Middle-End;
+- деградировавший DC остаётся в локальном retry/recovery контуре;
+- admission-метрики теперь явно показывают и деградацию, и восстановление.

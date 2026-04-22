@@ -166,6 +166,9 @@ pub struct Stats {
     me_floor_warm_cap_effective_gauge: AtomicU64,
     me_writers_active_current_gauge: AtomicU64,
     me_writers_warm_current_gauge: AtomicU64,
+    me_admission_configured_dcs_gauge: AtomicU64,
+    me_admission_ready_dcs_gauge: AtomicU64,
+    me_partial_degradation_active_gauge: AtomicU64,
     me_floor_cap_block_total: AtomicU64,
     me_floor_swap_idle_total: AtomicU64,
     me_floor_swap_idle_failed_total: AtomicU64,
@@ -1585,6 +1588,24 @@ impl Stats {
                 .store(value, Ordering::Relaxed);
         }
     }
+    pub fn set_me_admission_configured_dcs_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_admission_configured_dcs_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_admission_ready_dcs_gauge(&self, value: u64) {
+        if self.telemetry_me_allows_normal() {
+            self.me_admission_ready_dcs_gauge
+                .store(value, Ordering::Relaxed);
+        }
+    }
+    pub fn set_me_partial_degradation_active_gauge(&self, value: bool) {
+        if self.telemetry_me_allows_normal() {
+            self.me_partial_degradation_active_gauge
+                .store(u64::from(value), Ordering::Relaxed);
+        }
+    }
 
     pub fn set_buffer_pool_gauges(&self, pooled: usize, allocated: usize, in_use: usize) {
         if self.telemetry_me_allows_normal() {
@@ -1856,6 +1877,17 @@ impl Stats {
     }
     pub fn get_me_writers_warm_current_gauge(&self) -> u64 {
         self.me_writers_warm_current_gauge.load(Ordering::Relaxed)
+    }
+    pub fn get_me_admission_configured_dcs_gauge(&self) -> u64 {
+        self.me_admission_configured_dcs_gauge
+            .load(Ordering::Relaxed)
+    }
+    pub fn get_me_admission_ready_dcs_gauge(&self) -> u64 {
+        self.me_admission_ready_dcs_gauge.load(Ordering::Relaxed)
+    }
+    pub fn get_me_partial_degradation_active_gauge(&self) -> u64 {
+        self.me_partial_degradation_active_gauge
+            .load(Ordering::Relaxed)
     }
     pub fn get_me_floor_cap_block_total(&self) -> u64 {
         self.me_floor_cap_block_total.load(Ordering::Relaxed)

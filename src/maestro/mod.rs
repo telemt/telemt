@@ -725,6 +725,7 @@ async fn run_telemt_core(
     admission::configure_admission_gate(
         &config,
         me_pool.clone(),
+        stats.clone(),
         route_runtime.clone(),
         &admission_tx,
         config_rx.clone(),
