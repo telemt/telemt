@@ -57,7 +57,11 @@ fn log_admission_coverage_transition(
             ready_dcs = ready_dcs.len(),
             "ME partial degradation activated"
         );
-    } else if was_partial && !is_partial && ready_dcs == configured_dcs {
+    } else if was_partial
+        && !is_partial
+        && !configured_dcs.is_empty()
+        && ready_dcs == configured_dcs
+    {
         info!(
             covered_dcs = configured_dcs.len(),
             ready_dcs = ready_dcs.len(),

@@ -157,13 +157,19 @@ fn writer_ip_family(writer: &MeWriter) -> IpFamily {
     }
 }
 
+fn family_configured_for_admission(pool: &MePool, family: IpFamily) -> bool {
+    match family {
+        IpFamily::V4 => pool.decision.ipv4_me,
+        IpFamily::V6 => pool.decision.ipv6_me,
+    }
+}
+
 impl MePool {
     pub(crate) async fn admission_coverage_snapshot(&self) -> MeAdmissionCoverageSnapshot {
-        let now_epoch_secs = Self::now_epoch_secs();
         let mut configured_dcs = BTreeSet::<i16>::new();
         let mut configured_families_by_dc = HashMap::<i16, HashSet<IpFamily>>::new();
 
-        if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch_secs) {
+        if family_configured_for_admission(self, IpFamily::V4) {
             let map = self.proxy_map_v4.read().await;
             for (dc, _) in map.iter().filter(|(_, endpoints)| !endpoints.is_empty()) {
                 if let Ok(dc) = i16::try_from(*dc) {
@@ -175,7 +181,7 @@ impl MePool {
                 }
             }
         }
-        if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch_secs) {
+        if family_configured_for_admission(self, IpFamily::V6) {
             let map = self.proxy_map_v6.read().await;
             for (dc, _) in map.iter().filter(|(_, endpoints)| !endpoints.is_empty()) {
                 if let Ok(dc) = i16::try_from(*dc) {
@@ -222,17 +228,16 @@ impl MePool {
     }
 
     pub(crate) async fn admission_ready_for_target_dc(&self, target_dc: i16) -> bool {
-        let now_epoch_secs = Self::now_epoch_secs();
         let (routed_dc, _) = self.resolve_target_dc_for_routing(target_dc as i32).await;
         let mut configured_families = HashSet::<IpFamily>::new();
 
-        if self.family_enabled_for_drain_coverage(IpFamily::V4, now_epoch_secs) {
+        if family_configured_for_admission(self, IpFamily::V4) {
             let map = self.proxy_map_v4.read().await;
             if map.get(&routed_dc).is_some_and(|endpoints| !endpoints.is_empty()) {
                 configured_families.insert(IpFamily::V4);
             }
         }
-        if self.family_enabled_for_drain_coverage(IpFamily::V6, now_epoch_secs) {
+        if family_configured_for_admission(self, IpFamily::V6) {
             let map = self.proxy_map_v6.read().await;
             if map.get(&routed_dc).is_some_and(|endpoints| !endpoints.is_empty()) {
                 configured_families.insert(IpFamily::V6);
@@ -830,6 +835,7 @@ mod tests {
     use super::ratio_pct;
     use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeWriterPickMode};
     use crate::crypto::SecureRandom;
+    use crate::network::IpFamily;
     use crate::network::probe::NetworkDecision;
     use crate::stats::Stats;
     use crate::transport::middle_proxy::codec::WriterCommand;
@@ -1029,5 +1035,34 @@ mod tests {
         assert!(!pool.admission_ready_for_target_dc(2).await);
         assert!(!pool.admission_ready_partial_cast().await);
         assert!(!pool.admission_ready_conditional_cast().await);
+    }
+
+    #[tokio::test]
+    async fn admission_snapshot_keeps_configured_family_during_runtime_suppression() {
+        let pool = make_pool().await;
+        pool.set_family_runtime_state(
+            IpFamily::V4,
+            crate::transport::middle_proxy::pool::MeFamilyRuntimeState::Suppressed,
+            1,
+            u64::MAX,
+            5,
+            0,
+        );
+
+        insert_live_writer(
+            &pool,
+            1,
+            3,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 31)), 4001),
+        )
+        .await;
+
+        let snapshot = pool.admission_coverage_snapshot().await;
+        assert!(snapshot.configured_dcs.contains(&2));
+        assert!(snapshot.configured_dcs.contains(&3));
+        assert!(snapshot.ready_dcs.contains(&3));
+        assert!(!pool.admission_ready_for_target_dc(2).await);
+        assert!(pool.admission_ready_for_target_dc(3).await);
+        assert!(pool.admission_ready_partial_cast().await);
     }
 }

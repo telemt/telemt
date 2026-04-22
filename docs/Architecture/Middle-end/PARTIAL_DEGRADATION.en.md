@@ -95,3 +95,108 @@ This behavior is also covered by targeted pool-status tests for:
 
 - partial readiness with incomplete DC coverage;
 - readiness checks scoped to the requested target DC.
+
+## Admission coverage hardening
+
+During live validation of this feature, one additional failure mode was found.
+
+In an IPv4-only deployment, a single-endpoint outage could temporarily drive the
+family runtime state into suppression. The original admission coverage snapshot
+used the drain-coverage family gate, so temporary suppression could make the
+configured family set appear empty even while healthy writers for other DCs were
+still alive.
+
+In practice this produced a bad sequence:
+
+1. partial degradation activated correctly for the affected DC;
+2. the admission snapshot briefly collapsed to `covered_dcs=0 ready_dcs=0`;
+3. the proxy incorrectly switched new sessions to the global direct fallback.
+
+The fix keeps partial-degradation admission coverage based on configured ME
+families rather than the temporary suppression gate used by drain coverage.
+This preserves the intended semantics:
+
+- a single degraded DC does not erase admission coverage for unrelated healthy DCs;
+- partial degradation stays active instead of collapsing into a false global
+  not-ready state;
+- full recovery returns admission to `covered_dcs == ready_dcs` without forcing
+  an unnecessary global cutover.
+
+The transition log was also tightened so `ME partial degradation cleared` is
+emitted only for an actual recovery to full covered readiness, not for an empty
+coverage snapshot.
+
+## Live validation procedure
+
+The feature was validated on a real IPv4-only deployment using a controlled
+single-endpoint fault injection against DC3 ME routing.
+
+### Baseline
+
+Start Telemt normally and confirm:
+
+- `Conditional-admission gate: open / ME pool READY`
+- full ME connectivity for all configured DCs
+- `telemt_me_no_writer_failfast_total = 0`
+- `telemt_me_hybrid_timeout_total = 0`
+
+### Fault injection
+
+Block only the ME endpoint for one DC, leaving Direct-DC routing intact:
+
+```bash
+sudo iptables -I DOCKER-USER 1 \
+  -s 172.21.0.2 \
+  -d 149.154.175.100 \
+  -p tcp --dport 8888 \
+  -j DROP
+```
+
+This intentionally breaks only the ME path for that DC. Direct connectivity on
+port `443` remains available.
+
+### Expected degraded-state behavior
+
+With the fix applied, the expected logs are:
+
+- `ME target DC became unavailable for session routing`
+- `ME partial degradation activated covered_dcs=12 ready_dcs=11`
+- repeated single-endpoint outage reconnect attempts for the affected DC
+
+What should not happen anymore:
+
+- `covered_dcs=0 ready_dcs=0`
+- `ME pool not-ready; routing new sessions via Direct-DC (fast mode)`
+- global controlled route cutover for unrelated middle sessions
+
+### Recovery
+
+Remove the firewall rule:
+
+```bash
+sudo iptables -D DOCKER-USER \
+  -s 172.21.0.2 \
+  -d 149.154.175.100 \
+  -p tcp --dport 8888 \
+  -j DROP
+```
+
+Expected recovery logs:
+
+- `Single-endpoint outage reconnect succeeded`
+- `ME target DC recovered for session routing`
+- `ME partial degradation cleared covered_dcs=12 ready_dcs=12`
+- `ME writer floor restored for DC`
+
+### Observed result
+
+After the admission hardening fix:
+
+- partial degradation activated correctly for the affected DC;
+- healthy DCs stayed on Middle-End routing;
+- the admission layer no longer collapsed to a false `0/0` state;
+- recovery returned the pool to full readiness without a global fallback event.
+
+This confirms the branch now behaves as intended for the original partial
+degradation objective: one degraded DC no longer forces an unnecessary
+all-or-nothing collapse of ME admission for new sessions.
