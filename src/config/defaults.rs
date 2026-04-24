@@ -575,6 +575,10 @@ pub(crate) fn default_tls_new_session_tickets() -> u8 {
     0
 }
 
+pub(crate) fn default_serverhello_compact() -> bool {
+    false
+}
+
 pub(crate) fn default_tls_full_cert_ttl_secs() -> u64 {
     90
 }

@@ -1723,9 +1723,16 @@ pub struct AntiCensorshipConfig {
     #[serde(default = "default_tls_new_session_tickets")]
     pub tls_new_session_tickets: u8,
 
+    /// Enable compact ServerHello payload mode.
+    /// When false, FakeTLS always uses full ServerHello payload behavior.
+    /// When true, compact certificate payload mode can be used by TTL policy.
+    #[serde(default = "default_serverhello_compact")]
+    pub serverhello_compact: bool,
+
     /// TTL in seconds for sending full certificate payload per client IP.
     /// First client connection per (SNI domain, client IP) gets full cert payload.
     /// Subsequent handshakes within TTL use compact cert metadata payload.
+    /// Applied only when `serverhello_compact` is enabled.
     #[serde(default = "default_tls_full_cert_ttl_secs")]
     pub tls_full_cert_ttl_secs: u64,
 
@@ -1820,6 +1827,7 @@ impl Default for AntiCensorshipConfig {
             server_hello_delay_min_ms: default_server_hello_delay_min_ms(),
             server_hello_delay_max_ms: default_server_hello_delay_max_ms(),
             tls_new_session_tickets: default_tls_new_session_tickets(),
+            serverhello_compact: default_serverhello_compact(),
             tls_full_cert_ttl_secs: default_tls_full_cert_ttl_secs(),
             alpn_enforce: default_alpn_enforce(),
             mask_proxy_protocol: 0,

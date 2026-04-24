@@ -7,8 +7,8 @@ use crate::transport::upstream::IpPreference;
 
 use super::ApiShared;
 use super::model::{
-    DcEndpointWriters, DcStatus, DcStatusData, MeWriterStatus, MeWritersData, MeWritersSummary,
-    MinimalAllData, MinimalAllPayload, MinimalDcPathData, MinimalMeRuntimeData,
+    ClassCount, DcEndpointWriters, DcStatus, DcStatusData, MeWriterStatus, MeWritersData,
+    MeWritersSummary, MinimalAllData, MinimalAllPayload, MinimalDcPathData, MinimalMeRuntimeData,
     MinimalQuarantineData, UpstreamDcStatus, UpstreamStatus, UpstreamSummaryData, UpstreamsData,
     ZeroAllData, ZeroCodeCount, ZeroCoreData, ZeroDesyncData, ZeroMiddleProxyData, ZeroPoolData,
     ZeroUpstreamData,
@@ -26,6 +26,16 @@ pub(crate) struct MinimalCacheEntry {
 
 pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> ZeroAllData {
     let telemetry = stats.telemetry_policy();
+    let bad_connection_classes = stats
+        .get_connects_bad_class_counts()
+        .into_iter()
+        .map(|(class, total)| ClassCount { class, total })
+        .collect();
+    let handshake_failure_classes = stats
+        .get_handshake_failure_class_counts()
+        .into_iter()
+        .map(|(class, total)| ClassCount { class, total })
+        .collect();
     let handshake_error_codes = stats
         .get_me_handshake_error_code_counts()
         .into_iter()
@@ -38,6 +48,8 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             uptime_seconds: stats.uptime_secs(),
             connections_total: stats.get_connects_all(),
             connections_bad_total: stats.get_connects_bad(),
+            connections_bad_by_class: bad_connection_classes,
+            handshake_failures_by_class: handshake_failure_classes,
             handshake_timeouts_total: stats.get_handshake_timeouts(),
             accept_permit_timeout_total: stats.get_accept_permit_timeout_total(),
             configured_users,

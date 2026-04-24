@@ -41,7 +41,7 @@ use config_store::{current_revision, load_config_from_disk, parse_if_match};
 use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
-    ApiFailure, CreateUserRequest, DeleteUserResponse, HealthData, HealthReadyData,
+    ApiFailure, ClassCount, CreateUserRequest, DeleteUserResponse, HealthData, HealthReadyData,
     PatchUserRequest, RotateSecretRequest, SummaryData, UserActiveIps,
 };
 use runtime_edge::{
@@ -334,10 +334,24 @@ async fn handle(
             }
             ("GET", "/v1/stats/summary") => {
                 let revision = current_revision(&shared.config_path).await?;
+                let connections_bad_by_class = shared
+                    .stats
+                    .get_connects_bad_class_counts()
+                    .into_iter()
+                    .map(|(class, total)| ClassCount { class, total })
+                    .collect();
+                let handshake_failures_by_class = shared
+                    .stats
+                    .get_handshake_failure_class_counts()
+                    .into_iter()
+                    .map(|(class, total)| ClassCount { class, total })
+                    .collect();
                 let data = SummaryData {
                     uptime_seconds: shared.stats.uptime_secs(),
                     connections_total: shared.stats.get_connects_all(),
                     connections_bad_total: shared.stats.get_connects_bad(),
+                    connections_bad_by_class,
+                    handshake_failures_by_class,
                     handshake_timeouts_total: shared.stats.get_handshake_timeouts(),
                     configured_users: cfg.access.users.len(),
                 };

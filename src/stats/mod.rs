@@ -88,6 +88,8 @@ impl Drop for RouteConnectionLease {
 pub struct Stats {
     connects_all: AtomicU64,
     connects_bad: AtomicU64,
+    connects_bad_classes: DashMap<&'static str, AtomicU64>,
+    handshake_failure_classes: DashMap<&'static str, AtomicU64>,
     current_connections_direct: AtomicU64,
     current_connections_me: AtomicU64,
     handshake_timeouts: AtomicU64,
@@ -518,10 +520,32 @@ impl Stats {
             self.connects_all.fetch_add(1, Ordering::Relaxed);
         }
     }
-    pub fn increment_connects_bad(&self) {
-        if self.telemetry_core_enabled() {
-            self.connects_bad.fetch_add(1, Ordering::Relaxed);
+
+    pub fn increment_connects_bad_with_class(&self, class: &'static str) {
+        if !self.telemetry_core_enabled() {
+            return;
         }
+        self.connects_bad.fetch_add(1, Ordering::Relaxed);
+        let entry = self
+            .connects_bad_classes
+            .entry(class)
+            .or_insert_with(|| AtomicU64::new(0));
+        entry.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_connects_bad(&self) {
+        self.increment_connects_bad_with_class("other");
+    }
+
+    pub fn increment_handshake_failure_class(&self, class: &'static str) {
+        if !self.telemetry_core_enabled() {
+            return;
+        }
+        let entry = self
+            .handshake_failure_classes
+            .entry(class)
+            .or_insert_with(|| AtomicU64::new(0));
+        entry.fetch_add(1, Ordering::Relaxed);
     }
     pub fn increment_current_connections_direct(&self) {
         self.current_connections_direct
@@ -1640,6 +1664,37 @@ impl Stats {
     pub fn get_connects_bad(&self) -> u64 {
         self.connects_bad.load(Ordering::Relaxed)
     }
+
+    pub fn get_connects_bad_class_counts(&self) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = self
+            .connects_bad_classes
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key().to_string(),
+                    entry.value().load(Ordering::Relaxed),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    pub fn get_handshake_failure_class_counts(&self) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = self
+            .handshake_failure_classes
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key().to_string(),
+                    entry.value().load(Ordering::Relaxed),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     pub fn get_accept_permit_timeout_total(&self) -> u64 {
         self.accept_permit_timeout_total.load(Ordering::Relaxed)
     }

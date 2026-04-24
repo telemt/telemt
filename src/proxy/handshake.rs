@@ -1119,6 +1119,10 @@ where
     } else {
         None
     };
+    // Fail-closed to TLS 1.3 semantics when ClientHello version is ambiguous:
+    // this avoids leaking certificate payload on malformed probes.
+    let client_tls_version = tls::detect_client_hello_tls_version(handshake)
+        .unwrap_or(tls::ClientHelloTlsVersion::Tls13);
 
     if client_sni.is_some() && matched_tls_domain.is_none() && preferred_user_hint.is_none() {
         let sni = client_sni.as_deref().unwrap_or_default();
@@ -1439,12 +1443,18 @@ where
             let selected_domain =
                 matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
             let cached_entry = cache.get(selected_domain).await;
-            let use_full_cert_payload = cache
-                .take_full_cert_budget_for_ip(
-                    peer.ip(),
-                    Duration::from_secs(config.censorship.tls_full_cert_ttl_secs),
-                )
-                .await;
+            let use_full_cert_payload = if config.censorship.serverhello_compact
+                && matches!(client_tls_version, tls::ClientHelloTlsVersion::Tls12)
+            {
+                cache
+                    .take_full_cert_budget_for_ip(
+                        peer.ip(),
+                        Duration::from_secs(config.censorship.tls_full_cert_ttl_secs),
+                    )
+                    .await
+            } else {
+                true
+            };
             Some((cached_entry, use_full_cert_payload))
         } else {
             None
@@ -1465,6 +1475,8 @@ where
             validation_session_id_slice,
             &cached_entry,
             use_full_cert_payload,
+            config.censorship.serverhello_compact,
+            client_tls_version,
             rng,
             selected_alpn.clone(),
             config.censorship.tls_new_session_tickets,

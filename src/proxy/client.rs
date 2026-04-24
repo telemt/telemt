@@ -324,17 +324,38 @@ fn record_beobachten_class(
     beobachten.record(class, peer_ip, beobachten_ttl(config));
 }
 
+fn classify_expected_64_got_0(kind: std::io::ErrorKind) -> Option<&'static str> {
+    match kind {
+        std::io::ErrorKind::UnexpectedEof => Some("expected_64_got_0_unexpected_eof"),
+        std::io::ErrorKind::ConnectionReset => Some("expected_64_got_0_connection_reset"),
+        std::io::ErrorKind::ConnectionAborted => Some("expected_64_got_0_connection_aborted"),
+        std::io::ErrorKind::BrokenPipe => Some("expected_64_got_0_broken_pipe"),
+        std::io::ErrorKind::NotConnected => Some("expected_64_got_0_not_connected"),
+        _ => None,
+    }
+}
+
+fn classify_handshake_failure_class(error: &ProxyError) -> &'static str {
+    match error {
+        ProxyError::Io(err) => classify_expected_64_got_0(err.kind()).unwrap_or("other"),
+        ProxyError::Stream(StreamError::UnexpectedEof) => "expected_64_got_0_unexpected_eof",
+        ProxyError::Stream(StreamError::Io(err)) => {
+            classify_expected_64_got_0(err.kind()).unwrap_or("other")
+        }
+        _ => "other",
+    }
+}
+
 fn record_handshake_failure_class(
     beobachten: &BeobachtenStore,
     config: &ProxyConfig,
     peer_ip: IpAddr,
     error: &ProxyError,
 ) {
-    let class = match error {
-        ProxyError::Io(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-            "expected_64_got_0"
-        }
-        ProxyError::Stream(StreamError::UnexpectedEof) => "expected_64_got_0",
+    // Keep beobachten buckets stable while detailed per-kind classification
+    // is tracked in API counters.
+    let class = match classify_handshake_failure_class(error) {
+        value if value.starts_with("expected_64_got_0_") => "expected_64_got_0",
         _ => "other",
     };
     record_beobachten_class(beobachten, config, peer_ip, class);
@@ -343,7 +364,7 @@ fn record_handshake_failure_class(
 #[inline]
 fn increment_bad_on_unknown_tls_sni(stats: &Stats, error: &ProxyError) {
     if matches!(error, ProxyError::UnknownTlsSni) {
-        stats.increment_connects_bad();
+        stats.increment_connects_bad_with_class("unknown_tls_sni");
     }
 }
 
@@ -444,7 +465,7 @@ where
             Ok(Ok(info)) => {
                 if !is_trusted_proxy_source(peer.ip(), &config.server.proxy_protocol_trusted_cidrs)
                 {
-                    stats.increment_connects_bad();
+                    stats.increment_connects_bad_with_class("proxy_protocol_untrusted");
                     warn!(
                         peer = %peer,
                         trusted = ?config.server.proxy_protocol_trusted_cidrs,
@@ -465,13 +486,13 @@ where
                 }
             }
             Ok(Err(e)) => {
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("proxy_protocol_invalid_header");
                 warn!(peer = %peer, error = %e, "Invalid PROXY protocol header");
                 record_beobachten_class(&beobachten, &config, peer.ip(), "other");
                 return Err(e);
             }
             Err(_) => {
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("proxy_protocol_header_timeout");
                 warn!(peer = %peer, timeout_ms = proxy_header_timeout.as_millis(), "PROXY protocol header timeout");
                 record_beobachten_class(&beobachten, &config, peer.ip(), "other");
                 return Err(ProxyError::InvalidProxyProtocol);
@@ -561,7 +582,7 @@ where
             // third-party clients or future Telegram versions.
             if !tls_clienthello_len_in_bounds(tls_len) {
                 debug!(peer = %real_peer, tls_len = tls_len, max_tls_len = MAX_TLS_PLAINTEXT_SIZE, "TLS handshake length out of bounds");
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("tls_clienthello_len_out_of_bounds");
                 maybe_apply_mask_reject_delay(&config).await;
                 let (reader, writer) = tokio::io::split(stream);
                 return Ok(masking_outcome(
@@ -581,7 +602,7 @@ where
                 Ok(n) => n,
                 Err(e) => {
                     debug!(peer = %real_peer, error = %e, tls_len = tls_len, "TLS ClientHello body read failed; engaging masking fallback");
-                    stats.increment_connects_bad();
+                    stats.increment_connects_bad_with_class("tls_clienthello_read_error");
                     maybe_apply_mask_reject_delay(&config).await;
                     let initial_len = 5;
                     let (reader, writer) = tokio::io::split(stream);
@@ -599,7 +620,7 @@ where
 
             if body_read < tls_len {
                 debug!(peer = %real_peer, got = body_read, expected = tls_len, "Truncated in-range TLS ClientHello; engaging masking fallback");
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("tls_clienthello_truncated");
                 maybe_apply_mask_reject_delay(&config).await;
                 let initial_len = 5 + body_read;
                 let (reader, writer) = tokio::io::split(stream);
@@ -623,7 +644,7 @@ where
             ).await {
                 HandshakeResult::Success(result) => result,
                 HandshakeResult::BadClient { reader, writer } => {
-                    stats.increment_connects_bad();
+                    stats.increment_connects_bad_with_class("tls_handshake_bad_client");
                     return Ok(masking_outcome(
                         reader,
                         writer,
@@ -663,7 +684,7 @@ where
                         wrap_tls_application_record(&pending_plaintext)
                     };
                     let reader = tokio::io::AsyncReadExt::chain(std::io::Cursor::new(pending_record), reader);
-                    stats.increment_connects_bad();
+                    stats.increment_connects_bad_with_class("tls_mtproto_bad_client");
                     debug!(
                         peer = %peer,
                         "Authenticated TLS session failed MTProto validation; engaging masking fallback"
@@ -693,7 +714,7 @@ where
         } else {
             if !config.general.modes.classic && !config.general.modes.secure {
                 debug!(peer = %real_peer, "Non-TLS modes disabled");
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("direct_modes_disabled");
                 maybe_apply_mask_reject_delay(&config).await;
                 let (reader, writer) = tokio::io::split(stream);
                 return Ok(masking_outcome(
@@ -720,7 +741,7 @@ where
             ).await {
                 HandshakeResult::Success(result) => result,
                 HandshakeResult::BadClient { reader, writer } => {
-                    stats.increment_connects_bad();
+                    stats.increment_connects_bad_with_class("direct_mtproto_bad_client");
                     return Ok(masking_outcome(
                         reader,
                         writer,
@@ -757,6 +778,7 @@ where
         Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => {
             debug!(peer = %peer, error = %e, "Handshake failed");
+            stats_for_timeout.increment_handshake_failure_class(classify_handshake_failure_class(&e));
             record_handshake_failure_class(
                 &beobachten_for_timeout,
                 &config_for_timeout,
@@ -767,6 +789,7 @@ where
         }
         Err(_) => {
             stats_for_timeout.increment_handshake_timeouts();
+            stats_for_timeout.increment_handshake_failure_class("timeout");
             debug!(peer = %peer, "Handshake timeout");
             record_beobachten_class(
                 &beobachten_for_timeout,
@@ -956,7 +979,8 @@ impl RunningClientHandler {
                         self.peer.ip(),
                         &self.config.server.proxy_protocol_trusted_cidrs,
                     ) {
-                        self.stats.increment_connects_bad();
+                        self.stats
+                            .increment_connects_bad_with_class("proxy_protocol_untrusted");
                         warn!(
                             peer = %self.peer,
                             trusted = ?self.config.server.proxy_protocol_trusted_cidrs,
@@ -986,7 +1010,8 @@ impl RunningClientHandler {
                     }
                 }
                 Ok(Err(e)) => {
-                    self.stats.increment_connects_bad();
+                    self.stats
+                        .increment_connects_bad_with_class("proxy_protocol_invalid_header");
                     warn!(peer = %self.peer, error = %e, "Invalid PROXY protocol header");
                     record_beobachten_class(
                         &self.beobachten,
@@ -997,7 +1022,8 @@ impl RunningClientHandler {
                     return Err(e);
                 }
                 Err(_) => {
-                    self.stats.increment_connects_bad();
+                    self.stats
+                        .increment_connects_bad_with_class("proxy_protocol_header_timeout");
                     warn!(
                         peer = %self.peer,
                         timeout_ms = proxy_header_timeout.as_millis(),
@@ -1095,6 +1121,7 @@ impl RunningClientHandler {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(e)) => {
                 debug!(peer = %peer_for_log, error = %e, "Handshake failed");
+                stats.increment_handshake_failure_class(classify_handshake_failure_class(&e));
                 record_handshake_failure_class(
                     &beobachten_for_timeout,
                     &config_for_timeout,
@@ -1105,6 +1132,7 @@ impl RunningClientHandler {
             }
             Err(_) => {
                 stats.increment_handshake_timeouts();
+                stats.increment_handshake_failure_class("timeout");
                 debug!(peer = %peer_for_log, "Handshake timeout");
                 record_beobachten_class(
                     &beobachten_for_timeout,
@@ -1140,7 +1168,8 @@ impl RunningClientHandler {
         // third-party clients or future Telegram versions.
         if !tls_clienthello_len_in_bounds(tls_len) {
             debug!(peer = %peer, tls_len = tls_len, max_tls_len = MAX_TLS_PLAINTEXT_SIZE, "TLS handshake length out of bounds");
-            self.stats.increment_connects_bad();
+            self.stats
+                .increment_connects_bad_with_class("tls_clienthello_len_out_of_bounds");
             maybe_apply_mask_reject_delay(&self.config).await;
             let (reader, writer) = self.stream.into_split();
             return Ok(masking_outcome(
@@ -1160,7 +1189,8 @@ impl RunningClientHandler {
             Ok(n) => n,
             Err(e) => {
                 debug!(peer = %peer, error = %e, tls_len = tls_len, "TLS ClientHello body read failed; engaging masking fallback");
-                self.stats.increment_connects_bad();
+                self.stats
+                    .increment_connects_bad_with_class("tls_clienthello_read_error");
                 maybe_apply_mask_reject_delay(&self.config).await;
                 let (reader, writer) = self.stream.into_split();
                 return Ok(masking_outcome(
@@ -1177,7 +1207,8 @@ impl RunningClientHandler {
 
         if body_read < tls_len {
             debug!(peer = %peer, got = body_read, expected = tls_len, "Truncated in-range TLS ClientHello; engaging masking fallback");
-            self.stats.increment_connects_bad();
+            self.stats
+                .increment_connects_bad_with_class("tls_clienthello_truncated");
             maybe_apply_mask_reject_delay(&self.config).await;
             let initial_len = 5 + body_read;
             let (reader, writer) = self.stream.into_split();
@@ -1214,7 +1245,7 @@ impl RunningClientHandler {
         {
             HandshakeResult::Success(result) => result,
             HandshakeResult::BadClient { reader, writer } => {
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("tls_handshake_bad_client");
                 return Ok(masking_outcome(
                     reader,
                     writer,
@@ -1264,7 +1295,7 @@ impl RunningClientHandler {
                 };
                 let reader =
                     tokio::io::AsyncReadExt::chain(std::io::Cursor::new(pending_record), reader);
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("tls_mtproto_bad_client");
                 debug!(
                     peer = %peer,
                     "Authenticated TLS session failed MTProto validation; engaging masking fallback"
@@ -1311,7 +1342,8 @@ impl RunningClientHandler {
 
         if !self.config.general.modes.classic && !self.config.general.modes.secure {
             debug!(peer = %peer, "Non-TLS modes disabled");
-            self.stats.increment_connects_bad();
+            self.stats
+                .increment_connects_bad_with_class("direct_modes_disabled");
             maybe_apply_mask_reject_delay(&self.config).await;
             let (reader, writer) = self.stream.into_split();
             return Ok(masking_outcome(
@@ -1351,7 +1383,7 @@ impl RunningClientHandler {
         {
             HandshakeResult::Success(result) => result,
             HandshakeResult::BadClient { reader, writer } => {
-                stats.increment_connects_bad();
+                stats.increment_connects_bad_with_class("direct_mtproto_bad_client");
                 return Ok(masking_outcome(
                     reader,
                     writer,

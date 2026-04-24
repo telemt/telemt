@@ -5,7 +5,9 @@ use crate::protocol::constants::{
     MAX_TLS_CIPHERTEXT_SIZE, TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER,
     TLS_RECORD_HANDSHAKE, TLS_VERSION,
 };
-use crate::protocol::tls::{TLS_DIGEST_LEN, TLS_DIGEST_POS, gen_fake_x25519_key};
+use crate::protocol::tls::{
+    ClientHelloTlsVersion, TLS_DIGEST_LEN, TLS_DIGEST_POS, gen_fake_x25519_key,
+};
 use crate::tls_front::types::{CachedTlsData, ParsedCertificateInfo, TlsProfileSource};
 use crc32fast::Hasher;
 
@@ -190,6 +192,8 @@ pub fn build_emulated_server_hello(
     session_id: &[u8],
     cached: &CachedTlsData,
     use_full_cert_payload: bool,
+    serverhello_compact: bool,
+    client_tls_version: ClientHelloTlsVersion,
     rng: &SecureRandom,
     alpn: Option<Vec<u8>>,
     new_session_tickets: u8,
@@ -265,20 +269,33 @@ pub fn build_emulated_server_hello(
             }
         }
     };
-    let compact_payload = cached
-        .cert_info
-        .as_ref()
-        .and_then(build_compact_cert_info_payload)
-        .and_then(hash_compact_cert_info_payload);
-    let selected_payload: Option<&[u8]> = if use_full_cert_payload {
+    let compact_payload = if serverhello_compact {
         cached
-            .cert_payload
+            .cert_info
             .as_ref()
-            .map(|payload| payload.certificate_message.as_slice())
-            .filter(|payload| !payload.is_empty())
-            .or(compact_payload.as_deref())
+            .and_then(build_compact_cert_info_payload)
+            .and_then(hash_compact_cert_info_payload)
     } else {
-        compact_payload.as_deref()
+        None
+    };
+    let full_payload = cached
+        .cert_payload
+        .as_ref()
+        .map(|payload| payload.certificate_message.as_slice())
+        .filter(|payload| !payload.is_empty());
+    let selected_payload: Option<&[u8]> = match client_tls_version {
+        ClientHelloTlsVersion::Tls13 => None,
+        ClientHelloTlsVersion::Tls12 => {
+            if serverhello_compact {
+                if use_full_cert_payload {
+                    full_payload.or(compact_payload.as_deref())
+                } else {
+                    compact_payload.as_deref()
+                }
+            } else {
+                full_payload
+            }
+        }
     };
 
     if let Some(payload) = selected_payload {
@@ -402,6 +419,7 @@ mod tests {
     use crate::protocol::constants::{
         TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
     };
+    use crate::protocol::tls::ClientHelloTlsVersion;
 
     fn first_app_data_payload(response: &[u8]) -> &[u8] {
         let hello_len = u16::from_be_bytes([response[3], response[4]]) as usize;
@@ -448,6 +466,8 @@ mod tests {
             &[0x22; 16],
             &cached,
             true,
+            true,
+            ClientHelloTlsVersion::Tls12,
             &rng,
             None,
             0,
@@ -474,6 +494,8 @@ mod tests {
             &[0x33; 16],
             &cached,
             true,
+            true,
+            ClientHelloTlsVersion::Tls12,
             &rng,
             None,
             0,
@@ -506,6 +528,8 @@ mod tests {
             &[0x55; 16],
             &cached,
             false,
+            true,
+            ClientHelloTlsVersion::Tls12,
             &rng,
             None,
             0,
@@ -530,6 +554,68 @@ mod tests {
     }
 
     #[test]
+    fn test_build_emulated_server_hello_tls13_never_uses_cert_payload() {
+        let cert_msg = vec![0x0b, 0x00, 0x00, 0x05, 0x00, 0xaa, 0xbb, 0xcc, 0xdd];
+        let cached = make_cached(Some(TlsCertPayload {
+            cert_chain_der: vec![vec![0x30, 0x01, 0x00]],
+            certificate_message: cert_msg.clone(),
+        }));
+
+        let rng = SecureRandom::new();
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0x56; 32],
+            &[0x78; 16],
+            &cached,
+            true,
+            true,
+            ClientHelloTlsVersion::Tls13,
+            &rng,
+            None,
+            0,
+        );
+
+        let payload = first_app_data_payload(&response);
+        assert!(
+            !payload.starts_with(&cert_msg),
+            "TLS 1.3 response path must not expose certificate payload bytes"
+        );
+    }
+
+    #[test]
+    fn test_build_emulated_server_hello_compact_disabled_skips_compact_payload() {
+        let mut cached = make_cached(None);
+        cached.cert_info = Some(crate::tls_front::types::ParsedCertificateInfo {
+            not_after_unix: Some(1_900_000_000),
+            not_before_unix: Some(1_700_000_000),
+            issuer_cn: Some("Issuer".to_string()),
+            subject_cn: Some("example.com".to_string()),
+            san_names: vec!["example.com".to_string()],
+        });
+
+        let rng = SecureRandom::new();
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0x90; 32],
+            &[0x91; 16],
+            &cached,
+            false,
+            false,
+            ClientHelloTlsVersion::Tls12,
+            &rng,
+            Some(b"h2".to_vec()),
+            0,
+        );
+
+        let payload = first_app_data_payload(&response);
+        let expected_alpn_marker = [0x00u8, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'2'];
+        assert!(
+            payload.starts_with(&expected_alpn_marker),
+            "when compact mode is disabled and no full cert payload exists, the random/alpn path must be used"
+        );
+    }
+
+    #[test]
     fn test_build_emulated_server_hello_ignores_tail_records_for_profiled_tls() {
         let mut cached = make_cached(None);
         cached.app_data_records_sizes = vec![27, 3905, 537, 69];
@@ -545,6 +631,8 @@ mod tests {
             &[0x34; 16],
             &cached,
             false,
+            true,
+            ClientHelloTlsVersion::Tls13,
             &rng,
             None,
             0,

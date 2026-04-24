@@ -811,6 +811,122 @@ pub fn extract_alpn_from_client_hello(handshake: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
+/// ClientHello TLS generation inferred from handshake fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientHelloTlsVersion {
+    Tls12,
+    Tls13,
+}
+
+/// Detect TLS generation from a ClientHello.
+///
+/// The parser prefers `supported_versions` (0x002b) when present and falls back
+/// to `legacy_version` for compatibility with TLS 1.2 style hellos.
+pub fn detect_client_hello_tls_version(handshake: &[u8]) -> Option<ClientHelloTlsVersion> {
+    if handshake.len() < 5 || handshake[0] != TLS_RECORD_HANDSHAKE {
+        return None;
+    }
+
+    let record_len = u16::from_be_bytes([handshake[3], handshake[4]]) as usize;
+    if handshake.len() < 5 + record_len {
+        return None;
+    }
+
+    let mut pos = 5; // after record header
+    if handshake.get(pos) != Some(&0x01) {
+        return None; // not ClientHello
+    }
+    pos += 1; // message type
+
+    if pos + 3 > handshake.len() {
+        return None;
+    }
+    let handshake_len = ((handshake[pos] as usize) << 16)
+        | ((handshake[pos + 1] as usize) << 8)
+        | handshake[pos + 2] as usize;
+    pos += 3; // handshake length bytes
+    if pos + handshake_len > 5 + record_len {
+        return None;
+    }
+
+    if pos + 2 + 32 > handshake.len() {
+        return None;
+    }
+    let legacy_version = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
+    pos += 2 + 32; // version + random
+
+    let session_id_len = *handshake.get(pos)? as usize;
+    pos += 1 + session_id_len;
+    if pos + 2 > handshake.len() {
+        return None;
+    }
+
+    let cipher_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    pos += 2 + cipher_len;
+    if pos >= handshake.len() {
+        return None;
+    }
+
+    let comp_len = *handshake.get(pos)? as usize;
+    pos += 1 + comp_len;
+    if pos + 2 > handshake.len() {
+        return None;
+    }
+
+    let ext_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    pos += 2;
+    let ext_end = pos + ext_len;
+    if ext_end > handshake.len() {
+        return None;
+    }
+
+    while pos + 4 <= ext_end {
+        let etype = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]);
+        let elen = u16::from_be_bytes([handshake[pos + 2], handshake[pos + 3]]) as usize;
+        pos += 4;
+        if pos + elen > ext_end {
+            return None;
+        }
+
+        if etype == extension_type::SUPPORTED_VERSIONS {
+            if elen < 1 {
+                return None;
+            }
+            let list_len = handshake[pos] as usize;
+            if list_len == 0 || list_len % 2 != 0 || 1 + list_len > elen {
+                return None;
+            }
+
+            let mut has_tls12 = false;
+            let mut ver_pos = pos + 1;
+            let ver_end = ver_pos + list_len;
+            while ver_pos + 1 < ver_end {
+                let version = u16::from_be_bytes([handshake[ver_pos], handshake[ver_pos + 1]]);
+                if version == 0x0304 {
+                    return Some(ClientHelloTlsVersion::Tls13);
+                }
+                if version == 0x0303 || version == 0x0302 || version == 0x0301 {
+                    has_tls12 = true;
+                }
+                ver_pos += 2;
+            }
+
+            if has_tls12 {
+                return Some(ClientHelloTlsVersion::Tls12);
+            }
+            return None;
+        }
+
+        pos += elen;
+    }
+
+    if legacy_version >= 0x0303 {
+        Some(ClientHelloTlsVersion::Tls12)
+    } else {
+        None
+    }
+}
+
 /// Check if bytes look like a TLS ClientHello
 pub fn is_tls_handshake(first_bytes: &[u8]) -> bool {
     if first_bytes.len() < 3 {

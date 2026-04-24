@@ -1383,6 +1383,8 @@ fn emulated_server_hello_never_places_alpn_in_server_hello_extensions() {
         &session_id,
         &cached,
         false,
+        true,
+        ClientHelloTlsVersion::Tls13,
         &rng,
         Some(b"h2".to_vec()),
         0,
@@ -1622,6 +1624,34 @@ fn test_extract_alpn_multiple() {
         .map(|p| std::str::from_utf8(p).unwrap().to_string())
         .collect();
     assert_eq!(alpn_str, vec!["h2", "spdy", "h3"]);
+}
+
+#[test]
+fn detect_client_hello_tls_version_prefers_supported_versions_tls13() {
+    let supported_versions = vec![4, 0x03, 0x04, 0x03, 0x03];
+    let ch = build_client_hello_with_exts(vec![(0x002b, supported_versions)], "example.com");
+    assert_eq!(
+        detect_client_hello_tls_version(&ch),
+        Some(ClientHelloTlsVersion::Tls13)
+    );
+}
+
+#[test]
+fn detect_client_hello_tls_version_falls_back_to_legacy_tls12() {
+    let ch = build_client_hello_with_exts(Vec::new(), "example.com");
+    assert_eq!(
+        detect_client_hello_tls_version(&ch),
+        Some(ClientHelloTlsVersion::Tls12)
+    );
+}
+
+#[test]
+fn detect_client_hello_tls_version_rejects_malformed_supported_versions() {
+    // list_len=3 is invalid because version vector must contain u16 pairs.
+    let malformed_supported_versions = vec![3, 0x03, 0x04, 0x03];
+    let ch =
+        build_client_hello_with_exts(vec![(0x002b, malformed_supported_versions)], "example.com");
+    assert!(detect_client_hello_tls_version(&ch).is_none());
 }
 
 #[test]

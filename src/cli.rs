@@ -689,6 +689,7 @@ tls_domain = "{domain}"
 mask = true
 mask_port = 443
 fake_cert_len = 2048
+serverhello_compact = false
 tls_full_cert_ttl_secs = 90
 
 [access]

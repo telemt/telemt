@@ -24,7 +24,10 @@ use crate::transport::middle_proxy::MePool;
 use crate::transport::socket::set_linger_zero;
 use crate::transport::{ListenOptions, UpstreamManager, create_listener, find_listener_processes};
 
-use super::helpers::{is_expected_handshake_eof, print_proxy_links};
+use super::helpers::{
+    expected_handshake_close_description, is_expected_handshake_eof, peer_close_description,
+    print_proxy_links,
+};
 
 pub(crate) struct BoundListeners {
     pub(crate) listeners: Vec<(TcpListener, bool)>,
@@ -485,29 +488,9 @@ pub(crate) fn spawn_tcp_accept_loops(
                                     Ok(guard) => *guard,
                                     Err(_) => None,
                                 };
-                                let peer_closed = matches!(
-                                    &e,
-                                    crate::error::ProxyError::Io(ioe)
-                                        if matches!(
-                                            ioe.kind(),
-                                            std::io::ErrorKind::ConnectionReset
-                                                | std::io::ErrorKind::ConnectionAborted
-                                                | std::io::ErrorKind::BrokenPipe
-                                                | std::io::ErrorKind::NotConnected
-                                        )
-                                ) || matches!(
-                                    &e,
-                                    crate::error::ProxyError::Stream(
-                                        crate::error::StreamError::Io(ioe)
-                                    )
-                                        if matches!(
-                                            ioe.kind(),
-                                            std::io::ErrorKind::ConnectionReset
-                                                | std::io::ErrorKind::ConnectionAborted
-                                                | std::io::ErrorKind::BrokenPipe
-                                                | std::io::ErrorKind::NotConnected
-                                        )
-                                );
+                                let peer_close_reason = peer_close_description(&e);
+                                let handshake_close_reason =
+                                    expected_handshake_close_description(&e);
 
                                 let me_closed = matches!(
                                     &e,
@@ -518,12 +501,23 @@ pub(crate) fn spawn_tcp_accept_loops(
                                     crate::error::ProxyError::Proxy(msg) if msg == ROUTE_SWITCH_ERROR_MSG
                                 );
 
-                                match (peer_closed, me_closed) {
-                                    (true, _) => {
+                                match (peer_close_reason, me_closed) {
+                                    (Some(reason), _) => {
                                         if let Some(real_peer) = real_peer {
-                                            debug!(peer = %peer_addr, real_peer = %real_peer, error = %e, "Connection closed by client");
+                                            debug!(
+                                                peer = %peer_addr,
+                                                real_peer = %real_peer,
+                                                error = %e,
+                                                close_reason = reason,
+                                                "Connection closed by peer"
+                                            );
                                         } else {
-                                            debug!(peer = %peer_addr, error = %e, "Connection closed by client");
+                                            debug!(
+                                                peer = %peer_addr,
+                                                error = %e,
+                                                close_reason = reason,
+                                                "Connection closed by peer"
+                                            );
                                         }
                                     }
                                     (_, true) => {
@@ -541,10 +535,23 @@ pub(crate) fn spawn_tcp_accept_loops(
                                         }
                                     }
                                     _ if is_expected_handshake_eof(&e) => {
+                                        let reason = handshake_close_reason
+                                            .unwrap_or("Peer closed during initial handshake");
                                         if let Some(real_peer) = real_peer {
-                                            info!(peer = %peer_addr, real_peer = %real_peer, error = %e, "Connection closed during initial handshake");
+                                            info!(
+                                                peer = %peer_addr,
+                                                real_peer = %real_peer,
+                                                error = %e,
+                                                close_reason = reason,
+                                                "Connection closed during initial handshake"
+                                            );
                                         } else {
-                                            info!(peer = %peer_addr, error = %e, "Connection closed during initial handshake");
+                                            info!(
+                                                peer = %peer_addr,
+                                                error = %e,
+                                                close_reason = reason,
+                                                "Connection closed during initial handshake"
+                                            );
                                         }
                                     }
                                     _ => {

@@ -71,11 +71,19 @@ pub(super) struct HealthReadyData {
     pub(super) total_upstreams: usize,
 }
 
+#[derive(Serialize, Clone)]
+pub(super) struct ClassCount {
+    pub(super) class: String,
+    pub(super) total: u64,
+}
+
 #[derive(Serialize)]
 pub(super) struct SummaryData {
     pub(super) uptime_seconds: f64,
     pub(super) connections_total: u64,
     pub(super) connections_bad_total: u64,
+    pub(super) connections_bad_by_class: Vec<ClassCount>,
+    pub(super) handshake_failures_by_class: Vec<ClassCount>,
     pub(super) handshake_timeouts_total: u64,
     pub(super) configured_users: usize,
 }
@@ -91,6 +99,8 @@ pub(super) struct ZeroCoreData {
     pub(super) uptime_seconds: f64,
     pub(super) connections_total: u64,
     pub(super) connections_bad_total: u64,
+    pub(super) connections_bad_by_class: Vec<ClassCount>,
+    pub(super) handshake_failures_by_class: Vec<ClassCount>,
     pub(super) handshake_timeouts_total: u64,
     pub(super) accept_permit_timeout_total: u64,
     pub(super) configured_users: usize,

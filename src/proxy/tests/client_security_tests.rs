@@ -2494,6 +2494,46 @@ fn unexpected_eof_is_classified_without_string_matching() {
 }
 
 #[test]
+fn connection_reset_is_classified_as_expected_handshake_close() {
+    let beobachten = BeobachtenStore::new();
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = true;
+    config.general.beobachten_minutes = 1;
+
+    let reset = ProxyError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+    let peer_ip: IpAddr = "198.51.100.202".parse().unwrap();
+
+    record_handshake_failure_class(&beobachten, &config, peer_ip, &reset);
+
+    let snapshot = beobachten.snapshot_text(Duration::from_secs(60));
+    assert!(
+        snapshot.contains("[expected_64_got_0]"),
+        "ConnectionReset must be classified as expected handshake close"
+    );
+}
+
+#[test]
+fn stream_io_unexpected_eof_is_classified_without_string_matching() {
+    let beobachten = BeobachtenStore::new();
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = true;
+    config.general.beobachten_minutes = 1;
+
+    let eof = ProxyError::Stream(StreamError::Io(std::io::Error::from(
+        std::io::ErrorKind::UnexpectedEof,
+    )));
+    let peer_ip: IpAddr = "198.51.100.203".parse().unwrap();
+
+    record_handshake_failure_class(&beobachten, &config, peer_ip, &eof);
+
+    let snapshot = beobachten.snapshot_text(Duration::from_secs(60));
+    assert!(
+        snapshot.contains("[expected_64_got_0]"),
+        "StreamError::Io(UnexpectedEof) must be classified as expected handshake close"
+    );
+}
+
+#[test]
 fn non_eof_error_is_classified_as_other() {
     let beobachten = BeobachtenStore::new();
     let mut config = ProxyConfig::default();

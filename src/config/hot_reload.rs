@@ -624,6 +624,7 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
         || old.censorship.server_hello_delay_min_ms != new.censorship.server_hello_delay_min_ms
         || old.censorship.server_hello_delay_max_ms != new.censorship.server_hello_delay_max_ms
         || old.censorship.tls_new_session_tickets != new.censorship.tls_new_session_tickets
+        || old.censorship.serverhello_compact != new.censorship.serverhello_compact
         || old.censorship.tls_full_cert_ttl_secs != new.censorship.tls_full_cert_ttl_secs
         || old.censorship.alpn_enforce != new.censorship.alpn_enforce
         || old.censorship.mask_proxy_protocol != new.censorship.mask_proxy_protocol

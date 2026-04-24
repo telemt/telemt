@@ -20,6 +20,7 @@ use rustls::client::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError};
+use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
@@ -275,7 +276,7 @@ fn remember_profile_success(
     );
 }
 
-fn build_client_config() -> Arc<ClientConfig> {
+fn build_client_config(alpn_protocols: &[&[u8]]) -> Arc<ClientConfig> {
     let root = rustls::RootCertStore::empty();
 
     let provider = rustls::crypto::ring::default_provider();
@@ -288,6 +289,7 @@ fn build_client_config() -> Arc<ClientConfig> {
     config
         .dangerous()
         .set_certificate_verifier(Arc::new(NoVerify));
+    config.alpn_protocols = alpn_protocols.iter().map(|proto| proto.to_vec()).collect();
 
     Arc::new(config)
 }
@@ -359,6 +361,22 @@ fn profile_alpn(profile: TlsFetchProfile) -> &'static [&'static [u8]] {
     }
 }
 
+fn profile_alpn_labels(profile: TlsFetchProfile) -> &'static [&'static str] {
+    const H2_HTTP11: &[&str] = &["h2", "http/1.1"];
+    const HTTP11: &[&str] = &["http/1.1"];
+    match profile {
+        TlsFetchProfile::ModernChromeLike | TlsFetchProfile::ModernFirefoxLike => H2_HTTP11,
+        TlsFetchProfile::CompatTls12 | TlsFetchProfile::LegacyMinimal => HTTP11,
+    }
+}
+
+fn profile_session_id_len(profile: TlsFetchProfile) -> usize {
+    match profile {
+        TlsFetchProfile::ModernChromeLike | TlsFetchProfile::ModernFirefoxLike => 32,
+        TlsFetchProfile::CompatTls12 | TlsFetchProfile::LegacyMinimal => 0,
+    }
+}
+
 fn profile_supported_versions(profile: TlsFetchProfile) -> &'static [u16] {
     const MODERN: &[u16] = &[0x0304, 0x0303];
     const COMPAT: &[u16] = &[0x0303, 0x0304];
@@ -413,8 +431,20 @@ fn build_client_hello(
         body.extend_from_slice(&rng.bytes(32));
     }
 
-    // Session ID: empty
-    body.push(0);
+    // Use non-empty Session ID for modern TLS 1.3-like profiles to reduce middlebox friction.
+    let session_id_len = profile_session_id_len(profile);
+    let session_id = if session_id_len == 0 {
+        Vec::new()
+    } else if deterministic {
+        deterministic_bytes(
+            &format!("tls-fetch-session:{sni}:{}", profile.as_str()),
+            session_id_len,
+        )
+    } else {
+        rng.bytes(session_id_len)
+    };
+    body.push(session_id.len() as u8);
+    body.extend_from_slice(&session_id);
 
     let mut cipher_suites = profile_cipher_suites(profile).to_vec();
     if grease_enabled {
@@ -433,16 +463,26 @@ fn build_client_hello(
     // === Extensions ===
     let mut exts = Vec::new();
 
+    let mut push_extension = |ext_type: u16, data: &[u8]| {
+        exts.extend_from_slice(&ext_type.to_be_bytes());
+        exts.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        exts.extend_from_slice(data);
+    };
+
     // server_name (SNI)
     let sni_bytes = sni.as_bytes();
     let mut sni_ext = Vec::with_capacity(5 + sni_bytes.len());
     sni_ext.extend_from_slice(&(sni_bytes.len() as u16 + 3).to_be_bytes());
-    sni_ext.push(0); // host_name
+    sni_ext.push(0);
     sni_ext.extend_from_slice(&(sni_bytes.len() as u16).to_be_bytes());
     sni_ext.extend_from_slice(sni_bytes);
-    exts.extend_from_slice(&0x0000u16.to_be_bytes());
-    exts.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
-    exts.extend_from_slice(&sni_ext);
+    push_extension(0x0000, &sni_ext);
+
+    // Chrome-like profile keeps browser-like ordering and extension set.
+    if matches!(profile, TlsFetchProfile::ModernChromeLike) {
+        // ec_point_formats: uncompressed only.
+        push_extension(0x000b, &[0x01, 0x00]);
+    }
 
     // supported_groups
     let mut groups = profile_groups(profile).to_vec();
@@ -450,11 +490,16 @@ fn build_client_hello(
         let grease = grease_value(rng, deterministic, &format!("group:{sni}"));
         groups.insert(0, grease);
     }
-    exts.extend_from_slice(&0x000au16.to_be_bytes());
-    exts.extend_from_slice(&((2 + groups.len() * 2) as u16).to_be_bytes());
-    exts.extend_from_slice(&(groups.len() as u16 * 2).to_be_bytes());
+    let mut groups_ext = Vec::with_capacity(2 + groups.len() * 2);
+    groups_ext.extend_from_slice(&(groups.len() as u16 * 2).to_be_bytes());
     for g in groups {
-        exts.extend_from_slice(&g.to_be_bytes());
+        groups_ext.extend_from_slice(&g.to_be_bytes());
+    }
+    push_extension(0x000a, &groups_ext);
+
+    if matches!(profile, TlsFetchProfile::ModernChromeLike) {
+        // session_ticket
+        push_extension(0x0023, &[]);
     }
 
     // signature_algorithms
@@ -463,12 +508,12 @@ fn build_client_hello(
         let grease = grease_value(rng, deterministic, &format!("sigalg:{sni}"));
         sig_algs.insert(0, grease);
     }
-    exts.extend_from_slice(&0x000du16.to_be_bytes());
-    exts.extend_from_slice(&((2 + sig_algs.len() * 2) as u16).to_be_bytes());
-    exts.extend_from_slice(&(sig_algs.len() as u16 * 2).to_be_bytes());
+    let mut sig_algs_ext = Vec::with_capacity(2 + sig_algs.len() * 2);
+    sig_algs_ext.extend_from_slice(&(sig_algs.len() as u16 * 2).to_be_bytes());
     for a in sig_algs {
-        exts.extend_from_slice(&a.to_be_bytes());
+        sig_algs_ext.extend_from_slice(&a.to_be_bytes());
     }
+    push_extension(0x000d, &sig_algs_ext);
 
     // supported_versions
     let mut versions = profile_supported_versions(profile).to_vec();
@@ -476,30 +521,32 @@ fn build_client_hello(
         let grease = grease_value(rng, deterministic, &format!("version:{sni}"));
         versions.insert(0, grease);
     }
-    exts.extend_from_slice(&0x002bu16.to_be_bytes());
-    exts.extend_from_slice(&((1 + versions.len() * 2) as u16).to_be_bytes());
-    exts.push((versions.len() * 2) as u8);
+    let mut versions_ext = Vec::with_capacity(1 + versions.len() * 2);
+    versions_ext.push((versions.len() * 2) as u8);
     for v in versions {
-        exts.extend_from_slice(&v.to_be_bytes());
+        versions_ext.extend_from_slice(&v.to_be_bytes());
+    }
+    push_extension(0x002b, &versions_ext);
+
+    if matches!(profile, TlsFetchProfile::ModernChromeLike) {
+        // psk_key_exchange_modes: psk_dhe_ke
+        push_extension(0x002d, &[0x01, 0x01]);
     }
 
     // key_share (x25519)
-    let key = if deterministic {
-        let det = deterministic_bytes(&format!("keyshare:{sni}"), 32);
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&det);
-        key
-    } else {
-        gen_key_share(rng)
-    };
+    let key = gen_key_share(
+        rng,
+        deterministic,
+        &format!("tls-fetch-keyshare:{sni}:{}", profile.as_str()),
+    );
     let mut keyshare = Vec::with_capacity(4 + key.len());
-    keyshare.extend_from_slice(&0x001du16.to_be_bytes()); // group
+    keyshare.extend_from_slice(&0x001du16.to_be_bytes());
     keyshare.extend_from_slice(&(key.len() as u16).to_be_bytes());
     keyshare.extend_from_slice(&key);
-    exts.extend_from_slice(&0x0033u16.to_be_bytes());
-    exts.extend_from_slice(&((2 + keyshare.len()) as u16).to_be_bytes());
-    exts.extend_from_slice(&(keyshare.len() as u16).to_be_bytes());
-    exts.extend_from_slice(&keyshare);
+    let mut keyshare_ext = Vec::with_capacity(2 + keyshare.len());
+    keyshare_ext.extend_from_slice(&(keyshare.len() as u16).to_be_bytes());
+    keyshare_ext.extend_from_slice(&keyshare);
+    push_extension(0x0033, &keyshare_ext);
 
     // ALPN
     let mut alpn_list = Vec::new();
@@ -508,16 +555,15 @@ fn build_client_hello(
         alpn_list.extend_from_slice(proto);
     }
     if !alpn_list.is_empty() {
-        exts.extend_from_slice(&0x0010u16.to_be_bytes());
-        exts.extend_from_slice(&((2 + alpn_list.len()) as u16).to_be_bytes());
-        exts.extend_from_slice(&(alpn_list.len() as u16).to_be_bytes());
-        exts.extend_from_slice(&alpn_list);
+        let mut alpn_ext = Vec::with_capacity(2 + alpn_list.len());
+        alpn_ext.extend_from_slice(&(alpn_list.len() as u16).to_be_bytes());
+        alpn_ext.extend_from_slice(&alpn_list);
+        push_extension(0x0010, &alpn_ext);
     }
 
     if grease_enabled {
         let grease = grease_value(rng, deterministic, &format!("ext:{sni}"));
-        exts.extend_from_slice(&grease.to_be_bytes());
-        exts.extend_from_slice(&0u16.to_be_bytes());
+        push_extension(grease, &[]);
     }
 
     // padding to reduce recognizability and keep length ~500 bytes
@@ -553,10 +599,14 @@ fn build_client_hello(
     record
 }
 
-fn gen_key_share(rng: &SecureRandom) -> [u8; 32] {
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&rng.bytes(32));
-    key
+fn gen_key_share(rng: &SecureRandom, deterministic: bool, seed: &str) -> [u8; 32] {
+    let mut scalar = [0u8; 32];
+    if deterministic {
+        scalar.copy_from_slice(&deterministic_bytes(seed, 32));
+    } else {
+        scalar.copy_from_slice(&rng.bytes(32));
+    }
+    x25519(scalar, X25519_BASEPOINT_BYTES)
 }
 
 async fn read_tls_record<S>(stream: &mut S) -> Result<(u8, Vec<u8>)>
@@ -1018,6 +1068,7 @@ async fn fetch_via_rustls_stream<S>(
     host: &str,
     sni: &str,
     proxy_header: Option<Vec<u8>>,
+    alpn_protocols: &[&[u8]],
 ) -> Result<TlsFetchResult>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1028,7 +1079,7 @@ where
         stream.flush().await?;
     }
 
-    let config = build_client_config();
+    let config = build_client_config(alpn_protocols);
     let connector = TlsConnector::from(config);
 
     let server_name = ServerName::try_from(sni.to_owned())
@@ -1113,6 +1164,7 @@ async fn fetch_via_rustls(
     proxy_protocol: u8,
     unix_sock: Option<&str>,
     strict_route: bool,
+    alpn_protocols: &[&[u8]],
 ) -> Result<TlsFetchResult> {
     #[cfg(unix)]
     if let Some(sock_path) = unix_sock {
@@ -1124,7 +1176,8 @@ async fn fetch_via_rustls(
                     "Rustls fetch using mask unix socket"
                 );
                 let proxy_header = build_tls_fetch_proxy_header(proxy_protocol, None, None);
-                return fetch_via_rustls_stream(stream, host, sni, proxy_header).await;
+                return fetch_via_rustls_stream(stream, host, sni, proxy_header, alpn_protocols)
+                    .await;
             }
             Ok(Err(e)) => {
                 warn!(
@@ -1152,7 +1205,7 @@ async fn fetch_via_rustls(
             .await?;
     let (src_addr, dst_addr) = socket_addrs_from_upstream_stream(&stream);
     let proxy_header = build_tls_fetch_proxy_header(proxy_protocol, src_addr, dst_addr);
-    fetch_via_rustls_stream(stream, host, sni, proxy_header).await
+    fetch_via_rustls_stream(stream, host, sni, proxy_header, alpn_protocols).await
 }
 
 /// Fetch real TLS metadata with an adaptive multi-profile strategy.
@@ -1191,6 +1244,14 @@ pub async fn fetch_real_tls_with_strategy(
             break;
         }
         let timeout_for_attempt = attempt_timeout.min(total_budget - elapsed);
+        debug!(
+            sni = %sni,
+            profile = profile.as_str(),
+            alpn = ?profile_alpn_labels(profile),
+            grease_enabled = strategy.grease_enabled,
+            deterministic = strategy.deterministic,
+            "TLS fetch ClientHello params (raw)"
+        );
 
         match fetch_via_raw_tls(
             host,
@@ -1256,6 +1317,16 @@ pub async fn fetch_real_tls_with_strategy(
     }
 
     let rustls_timeout = attempt_timeout.min(total_budget - elapsed);
+    let rustls_profile = selected_profile.unwrap_or(TlsFetchProfile::ModernChromeLike);
+    let rustls_alpn_protocols = profile_alpn(rustls_profile);
+    debug!(
+        sni = %sni,
+        profile = rustls_profile.as_str(),
+        alpn = ?profile_alpn_labels(rustls_profile),
+        grease_enabled = strategy.grease_enabled,
+        deterministic = strategy.deterministic,
+        "TLS fetch ClientHello params (rustls)"
+    );
     let rustls_result = fetch_via_rustls(
         host,
         port,
@@ -1266,6 +1337,7 @@ pub async fn fetch_real_tls_with_strategy(
         proxy_protocol,
         unix_sock,
         strategy.strict_route,
+        rustls_alpn_protocols,
     )
     .await;
 
@@ -1327,8 +1399,8 @@ mod tests {
 
     use super::{
         ProfileCacheValue, TlsFetchStrategy, build_client_hello, build_tls_fetch_proxy_header,
-        derive_behavior_profile, encode_tls13_certificate_message, order_profiles, profile_cache,
-        profile_cache_key,
+        derive_behavior_profile, encode_tls13_certificate_message, fetch_via_rustls_stream,
+        order_profiles, profile_alpn, profile_cache, profile_cache_key,
     };
     use crate::config::TlsFetchProfile;
     use crate::crypto::SecureRandom;
@@ -1336,9 +1408,113 @@ mod tests {
         TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
     };
     use crate::tls_front::types::TlsProfileSource;
+    use tokio::io::AsyncReadExt;
+
+    struct ParsedClientHelloForTest {
+        session_id: Vec<u8>,
+        extensions: Vec<(u16, Vec<u8>)>,
+    }
 
     fn read_u24(bytes: &[u8]) -> usize {
         ((bytes[0] as usize) << 16) | ((bytes[1] as usize) << 8) | (bytes[2] as usize)
+    }
+
+    fn parse_client_hello_for_test(record: &[u8]) -> ParsedClientHelloForTest {
+        assert!(record.len() >= 9, "record too short");
+        assert_eq!(record[0], TLS_RECORD_HANDSHAKE, "not a handshake record");
+        let record_len = u16::from_be_bytes([record[3], record[4]]) as usize;
+        assert_eq!(record.len(), 5 + record_len, "record length mismatch");
+
+        let handshake = &record[5..];
+        assert_eq!(handshake[0], 0x01, "not a ClientHello handshake");
+        let hello_len = read_u24(&handshake[1..4]);
+        assert_eq!(handshake.len(), 4 + hello_len, "handshake length mismatch");
+        let hello = &handshake[4..];
+
+        let mut pos = 0usize;
+        pos += 2;
+        pos += 32;
+
+        let session_len = hello[pos] as usize;
+        pos += 1;
+        let session_id = hello[pos..pos + session_len].to_vec();
+        pos += session_len;
+
+        let cipher_len = u16::from_be_bytes([hello[pos], hello[pos + 1]]) as usize;
+        pos += 2 + cipher_len;
+
+        let compression_len = hello[pos] as usize;
+        pos += 1 + compression_len;
+
+        let ext_len = u16::from_be_bytes([hello[pos], hello[pos + 1]]) as usize;
+        pos += 2;
+        let ext_end = pos + ext_len;
+        assert_eq!(ext_end, hello.len(), "extensions length mismatch");
+
+        let mut extensions = Vec::new();
+        while pos + 4 <= ext_end {
+            let ext_type = u16::from_be_bytes([hello[pos], hello[pos + 1]]);
+            let data_len = u16::from_be_bytes([hello[pos + 2], hello[pos + 3]]) as usize;
+            pos += 4;
+            let data = hello[pos..pos + data_len].to_vec();
+            pos += data_len;
+            extensions.push((ext_type, data));
+        }
+        assert_eq!(pos, ext_end, "extension parse did not consume all bytes");
+
+        ParsedClientHelloForTest {
+            session_id,
+            extensions,
+        }
+    }
+
+    fn parse_alpn_protocols(data: &[u8]) -> Vec<Vec<u8>> {
+        assert!(data.len() >= 2, "ALPN extension is too short");
+        let protocols_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+        assert_eq!(protocols_len + 2, data.len(), "ALPN list length mismatch");
+        let mut pos = 2usize;
+        let mut out = Vec::new();
+        while pos < data.len() {
+            let len = data[pos] as usize;
+            pos += 1;
+            out.push(data[pos..pos + len].to_vec());
+            pos += len;
+        }
+        out
+    }
+
+    async fn capture_rustls_client_hello_record(
+        alpn_protocols: &'static [&'static [u8]],
+    ) -> Vec<u8> {
+        let (client, mut server) = tokio::io::duplex(32 * 1024);
+        let fetch_task = tokio::spawn(async move {
+            fetch_via_rustls_stream(client, "example.com", "example.com", None, alpn_protocols)
+                .await
+        });
+
+        let mut header = [0u8; 5];
+        server
+            .read_exact(&mut header)
+            .await
+            .expect("must read client hello record header");
+        let body_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let mut body = vec![0u8; body_len];
+        server
+            .read_exact(&mut body)
+            .await
+            .expect("must read client hello record body");
+        drop(server);
+
+        let result = fetch_task.await.expect("fetch task must join");
+        assert!(
+            result.is_err(),
+            "capture task should end with handshake error"
+        );
+
+        let mut record = Vec::with_capacity(5 + body_len);
+        record.extend_from_slice(&header);
+        record.extend_from_slice(&body);
+        record
     }
 
     #[test]
@@ -1468,6 +1644,186 @@ mod tests {
         );
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_raw_client_hello_alpn_matches_profile() {
+        let rng = SecureRandom::new();
+        for profile in [
+            TlsFetchProfile::ModernChromeLike,
+            TlsFetchProfile::ModernFirefoxLike,
+            TlsFetchProfile::CompatTls12,
+            TlsFetchProfile::LegacyMinimal,
+        ] {
+            let hello = build_client_hello("alpn.example", &rng, profile, false, true);
+            let parsed = parse_client_hello_for_test(&hello);
+            let alpn_ext = parsed
+                .extensions
+                .iter()
+                .find(|(ext_type, _)| *ext_type == 0x0010)
+                .expect("ALPN extension must exist");
+            let parsed_alpn = parse_alpn_protocols(&alpn_ext.1);
+            let expected_alpn = profile_alpn(profile)
+                .iter()
+                .map(|proto| proto.to_vec())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parsed_alpn,
+                expected_alpn,
+                "ALPN mismatch for {}",
+                profile.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_modern_chrome_like_browser_extension_layout() {
+        let rng = SecureRandom::new();
+        let hello = build_client_hello(
+            "chrome.example",
+            &rng,
+            TlsFetchProfile::ModernChromeLike,
+            false,
+            true,
+        );
+        let parsed = parse_client_hello_for_test(&hello);
+        assert_eq!(
+            parsed.session_id.len(),
+            32,
+            "modern chrome must use non-empty session id"
+        );
+
+        let extension_ids = parsed
+            .extensions
+            .iter()
+            .map(|(ext_type, _)| *ext_type)
+            .collect::<Vec<_>>();
+        let expected_prefix = [
+            0x0000, 0x000b, 0x000a, 0x0023, 0x000d, 0x002b, 0x002d, 0x0033, 0x0010,
+        ];
+        assert!(
+            extension_ids.as_slice().starts_with(&expected_prefix),
+            "unexpected extension order: {extension_ids:?}"
+        );
+        assert!(
+            extension_ids.contains(&0x0015),
+            "modern chrome profile should include padding extension"
+        );
+
+        let key_share = parsed
+            .extensions
+            .iter()
+            .find(|(ext_type, _)| *ext_type == 0x0033)
+            .expect("key_share extension must exist");
+        let key_share_data = &key_share.1;
+        assert!(
+            key_share_data.len() >= 2 + 4 + 32,
+            "key_share payload is too short"
+        );
+        let entry_len = u16::from_be_bytes([key_share_data[0], key_share_data[1]]) as usize;
+        assert_eq!(
+            entry_len,
+            key_share_data.len() - 2,
+            "key_share list length mismatch"
+        );
+        let group = u16::from_be_bytes([key_share_data[2], key_share_data[3]]);
+        let key_len = u16::from_be_bytes([key_share_data[4], key_share_data[5]]) as usize;
+        let key = &key_share_data[6..6 + key_len];
+        assert_eq!(group, 0x001d, "key_share group must be x25519");
+        assert_eq!(key_len, 32, "x25519 key length must be 32");
+        assert!(
+            key.iter().any(|b| *b != 0),
+            "x25519 key must not be all zero"
+        );
+    }
+
+    #[test]
+    fn test_fallback_profiles_keep_compat_extension_set() {
+        let rng = SecureRandom::new();
+        for profile in [
+            TlsFetchProfile::ModernFirefoxLike,
+            TlsFetchProfile::CompatTls12,
+            TlsFetchProfile::LegacyMinimal,
+        ] {
+            let hello = build_client_hello("fallback.example", &rng, profile, false, true);
+            let parsed = parse_client_hello_for_test(&hello);
+            let extension_ids = parsed
+                .extensions
+                .iter()
+                .map(|(ext_type, _)| *ext_type)
+                .collect::<Vec<_>>();
+
+            assert!(extension_ids.contains(&0x0000), "SNI extension must exist");
+            assert!(
+                extension_ids.contains(&0x000a),
+                "supported_groups extension must exist"
+            );
+            assert!(
+                extension_ids.contains(&0x000d),
+                "signature_algorithms extension must exist"
+            );
+            assert!(
+                extension_ids.contains(&0x002b),
+                "supported_versions extension must exist"
+            );
+            assert!(
+                extension_ids.contains(&0x0033),
+                "key_share extension must exist"
+            );
+            assert!(extension_ids.contains(&0x0010), "ALPN extension must exist");
+            assert!(
+                !extension_ids.contains(&0x000b),
+                "ec_point_formats must stay chrome-only"
+            );
+            assert!(
+                !extension_ids.contains(&0x0023),
+                "session_ticket must stay chrome-only"
+            );
+            assert!(
+                !extension_ids.contains(&0x002d),
+                "psk_key_exchange_modes must stay chrome-only"
+            );
+
+            let expected_session_len = if matches!(profile, TlsFetchProfile::ModernFirefoxLike) {
+                32
+            } else {
+                0
+            };
+            assert_eq!(
+                parsed.session_id.len(),
+                expected_session_len,
+                "unexpected session id length for {}",
+                profile.as_str()
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_rustls_client_hello_alpn_matches_selected_profile() {
+        for profile in [
+            TlsFetchProfile::ModernChromeLike,
+            TlsFetchProfile::CompatTls12,
+            TlsFetchProfile::LegacyMinimal,
+        ] {
+            let record = capture_rustls_client_hello_record(profile_alpn(profile)).await;
+            let parsed = parse_client_hello_for_test(&record);
+            let alpn_ext = parsed
+                .extensions
+                .iter()
+                .find(|(ext_type, _)| *ext_type == 0x0010)
+                .expect("ALPN extension must exist");
+            let parsed_alpn = parse_alpn_protocols(&alpn_ext.1);
+            let expected_alpn = profile_alpn(profile)
+                .iter()
+                .map(|proto| proto.to_vec())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parsed_alpn,
+                expected_alpn,
+                "rustls ALPN mismatch for {}",
+                profile.as_str()
+            );
+        }
     }
 
     #[test]
