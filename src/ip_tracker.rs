@@ -278,9 +278,11 @@ impl UserIpTracker {
             return Ok(());
         }
 
+        let is_new_ip = !user_recent.contains_key(&ip);
+
         if let Some(limit) = limit {
             let active_limit_reached = user_active.len() >= limit;
-            let recent_limit_reached = user_recent.len() >= limit;
+            let recent_limit_reached = user_recent.len() >= limit && is_new_ip;
             let deny = match mode {
                 UserMaxUniqueIpsMode::ActiveWindow => active_limit_reached,
                 UserMaxUniqueIpsMode::TimeWindow => recent_limit_reached,
@@ -859,5 +861,20 @@ mod tests {
             .map(|ips| ips.contains_key(&stale_ip))
             .unwrap_or(false);
         assert!(!stale_exists);
+    }
+
+    #[tokio::test]
+    async fn test_time_window_allows_same_ip_reconnect() {
+        let tracker = UserIpTracker::new();
+        tracker.set_user_limit("test_user", 1).await;
+        tracker
+            .set_limit_policy(UserMaxUniqueIpsMode::TimeWindow, 1)
+            .await;
+
+        let ip1 = test_ipv4(10, 4, 0, 1);
+
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
+        tracker.remove_ip("test_user", ip1).await;
+        assert!(tracker.check_and_add("test_user", ip1).await.is_ok());
     }
 }
