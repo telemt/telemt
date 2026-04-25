@@ -14,8 +14,9 @@ use super::config_store::{
 use super::model::{
     ApiFailure, CreateUserRequest, CreateUserResponse, PatchUserRequest, RotateSecretRequest,
     UserInfo, UserLinks, is_valid_ad_tag, is_valid_user_secret, is_valid_username,
-    parse_optional_expiration, random_user_secret,
+    parse_optional_expiration, parse_patch_expiration, random_user_secret,
 };
+use super::patch::Patch;
 
 pub(super) async fn create_user(
     body: CreateUserRequest,
@@ -182,14 +183,14 @@ pub(super) async fn patch_user(
             "secret must be exactly 32 hex characters",
         ));
     }
-    if let Some(ad_tag) = body.user_ad_tag.as_ref()
+    if let Patch::Set(ad_tag) = &body.user_ad_tag
         && !is_valid_ad_tag(ad_tag)
     {
         return Err(ApiFailure::bad_request(
             "user_ad_tag must be exactly 32 hex characters",
         ));
     }
-    let expiration = parse_optional_expiration(body.expiration_rfc3339.as_deref())?;
+    let expiration = parse_patch_expiration(&body.expiration_rfc3339)?;
     let _guard = shared.mutation_lock.lock().await;
     let mut cfg = load_config_from_disk(&shared.config_path).await?;
     ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
@@ -205,38 +206,71 @@ pub(super) async fn patch_user(
     if let Some(secret) = body.secret {
         cfg.access.users.insert(user.to_string(), secret);
     }
-    if let Some(ad_tag) = body.user_ad_tag {
-        cfg.access.user_ad_tags.insert(user.to_string(), ad_tag);
+    match body.user_ad_tag {
+        Patch::Unchanged => {}
+        Patch::Remove => {
+            cfg.access.user_ad_tags.remove(user);
+        }
+        Patch::Set(ad_tag) => {
+            cfg.access.user_ad_tags.insert(user.to_string(), ad_tag);
+        }
     }
-    if let Some(limit) = body.max_tcp_conns {
-        cfg.access
-            .user_max_tcp_conns
-            .insert(user.to_string(), limit);
+    match body.max_tcp_conns {
+        Patch::Unchanged => {}
+        Patch::Remove => {
+            cfg.access.user_max_tcp_conns.remove(user);
+        }
+        Patch::Set(limit) => {
+            cfg.access
+                .user_max_tcp_conns
+                .insert(user.to_string(), limit);
+        }
     }
-    if let Some(expiration) = expiration {
-        cfg.access
-            .user_expirations
-            .insert(user.to_string(), expiration);
+    match expiration {
+        Patch::Unchanged => {}
+        Patch::Remove => {
+            cfg.access.user_expirations.remove(user);
+        }
+        Patch::Set(expiration) => {
+            cfg.access
+                .user_expirations
+                .insert(user.to_string(), expiration);
+        }
     }
-    if let Some(quota) = body.data_quota_bytes {
-        cfg.access.user_data_quota.insert(user.to_string(), quota);
+    match body.data_quota_bytes {
+        Patch::Unchanged => {}
+        Patch::Remove => {
+            cfg.access.user_data_quota.remove(user);
+        }
+        Patch::Set(quota) => {
+            cfg.access.user_data_quota.insert(user.to_string(), quota);
+        }
     }
-
-    let mut updated_limit = None;
-    if let Some(limit) = body.max_unique_ips {
-        cfg.access
-            .user_max_unique_ips
-            .insert(user.to_string(), limit);
-        updated_limit = Some(limit);
-    }
+    // Capture how the per-user IP limit changed, so the in-memory ip_tracker
+    // can be synced (set or removed) after the config is persisted.
+    let max_unique_ips_change = match body.max_unique_ips {
+        Patch::Unchanged => None,
+        Patch::Remove => {
+            cfg.access.user_max_unique_ips.remove(user);
+            Some(None)
+        }
+        Patch::Set(limit) => {
+            cfg.access
+                .user_max_unique_ips
+                .insert(user.to_string(), limit);
+            Some(Some(limit))
+        }
+    };
 
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
 
     let revision = save_config_to_disk(&shared.config_path, &cfg).await?;
     drop(_guard);
-    if let Some(limit) = updated_limit {
-        shared.ip_tracker.set_user_limit(user, limit).await;
+    match max_unique_ips_change {
+        Some(Some(limit)) => shared.ip_tracker.set_user_limit(user, limit).await,
+        Some(None) => shared.ip_tracker.remove_user_limit(user).await,
+        None => {}
     }
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
     let users = users_from_config(

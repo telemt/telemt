@@ -12,6 +12,12 @@ fn make_pooled_payload(data: &[u8]) -> PooledBuffer {
     payload
 }
 
+fn make_c2me_permit() -> tokio::sync::OwnedSemaphorePermit {
+    Arc::new(tokio::sync::Semaphore::new(1))
+        .try_acquire_many_owned(1)
+        .expect("test permit must be available")
+}
+
 #[test]
 #[ignore = "Tracking for M-04: Verify should_emit_full_desync returns true on first occurrence and false on duplicate within window"]
 fn should_emit_full_desync_filters_duplicates() {
@@ -107,6 +113,7 @@ async fn c2me_channel_full_path_yields_then_sends() {
     tx.send(C2MeCommand::Data {
         payload: make_pooled_payload(&[0xAA]),
         flags: 1,
+        _permit: make_c2me_permit(),
     })
     .await
     .expect("priming queue with one frame must succeed");
@@ -119,6 +126,7 @@ async fn c2me_channel_full_path_yields_then_sends() {
             C2MeCommand::Data {
                 payload: make_pooled_payload(&[0xBB, 0xCC]),
                 flags: 2,
+                _permit: make_c2me_permit(),
             },
             None,
             &stats,
@@ -138,7 +146,7 @@ async fn c2me_channel_full_path_yields_then_sends() {
         .expect("receiver should observe primed frame")
         .expect("first queued command must exist");
     match first {
-        C2MeCommand::Data { payload, flags } => {
+        C2MeCommand::Data { payload, flags, .. } => {
             assert_eq!(payload.as_ref(), &[0xAA]);
             assert_eq!(flags, 1);
         }
@@ -155,7 +163,7 @@ async fn c2me_channel_full_path_yields_then_sends() {
         .expect("receiver should observe backpressure-resumed frame")
         .expect("second queued command must exist");
     match second {
-        C2MeCommand::Data { payload, flags } => {
+        C2MeCommand::Data { payload, flags, .. } => {
             assert_eq!(payload.as_ref(), &[0xBB, 0xCC]);
             assert_eq!(flags, 2);
         }

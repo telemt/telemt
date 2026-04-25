@@ -70,6 +70,7 @@ async fn me_writer_write_fail_keeps_reserved_quota_and_tracks_fail_metrics() {
         MeResponse::Data {
             flags: 0,
             data: payload.clone(),
+            route_permit: None,
         },
         &mut writer,
         ProtoTag::Intermediate,
@@ -139,6 +140,7 @@ async fn me_writer_pre_write_quota_reject_happens_before_writer_poll() {
         MeResponse::Data {
             flags: 0,
             data: Bytes::from_static(&[0xAA, 0xBB, 0xCC]),
+            route_permit: None,
         },
         &mut writer,
         ProtoTag::Intermediate,

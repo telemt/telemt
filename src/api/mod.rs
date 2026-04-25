@@ -28,6 +28,7 @@ mod config_store;
 mod events;
 mod http_utils;
 mod model;
+mod patch;
 mod runtime_edge;
 mod runtime_init;
 mod runtime_min;

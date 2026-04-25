@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
 
+use super::patch::{Patch, patch_field};
 use crate::crypto::SecureRandom;
 
 const MAX_USERNAME_LEN: usize = 64;
@@ -507,11 +508,16 @@ pub(super) struct CreateUserRequest {
 #[derive(Deserialize)]
 pub(super) struct PatchUserRequest {
     pub(super) secret: Option<String>,
-    pub(super) user_ad_tag: Option<String>,
-    pub(super) max_tcp_conns: Option<usize>,
-    pub(super) expiration_rfc3339: Option<String>,
-    pub(super) data_quota_bytes: Option<u64>,
-    pub(super) max_unique_ips: Option<usize>,
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(super) user_ad_tag: Patch<String>,
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(super) max_tcp_conns: Patch<usize>,
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(super) expiration_rfc3339: Patch<String>,
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(super) data_quota_bytes: Patch<u64>,
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(super) max_unique_ips: Patch<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -528,6 +534,20 @@ pub(super) fn parse_optional_expiration(
     let parsed = DateTime::parse_from_rfc3339(raw)
         .map_err(|_| ApiFailure::bad_request("expiration_rfc3339 must be valid RFC3339"))?;
     Ok(Some(parsed.with_timezone(&Utc)))
+}
+
+pub(super) fn parse_patch_expiration(
+    value: &Patch<String>,
+) -> Result<Patch<DateTime<Utc>>, ApiFailure> {
+    match value {
+        Patch::Unchanged => Ok(Patch::Unchanged),
+        Patch::Remove => Ok(Patch::Remove),
+        Patch::Set(raw) => {
+            let parsed = DateTime::parse_from_rfc3339(raw)
+                .map_err(|_| ApiFailure::bad_request("expiration_rfc3339 must be valid RFC3339"))?;
+            Ok(Patch::Set(parsed.with_timezone(&Utc)))
+        }
+    }
 }
 
 pub(super) fn is_valid_user_secret(secret: &str) -> bool {

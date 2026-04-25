@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, trace, warn};
 
@@ -36,7 +36,11 @@ use crate::stream::{BufferPool, CryptoReader, CryptoWriter, PooledBuffer};
 use crate::transport::middle_proxy::{MePool, MeResponse, proto_flags_for_tag};
 
 enum C2MeCommand {
-    Data { payload: PooledBuffer, flags: u32 },
+    Data {
+        payload: PooledBuffer,
+        flags: u32,
+        _permit: OwnedSemaphorePermit,
+    },
     Close,
 }
 
@@ -47,6 +51,8 @@ const DESYNC_ERROR_CLASS: &str = "frame_too_large_crypto_desync";
 const C2ME_CHANNEL_CAPACITY_FALLBACK: usize = 128;
 const C2ME_SOFT_PRESSURE_MIN_FREE_SLOTS: usize = 64;
 const C2ME_SENDER_FAIRNESS_BUDGET: usize = 32;
+const C2ME_QUEUED_BYTE_PERMIT_UNIT: usize = 16 * 1024;
+const C2ME_QUEUED_PERMITS_PER_SLOT: usize = 4;
 const RELAY_IDLE_IO_POLL_MAX: Duration = Duration::from_secs(1);
 const TINY_FRAME_DEBT_PER_TINY: u32 = 8;
 const TINY_FRAME_DEBT_LIMIT: u32 = 512;
@@ -569,6 +575,43 @@ fn report_desync_frame_too_large(
 
 fn should_yield_c2me_sender(sent_since_yield: usize, has_backlog: bool) -> bool {
     has_backlog && sent_since_yield >= C2ME_SENDER_FAIRNESS_BUDGET
+}
+
+fn c2me_payload_permits(payload_len: usize) -> u32 {
+    payload_len
+        .max(1)
+        .div_ceil(C2ME_QUEUED_BYTE_PERMIT_UNIT)
+        .min(u32::MAX as usize) as u32
+}
+
+fn c2me_queued_permit_budget(channel_capacity: usize, frame_limit: usize) -> usize {
+    channel_capacity
+        .saturating_mul(C2ME_QUEUED_PERMITS_PER_SLOT)
+        .max(c2me_payload_permits(frame_limit) as usize)
+        .max(1)
+}
+
+async fn acquire_c2me_payload_permit(
+    semaphore: &Arc<Semaphore>,
+    payload_len: usize,
+    send_timeout: Option<Duration>,
+    stats: &Stats,
+) -> Result<OwnedSemaphorePermit> {
+    let permits = c2me_payload_permits(payload_len);
+    let acquire = semaphore.clone().acquire_many_owned(permits);
+    match send_timeout {
+        Some(send_timeout) => match timeout(send_timeout, acquire).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_)) => Err(ProxyError::Proxy("ME sender byte budget closed".into())),
+            Err(_) => {
+                stats.increment_me_c2me_send_timeout_total();
+                Err(ProxyError::Proxy("ME sender byte budget timeout".into()))
+            }
+        },
+        None => acquire
+            .await
+            .map_err(|_| ProxyError::Proxy("ME sender byte budget closed".into())),
+    }
 }
 
 fn quota_soft_cap(limit: u64, overshoot: u64) -> u64 {
@@ -1122,13 +1165,19 @@ where
         0 => None,
         timeout_ms => Some(Duration::from_millis(timeout_ms)),
     };
+    let c2me_byte_budget = c2me_queued_permit_budget(c2me_channel_capacity, frame_limit);
+    let c2me_byte_semaphore = Arc::new(Semaphore::new(c2me_byte_budget));
     let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(c2me_channel_capacity);
     let me_pool_c2me = me_pool.clone();
     let c2me_sender = tokio::spawn(async move {
         let mut sent_since_yield = 0usize;
         while let Some(cmd) = c2me_rx.recv().await {
             match cmd {
-                C2MeCommand::Data { payload, flags } => {
+                C2MeCommand::Data {
+                    payload,
+                    flags,
+                    _permit,
+                } => {
                     me_pool_c2me
                         .send_proxy_req(
                             conn_id,
@@ -1624,11 +1673,29 @@ where
                         if payload.len() >= 8 && payload[..8].iter().all(|b| *b == 0) {
                             flags |= RPC_FLAG_NOT_ENCRYPTED;
                         }
+                        let payload_permit = match acquire_c2me_payload_permit(
+                            &c2me_byte_semaphore,
+                            payload.len(),
+                            c2me_send_timeout,
+                            stats.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(permit) => permit,
+                            Err(e) => {
+                                main_result = Err(e);
+                                break;
+                            }
+                        };
                         // Keep client read loop lightweight: route heavy ME send path via a dedicated task.
                         if enqueue_c2me_command_in(
                             shared.as_ref(),
                             &c2me_tx,
-                            C2MeCommand::Data { payload, flags },
+                            C2MeCommand::Data {
+                                payload,
+                                flags,
+                                _permit: payload_permit,
+                            },
                             c2me_send_timeout,
                             stats.as_ref(),
                         )
@@ -2262,7 +2329,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     match response {
-        MeResponse::Data { flags, data } => {
+        MeResponse::Data { flags, data, .. } => {
             if batched {
                 trace!(conn_id, bytes = data.len(), flags, "ME->C data (batched)");
             } else {

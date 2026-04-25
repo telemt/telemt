@@ -84,6 +84,7 @@ async fn route_data_with_retry(
                 MeResponse::Data {
                     flags,
                     data: data.clone(),
+                    route_permit: None,
                 },
                 timeout_ms,
             )
@@ -639,7 +640,7 @@ mod tests {
         let routed = route_data_with_retry(&reg, conn_id, 0, Bytes::from_static(b"a"), 20).await;
         assert!(matches!(routed, RouteResult::Routed));
         match rx.recv().await {
-            Some(MeResponse::Data { flags, data }) => {
+            Some(MeResponse::Data { flags, data, .. }) => {
                 assert_eq!(flags, 0);
                 assert_eq!(data, Bytes::from_static(b"a"));
             }

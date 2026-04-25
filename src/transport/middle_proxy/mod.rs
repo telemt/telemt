@@ -46,6 +46,7 @@ mod send_adversarial_tests;
 mod wire;
 
 use bytes::Bytes;
+use tokio::sync::OwnedSemaphorePermit;
 
 #[allow(unused_imports)]
 pub use config_updater::{
@@ -68,9 +69,32 @@ pub use secret::{fetch_proxy_secret, fetch_proxy_secret_with_upstream};
 pub(crate) use selftest::{bnd_snapshot, timeskew_snapshot, upstream_bnd_snapshots};
 pub use wire::proto_flags_for_tag;
 
+/// Holds D2C queued-byte capacity until a routed payload is consumed or dropped.
+pub struct RouteBytePermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+impl std::fmt::Debug for RouteBytePermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouteBytePermit").finish_non_exhaustive()
+    }
+}
+
+impl RouteBytePermit {
+    pub(crate) fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self { _permit: permit }
+    }
+}
+
+/// Response routed from middle proxy readers to client relay tasks.
 #[derive(Debug)]
 pub enum MeResponse {
-    Data { flags: u32, data: Bytes },
+    /// Downstream payload with its queued-byte reservation.
+    Data {
+        flags: u32,
+        data: Bytes,
+        route_permit: Option<RouteBytePermit>,
+    },
     Ack(u32),
     Close,
 }
