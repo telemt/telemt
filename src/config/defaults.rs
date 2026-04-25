@@ -568,7 +568,7 @@ pub(crate) fn default_beobachten_flush_secs() -> u64 {
 }
 
 pub(crate) fn default_beobachten_file() -> String {
-    "/etc/telemt/beobachten.txt".to_string()
+    "cache/beobachten.txt".to_string()
 }
 
 pub(crate) fn default_tls_new_session_tickets() -> u8 {
