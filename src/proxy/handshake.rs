@@ -55,6 +55,7 @@ const STICKY_HINT_MAX_ENTRIES: usize = 65_536;
 const CANDIDATE_HINT_TRACK_CAP: usize = 64;
 const OVERLOAD_CANDIDATE_BUDGET_HINTED: usize = 16;
 const OVERLOAD_CANDIDATE_BUDGET_UNHINTED: usize = 8;
+const EXPENSIVE_INVALID_SCAN_SATURATION_THRESHOLD: usize = 64;
 const RECENT_USER_RING_SCAN_LIMIT: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -549,6 +550,19 @@ fn auth_probe_note_saturation_in(shared: &ProxySharedState, now: Instant) {
             });
         }
     }
+}
+
+fn auth_probe_note_expensive_invalid_scan_in(
+    shared: &ProxySharedState,
+    now: Instant,
+    validation_checks: usize,
+    overload: bool,
+) {
+    if overload || validation_checks < EXPENSIVE_INVALID_SCAN_SATURATION_THRESHOLD {
+        return;
+    }
+
+    auth_probe_note_saturation_in(shared, now);
 }
 
 fn auth_probe_record_failure_in(shared: &ProxySharedState, peer_ip: IpAddr, now: Instant) {
@@ -1378,7 +1392,14 @@ where
         }
 
         if !matched {
-            auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
+            let failure_now = Instant::now();
+            auth_probe_note_expensive_invalid_scan_in(
+                shared,
+                failure_now,
+                validation_checks,
+                overload,
+            );
+            auth_probe_record_failure_in(shared, peer.ip(), failure_now);
             maybe_apply_server_hello_delay(config).await;
             debug!(
                 peer = %peer,
@@ -1753,7 +1774,14 @@ where
         }
 
         if !matched {
-            auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
+            let failure_now = Instant::now();
+            auth_probe_note_expensive_invalid_scan_in(
+                shared,
+                failure_now,
+                validation_checks,
+                overload,
+            );
+            auth_probe_record_failure_in(shared, peer.ip(), failure_now);
             maybe_apply_server_hello_delay(config).await;
             debug!(
                 peer = %peer,

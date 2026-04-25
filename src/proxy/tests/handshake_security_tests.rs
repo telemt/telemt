@@ -1253,6 +1253,97 @@ async fn tls_overload_budget_limits_candidate_scan_depth() {
 }
 
 #[tokio::test]
+async fn tls_expensive_invalid_scan_activates_saturation_budget() {
+    let mut config = ProxyConfig::default();
+    config.access.users.clear();
+    config.access.ignore_time_skew = true;
+    for idx in 0..80u8 {
+        config.access.users.insert(
+            format!("user-{idx}"),
+            format!("{:032x}", u128::from(idx) + 1),
+        );
+    }
+    config.rebuild_runtime_user_auth().unwrap();
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let shared = ProxySharedState::new();
+    let attacker_secret = [0xEFu8; 16];
+    let handshake = make_valid_tls_handshake(&attacker_secret, 0);
+
+    let first_peer: SocketAddr = "198.51.100.214:44326".parse().unwrap();
+    let first = handle_tls_handshake_with_shared(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        first_peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+        shared.as_ref(),
+    )
+    .await;
+
+    assert!(matches!(first, HandshakeResult::BadClient { .. }));
+    assert!(
+        auth_probe_saturation_state_for_testing_in_shared(shared.as_ref())
+            .lock()
+            .unwrap()
+            .is_some(),
+        "expensive invalid scan must activate global saturation"
+    );
+    assert_eq!(
+        shared
+            .handshake
+            .auth_expensive_checks_total
+            .load(Ordering::Relaxed),
+        80,
+        "first invalid probe preserves full first-hit compatibility before enabling saturation"
+    );
+
+    {
+        let mut saturation = auth_probe_saturation_state_for_testing_in_shared(shared.as_ref())
+            .lock()
+            .unwrap();
+        let state = saturation.as_mut().expect("saturation must be present");
+        state.blocked_until = Instant::now() + Duration::from_millis(200);
+    }
+
+    let second_peer: SocketAddr = "198.51.100.215:44326".parse().unwrap();
+    let second = handle_tls_handshake_with_shared(
+        &handshake,
+        tokio::io::empty(),
+        tokio::io::sink(),
+        second_peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+        shared.as_ref(),
+    )
+    .await;
+
+    assert!(matches!(second, HandshakeResult::BadClient { .. }));
+    assert_eq!(
+        shared
+            .handshake
+            .auth_budget_exhausted_total
+            .load(Ordering::Relaxed),
+        1,
+        "second invalid probe must be capped by overload budget"
+    );
+    assert_eq!(
+        shared
+            .handshake
+            .auth_expensive_checks_total
+            .load(Ordering::Relaxed),
+        80 + OVERLOAD_CANDIDATE_BUDGET_UNHINTED as u64,
+        "saturation budget must bound follow-up invalid scans"
+    );
+}
+
+#[tokio::test]
 async fn mtproto_runtime_snapshot_prefers_preferred_user_hint() {
     let mut config = ProxyConfig::default();
     config.general.modes.secure = true;

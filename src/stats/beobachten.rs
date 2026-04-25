@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_BEOBACHTEN_ENTRIES: usize = 65_536;
 
 #[derive(Default)]
 struct BeobachtenInner {
@@ -48,12 +49,23 @@ impl BeobachtenStore {
         Self::cleanup_if_needed(&mut guard, now, ttl);
 
         let key = (class.to_string(), ip);
-        let entry = guard.entries.entry(key).or_insert(BeobachtenEntry {
-            tries: 0,
-            last_seen: now,
-        });
-        entry.tries = entry.tries.saturating_add(1);
-        entry.last_seen = now;
+        if let Some(entry) = guard.entries.get_mut(&key) {
+            entry.tries = entry.tries.saturating_add(1);
+            entry.last_seen = now;
+            return;
+        }
+
+        if guard.entries.len() >= MAX_BEOBACHTEN_ENTRIES {
+            return;
+        }
+
+        guard.entries.insert(
+            key,
+            BeobachtenEntry {
+                tries: 1,
+                last_seen: now,
+            },
+        );
     }
 
     pub fn snapshot_text(&self, ttl: Duration) -> String {
