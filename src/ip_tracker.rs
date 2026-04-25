@@ -22,7 +22,7 @@ pub struct UserIpTracker {
     limit_mode: Arc<RwLock<UserMaxUniqueIpsMode>>,
     limit_window: Arc<RwLock<Duration>>,
     last_compact_epoch_secs: Arc<AtomicU64>,
-    cleanup_queue: Arc<Mutex<Vec<(String, IpAddr)>>>,
+    cleanup_queue: Arc<Mutex<HashMap<(String, IpAddr), usize>>>,
     cleanup_drain_lock: Arc<AsyncMutex<()>>,
 }
 
@@ -45,17 +45,21 @@ impl UserIpTracker {
             limit_mode: Arc::new(RwLock::new(UserMaxUniqueIpsMode::ActiveWindow)),
             limit_window: Arc::new(RwLock::new(Duration::from_secs(30))),
             last_compact_epoch_secs: Arc::new(AtomicU64::new(0)),
-            cleanup_queue: Arc::new(Mutex::new(Vec::new())),
+            cleanup_queue: Arc::new(Mutex::new(HashMap::new())),
             cleanup_drain_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
     pub fn enqueue_cleanup(&self, user: String, ip: IpAddr) {
         match self.cleanup_queue.lock() {
-            Ok(mut queue) => queue.push((user, ip)),
+            Ok(mut queue) => {
+                let count = queue.entry((user, ip)).or_insert(0);
+                *count = count.saturating_add(1);
+            }
             Err(poisoned) => {
                 let mut queue = poisoned.into_inner();
-                queue.push((user.clone(), ip));
+                let count = queue.entry((user.clone(), ip)).or_insert(0);
+                *count = count.saturating_add(1);
                 self.cleanup_queue.clear_poison();
                 tracing::warn!(
                     "UserIpTracker cleanup_queue lock poisoned; recovered and enqueued IP cleanup for {} ({})",
@@ -75,7 +79,9 @@ impl UserIpTracker {
     }
 
     #[cfg(test)]
-    pub(crate) fn cleanup_queue_mutex_for_tests(&self) -> Arc<Mutex<Vec<(String, IpAddr)>>> {
+    pub(crate) fn cleanup_queue_mutex_for_tests(
+        &self,
+    ) -> Arc<Mutex<HashMap<(String, IpAddr), usize>>> {
         Arc::clone(&self.cleanup_queue)
     }
 
@@ -105,11 +111,14 @@ impl UserIpTracker {
         };
 
         let mut active_ips = self.active_ips.write().await;
-        for (user, ip) in to_remove {
+        for ((user, ip), pending_count) in to_remove {
+            if pending_count == 0 {
+                continue;
+            }
             if let Some(user_ips) = active_ips.get_mut(&user) {
                 if let Some(count) = user_ips.get_mut(&ip) {
-                    if *count > 1 {
-                        *count -= 1;
+                    if *count > pending_count {
+                        *count -= pending_count;
                     } else {
                         user_ips.remove(&ip);
                     }

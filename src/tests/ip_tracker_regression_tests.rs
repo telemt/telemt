@@ -650,6 +650,25 @@ async fn duplicate_cleanup_entries_do_not_break_future_admission() {
 }
 
 #[tokio::test]
+async fn duplicate_cleanup_entries_are_coalesced_until_drain() {
+    let tracker = UserIpTracker::new();
+    let ip = ip_from_idx(7150);
+
+    tracker.enqueue_cleanup("coalesced-cleanup".to_string(), ip);
+    tracker.enqueue_cleanup("coalesced-cleanup".to_string(), ip);
+    tracker.enqueue_cleanup("coalesced-cleanup".to_string(), ip);
+
+    assert_eq!(
+        tracker.cleanup_queue_len_for_tests(),
+        1,
+        "duplicate queued cleanup entries must retain one allocation slot"
+    );
+
+    tracker.drain_cleanup_queue().await;
+    assert_eq!(tracker.cleanup_queue_len_for_tests(), 0);
+}
+
+#[tokio::test]
 async fn stress_repeated_queue_poison_recovery_preserves_admission_progress() {
     let tracker = UserIpTracker::new();
     tracker.set_user_limit("poison-stress", 1).await;

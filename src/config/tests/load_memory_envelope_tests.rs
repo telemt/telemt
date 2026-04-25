@@ -18,6 +18,20 @@ fn remove_temp_config(path: &PathBuf) {
 }
 
 #[test]
+fn defaults_enable_byte_bounded_route_fairness() {
+    let cfg = ProxyConfig::default();
+
+    assert!(
+        cfg.general.me_route_fairshare_enabled,
+        "D2C route fairness must be enabled by default to bound queued bytes"
+    );
+    assert!(
+        cfg.general.me_route_backpressure_enabled,
+        "D2C route backpressure must be enabled by default to shed under sustained pressure"
+    );
+}
+
+#[test]
 fn load_rejects_writer_cmd_capacity_above_upper_bound() {
     let path = write_temp_config(
         r#"
