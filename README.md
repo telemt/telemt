@@ -99,7 +99,7 @@ Monero (XMR) directly:
 8Bk4tZEYPQWSypeD2hrUXG2rKbAKF16GqEN942ZdAP5cFdSqW6h4DwkP5cJMAdszzuPeHeHZPTyjWWFwzeFdjuci3ktfMoB
 ```
 
-All donations go toward infrastructure, development, and research.
+All donations go toward infrastructure, development and research
 
 
 ![telemt_scheme](docs/assets/telemt.png)
