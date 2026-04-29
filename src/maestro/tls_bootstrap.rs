@@ -10,6 +10,14 @@ use crate::tls_front::TlsFrontCache;
 use crate::tls_front::fetcher::TlsFetchStrategy;
 use crate::transport::UpstreamManager;
 
+fn tls_fetch_host_for_domain(mask_host: &str, primary_tls_domain: &str, domain: &str) -> String {
+    if mask_host.eq_ignore_ascii_case(primary_tls_domain) {
+        domain.to_string()
+    } else {
+        mask_host.to_string()
+    }
+}
+
 pub(crate) async fn bootstrap_tls_front(
     config: &ProxyConfig,
     tls_domains: &[String],
@@ -56,6 +64,7 @@ pub(crate) async fn bootstrap_tls_front(
         let cache_initial = cache.clone();
         let domains_initial = tls_domains.to_vec();
         let host_initial = mask_host.clone();
+        let primary_initial = config.censorship.tls_domain.clone();
         let unix_sock_initial = mask_unix_sock.clone();
         let scope_initial = tls_fetch_scope.clone();
         let upstream_initial = upstream_manager.clone();
@@ -64,7 +73,8 @@ pub(crate) async fn bootstrap_tls_front(
             let mut join = tokio::task::JoinSet::new();
             for domain in domains_initial {
                 let cache_domain = cache_initial.clone();
-                let host_domain = host_initial.clone();
+                let host_domain =
+                    tls_fetch_host_for_domain(&host_initial, &primary_initial, &domain);
                 let unix_sock_domain = unix_sock_initial.clone();
                 let scope_domain = scope_initial.clone();
                 let upstream_domain = upstream_initial.clone();
@@ -117,6 +127,7 @@ pub(crate) async fn bootstrap_tls_front(
         let cache_refresh = cache.clone();
         let domains_refresh = tls_domains.to_vec();
         let host_refresh = mask_host.clone();
+        let primary_refresh = config.censorship.tls_domain.clone();
         let unix_sock_refresh = mask_unix_sock.clone();
         let scope_refresh = tls_fetch_scope.clone();
         let upstream_refresh = upstream_manager.clone();
@@ -130,7 +141,8 @@ pub(crate) async fn bootstrap_tls_front(
                 let mut join = tokio::task::JoinSet::new();
                 for domain in domains_refresh.clone() {
                     let cache_domain = cache_refresh.clone();
-                    let host_domain = host_refresh.clone();
+                    let host_domain =
+                        tls_fetch_host_for_domain(&host_refresh, &primary_refresh, &domain);
                     let unix_sock_domain = unix_sock_refresh.clone();
                     let scope_domain = scope_refresh.clone();
                     let upstream_domain = upstream_refresh.clone();
@@ -185,4 +197,25 @@ pub(crate) async fn bootstrap_tls_front(
     }
 
     tls_cache
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tls_fetch_host_for_domain;
+
+    #[test]
+    fn tls_fetch_host_uses_each_domain_when_mask_host_is_primary_default() {
+        assert_eq!(
+            tls_fetch_host_for_domain("a.com", "a.com", "b.com"),
+            "b.com"
+        );
+    }
+
+    #[test]
+    fn tls_fetch_host_preserves_explicit_non_primary_mask_host() {
+        assert_eq!(
+            tls_fetch_host_for_domain("origin.example", "a.com", "b.com"),
+            "origin.example"
+        );
+    }
 }

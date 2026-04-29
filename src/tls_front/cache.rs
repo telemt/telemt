@@ -130,6 +130,14 @@ impl TlsFrontCache {
                             warn!(file = %name, "Skipping TLS cache entry with invalid domain");
                             continue;
                         }
+                        if !cert_info_matches_domain(&cached) {
+                            warn!(
+                                file = %name,
+                                domain = %cached.domain,
+                                "Skipping TLS cache entry with mismatched certificate metadata"
+                            );
+                            continue;
+                        }
                         // fetched_at is skipped during deserialization; approximate with file mtime if available.
                         if let Ok(meta) = entry.metadata().await
                             && let Ok(modified) = meta.modified()
@@ -209,9 +217,99 @@ impl TlsFrontCache {
     }
 }
 
+fn cert_info_matches_domain(cached: &CachedTlsData) -> bool {
+    let Some(cert_info) = cached.cert_info.as_ref() else {
+        return true;
+    };
+    if !cert_info.san_names.is_empty() {
+        return cert_info
+            .san_names
+            .iter()
+            .any(|name| dns_name_matches_domain(name, &cached.domain));
+    }
+    cert_info
+        .subject_cn
+        .as_deref()
+        .map_or(true, |name| dns_name_matches_domain(name, &cached.domain))
+}
+
+fn dns_name_matches_domain(pattern: &str, domain: &str) -> bool {
+    let pattern = normalize_dns_name(pattern);
+    let domain = normalize_dns_name(domain);
+    if pattern == domain {
+        return true;
+    }
+
+    let Some(suffix) = pattern.strip_prefix("*.") else {
+        return false;
+    };
+    let Some(prefix) = domain.strip_suffix(suffix) else {
+        return false;
+    };
+    prefix.ends_with('.') && !prefix[..prefix.len() - 1].contains('.')
+}
+
+fn normalize_dns_name(value: &str) -> String {
+    value.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cached_with_cert_info(
+        domain: &str,
+        subject_cn: Option<&str>,
+        san_names: Vec<&str>,
+    ) -> CachedTlsData {
+        CachedTlsData {
+            server_hello_template: ParsedServerHello {
+                version: [0x03, 0x03],
+                random: [0u8; 32],
+                session_id: Vec::new(),
+                cipher_suite: [0x13, 0x01],
+                compression: 0,
+                extensions: Vec::new(),
+            },
+            cert_info: Some(crate::tls_front::types::ParsedCertificateInfo {
+                not_after_unix: None,
+                not_before_unix: None,
+                issuer_cn: None,
+                subject_cn: subject_cn.map(str::to_string),
+                san_names: san_names.into_iter().map(str::to_string).collect(),
+            }),
+            cert_payload: None,
+            app_data_records_sizes: vec![1024],
+            total_app_data_len: 1024,
+            behavior_profile: TlsBehaviorProfile::default(),
+            fetched_at: SystemTime::now(),
+            domain: domain.to_string(),
+        }
+    }
+
+    #[test]
+    fn cert_info_domain_match_accepts_exact_san() {
+        let cached = cached_with_cert_info("b.com", Some("a.com"), vec!["b.com"]);
+        assert!(cert_info_matches_domain(&cached));
+    }
+
+    #[test]
+    fn cert_info_domain_match_rejects_wrong_san() {
+        let cached = cached_with_cert_info("b.com", Some("b.com"), vec!["a.com"]);
+        assert!(!cert_info_matches_domain(&cached));
+    }
+
+    #[test]
+    fn cert_info_domain_match_accepts_single_label_wildcard_san() {
+        let cached = cached_with_cert_info("api.b.com", None, vec!["*.b.com"]);
+        assert!(cert_info_matches_domain(&cached));
+    }
+
+    #[test]
+    fn cert_info_domain_match_rejects_multi_label_wildcard_san() {
+        let cached = cached_with_cert_info("deep.api.b.com", None, vec!["*.b.com"]);
+        assert!(!cert_info_matches_domain(&cached));
+    }
 
     #[tokio::test]
     async fn test_take_full_cert_budget_for_ip_uses_ttl() {
