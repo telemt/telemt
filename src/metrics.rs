@@ -18,7 +18,12 @@ use crate::ip_tracker::UserIpTracker;
 use crate::proxy::shared_state::ProxySharedState;
 use crate::stats::Stats;
 use crate::stats::beobachten::BeobachtenStore;
+use crate::tls_front::cache;
+use crate::tls_front::fetcher;
 use crate::transport::{ListenOptions, create_listener};
+
+// Keeps `/metrics` response size bounded when per-user telemetry is enabled.
+const USER_LABELED_METRICS_MAX_USERS: usize = 4096;
 
 pub async fn serve(
     port: u16,
@@ -311,6 +316,12 @@ async fn render_metrics(
         "telemt_telemetry_user_enabled {}",
         if user_enabled { 1 } else { 0 }
     );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_stats_user_entries Retained per-user stats entries"
+    );
+    let _ = writeln!(out, "# TYPE telemt_stats_user_entries gauge");
+    let _ = writeln!(out, "telemt_stats_user_entries {}", stats.user_stats_len());
 
     let _ = writeln!(
         out,
@@ -364,6 +375,53 @@ async fn render_metrics(
         out,
         "telemt_buffer_pool_buffers_total{{kind=\"in_use\"}} {}",
         stats.get_buffer_pool_in_use_gauge()
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_tls_fetch_profile_cache_entries Current adaptive TLS fetch profile-cache entries"
+    );
+    let _ = writeln!(out, "# TYPE telemt_tls_fetch_profile_cache_entries gauge");
+    let _ = writeln!(
+        out,
+        "telemt_tls_fetch_profile_cache_entries {}",
+        fetcher::profile_cache_entries_for_metrics()
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_tls_fetch_profile_cache_cap_drops_total Profile-cache winner inserts skipped because the cache cap was reached"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_tls_fetch_profile_cache_cap_drops_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_tls_fetch_profile_cache_cap_drops_total {}",
+        fetcher::profile_cache_cap_drops_for_metrics()
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_tls_front_full_cert_budget_ips Current IP entries tracked by TLS full-cert budget"
+    );
+    let _ = writeln!(out, "# TYPE telemt_tls_front_full_cert_budget_ips gauge");
+    let _ = writeln!(
+        out,
+        "telemt_tls_front_full_cert_budget_ips {}",
+        cache::full_cert_sent_ips_for_metrics()
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_tls_front_full_cert_budget_cap_drops_total New IPs denied full-cert budget tracking because the cap was reached"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_tls_front_full_cert_budget_cap_drops_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_tls_front_full_cert_budget_cap_drops_total {}",
+        cache::full_cert_sent_cap_drops_for_metrics()
     );
 
     let _ = writeln!(
@@ -3019,17 +3077,6 @@ async fn render_metrics(
             0
         }
     );
-    let _ = writeln!(
-        out,
-        "# HELP telemt_telemetry_user_series_suppressed User-labeled metric series suppression flag"
-    );
-    let _ = writeln!(out, "# TYPE telemt_telemetry_user_series_suppressed gauge");
-    let _ = writeln!(
-        out,
-        "telemt_telemetry_user_series_suppressed {}",
-        if user_enabled { 0 } else { 1 }
-    );
-
     let ip_memory = ip_tracker.memory_stats().await;
     let _ = writeln!(
         out,
@@ -3071,11 +3118,46 @@ async fn render_metrics(
         "telemt_ip_tracker_cleanup_queue_len {}",
         ip_memory.cleanup_queue_len
     );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_ip_tracker_cleanup_total Release cleanups deferred through the cleanup queue"
+    );
+    let _ = writeln!(out, "# TYPE telemt_ip_tracker_cleanup_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_cleanup_total{{path=\"deferred\"}} {}",
+        ip_memory.cleanup_deferred_releases
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_ip_tracker_cap_rejects_total New connection rejects caused by global IP tracker caps"
+    );
+    let _ = writeln!(out, "# TYPE telemt_ip_tracker_cap_rejects_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_cap_rejects_total{{scope=\"active\"}} {}",
+        ip_memory.active_cap_rejects
+    );
+    let _ = writeln!(
+        out,
+        "telemt_ip_tracker_cap_rejects_total{{scope=\"recent\"}} {}",
+        ip_memory.recent_cap_rejects
+    );
+
+    let mut user_stats_emitted = 0usize;
+    let mut user_stats_suppressed = 0usize;
+    let mut unique_ip_emitted = 0usize;
+    let mut unique_ip_suppressed = 0usize;
 
     if user_enabled {
         for entry in stats.iter_user_stats() {
+            if user_stats_emitted >= USER_LABELED_METRICS_MAX_USERS {
+                user_stats_suppressed = user_stats_suppressed.saturating_add(1);
+                continue;
+            }
             let user = entry.key();
             let s = entry.value();
+            user_stats_emitted = user_stats_emitted.saturating_add(1);
             let _ = writeln!(
                 out,
                 "telemt_user_connections_total{{user=\"{}\"}} {}",
@@ -3117,7 +3199,7 @@ async fn render_metrics(
             );
         }
 
-        let ip_stats = ip_tracker.get_stats().await;
+        let ip_stats = ip_tracker.get_stats_snapshot().await;
         let ip_counts: HashMap<String, usize> = ip_stats
             .into_iter()
             .map(|(user, count, _)| (user, count))
@@ -3129,7 +3211,7 @@ async fn render_metrics(
         unique_users.extend(ip_counts.keys().cloned());
         let unique_users_vec: Vec<String> = unique_users.iter().cloned().collect();
         let recent_counts = ip_tracker
-            .get_recent_counts_for_users(&unique_users_vec)
+            .get_recent_counts_for_users_snapshot(&unique_users_vec)
             .await;
 
         let _ = writeln!(
@@ -3154,6 +3236,11 @@ async fn render_metrics(
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_utilization gauge");
 
         for user in unique_users {
+            if unique_ip_emitted >= USER_LABELED_METRICS_MAX_USERS {
+                unique_ip_suppressed = unique_ip_suppressed.saturating_add(1);
+                continue;
+            }
+            unique_ip_emitted = unique_ip_emitted.saturating_add(1);
             let current = ip_counts.get(&user).copied().unwrap_or(0);
             let limit = config
                 .access
@@ -3192,6 +3279,46 @@ async fn render_metrics(
             );
         }
     }
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_user_series_suppressed User-labeled metric series suppression flag"
+    );
+    let _ = writeln!(out, "# TYPE telemt_telemetry_user_series_suppressed gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_suppressed {}",
+        if user_enabled && user_stats_suppressed == 0 && unique_ip_suppressed == 0 {
+            0
+        } else {
+            1
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_user_series_users User-labeled metric users by export status"
+    );
+    let _ = writeln!(out, "# TYPE telemt_telemetry_user_series_users gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"stats\",status=\"emitted\"}} {}",
+        user_stats_emitted
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"stats\",status=\"suppressed\"}} {}",
+        user_stats_suppressed
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"unique_ip\",status=\"emitted\"}} {}",
+        unique_ip_emitted
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"unique_ip\",status=\"suppressed\"}} {}",
+        unique_ip_suppressed
+    );
 
     out
 }
@@ -3406,9 +3533,19 @@ mod tests {
         assert!(output.contains("# TYPE telemt_user_unique_ips_recent_window gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_limit gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_utilization gauge"));
+        assert!(output.contains("# TYPE telemt_stats_user_entries gauge"));
+        assert!(output.contains("# TYPE telemt_telemetry_user_series_users gauge"));
         assert!(output.contains("# TYPE telemt_ip_tracker_users gauge"));
         assert!(output.contains("# TYPE telemt_ip_tracker_entries gauge"));
         assert!(output.contains("# TYPE telemt_ip_tracker_cleanup_queue_len gauge"));
+        assert!(output.contains("# TYPE telemt_ip_tracker_cleanup_total counter"));
+        assert!(output.contains("# TYPE telemt_ip_tracker_cap_rejects_total counter"));
+        assert!(output.contains("# TYPE telemt_tls_fetch_profile_cache_entries gauge"));
+        assert!(output.contains("# TYPE telemt_tls_fetch_profile_cache_cap_drops_total counter"));
+        assert!(output.contains("# TYPE telemt_tls_front_full_cert_budget_ips gauge"));
+        assert!(
+            output.contains("# TYPE telemt_tls_front_full_cert_budget_cap_drops_total counter")
+        );
     }
 
     #[tokio::test]

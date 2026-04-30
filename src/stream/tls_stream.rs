@@ -277,6 +277,7 @@ impl StreamState for TlsReaderState {
 pub struct FakeTlsReader<R> {
     upstream: R,
     state: TlsReaderState,
+    body_scratch: Vec<u8>,
 }
 
 impl<R> FakeTlsReader<R> {
@@ -284,6 +285,7 @@ impl<R> FakeTlsReader<R> {
         Self {
             upstream,
             state: TlsReaderState::Idle,
+            body_scratch: Vec::new(),
         }
     }
 
@@ -439,7 +441,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for FakeTlsReader<R> {
                     length,
                     mut buffer,
                 } => {
-                    let result = poll_read_body(&mut this.upstream, cx, &mut buffer, length);
+                    let result = poll_read_body(
+                        &mut this.upstream,
+                        cx,
+                        &mut buffer,
+                        length,
+                        &mut this.body_scratch,
+                    );
 
                     match result {
                         BodyPollResult::Pending => {
@@ -558,34 +566,36 @@ fn poll_read_body<R: AsyncRead + Unpin>(
     cx: &mut Context<'_>,
     buffer: &mut BytesMut,
     target_len: usize,
+    scratch: &mut Vec<u8>,
 ) -> BodyPollResult {
-    // NOTE: This implementation uses a temporary Vec to avoid tricky borrow/lifetime
-    // issues with BytesMut spare capacity and ReadBuf across polls.
-    // It's safe and correct; optimization is possible if needed.
     while buffer.len() < target_len {
         let remaining = target_len - buffer.len();
+        let chunk_len = remaining.min(8192);
 
-        let mut temp = vec![0u8; remaining.min(8192)];
-        let mut read_buf = ReadBuf::new(&mut temp);
-
-        match Pin::new(&mut *upstream).poll_read(cx, &mut read_buf) {
-            Poll::Pending => return BodyPollResult::Pending,
-            Poll::Ready(Err(e)) => return BodyPollResult::Error(e),
-            Poll::Ready(Ok(())) => {
-                let n = read_buf.filled().len();
-                if n == 0 {
-                    return BodyPollResult::Error(Error::new(
-                        ErrorKind::UnexpectedEof,
-                        format!(
-                            "unexpected EOF in TLS body (got {} of {} bytes)",
-                            buffer.len(),
-                            target_len
-                        ),
-                    ));
-                }
-                buffer.extend_from_slice(&temp[..n]);
-            }
+        if scratch.len() < chunk_len {
+            scratch.resize(chunk_len, 0);
         }
+
+        let n = {
+            let mut read_buf = ReadBuf::new(&mut scratch[..chunk_len]);
+            match Pin::new(&mut *upstream).poll_read(cx, &mut read_buf) {
+                Poll::Pending => return BodyPollResult::Pending,
+                Poll::Ready(Err(e)) => return BodyPollResult::Error(e),
+                Poll::Ready(Ok(())) => read_buf.filled().len(),
+            }
+        };
+
+        if n == 0 {
+            return BodyPollResult::Error(Error::new(
+                ErrorKind::UnexpectedEof,
+                format!(
+                    "unexpected EOF in TLS body (got {} of {} bytes)",
+                    buffer.len(),
+                    target_len
+                ),
+            ));
+        }
+        buffer.extend_from_slice(&scratch[..n]);
     }
 
     BodyPollResult::Complete(buffer.split().freeze())

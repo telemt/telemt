@@ -3,7 +3,9 @@
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -144,10 +146,35 @@ enum FetchErrorKind {
     Other,
 }
 
+const PROFILE_CACHE_MAX_ENTRIES: usize = 4096;
+
 static PROFILE_CACHE: OnceLock<DashMap<ProfileCacheKey, ProfileCacheValue>> = OnceLock::new();
+static PROFILE_CACHE_INSERT_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+static PROFILE_CACHE_CAP_DROPS: AtomicU64 = AtomicU64::new(0);
 
 fn profile_cache() -> &'static DashMap<ProfileCacheKey, ProfileCacheValue> {
     PROFILE_CACHE.get_or_init(DashMap::new)
+}
+
+fn profile_cache_insert_guard() -> &'static Mutex<()> {
+    PROFILE_CACHE_INSERT_GUARD.get_or_init(|| Mutex::new(()))
+}
+
+fn sweep_expired_profile_cache(ttl: Duration, now: Instant) {
+    if ttl.is_zero() {
+        return;
+    }
+    profile_cache().retain(|_, value| now.saturating_duration_since(value.updated_at) <= ttl);
+}
+
+/// Current number of adaptive TLS fetch profile-cache entries.
+pub(crate) fn profile_cache_entries_for_metrics() -> usize {
+    profile_cache().len()
+}
+
+/// Number of fresh profile-cache winners skipped because the cache was full.
+pub(crate) fn profile_cache_cap_drops_for_metrics() -> u64 {
+    PROFILE_CACHE_CAP_DROPS.load(Ordering::Relaxed)
 }
 
 fn route_hint(
@@ -267,6 +294,43 @@ fn remember_profile_success(
     let Some(key) = cache_key else {
         return;
     };
+    remember_profile_success_with_cap(strategy, key, profile, now, PROFILE_CACHE_MAX_ENTRIES);
+}
+
+fn remember_profile_success_with_cap(
+    strategy: &TlsFetchStrategy,
+    key: ProfileCacheKey,
+    profile: TlsFetchProfile,
+    now: Instant,
+    max_entries: usize,
+) {
+    let Ok(_guard) = profile_cache_insert_guard().lock() else {
+        PROFILE_CACHE_CAP_DROPS.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    if max_entries == 0 {
+        PROFILE_CACHE_CAP_DROPS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if profile_cache().contains_key(&key) {
+        profile_cache().insert(
+            key,
+            ProfileCacheValue {
+                profile,
+                updated_at: now,
+            },
+        );
+        return;
+    }
+    if profile_cache().len() >= max_entries {
+        // TLS fetch is control-plane work; sweeping under a tiny mutex keeps
+        // profile-cache cardinality hard-bounded without touching relay hot paths.
+        sweep_expired_profile_cache(strategy.profile_cache_ttl, now);
+    }
+    if profile_cache().len() >= max_entries {
+        PROFILE_CACHE_CAP_DROPS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     profile_cache().insert(
         key,
         ProfileCacheValue {

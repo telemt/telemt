@@ -778,7 +778,7 @@ pub struct GeneralConfig {
     pub me_route_hybrid_max_wait_ms: u64,
 
     /// Maximum wait in milliseconds for blocking ME writer channel send fallback.
-    /// `0` keeps legacy unbounded wait behavior.
+    /// Must be within [1, 5000].
     #[serde(default = "default_me_route_blocking_send_timeout_ms")]
     pub me_route_blocking_send_timeout_ms: u64,
 

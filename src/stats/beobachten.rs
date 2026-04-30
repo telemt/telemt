@@ -74,16 +74,21 @@ impl BeobachtenStore {
         }
 
         let now = Instant::now();
-        let mut guard = self.inner.lock();
-        Self::cleanup(&mut guard, now, ttl);
-        guard.last_cleanup = Some(now);
+        let entries = {
+            let mut guard = self.inner.lock();
+            Self::cleanup(&mut guard, now, ttl);
+            guard.last_cleanup = Some(now);
+
+            guard
+                .entries
+                .iter()
+                .map(|((class, ip), entry)| (class.clone(), *ip, entry.tries))
+                .collect::<Vec<_>>()
+        };
 
         let mut grouped = BTreeMap::<String, Vec<(IpAddr, u64)>>::new();
-        for ((class, ip), entry) in &guard.entries {
-            grouped
-                .entry(class.clone())
-                .or_default()
-                .push((*ip, entry.tries));
+        for (class, ip, tries) in entries {
+            grouped.entry(class).or_default().push((ip, tries));
         }
 
         if grouped.is_empty() {

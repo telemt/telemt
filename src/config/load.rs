@@ -1087,9 +1087,9 @@ impl ProxyConfig {
             ));
         }
 
-        if config.general.me_route_blocking_send_timeout_ms > 5000 {
+        if !(1..=5000).contains(&config.general.me_route_blocking_send_timeout_ms) {
             return Err(ProxyError::Config(
-                "general.me_route_blocking_send_timeout_ms must be within [0, 5000]".to_string(),
+                "general.me_route_blocking_send_timeout_ms must be within [1, 5000]".to_string(),
             ));
         }
 
@@ -2599,6 +2599,26 @@ mod tests {
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
         assert!(err.contains("general.me_route_no_writer_wait_ms must be within [10, 5000]"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn me_route_blocking_send_timeout_ms_zero_is_rejected() {
+        let toml = r#"
+            [general]
+            me_route_blocking_send_timeout_ms = 0
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("telemt_me_route_blocking_send_timeout_zero_test.toml");
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+        assert!(err.contains("general.me_route_blocking_send_timeout_ms must be within [1, 5000]"));
         let _ = std::fs::remove_file(path);
     }
 

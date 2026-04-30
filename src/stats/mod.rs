@@ -2477,6 +2477,11 @@ impl Stats {
         self.user_stats.iter()
     }
 
+    /// Current number of retained per-user stats entries.
+    pub fn user_stats_len(&self) -> usize {
+        self.user_stats.len()
+    }
+
     pub fn uptime_secs(&self) -> f64 {
         self.start_time
             .read()

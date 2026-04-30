@@ -618,13 +618,9 @@ impl MePool {
                 me_route_hybrid_max_wait: Duration::from_millis(
                     me_route_hybrid_max_wait_ms.max(50),
                 ),
-                me_route_blocking_send_timeout: if me_route_blocking_send_timeout_ms == 0 {
-                    None
-                } else {
-                    Some(Duration::from_millis(
-                        me_route_blocking_send_timeout_ms.min(5_000),
-                    ))
-                },
+                me_route_blocking_send_timeout: Some(Duration::from_millis(
+                    me_route_blocking_send_timeout_ms.clamp(1, 5_000),
+                )),
                 me_route_last_success_epoch_ms: AtomicU64::new(0),
                 me_route_hybrid_timeout_warn_epoch_ms: AtomicU64::new(0),
                 me_async_recovery_last_trigger_epoch_ms: AtomicU64::new(0),

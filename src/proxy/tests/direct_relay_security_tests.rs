@@ -669,6 +669,13 @@ fn adversarial_check_then_symlink_flip_is_blocked_by_nofollow_open() {
             "telemt-unknown-dc-check-open-race-{}",
             std::process::id()
         ));
+    if let Ok(meta) = fs::symlink_metadata(&parent) {
+        if meta.file_type().is_symlink() || meta.is_file() {
+            fs::remove_file(&parent).expect("stale check-open-race path must be removable");
+        } else {
+            fs::remove_dir_all(&parent).expect("stale check-open-race parent must be removable");
+        }
+    }
     fs::create_dir_all(&parent).expect("check-open-race parent must be creatable");
 
     let target = parent.join("unknown-dc.log");
