@@ -1432,8 +1432,8 @@ impl RunningClientHandler {
 
     /// Main dispatch after successful handshake.
     /// Two modes:
-    ///   - Direct: TCP relay to TG DC (existing behavior)  
-    ///   - Middle Proxy: RPC multiplex through ME pool (new — supports CDN DCs)
+    ///   - Direct: TCP relay to TG DC (existing behavior)
+    ///   - Middle Proxy: RPC multiplex through ME pool (supports CDN DCs)
     #[cfg(test)]
     async fn handle_authenticated_static<R, W>(
         client_reader: CryptoReader<R>,

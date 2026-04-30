@@ -22,6 +22,9 @@ use crate::tls_front::cache;
 use crate::tls_front::fetcher;
 use crate::transport::{ListenOptions, create_listener};
 
+// Keeps `/metrics` response size bounded when per-user telemetry is enabled.
+const USER_LABELED_METRICS_MAX_USERS: usize = 4096;
+
 pub async fn serve(
     port: u16,
     listen: Option<String>,
@@ -313,6 +316,12 @@ async fn render_metrics(
         "telemt_telemetry_user_enabled {}",
         if user_enabled { 1 } else { 0 }
     );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_stats_user_entries Retained per-user stats entries"
+    );
+    let _ = writeln!(out, "# TYPE telemt_stats_user_entries gauge");
+    let _ = writeln!(out, "telemt_stats_user_entries {}", stats.user_stats_len());
 
     let _ = writeln!(
         out,
@@ -3071,17 +3080,6 @@ async fn render_metrics(
             0
         }
     );
-    let _ = writeln!(
-        out,
-        "# HELP telemt_telemetry_user_series_suppressed User-labeled metric series suppression flag"
-    );
-    let _ = writeln!(out, "# TYPE telemt_telemetry_user_series_suppressed gauge");
-    let _ = writeln!(
-        out,
-        "telemt_telemetry_user_series_suppressed {}",
-        if user_enabled { 0 } else { 1 }
-    );
-
     let ip_memory = ip_tracker.memory_stats().await;
     let _ = writeln!(
         out,
@@ -3154,10 +3152,20 @@ async fn render_metrics(
         ip_memory.recent_cap_rejects
     );
 
+    let mut user_stats_emitted = 0usize;
+    let mut user_stats_suppressed = 0usize;
+    let mut unique_ip_emitted = 0usize;
+    let mut unique_ip_suppressed = 0usize;
+
     if user_enabled {
         for entry in stats.iter_user_stats() {
+            if user_stats_emitted >= USER_LABELED_METRICS_MAX_USERS {
+                user_stats_suppressed = user_stats_suppressed.saturating_add(1);
+                continue;
+            }
             let user = entry.key();
             let s = entry.value();
+            user_stats_emitted = user_stats_emitted.saturating_add(1);
             let _ = writeln!(
                 out,
                 "telemt_user_connections_total{{user=\"{}\"}} {}",
@@ -3236,6 +3244,11 @@ async fn render_metrics(
         let _ = writeln!(out, "# TYPE telemt_user_unique_ips_utilization gauge");
 
         for user in unique_users {
+            if unique_ip_emitted >= USER_LABELED_METRICS_MAX_USERS {
+                unique_ip_suppressed = unique_ip_suppressed.saturating_add(1);
+                continue;
+            }
+            unique_ip_emitted = unique_ip_emitted.saturating_add(1);
             let current = ip_counts.get(&user).copied().unwrap_or(0);
             let limit = config
                 .access
@@ -3274,6 +3287,46 @@ async fn render_metrics(
             );
         }
     }
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_user_series_suppressed User-labeled metric series suppression flag"
+    );
+    let _ = writeln!(out, "# TYPE telemt_telemetry_user_series_suppressed gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_suppressed {}",
+        if user_enabled && user_stats_suppressed == 0 && unique_ip_suppressed == 0 {
+            0
+        } else {
+            1
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_telemetry_user_series_users User-labeled metric users by export status"
+    );
+    let _ = writeln!(out, "# TYPE telemt_telemetry_user_series_users gauge");
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"stats\",status=\"emitted\"}} {}",
+        user_stats_emitted
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"stats\",status=\"suppressed\"}} {}",
+        user_stats_suppressed
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"unique_ip\",status=\"emitted\"}} {}",
+        unique_ip_emitted
+    );
+    let _ = writeln!(
+        out,
+        "telemt_telemetry_user_series_users{{family=\"unique_ip\",status=\"suppressed\"}} {}",
+        unique_ip_suppressed
+    );
 
     out
 }
@@ -3488,6 +3541,8 @@ mod tests {
         assert!(output.contains("# TYPE telemt_user_unique_ips_recent_window gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_limit gauge"));
         assert!(output.contains("# TYPE telemt_user_unique_ips_utilization gauge"));
+        assert!(output.contains("# TYPE telemt_stats_user_entries gauge"));
+        assert!(output.contains("# TYPE telemt_telemetry_user_series_users gauge"));
         assert!(output.contains("# TYPE telemt_ip_tracker_users gauge"));
         assert!(output.contains("# TYPE telemt_ip_tracker_entries gauge"));
         assert!(output.contains("# TYPE telemt_ip_tracker_cleanup_queue_len gauge"));
