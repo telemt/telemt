@@ -456,6 +456,21 @@ async fn render_metrics(
 
     let _ = writeln!(
         out,
+        "# HELP telemt_connections_bad_by_class_total Bad/rejected connections by class"
+    );
+    let _ = writeln!(out, "# TYPE telemt_connections_bad_by_class_total counter");
+    if core_enabled {
+        for (class, total) in stats.get_connects_bad_class_counts() {
+            let _ = writeln!(
+                out,
+                "telemt_connections_bad_by_class_total{{class=\"{}\"}} {}",
+                class, total
+            );
+        }
+    }
+
+    let _ = writeln!(
+        out,
         "# HELP telemt_handshake_timeouts_total Handshake timeouts"
     );
     let _ = writeln!(out, "# TYPE telemt_handshake_timeouts_total counter");
@@ -468,6 +483,24 @@ async fn render_metrics(
             0
         }
     );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_handshake_failures_by_class_total Handshake failures by class"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_handshake_failures_by_class_total counter"
+    );
+    if core_enabled {
+        for (class, total) in stats.get_handshake_failure_class_counts() {
+            let _ = writeln!(
+                out,
+                "telemt_handshake_failures_by_class_total{{class=\"{}\"}} {}",
+                class, total
+            );
+        }
+    }
 
     let _ = writeln!(
         out,
@@ -3342,8 +3375,9 @@ mod tests {
 
         stats.increment_connects_all();
         stats.increment_connects_all();
-        stats.increment_connects_bad();
+        stats.increment_connects_bad_with_class("tls_handshake_bad_client");
         stats.increment_handshake_timeouts();
+        stats.increment_handshake_failure_class("timeout");
         shared_state
             .handshake
             .auth_expensive_checks_total
@@ -3403,7 +3437,10 @@ mod tests {
         )));
         assert!(output.contains("telemt_connections_total 2"));
         assert!(output.contains("telemt_connections_bad_total 1"));
+        assert!(output
+            .contains("telemt_connections_bad_by_class_total{class=\"tls_handshake_bad_client\"} 1"));
         assert!(output.contains("telemt_handshake_timeouts_total 1"));
+        assert!(output.contains("telemt_handshake_failures_by_class_total{class=\"timeout\"} 1"));
         assert!(output.contains("telemt_auth_expensive_checks_total 9"));
         assert!(output.contains("telemt_auth_budget_exhausted_total 2"));
         assert!(output.contains("telemt_upstream_connect_attempt_total 2"));
@@ -3503,7 +3540,9 @@ mod tests {
         assert!(output.contains("# TYPE telemt_uptime_seconds gauge"));
         assert!(output.contains("# TYPE telemt_connections_total counter"));
         assert!(output.contains("# TYPE telemt_connections_bad_total counter"));
+        assert!(output.contains("# TYPE telemt_connections_bad_by_class_total counter"));
         assert!(output.contains("# TYPE telemt_handshake_timeouts_total counter"));
+        assert!(output.contains("# TYPE telemt_handshake_failures_by_class_total counter"));
         assert!(output.contains("# TYPE telemt_auth_expensive_checks_total counter"));
         assert!(output.contains("# TYPE telemt_auth_budget_exhausted_total counter"));
         assert!(output.contains("# TYPE telemt_upstream_connect_attempt_total counter"));
