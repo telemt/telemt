@@ -162,6 +162,8 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`log_level`](#log_level) | `"debug"`, `"verbose"`, `"normal"`, or `"silent"` | `"normal"` |
 | [`disable_colors`](#disable_colors) | `bool` | `false` |
 | [`me_socks_kdf_policy`](#me_socks_kdf_policy) | `"strict"` or `"compat"` | `"strict"` |
+| [`me_route_backpressure_enabled`](#me_route_backpressure_enabled) | `bool` | `false` |
+| [`me_route_fairshare_enabled`](#me_route_fairshare_enabled) | `bool` | `false` |
 | [`me_route_backpressure_base_timeout_ms`](#me_route_backpressure_base_timeout_ms) | `u64` | `25` |
 | [`me_route_backpressure_high_timeout_ms`](#me_route_backpressure_high_timeout_ms) | `u64` | `120` |
 | [`me_route_backpressure_high_watermark_pct`](#me_route_backpressure_high_watermark_pct) | `u8` | `80` |
@@ -975,6 +977,24 @@ This document lists all configuration keys accepted by `config.toml`.
     [general]
     me_socks_kdf_policy = "strict"
     ```
+## me_route_backpressure_enabled
+  - **Constraints / validation**: `bool`.
+  - **Description**: Enables channel-pressure-aware route send timeouts.
+  - **Example**:
+
+    ```toml
+    [general]
+    me_route_backpressure_enabled = false
+    ```
+## me_route_fairshare_enabled
+  - **Constraints / validation**: `bool`.
+  - **Description**: Enables fair-share routing admission across writer workers.
+  - **Example**:
+
+    ```toml
+    [general]
+    me_route_fairshare_enabled = false
+    ```
 ## me_route_backpressure_base_timeout_ms
   - **Constraints / validation**: Must be within `1..=5000` (milliseconds).
   - **Description**: Base backpressure timeout in milliseconds for ME route-channel send.
@@ -1753,6 +1773,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`metrics_whitelist`](#metrics_whitelist) | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` |
 | [`max_connections`](#max_connections) | `u32` | `10000` |
 | [`accept_permit_timeout_ms`](#accept_permit_timeout_ms) | `u64` | `250` |
+| [`listen_backlog`](#listen_backlog) | `u32` | `1024` |
 
 ## port
   - **Constraints / validation**: `u16`.
@@ -1762,6 +1783,15 @@ This document lists all configuration keys accepted by `config.toml`.
     ```toml
     [server]
     port = 443
+    ```
+## listen_backlog
+  - **Constraints / validation**: `u32`. `0` uses the OS default backlog behavior.
+  - **Description**: Listen backlog passed to `listen(2)` for TCP sockets.
+  - **Example**:
+
+    ```toml
+    [server]
+    listen_backlog = 1024
     ```
 ## listen_addr_ipv4
   - **Constraints / validation**: `String` (optional). When set, must be a valid IPv4 address string.
@@ -2005,6 +2035,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`runtime_edge_top_n`](#runtime_edge_top_n) | `usize` | `10` |
 | [`runtime_edge_events_capacity`](#runtime_edge_events_capacity) | `usize` | `256` |
 | [`read_only`](#read_only) | `bool` | `false` |
+| [`gray_action`](#gray_action) | `"drop"`, `"api"`, or `"200"` | `"drop"` |
 
 ## enabled
   - **Constraints / validation**: `bool`.
@@ -2014,6 +2045,15 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```toml
     [server.api]
     enabled = true
+    ```
+## gray_action
+  - **Constraints / validation**: `"drop"`, `"api"`, or `"200"`.
+  - **Description**: API response policy for gray/limited states: drop request, serve normal API response, or force `200 OK`.
+  - **Example**:
+
+    ```toml
+    [server.api]
+    gray_action = "drop"
     ```
 ## listen
   - **Constraints / validation**: `String`. Must be in `IP:PORT` format.
@@ -2207,6 +2247,15 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     [timeouts]
     client_handshake = 30
     ```
+## client_first_byte_idle_secs
+  - **Constraints / validation**: `u64` (seconds). `0` disables first-byte idle enforcement.
+  - **Description**: Maximum idle time to wait for the first client payload byte after session setup.
+  - **Example**:
+
+    ```toml
+    [timeouts]
+    client_first_byte_idle_secs = 300
+    ```
 ## relay_idle_policy_v2_enabled
   - **Constraints / validation**: `bool`.
   - **Description**: Enables soft/hard middle-relay client idle policy.
@@ -2311,6 +2360,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`server_hello_delay_max_ms`](#server_hello_delay_max_ms) | `u64` | `0` |
 | [`tls_new_session_tickets`](#tls_new_session_tickets) | `u8` | `0` |
 | [`tls_full_cert_ttl_secs`](#tls_full_cert_ttl_secs) | `u64` | `90` |
+| [`serverhello_compact`](#serverhello_compact) | `bool` | `false` |
 | [`alpn_enforce`](#alpn_enforce) | `bool` | `true` |
 | [`mask_proxy_protocol`](#mask_proxy_protocol) | `u8` | `0` |
 | [`mask_shape_hardening`](#mask_shape_hardening) | `bool` | `true` |
@@ -2487,6 +2537,15 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```toml
     [censorship]
     tls_full_cert_ttl_secs = 90
+    ```
+## serverhello_compact
+  - **Constraints / validation**: `bool`.
+  - **Description**: Enables compact ServerHello/Fake-TLS profile to reduce response-size signature.
+  - **Example**:
+
+    ```toml
+    [censorship]
+    serverhello_compact = false
     ```
 ## alpn_enforce
   - **Constraints / validation**: `bool`.
@@ -2830,6 +2889,8 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`replay_check_len`](#replay_check_len) | `usize` | `65536` |
 | [`replay_window_secs`](#replay_window_secs) | `u64` | `120` |
 | [`ignore_time_skew`](#ignore_time_skew) | `bool` | `false` |
+| [`user_rate_limits`](#user_rate_limits) | `Map<String, RateLimitBps>` | `{}` |
+| [`cidr_rate_limits`](#cidr_rate_limits) | `Map<IpNetwork, RateLimitBps>` | `{}` |
 
 ## users
   - **Constraints / validation**: Must not be empty (at least one user must exist). Each value must be **exactly 32 hex characters**.
@@ -2958,6 +3019,24 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 
 
+## user_rate_limits
+  - **Constraints / validation**: Table `username -> { up_bps, down_bps }`. At least one direction must be non-zero.
+  - **Description**: Per-user bandwidth caps in bytes/sec for upload (`up_bps`) and download (`down_bps`).
+  - **Example**:
+
+    ```toml
+    [access.user_rate_limits]
+    alice = { up_bps = 1048576, down_bps = 2097152 }
+    ```
+## cidr_rate_limits
+  - **Constraints / validation**: Table `CIDR -> { up_bps, down_bps }`. CIDR must parse as `IpNetwork`; at least one direction must be non-zero.
+  - **Description**: Source-subnet bandwidth caps applied alongside per-user limits.
+  - **Example**:
+
+    ```toml
+    [access.cidr_rate_limits]
+    "203.0.113.0/24" = { up_bps = 0, down_bps = 1048576 }
+    ```
 # [[upstreams]]
 
 
