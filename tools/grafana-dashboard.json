@@ -767,7 +767,7 @@
             },
             "gridPos": {
                 "h": 8,
-                "w": 12,
+                "w": 4,
                 "x": 12,
                 "y": 5
             },
@@ -777,12 +777,12 @@
                     "calcs": [],
                     "displayMode": "list",
                     "placement": "bottom",
-                    "showLegend": true
+                    "showLegend": false
                 },
                 "tooltip": {
-                    "hideZeros": false,
-                    "mode": "single",
-                    "sort": "none"
+                    "hideZeros": true,
+                    "mode": "multi",
+                    "sort": "desc"
                 }
             },
             "pluginVersion": "12.4.2",
@@ -812,7 +812,7 @@
                     "refId": "D"
                 }
             ],
-            "title": "Connection and permit rates",
+            "title": "Connection / permit rates",
             "type": "timeseries"
         },
         {
@@ -1070,10 +1070,10 @@
                 "overrides": []
             },
             "gridPos": {
-                "h": 4,
-                "w": 6,
-                "x": 12,
-                "y": 9
+                "h": 8,
+                "w": 4,
+                "x": 16,
+                "y": 5
             },
             "id": 437,
             "options": {
@@ -1081,12 +1081,12 @@
                     "calcs": [],
                     "displayMode": "list",
                     "placement": "bottom",
-                    "showLegend": true
+                    "showLegend": false
                 },
                 "tooltip": {
-                    "hideZeros": false,
-                    "mode": "single",
-                    "sort": "none"
+                    "hideZeros": true,
+                    "mode": "multi",
+                    "sort": "desc"
                 }
             },
             "pluginVersion": "12.4.2",
@@ -1165,10 +1165,10 @@
                 "overrides": []
             },
             "gridPos": {
-                "h": 4,
-                "w": 6,
-                "x": 18,
-                "y": 9
+                "h": 8,
+                "w": 4,
+                "x": 20,
+                "y": 5
             },
             "id": 438,
             "options": {
@@ -1176,12 +1176,12 @@
                     "calcs": [],
                     "displayMode": "list",
                     "placement": "bottom",
-                    "showLegend": true
+                    "showLegend": false
                 },
                 "tooltip": {
-                    "hideZeros": false,
-                    "mode": "single",
-                    "sort": "none"
+                    "hideZeros": true,
+                    "mode": "multi",
+                    "sort": "desc"
                 }
             },
             "pluginVersion": "12.4.2",
