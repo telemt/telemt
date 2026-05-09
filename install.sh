@@ -27,6 +27,8 @@ ACTION="install"
 TARGET_VERSION="${VERSION:-latest}"
 LANG_CHOICE="en"
 
+PATH="${PATH}:/usr/sbin:/sbin"
+
 set_language() {
     case "$1" in
         ru)
