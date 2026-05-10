@@ -37,6 +37,10 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`show_link`](#show_link) | `"*"` or `String[]` | `[]` (`ShowLink::None`) | `✘` |
 | [`dc_overrides`](#dc_overrides) | `Map<String, String or String[]>` | `{}` | `✘` |
 | [`default_dc`](#default_dc) | `u8` | — (effective fallback: `2` in ME routing) | `✘` |
+| [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
+| [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
+| [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
 
 ## include
   - **Constraints / validation**: Must be a single-line directive in the form `include = "path/to/file.toml"`. Includes are expanded before TOML parsing. Maximum include depth is 10.
@@ -84,12 +88,17 @@ This document lists all configuration keys accepted by `config.toml`.
 | Key | Type | Default | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | [`data_path`](#data_path) | `String` | — | `✘` |
+| [`quota_state_path`](#quota_state_path) | `Path` | `"telemt.limit.json"` | `✘` |
+| [`config_strict`](#config_strict) | `bool` | `false` | `✘` |
 | [`prefer_ipv6`](#prefer_ipv6) | `bool` | `false` | `✘` |
 | [`fast_mode`](#fast_mode) | `bool` | `true` | `✘` |
 | [`use_middle_proxy`](#use_middle_proxy) | `bool` | `true` | `✘` |
 | [`proxy_secret_path`](#proxy_secret_path) | `String` | `"proxy-secret"` | `✘` |
+| [`proxy_secret_url`](#proxy_secret_url) | `String` | `"https://core.telegram.org/getProxySecret"` | `✘` |
 | [`proxy_config_v4_cache_path`](#proxy_config_v4_cache_path) | `String` | `"cache/proxy-config-v4.txt"` | `✘` |
+| [`proxy_config_v4_url`](#proxy_config_v4_url) | `String` | `"https://core.telegram.org/getProxyConfig"` | `✘` |
 | [`proxy_config_v6_cache_path`](#proxy_config_v6_cache_path) | `String` | `"cache/proxy-config-v6.txt"` | `✘` |
+| [`proxy_config_v6_url`](#proxy_config_v6_url) | `String` | `"https://core.telegram.org/getProxyConfigV6"` | `✘` |
 | [`ad_tag`](#ad_tag) | `String` | — | `✔` |
 | [`middle_proxy_nat_ip`](#middle_proxy_nat_ip) | `IpAddr` | — | `✘` |
 | [`middle_proxy_nat_probe`](#middle_proxy_nat_probe) | `bool` | `true` | `✘` |
@@ -156,6 +165,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`upstream_connect_retry_attempts`](#upstream_connect_retry_attempts) | `u32` | `2` | `✘` |
 | [`upstream_connect_retry_backoff_ms`](#upstream_connect_retry_backoff_ms) | `u64` | `100` | `✘` |
 | [`upstream_connect_budget_ms`](#upstream_connect_budget_ms) | `u64` | `3000` | `✘` |
+| [`tg_connect`](#tg_connect) | `u64` | `10` | `✘` |
 | [`upstream_unhealthy_fail_threshold`](#upstream_unhealthy_fail_threshold) | `u32` | `5` | `✘` |
 | [`upstream_connect_failfast_hard_errors`](#upstream_connect_failfast_hard_errors) | `bool` | `false` | `✘` |
 | [`stun_iface_mismatch_ignore`](#stun_iface_mismatch_ignore) | `bool` | `false` | `✘` |
@@ -229,6 +239,24 @@ This document lists all configuration keys accepted by `config.toml`.
     ```toml
     [general]
     data_path = "/var/lib/telemt"
+    ```
+## quota_state_path
+  - **Constraints / validation**: `Path`. Relative paths are resolved from the process working directory.
+  - **Description**: JSON state file used to persist runtime per-user quota consumption.
+  - **Example**:
+
+    ```toml
+    [general]
+    quota_state_path = "telemt.limit.json"
+    ```
+## config_strict
+  - **Constraints / validation**: `bool`.
+  - **Description**: Rejects unknown TOML keys during config load. Startup fails fast; hot-reload rejects the new snapshot and keeps the current config.
+  - **Example**:
+
+    ```toml
+    [general]
+    config_strict = true
     ```
 ## prefer_ipv6
   - **Constraints / validation**: Deprecated. Use `network.prefer`.
@@ -906,6 +934,15 @@ This document lists all configuration keys accepted by `config.toml`.
     ```toml
     [general]
     upstream_connect_budget_ms = 3000
+    ```
+## tg_connect
+  - **Constraints / validation**: Must be `> 0` (seconds).
+  - **Description**: Upstream Telegram connect timeout.
+  - **Example**:
+
+    ```toml
+    [general]
+    tg_connect = 10
     ```
 ## upstream_unhealthy_fail_threshold
   - **Constraints / validation**: Must be `> 0`.
@@ -1773,9 +1810,13 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`metrics_port`](#metrics_port) | `u16` | — | `✘` |
 | [`metrics_listen`](#metrics_listen) | `String` | — | `✘` |
 | [`metrics_whitelist`](#metrics_whitelist) | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | `✘` |
+| [`api`](#serverapi) | `Table` | built-in defaults | `✘` |
+| [`admin_api`](#serverapi) | `Table` | alias for `api` | `✘` |
+| [`listeners`](#serverlisteners) | `Table[]` | derived from legacy listener fields | `✘` |
 | [`max_connections`](#max_connections) | `u32` | `10000` | `✘` |
 | [`accept_permit_timeout_ms`](#accept_permit_timeout_ms) | `u64` | `250` | `✘` |
 | [`listen_backlog`](#listen_backlog) | `u32` | `1024` | `✘` |
+| [`conntrack_control`](#serverconntrack_control) | `Table` | built-in defaults | `✘` |
 
 ## port
   - **Constraints / validation**: `u16`.
@@ -2164,6 +2205,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | Key | Type | Default | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | [`ip`](#ip) | `IpAddr` | — | `✘` |
+| [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2177,6 +2219,16 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```toml
     [[server.listeners]]
     ip = "0.0.0.0"
+    ```
+## port (server.listeners)
+  - **Constraints / validation**: `u16` (optional). When omitted, falls back to `server.port`.
+  - **Description**: Per-listener TCP port.
+  - **Example**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
     ```
 ## announce
   - **Constraints / validation**: `String` (optional). Must not be empty when set.
@@ -2211,8 +2263,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "0.0.0.0"
     proxy_protocol = true
     ```
-## reuse_allow"
-- `reuse_allow`
+## reuse_allow
   - **Constraints / validation**: `bool`.
   - **Description**: Enables `SO_REUSEPORT` for multi-instance bind sharing (allows multiple telemt instances to listen on the same `ip:port`).
   - **Example**:
@@ -2229,12 +2280,12 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 
 | Key | Type | Default | Hot-Reload |
 | --- | ---- | ------- | ---------- |
+| [`client_first_byte_idle_secs`](#client_first_byte_idle_secs) | `u64` | `300` | `✘` |
 | [`client_handshake`](#client_handshake) | `u64` | `30` | `✘` |
 | [`relay_idle_policy_v2_enabled`](#relay_idle_policy_v2_enabled) | `bool` | `true` | `✘` |
 | [`relay_client_idle_soft_secs`](#relay_client_idle_soft_secs) | `u64` | `120` | `✘` |
 | [`relay_client_idle_hard_secs`](#relay_client_idle_hard_secs) | `u64` | `360` | `✘` |
 | [`relay_idle_grace_after_downstream_activity_secs`](#relay_idle_grace_after_downstream_activity_secs) | `u64` | `30` | `✘` |
-| [`tg_connect`](#tg_connect) | `u64` | `10` | `✘` |
 | [`client_keepalive`](#client_keepalive) | `u64` | `15` | `✘` |
 | [`client_ack`](#client_ack) | `u64` | `90` | `✘` |
 | [`me_one_retry`](#me_one_retry) | `u8` | `12` | `✘` |
@@ -2293,15 +2344,6 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```toml
     [timeouts]
     relay_idle_grace_after_downstream_activity_secs = 30
-    ```
-## tg_connect
-  - **Constraints / validation**: `u64`. Value is in seconds.
-  - **Description**: Upstream Telegram connect timeout (seconds).
-  - **Example**:
-
-    ```toml
-    [timeouts]
-    tg_connect = 10
     ```
 ## client_keepalive
   - **Constraints / validation**: `u64`. Value is in seconds.
@@ -3063,8 +3105,12 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`weight`](#weight) | `u16` | `1` | `✘` |
 | [`enabled`](#enabled) | `bool` | `true` | `✘` |
 | [`scopes`](#scopes) | `String` | `""` | `✘` |
+| [`ipv4`](#ipv4-upstreams) | `bool` | — (auto) | `✘` |
+| [`ipv6`](#ipv6-upstreams) | `bool` | — (auto) | `✘` |
 | [`interface`](#interface) | `String` | — | `✘` |
 | [`bind_addresses`](#bind_addresses) | `String[]` | — | `✘` |
+| [`bindtodevice`](#bindtodevice) | `String` | — | `✘` |
+| [`force_bind`](#force_bind) | `String` | — | `✘` |
 | [`url`](#url) | `String` | — | `✘` |
 | [`address`](#address) | `String` | — | `✘` |
 | [`user_id`](#user_id) | `String` | — | `✘` |
@@ -3120,6 +3166,26 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     address = "10.0.0.10:1080"
     scopes = "me, fetch, dc2"
     ```
+## ipv4 (upstreams)
+  - **Constraints / validation**: `bool` (optional).
+  - **Description**: Allows IPv4 DC targets for this upstream. When omitted, Telemt auto-detects support from runtime connectivity state.
+  - **Example**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    ipv4 = true
+    ```
+## ipv6 (upstreams)
+  - **Constraints / validation**: `bool` (optional).
+  - **Description**: Allows IPv6 DC targets for this upstream. When omitted, Telemt auto-detects support from runtime connectivity state.
+  - **Example**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    ipv6 = false
+    ```
 ## interface
   - **Constraints / validation**: `String` (optional).
     - For `"direct"`: may be an IP address (used as explicit local bind) or an OS interface name (resolved to an IP at runtime; Unix only).
@@ -3149,6 +3215,26 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [[upstreams]]
     type = "direct"
     bind_addresses = ["192.0.2.10", "192.0.2.11"]
+    ```
+## bindtodevice
+  - **Constraints / validation**: `String` (optional). Applies only to `type = "direct"` and is Linux-only.
+  - **Description**: Hard interface pinning via `SO_BINDTODEVICE` for outgoing direct TCP connects.
+  - **Example**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    bindtodevice = "eth0"
+    ```
+## force_bind
+  - **Constraints / validation**: `String` (optional). Alias for `bindtodevice`.
+  - **Description**: Backward-compatible alias for Linux `SO_BINDTODEVICE` hard interface pinning.
+  - **Example**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    force_bind = "eth0"
     ```
 ## url
   - **Constraints / validation**: Applies only to `type = "shadowsocks"`.
