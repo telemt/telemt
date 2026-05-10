@@ -37,6 +37,10 @@
 | [`show_link`](#show_link) | `"*"` or `String[]` | `[]` (`ShowLink::None`) | `✘` |
 | [`dc_overrides`](#dc_overrides) | `Map<String, String or String[]>` | `{}` | `✘` |
 | [`default_dc`](#default_dc) | `u8` | — (эффективный резервный вариант: `2` в ME маршрутизации) | `✘` |
+| [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
+| [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
+| [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
 
 ## include
   - **Ограничения / валидация**: значение должно быть одной строкой в виде `include = "path/to/file.toml"`. Значения параметра обрабатываются перед анализом TOML. Максимальное количество - 10.
@@ -84,12 +88,17 @@
 | Ключ | Тип | По умолчанию | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | [`data_path`](#data_path) | `String` | — | `✘` |
+| [`quota_state_path`](#quota_state_path) | `Path` | `"telemt.limit.json"` | `✘` |
+| [`config_strict`](#config_strict) | `bool` | `false` | `✘` |
 | [`prefer_ipv6`](#prefer_ipv6) | `bool` | `false` | `✘` |
 | [`fast_mode`](#fast_mode) | `bool` | `true` | `✘` |
 | [`use_middle_proxy`](#use_middle_proxy) | `bool` | `true` | `✘` |
 | [`proxy_secret_path`](#proxy_secret_path) | `String` | `"proxy-secret"` | `✘` |
+| [`proxy_secret_url`](#proxy_secret_url) | `String` | `"https://core.telegram.org/getProxySecret"` | `✘` |
 | [`proxy_config_v4_cache_path`](#proxy_config_v4_cache_path) | `String` | `"cache/proxy-config-v4.txt"` | `✘` |
+| [`proxy_config_v4_url`](#proxy_config_v4_url) | `String` | `"https://core.telegram.org/getProxyConfig"` | `✘` |
 | [`proxy_config_v6_cache_path`](#proxy_config_v6_cache_path) | `String` | `"cache/proxy-config-v6.txt"` | `✘` |
+| [`proxy_config_v6_url`](#proxy_config_v6_url) | `String` | `"https://core.telegram.org/getProxyConfigV6"` | `✘` |
 | [`ad_tag`](#ad_tag) | `String` | — | `✔` |
 | [`middle_proxy_nat_ip`](#middle_proxy_nat_ip) | `IpAddr` | — | `✘` |
 | [`middle_proxy_nat_probe`](#middle_proxy_nat_probe) | `bool` | `true` | `✘` |
@@ -156,6 +165,7 @@
 | [`upstream_connect_retry_attempts`](#upstream_connect_retry_attempts) | `u32` | `2` | `✘` |
 | [`upstream_connect_retry_backoff_ms`](#upstream_connect_retry_backoff_ms) | `u64` | `100` | `✘` |
 | [`upstream_connect_budget_ms`](#upstream_connect_budget_ms) | `u64` | `3000` | `✘` |
+| [`tg_connect`](#tg_connect) | `u64` | `10` | `✘` |
 | [`upstream_unhealthy_fail_threshold`](#upstream_unhealthy_fail_threshold) | `u32` | `5` | `✘` |
 | [`upstream_connect_failfast_hard_errors`](#upstream_connect_failfast_hard_errors) | `bool` | `false` | `✘` |
 | [`stun_iface_mismatch_ignore`](#stun_iface_mismatch_ignore) | `bool` | `false` | `✘` |
@@ -229,6 +239,24 @@
     ```toml
     [general]
     data_path = "/var/lib/telemt"
+    ```
+## quota_state_path
+  - **Ограничения / валидация**: `Path`. Относительные пути разрешаются от рабочего каталога процесса.
+  - **Описание**: JSON-файл состояния для сохранения runtime-расхода квот по пользователям.
+  - **Пример**:
+
+    ```toml
+    [general]
+    quota_state_path = "telemt.limit.json"
+    ```
+## config_strict
+  - **Ограничения / валидация**: `bool`.
+  - **Описание**: Отклоняет неизвестные TOML-ключи во время загрузки конфигурации. При запуске процесс завершается с ошибкой; при hot-reload новый снимок отклоняется, а текущая конфигурация сохраняется.
+  - **Пример**:
+
+    ```toml
+    [general]
+    config_strict = true
     ```
 ## prefer_ipv6
   - **Ограничения / валидация**: Устарело. Используйте `network.prefer`.
@@ -906,6 +934,15 @@
     ```toml
     [general]
     upstream_connect_budget_ms = 3000
+    ```
+## tg_connect
+  - **Ограничения / валидация**: Должно быть `> 0` (секунды).
+  - **Описание**: Таймаут подключения к upstream-серверам Telegram.
+  - **Пример**:
+
+    ```toml
+    [general]
+    tg_connect = 10
     ```
 ## upstream_unhealthy_fail_threshold
   - **Ограничения / валидация**: Должно быть `> 0`.
@@ -1775,9 +1812,13 @@
 | [`metrics_port`](#metrics_port) | `u16` | — | `✘` |
 | [`metrics_listen`](#metrics_listen) | `String` | — | `✘` |
 | [`metrics_whitelist`](#metrics_whitelist) | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | `✘` |
+| [`api`](#serverapi) | `Table` | встроенные значения | `✘` |
+| [`admin_api`](#serverapi) | `Table` | алиас для `api` | `✘` |
+| [`listeners`](#serverlisteners) | `Table[]` | выводится из legacy listener-полей | `✘` |
 | [`max_connections`](#max_connections) | `u32` | `10000` | `✘` |
 | [`accept_permit_timeout_ms`](#accept_permit_timeout_ms) | `u64` | `250` | `✘` |
 | [`listen_backlog`](#listen_backlog) | `u32` | `1024` | `✘` |
+| [`conntrack_control`](#serverconntrack_control) | `Table` | встроенные значения | `✘` |
 
 ## port
   - **Ограничения / валидация**: `u16`.
@@ -2170,6 +2211,7 @@
 | Ключ | Тип | По умолчанию | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | [`ip`](#ip) | `IpAddr` | — | `✘` |
+| [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2183,6 +2225,16 @@
     ```toml
     [[server.listeners]]
     ip = "0.0.0.0"
+    ```
+## port (server.listeners)
+  - **Ограничения / валидация**: `u16` (необязательный параметр). Если не задан, используется `server.port`.
+  - **Описание**: TCP-порт для конкретного listener’а.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
     ```
 ## announce
   - **Ограничения / валидация**: `String` (необязательный параметр). Не должен быть пустым, если задан.
@@ -2217,8 +2269,7 @@
     ip = "0.0.0.0"
     proxy_protocol = true
     ```
-## reuse_allow"
-- `reuse_allow`
+## reuse_allow
   - **Ограничения / валидация**: `bool`.
   - **Описание**: Включает `SO_REUSEPORT` для совместного использования привязки нескольких экземпляров (позволяет нескольким экземплярам telemt прослушивать один и тот же `ip:port`).
   - **Пример**:
@@ -2235,12 +2286,12 @@
 
 | Ключ | Тип | По умолчанию | Hot-Reload |
 | --- | ---- | ------- | ---------- |
+| [`client_first_byte_idle_secs`](#client_first_byte_idle_secs) | `u64` | `300` | `✘` |
 | [`client_handshake`](#client_handshake) | `u64` | `30` | `✘` |
 | [`relay_idle_policy_v2_enabled`](#relay_idle_policy_v2_enabled) | `bool` | `true` | `✘` |
 | [`relay_client_idle_soft_secs`](#relay_client_idle_soft_secs) | `u64` | `120` | `✘` |
 | [`relay_client_idle_hard_secs`](#relay_client_idle_hard_secs) | `u64` | `360` | `✘` |
 | [`relay_idle_grace_after_downstream_activity_secs`](#relay_idle_grace_after_downstream_activity_secs) | `u64` | `30` | `✘` |
-| [`tg_connect`](#tg_connect) | `u64` | `10` | `✘` |
 | [`client_keepalive`](#client_keepalive) | `u64` | `15` | `✘` |
 | [`client_ack`](#client_ack) | `u64` | `90` | `✘` |
 | [`me_one_retry`](#me_one_retry) | `u8` | `12` | `✘` |
@@ -2299,15 +2350,6 @@
     ```toml
     [timeouts]
     relay_idle_grace_after_downstream_activity_secs = 30
-    ```
-## tg_connect
-  - **Ограничения / валидация**: `u64` (секунд).
-  - **Описание**: Таймаут подключения к upstream-серверу Telegram (в секундах).
-  - **Пример**:
-
-    ```toml
-    [timeouts]
-    tg_connect = 10
     ```
 ## client_keepalive
   - **Ограничения / валидация**: `u64` (секунд).
@@ -2895,6 +2937,7 @@
 | [`user_max_unique_ips_global_each`](#user_max_unique_ips_global_each) | `usize` | `0` | `✔` |
 | [`user_max_unique_ips_mode`](#user_max_unique_ips_mode) | `"active_window"`, `"time_window"`, or `"combined"` | `"active_window"` | `✔` |
 | [`user_max_unique_ips_window_secs`](#user_max_unique_ips_window_secs) | `u64` | `30` | `✔` |
+| [`user_source_deny`](#user_source_deny) | `Map<String, IpNetwork[]>` | `{}` | `✘` |
 | [`replay_check_len`](#replay_check_len) | `usize` | `65536` | `✘` |
 | [`replay_window_secs`](#replay_window_secs) | `u64` | `120` | `✘` |
 | [`ignore_time_skew`](#ignore_time_skew) | `bool` | `false` | `✘` |
@@ -2999,6 +3042,20 @@
     [access]
     user_max_unique_ips_window_secs = 30
     ```
+## user_source_deny
+  - **Ограничения / валидация**: Таблица `username -> IpNetwork[]`. Каждая сеть должна разбираться как CIDR, например `203.0.113.0/24` или `2001:db8::/32`.
+  - **Описание**: Deny-list исходных IP/CIDR для конкретного пользователя, применяемый **после успешной аутентификации** в TLS- и MTProto-handshake путях. Совпавший source IP отклоняется тем же fail-closed путём, что и невалидная аутентификация.
+  - **Пример**:
+
+    ```toml
+    [access.user_source_deny]
+    alice = ["203.0.113.0/24", "2001:db8:abcd::/48"]
+    bob = ["198.51.100.42/32"]
+    ```
+
+  - **Краткая проверка**:
+    - соединение пользователя `alice` с source `203.0.113.55` отклоняется, потому что совпадает с `203.0.113.0/24`;
+    - соединение пользователя `alice` с source `198.51.100.10` допускается этим набором правил, потому что совпадений нет.
 ## replay_check_len
   - **Ограничения / валидация**: `usize`.
   - **Описание**: Количество последних сообщений/запросов, которое система запоминает, чтобы не допустить их повторной отправки (replay).
@@ -3055,8 +3112,12 @@
 | [`weight`](#weight) | `u16` | `1` | `✘` |
 | [`enabled`](#enabled) | `bool` | `true` | `✘` |
 | [`scopes`](#scopes) | `String` | `""` | `✘` |
+| [`ipv4`](#ipv4-upstreams) | `bool` | — (auto) | `✘` |
+| [`ipv6`](#ipv6-upstreams) | `bool` | — (auto) | `✘` |
 | [`interface`](#interface) | `String` | — | `✘` |
 | [`bind_addresses`](#bind_addresses) | `String[]` | — | `✘` |
+| [`bindtodevice`](#bindtodevice) | `String` | — | `✘` |
+| [`force_bind`](#force_bind) | `String` | — | `✘` |
 | [`url`](#url) | `String` | — | `✘` |
 | [`address`](#address) | `String` | — | `✘` |
 | [`user_id`](#user_id) | `String` | — | `✘` |
@@ -3112,6 +3173,26 @@
     address = "10.0.0.10:1080"
     scopes = "me, fetch, dc2"
     ```
+## ipv4 (upstreams)
+  - **Ограничения / валидация**: `bool` (необязательный параметр).
+  - **Описание**: Разрешает IPv4 DC-targets для этого upstream. Если не задан, Telemt определяет поддержку автоматически по runtime-состоянию connectivity.
+  - **Пример**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    ipv4 = true
+    ```
+## ipv6 (upstreams)
+  - **Ограничения / валидация**: `bool` (необязательный параметр).
+  - **Описание**: Разрешает IPv6 DC-targets для этого upstream. Если не задан, Telemt определяет поддержку автоматически по runtime-состоянию connectivity.
+  - **Пример**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    ipv6 = false
+    ```
 ## interface
   - **Ограничения / валидация**: `String` (необязательный параметр).
     - для `"direct"`: может быть IP-адресом (используется как явный local bind) или именем сетевого интерфейса ОС (резолвится в IP во время выполнения; только Unix).
@@ -3141,6 +3222,26 @@
     [[upstreams]]
     type = "direct"
     bind_addresses = ["192.0.2.10", "192.0.2.11"]
+    ```
+## bindtodevice
+  - **Ограничения / валидация**: `String` (необязательный параметр). Применяется только для `type = "direct"` и только в Linux.
+  - **Описание**: Жёсткая привязка исходящих direct TCP-connect к интерфейсу через `SO_BINDTODEVICE`.
+  - **Пример**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    bindtodevice = "eth0"
+    ```
+## force_bind
+  - **Ограничения / валидация**: `String` (необязательный параметр). Алиас для `bindtodevice`.
+  - **Описание**: Обратно-совместимый алиас для жёсткой Linux-привязки к интерфейсу через `SO_BINDTODEVICE`.
+  - **Пример**:
+
+    ```toml
+    [[upstreams]]
+    type = "direct"
+    force_bind = "eth0"
     ```
 ## url
   - **Ограничения / валидация**: Применяется в случае, если `type = "shadowsocks"`.
