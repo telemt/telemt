@@ -215,6 +215,7 @@ struct StatsIo<S> {
     c2s_rate_debt_bytes: u64,
     c2s_wait: RateWaitState,
     s2c_wait: RateWaitState,
+    quota_wait: RateWaitState,
     quota_limit: Option<u64>,
     quota_exceeded: Arc<AtomicBool>,
     quota_bytes_since_check: u64,
@@ -275,6 +276,7 @@ impl<S> StatsIo<S> {
             c2s_rate_debt_bytes: 0,
             c2s_wait: RateWaitState::default(),
             s2c_wait: RateWaitState::default(),
+            quota_wait: RateWaitState::default(),
             quota_limit,
             quota_exceeded,
             quota_bytes_since_check: 0,
@@ -353,6 +355,11 @@ impl<S> StatsIo<S> {
 
         Poll::Ready(())
     }
+
+    fn arm_quota_wait(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        Self::arm_wait(&mut self.quota_wait, false, false);
+        Self::poll_wait(&mut self.quota_wait, cx, None, RateDirection::Up)
+    }
 }
 
 #[derive(Debug)]
@@ -430,8 +437,13 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
         if this.settle_c2s_rate_debt(cx).is_pending() {
             return Poll::Pending;
         }
+        if buf.remaining() == 0 {
+            return Pin::new(&mut this.inner).poll_read(cx, buf);
+        }
 
         let mut remaining_before = None;
+        let mut reserved_read_bytes = 0u64;
+        let mut read_limit = buf.remaining();
         if let Some(limit) = this.quota_limit {
             let used_before = this.user_stats.quota_used();
             let remaining = limit.saturating_sub(used_before);
@@ -440,50 +452,77 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
                 return Poll::Ready(Err(quota_io_error()));
             }
             remaining_before = Some(remaining);
+            read_limit = read_limit.min(remaining as usize);
+            if read_limit == 0 {
+                this.quota_exceeded.store(true, Ordering::Release);
+                return Poll::Ready(Err(quota_io_error()));
+            }
+
+            let desired = read_limit as u64;
+            let mut reserve_rounds = 0usize;
+            while reserved_read_bytes == 0 {
+                for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
+                    match this.user_stats.quota_try_reserve(desired, limit) {
+                        Ok(_) => {
+                            reserved_read_bytes = desired;
+                            break;
+                        }
+                        Err(crate::stats::QuotaReserveError::LimitExceeded) => {
+                            this.quota_exceeded.store(true, Ordering::Release);
+                            return Poll::Ready(Err(quota_io_error()));
+                        }
+                        Err(crate::stats::QuotaReserveError::Contended) => {}
+                    }
+                }
+
+                if reserved_read_bytes == 0 {
+                    reserve_rounds = reserve_rounds.saturating_add(1);
+                    if reserve_rounds >= QUOTA_RESERVE_MAX_ROUNDS {
+                        if this.arm_quota_wait(cx).is_pending() {
+                            return Poll::Pending;
+                        }
+                        reserve_rounds = 0;
+                    }
+                }
+            }
         }
 
-        let before = buf.filled().len();
+        let limited_read = read_limit < buf.remaining();
+        let read_result = if limited_read {
+            let mut limited_buf = ReadBuf::new(buf.initialize_unfilled_to(read_limit));
+            match Pin::new(&mut this.inner).poll_read(cx, &mut limited_buf) {
+                Poll::Ready(Ok(())) => {
+                    let n = limited_buf.filled().len();
+                    buf.advance(n);
+                    Poll::Ready(Ok(n))
+                }
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        } else {
+            let before = buf.filled().len();
+            match Pin::new(&mut this.inner).poll_read(cx, buf) {
+                Poll::Ready(Ok(())) => {
+                    let n = buf.filled().len() - before;
+                    Poll::Ready(Ok(n))
+                }
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        };
 
-        match Pin::new(&mut this.inner).poll_read(cx, buf) {
-            Poll::Ready(Ok(())) => {
-                let n = buf.filled().len() - before;
+        match read_result {
+            Poll::Ready(Ok(n)) => {
+                if reserved_read_bytes > n as u64 {
+                    refund_reserved_quota_bytes(
+                        this.user_stats.as_ref(),
+                        reserved_read_bytes - n as u64,
+                    );
+                }
                 if n > 0 {
                     let n_to_charge = n as u64;
 
-                    if let (Some(limit), Some(remaining)) = (this.quota_limit, remaining_before) {
-                        let mut reserved_total = None;
-                        let mut reserve_rounds = 0usize;
-                        while reserved_total.is_none() {
-                            let mut saw_contention = false;
-                            for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
-                                match this.user_stats.quota_try_reserve(n_to_charge, limit) {
-                                    Ok(total) => {
-                                        reserved_total = Some(total);
-                                        break;
-                                    }
-                                    Err(crate::stats::QuotaReserveError::LimitExceeded) => {
-                                        this.quota_exceeded.store(true, Ordering::Release);
-                                        buf.set_filled(before);
-                                        return Poll::Ready(Err(quota_io_error()));
-                                    }
-                                    Err(crate::stats::QuotaReserveError::Contended) => {
-                                        saw_contention = true;
-                                    }
-                                }
-                            }
-                            if reserved_total.is_none() {
-                                reserve_rounds = reserve_rounds.saturating_add(1);
-                                if reserve_rounds >= QUOTA_RESERVE_MAX_ROUNDS {
-                                    this.quota_exceeded.store(true, Ordering::Release);
-                                    buf.set_filled(before);
-                                    return Poll::Ready(Err(quota_io_error()));
-                                }
-                                if saw_contention {
-                                    std::thread::yield_now();
-                                }
-                            }
-                        }
-
+                    if let Some(remaining) = remaining_before {
                         if should_immediate_quota_check(remaining, n_to_charge) {
                             this.quota_bytes_since_check = 0;
                         } else {
@@ -495,9 +534,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
                             }
                         }
 
-                        if reserved_total.unwrap_or(0) >= limit {
-                            this.quota_exceeded.store(true, Ordering::Release);
-                        }
+                    }
+                    if let Some(limit) = this.quota_limit
+                        && this.user_stats.quota_used() >= limit
+                    {
+                        this.quota_exceeded.store(true, Ordering::Release);
                     }
 
                     // C→S: client sent data
@@ -521,7 +562,18 @@ impl<S: AsyncRead + Unpin> AsyncRead for StatsIo<S> {
                 }
                 Poll::Ready(Ok(()))
             }
-            other => other,
+            Poll::Pending => {
+                if reserved_read_bytes > 0 {
+                    refund_reserved_quota_bytes(this.user_stats.as_ref(), reserved_read_bytes);
+                }
+                Poll::Pending
+            }
+            Poll::Ready(Err(err)) => {
+                if reserved_read_bytes > 0 {
+                    refund_reserved_quota_bytes(this.user_stats.as_ref(), reserved_read_bytes);
+                }
+                Poll::Ready(Err(err))
+            }
         }
     }
 }
@@ -614,11 +666,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StatsIo<S> {
                             if let Some(lease) = this.traffic_lease.as_ref() {
                                 lease.refund(RateDirection::Down, shaper_reserved_bytes);
                             }
-                            this.quota_exceeded.store(true, Ordering::Release);
-                            return Poll::Ready(Err(quota_io_error()));
-                        }
-                        if saw_contention {
-                            std::thread::yield_now();
+                            let _ = this.arm_quota_wait(cx);
+                            return Poll::Pending;
+                        } else if saw_contention {
+                            std::hint::spin_loop();
                         }
                     }
                 }

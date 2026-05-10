@@ -65,6 +65,8 @@ const ME_D2C_SINGLE_WRITE_COALESCE_MAX_BYTES: usize = 128 * 1024;
 const QUOTA_RESERVE_SPIN_RETRIES: usize = 32;
 const QUOTA_RESERVE_BACKOFF_MIN_MS: u64 = 1;
 const QUOTA_RESERVE_BACKOFF_MAX_MS: u64 = 16;
+const QUOTA_RESERVE_MAX_BACKOFF_ROUNDS: usize = 16;
+const ME_CHILD_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub(crate) struct DesyncDedupRotationState {
@@ -624,6 +626,7 @@ async fn reserve_user_quota_with_yield(
     limit: u64,
 ) -> std::result::Result<u64, QuotaReserveError> {
     let mut backoff_ms = QUOTA_RESERVE_BACKOFF_MIN_MS;
+    let mut backoff_rounds = 0usize;
     loop {
         for _ in 0..QUOTA_RESERVE_SPIN_RETRIES {
             match user_stats.quota_try_reserve(bytes, limit) {
@@ -637,6 +640,10 @@ async fn reserve_user_quota_with_yield(
 
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        backoff_rounds = backoff_rounds.saturating_add(1);
+        if backoff_rounds >= QUOTA_RESERVE_MAX_BACKOFF_ROUNDS {
+            return Err(QuotaReserveError::Contended);
+        }
         backoff_ms = backoff_ms
             .saturating_mul(2)
             .min(QUOTA_RESERVE_BACKOFF_MAX_MS);
@@ -1169,7 +1176,7 @@ where
     let c2me_byte_semaphore = Arc::new(Semaphore::new(c2me_byte_budget));
     let (c2me_tx, mut c2me_rx) = mpsc::channel::<C2MeCommand>(c2me_channel_capacity);
     let me_pool_c2me = me_pool.clone();
-    let c2me_sender = tokio::spawn(async move {
+    let mut c2me_sender = tokio::spawn(async move {
         let mut sent_since_yield = 0usize;
         while let Some(cmd) = c2me_rx.recv().await {
             match cmd {
@@ -1214,7 +1221,7 @@ where
     let last_downstream_activity_ms_clone = last_downstream_activity_ms.clone();
     let bytes_me2c_clone = bytes_me2c.clone();
     let d2c_flush_policy = MeD2cFlushPolicy::from_config(&config);
-    let me_writer = tokio::spawn(async move {
+    let mut me_writer = tokio::spawn(async move {
         let mut writer = crypto_writer;
         let mut frame_buf = Vec::with_capacity(16 * 1024);
         let shrink_threshold = d2c_flush_policy.frame_buf_shrink_threshold_bytes;
@@ -1729,14 +1736,26 @@ where
     }
 
     drop(c2me_tx);
-    let c2me_result = c2me_sender
-        .await
-        .unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME sender join error: {e}"))));
+    let c2me_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut c2me_sender).await {
+        Ok(joined) => {
+            joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME sender join error: {e}"))))
+        }
+        Err(_) => {
+            c2me_sender.abort();
+            Err(ProxyError::Proxy("ME sender join timeout".into()))
+        }
+    };
 
     let _ = stop_tx.send(());
-    let mut writer_result = me_writer
-        .await
-        .unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))));
+    let mut writer_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut me_writer).await {
+        Ok(joined) => {
+            joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))))
+        }
+        Err(_) => {
+            me_writer.abort();
+            Err(ProxyError::Proxy("ME writer join timeout".into()))
+        }
+    };
 
     // When client closes, but ME channel stopped as unregistered - it isnt error
     if client_closed
