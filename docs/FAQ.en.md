@@ -201,6 +201,11 @@ user3 = "00000000000000000000000000000003"
 curl -s http://127.0.0.1:9091/v1/users | jq
 ```
 
+### "Telegram handshake timeout" error
+Most often reported by mobile Telegram clients (Android/iOS) on Russian networks while desktop clients on the same proxy keep working. The cause is an outdated TLS fingerprint in the client — see the "Recognizability for DPI and crawler" section above and update Telegram from the official sources.
+
+Raising `timeouts.client_handshake` does not help: the server is waiting for handshake bytes that the old client never sends in the expected form.
+
 ### "Unknown TLS SNI" error
 Usually, this error occurs if you have changed the `tls_domain` parameter, but users continue to connect using old links with the previous domain.
 
