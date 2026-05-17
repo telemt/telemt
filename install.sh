@@ -2,6 +2,10 @@
 set -eu
 
 REPO="${REPO:-Gickrede-e/telemt_bb}"
+# When release artifacts are missing (or BUILD_FROM_SOURCE=1) the script
+# falls back to git clone + cargo build --release of the requested branch.
+BRANCH="${BRANCH:-main}"
+BUILD_FROM_SOURCE="${BUILD_FROM_SOURCE:-0}"
 BIN_NAME="${BIN_NAME:-telemt}"
 INSTALL_DIR="${INSTALL_DIR:-/bin}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/telemt}"
@@ -92,6 +96,13 @@ set_language() {
             L_ERR_TMP_INV="Временная директория недействительна"
             L_INFO_FALLBACK="Сборка x86_64-v3 не найдена, откат к стандартной x86_64..."
             L_ERR_DL_FAIL="Ошибка загрузки архива"
+            L_INFO_BUILD_FALLBACK="Релизный архив недоступен, переходим к сборке из исходников (ветка %s)..."
+            L_I_BUILD_START=">>> Этап 2b: git clone + cargo build --release (это может занять несколько минут)"
+            L_ERR_NO_GIT="Для сборки из исходников необходим git. Установите его и повторите запуск."
+            L_ERR_NO_CARGO="Для сборки из исходников необходим cargo (Rust toolchain). Установите Rust через https://rustup.rs/ и повторите запуск."
+            L_ERR_CLONE_FAIL="Не удалось клонировать репозиторий %s (ветка %s)."
+            L_ERR_BUILD_FAIL="cargo build --release завершился ошибкой."
+            L_ERR_BUILT_BIN_MISSING="После сборки не найден ожидаемый бинарь target/release/%s."
             L_I_STAGE_3=">>> Этап 3: Распаковка архива"
             L_ERR_EXTRACT="Ошибка распаковки архива."
             L_ERR_BIN_NOT_FOUND="Бинарный файл не найден в архиве"
@@ -168,6 +179,13 @@ set_language() {
             L_ERR_TMP_INV="Temp directory is invalid or was not created"
             L_INFO_FALLBACK="x86_64-v3 build not found, falling back to standard x86_64..."
             L_ERR_DL_FAIL="Download failed"
+            L_INFO_BUILD_FALLBACK="Release artifact unavailable, falling back to building from source (branch %s)..."
+            L_I_BUILD_START=">>> Stage 2b: git clone + cargo build --release (this can take a few minutes)"
+            L_ERR_NO_GIT="Building from source requires git. Install it and re-run."
+            L_ERR_NO_CARGO="Building from source requires cargo (Rust toolchain). Install Rust via https://rustup.rs/ and re-run."
+            L_ERR_CLONE_FAIL="Failed to clone repository %s (branch %s)."
+            L_ERR_BUILD_FAIL="cargo build --release failed."
+            L_ERR_BUILT_BIN_MISSING="Built binary target/release/%s not found after build."
             L_I_STAGE_3=">>> Stage 3: Extracting archive"
             L_ERR_EXTRACT="Extraction failed."
             L_ERR_BIN_NOT_FOUND="Binary not found in archive"
@@ -297,6 +315,12 @@ show_help() {
         say "  -s, --secret Указать секрет пользователя (32 hex символа)"
         say "  -a, --ad-tag Указать ad_tag"
         say "  -l, --lang   Выбрать язык вывода (1/en или 2/ru)"
+        say ""
+        say "Переменные окружения:"
+        say "  REPO=owner/repo            Источник релизов/исходников (по умолчанию: ${REPO})"
+        say "  BRANCH=name                Ветка для сборки при fallback (по умолчанию: ${BRANCH})"
+        say "  BUILD_FROM_SOURCE=1        Пропустить попытку скачивания, сразу собрать (требует git и cargo)"
+        say "  INSTALL_DIR, CONFIG_DIR    Куда установить бинарь и конфиг"
     else
         say "Usage: $0 [ <version> | install | uninstall | purge ] [ options ]"
         say "  <version>    Install specific version (e.g. 3.3.15, default: latest)"
@@ -310,6 +334,12 @@ show_help() {
         say "  -s, --secret Set specific user secret (32 hex characters)"
         say "  -a, --ad-tag Set ad_tag"
         say "  -l, --lang   Set output language (1/en or 2/ru)"
+        say ""
+        say "Environment variables:"
+        say "  REPO=owner/repo            Release/source repository (default: ${REPO})"
+        say "  BRANCH=name                Branch used by the build fallback (default: ${BRANCH})"
+        say "  BUILD_FROM_SOURCE=1        Skip download and build from source (requires git and cargo)"
+        say "  INSTALL_DIR, CONFIG_DIR    Where to install the binary and config"
     fi
     exit 0
 }
@@ -490,6 +520,41 @@ detect_libc() {
 fetch_file() {
     if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
     else wget -q -O "$2" "$1"; fi
+}
+
+# Build the binary from source as a fallback when release artifacts are
+# unavailable (or BUILD_FROM_SOURCE=1). Arguments:
+#   $1 = destination directory under which the built binary lives
+#   $2 = git ref to check out (branch name or tag like "3.4.11")
+# On success the path to the freshly built binary is written to stdout.
+build_from_source() {
+    _bfs_destdir="$1"
+    _bfs_ref="$2"
+
+    command -v git >/dev/null 2>&1 || die "$L_ERR_NO_GIT"
+    command -v cargo >/dev/null 2>&1 || die "$L_ERR_NO_CARGO"
+
+    _bfs_srcdir="${_bfs_destdir}/src"
+    rm -rf "$_bfs_srcdir"
+
+    # `--depth=1 --branch <ref>` works for both branch names and tag names.
+    if ! git clone --depth=1 --branch "$_bfs_ref" \
+            "https://github.com/${REPO}.git" "$_bfs_srcdir" >&2
+    then
+        # shellcheck disable=SC2059
+        die "$(printf "$L_ERR_CLONE_FAIL" "$REPO" "$_bfs_ref")"
+    fi
+
+    ( cd "$_bfs_srcdir" && cargo build --release --bin "$BIN_NAME" >&2 ) \
+        || die "$L_ERR_BUILD_FAIL"
+
+    _bfs_built="${_bfs_srcdir}/target/release/${BIN_NAME}"
+    if [ ! -x "$_bfs_built" ]; then
+        # shellcheck disable=SC2059
+        die "$(printf "$L_ERR_BUILT_BIN_MISSING" "$BIN_NAME")"
+    fi
+
+    printf '%s\n' "$_bfs_built"
 }
 
 ensure_user_group() {
@@ -867,8 +932,22 @@ case "$ACTION" in
             die "$L_ERR_TMP_INV"
         fi
 
-        if ! fetch_file "$DL_URL" "${TEMP_DIR}/${FILE_NAME}"; then
-            if [ "$ARCH" = "x86_64-v3" ]; then
+        # Decide whether to download a release artifact or build from source.
+        # BUILD_FROM_SOURCE=1 → skip download entirely. Otherwise try the
+        # release tarball (with the historical x86_64-v3 → x86_64 fallback)
+        # and, only if every download fails, fall back to git clone + cargo
+        # build --release of the requested ref.
+        EXTRACTED_BIN=""
+        BUILD_REF="$BRANCH"
+        if [ "$TARGET_VERSION" != "latest" ]; then
+            BUILD_REF="$TARGET_VERSION"
+        fi
+        DOWNLOAD_OK=0
+
+        if [ "$BUILD_FROM_SOURCE" != "1" ]; then
+            if fetch_file "$DL_URL" "${TEMP_DIR}/${FILE_NAME}"; then
+                DOWNLOAD_OK=1
+            elif [ "$ARCH" = "x86_64-v3" ]; then
                 say "  -> $L_INFO_FALLBACK"
                 ARCH="x86_64"
                 FILE_NAME="${BIN_NAME}-${ARCH}-linux-${LIBC}.tar.gz"
@@ -877,18 +956,26 @@ case "$ACTION" in
                 else
                     DL_URL="https://github.com/${REPO}/releases/download/${TARGET_VERSION}/${FILE_NAME}"
                 fi
-                fetch_file "$DL_URL" "${TEMP_DIR}/${FILE_NAME}" || die "$L_ERR_DL_FAIL"
-            else
-                die "$L_ERR_DL_FAIL"
+                if fetch_file "$DL_URL" "${TEMP_DIR}/${FILE_NAME}"; then
+                    DOWNLOAD_OK=1
+                fi
             fi
         fi
 
-        say "$L_I_STAGE_3"
-        if ! gzip -dc "${TEMP_DIR}/${FILE_NAME}" | tar -xf - -C "$TEMP_DIR" 2>/dev/null; then
-            die "$L_ERR_EXTRACT"
+        if [ "$DOWNLOAD_OK" -eq 1 ]; then
+            say "$L_I_STAGE_3"
+            if ! gzip -dc "${TEMP_DIR}/${FILE_NAME}" | tar -xf - -C "$TEMP_DIR" 2>/dev/null; then
+                die "$L_ERR_EXTRACT"
+            fi
+            EXTRACTED_BIN="$(find "$TEMP_DIR" -type f -name "$BIN_NAME" -print 2>/dev/null | head -n 1 || true)"
+        else
+            if [ "$BUILD_FROM_SOURCE" != "1" ]; then
+                # shellcheck disable=SC2059
+                say "  -> $(printf "$L_INFO_BUILD_FALLBACK" "$BUILD_REF")"
+            fi
+            say "$L_I_BUILD_START"
+            EXTRACTED_BIN="$(build_from_source "$TEMP_DIR" "$BUILD_REF")"
         fi
-
-        EXTRACTED_BIN="$(find "$TEMP_DIR" -type f -name "$BIN_NAME" -print 2>/dev/null | head -n 1 || true)"
         [ -n "$EXTRACTED_BIN" ] || die "$L_ERR_BIN_NOT_FOUND"
 
         say "$L_I_STAGE_4"
