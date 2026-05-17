@@ -1,6 +1,6 @@
 # Telemt — MTProxy на Rust + Tokio
 
-[![Latest Release](https://img.shields.io/github/v/release/telemt/telemt?color=neon)](https://github.com/telemt/telemt/releases/latest) [![Stars](https://img.shields.io/github/stars/telemt/telemt?style=social)](https://github.com/telemt/telemt/stargazers) [![Forks](https://img.shields.io/github/forks/telemt/telemt?style=social)](https://github.com/telemt/telemt/network/members) [![Telegram](https://img.shields.io/badge/Telegram-Chat-24a1de?logo=telegram&logoColor=24a1de)](https://t.me/telemtrs)
+[![Latest Release](https://img.shields.io/github/v/release/Gickrede-e/telemt_bb?color=neon)](https://github.com/Gickrede-e/telemt_bb/releases/latest) [![Stars](https://img.shields.io/github/stars/Gickrede-e/telemt_bb?style=social)](https://github.com/Gickrede-e/telemt_bb/stargazers) [![Forks](https://img.shields.io/github/forks/Gickrede-e/telemt_bb?style=social)](https://github.com/Gickrede-e/telemt_bb/network/members) [![Telegram](https://img.shields.io/badge/Telegram-Chat-24a1de?logo=telegram&logoColor=24a1de)](https://t.me/telemtrs)
 
 ***Решает проблемы раньше, чем другие узнают об их существовании***
 
@@ -21,7 +21,7 @@
 ## Установка и обновление одной командой
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Gickrede-e/telemt_bb/main/install.sh | sh
 ```
 
 - [Инструкция по быстрому запуску](docs/Quick_start/QUICK_START_GUIDE.ru.md)
@@ -56,9 +56,9 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 ## Сборка
 ```bash
 # Клонируйте репозиторий
-git clone https://github.com/telemt/telemt 
-# Смените каталог на telemt
-cd telemt
+git clone https://github.com/Gickrede-e/telemt_bb 
+# Смените каталог на telemt_bb
+cd telemt_bb
 # Начните процесс сборки
 cargo build --release
 

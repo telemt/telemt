@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG TELEMT_REPOSITORY=telemt/telemt
+ARG TELEMT_REPOSITORY=Gickrede-e/telemt_bb
 ARG TELEMT_VERSION=latest
 
 # ==========================

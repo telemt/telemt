@@ -8,7 +8,7 @@
 
 ### Установка одной командой / обновление при повторном запуске
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Gickrede-e/telemt_bb/main/install.sh | sh
 ```
 После запуска скрипт запросит:
  - ваш язык (1 - English, 2 - Русский);
@@ -32,12 +32,12 @@ tg://proxy?server=IP&port=PORT&secret=SECRET
 
 ### Установка нужной версии
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- 3.3.39
+curl -fsSL https://raw.githubusercontent.com/Gickrede-e/telemt_bb/main/install.sh | sh -s -- 3.3.39
 ```
 
 ### Удаление с полной очисткой
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- purge
+curl -fsSL https://raw.githubusercontent.com/Gickrede-e/telemt_bb/main/install.sh | sh -s -- purge
 ```
 
 # Telemt через Systemd вручную
@@ -48,7 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh 
 
 **1. Скачать**
 ```bash
-wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
+wget -qO- "https://github.com/Gickrede-e/telemt_bb/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
 ```
 **2. Переместить в папку Bin**
 ```bash

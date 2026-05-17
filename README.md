@@ -1,8 +1,8 @@
 # Telemt - MTProxy on Rust + Tokio
 
-[![Latest Release](https://img.shields.io/github/v/release/telemt/telemt?color=neon)](https://github.com/telemt/telemt/releases/latest) [![Stars](https://img.shields.io/github/stars/telemt/telemt?style=social)](https://github.com/telemt/telemt/stargazers) [![Forks](https://img.shields.io/github/forks/telemt/telemt?style=social)](https://github.com/telemt/telemt/network/members)
+[![Latest Release](https://img.shields.io/github/v/release/Gickrede-e/telemt_bb?color=neon)](https://github.com/Gickrede-e/telemt_bb/releases/latest) [![Stars](https://img.shields.io/github/stars/Gickrede-e/telemt_bb?style=social)](https://github.com/Gickrede-e/telemt_bb/stargazers) [![Forks](https://img.shields.io/github/forks/Gickrede-e/telemt_bb?style=social)](https://github.com/Gickrede-e/telemt_bb/network/members)
 
-[🇷🇺 README на русском](https://github.com/telemt/telemt/blob/main/README.ru.md)
+[🇷🇺 README на русском](https://github.com/Gickrede-e/telemt_bb/blob/main/README.ru.md)
 
 ***Löst Probleme, bevor andere überhaupt wissen, dass sie existieren*** / ***It solves problems before others even realize they exist***
 
@@ -22,7 +22,7 @@
 
 ### One-command Install and Update
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Gickrede-e/telemt_bb/main/install.sh | sh
 ```
 - [Quick Start Guide](docs/Quick_start/QUICK_START_GUIDE.en.md)
 - [Инструкция по быстрому запуску](docs/Quick_start/QUICK_START_GUIDE.ru.md)
@@ -56,9 +56,9 @@ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared t
 ## Build
 ```bash
 # Cloning repo
-git clone https://github.com/telemt/telemt 
-# Changing Directory to telemt
-cd telemt
+git clone https://github.com/Gickrede-e/telemt_bb 
+# Changing Directory to telemt_bb
+cd telemt_bb
 # Starting Release Build
 cargo build --release
 

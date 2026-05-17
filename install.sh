@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${REPO:-telemt/telemt}"
+REPO="${REPO:-Gickrede-e/telemt_bb}"
 BIN_NAME="${BIN_NAME:-telemt}"
 INSTALL_DIR="${INSTALL_DIR:-/bin}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/telemt}"

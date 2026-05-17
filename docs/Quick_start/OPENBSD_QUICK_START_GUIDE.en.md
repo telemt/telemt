@@ -21,8 +21,8 @@ Notes:
 ## 2. Build from source
 
 ```sh
-git clone https://github.com/telemt/telemt
-cd telemt
+git clone https://github.com/Gickrede-e/telemt_bb
+cd telemt_bb
 cargo build --release
 ./target/release/telemt --version
 ```
