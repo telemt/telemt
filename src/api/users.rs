@@ -14,8 +14,9 @@ use super::config_store::{
 };
 use super::model::{
     ApiFailure, CreateUserRequest, CreateUserResponse, PatchUserRequest, RotateSecretRequest,
-    TlsDomainLink, UserInfo, UserLinks, is_valid_ad_tag, is_valid_user_secret, is_valid_username,
-    parse_optional_expiration, parse_patch_expiration, random_user_secret,
+    TlsDomainLink, UserInfo, UserLinks, UserQuotaEntry, UserQuotaListData, is_valid_ad_tag,
+    is_valid_user_secret, is_valid_username, parse_optional_expiration, parse_patch_expiration,
+    random_user_secret,
 };
 use super::patch::Patch;
 
@@ -568,6 +569,33 @@ pub(super) async fn users_from_config(
     users
 }
 
+pub(super) fn build_user_quota_list(cfg: &ProxyConfig, stats: &Stats) -> UserQuotaListData {
+    let mut names = cfg.access.users.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+
+    let snapshot = stats.user_quota_snapshot();
+    let mut users = Vec::with_capacity(names.len());
+    for username in names {
+        let Some(&data_quota_bytes) = cfg.access.user_data_quota.get(&username) else {
+            continue;
+        };
+        if data_quota_bytes == 0 {
+            continue;
+        }
+        let (used_bytes, last_reset_epoch_secs) = snapshot
+            .get(&username)
+            .map(|entry| (entry.used_bytes, entry.last_reset_epoch_secs))
+            .unwrap_or((0, 0));
+        users.push(UserQuotaEntry {
+            username,
+            data_quota_bytes,
+            used_bytes,
+            last_reset_epoch_secs,
+        });
+    }
+    UserQuotaListData { users }
+}
+
 fn empty_user_links() -> UserLinks {
     UserLinks {
         classic: Vec::new(),
@@ -958,5 +986,69 @@ mod tests {
                 .iter()
                 .any(|entry| entry.domain == "front-a.example.com")
         );
+    }
+
+    #[test]
+    fn build_user_quota_list_skips_users_without_positive_quota_and_sorts_by_username() {
+        let mut cfg = ProxyConfig::default();
+        cfg.access.users.insert(
+            "alice".to_string(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        );
+        cfg.access.users.insert(
+            "bob".to_string(),
+            "fedcba9876543210fedcba9876543210".to_string(),
+        );
+        cfg.access.users.insert(
+            "carol".to_string(),
+            "aaaabbbbccccddddeeeeffff00001111".to_string(),
+        );
+        // alice has a positive quota and should be listed.
+        cfg.access
+            .user_data_quota
+            .insert("alice".to_string(), 1 << 20);
+        // bob has no quota entry at all (None) — should be skipped.
+        // carol has an explicit zero quota — should be skipped.
+        cfg.access.user_data_quota.insert("carol".to_string(), 0);
+
+        let stats = Stats::new();
+        // Charge some traffic against alice; carol gets traffic too but should
+        // still be filtered out by the quota check.
+        let alice_stats = stats.get_or_create_user_stats_handle("alice");
+        stats.quota_charge_post_write(&alice_stats, 4096);
+        let carol_stats = stats.get_or_create_user_stats_handle("carol");
+        stats.quota_charge_post_write(&carol_stats, 99);
+
+        let data = build_user_quota_list(&cfg, &stats);
+
+        assert_eq!(data.users.len(), 1);
+        let entry = &data.users[0];
+        assert_eq!(entry.username, "alice");
+        assert_eq!(entry.data_quota_bytes, 1 << 20);
+        assert_eq!(entry.used_bytes, 4096);
+        assert_eq!(entry.last_reset_epoch_secs, 0);
+    }
+
+    #[test]
+    fn build_user_quota_list_orders_multiple_users_by_username_ascending() {
+        let mut cfg = ProxyConfig::default();
+        for name in ["charlie", "alice", "bob"] {
+            cfg.access.users.insert(
+                name.to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+            );
+            cfg.access.user_data_quota.insert(name.to_string(), 1 << 30);
+        }
+
+        let stats = Stats::new();
+        let data = build_user_quota_list(&cfg, &stats);
+
+        let names: Vec<&str> = data.users.iter().map(|e| e.username.as_str()).collect();
+        assert_eq!(names, vec!["alice", "bob", "charlie"]);
+        for entry in &data.users {
+            assert_eq!(entry.used_bytes, 0);
+            assert_eq!(entry.last_reset_epoch_secs, 0);
+            assert_eq!(entry.data_quota_bytes, 1 << 30);
+        }
     }
 }

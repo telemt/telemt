@@ -510,6 +510,19 @@ pub(super) struct ResetUserQuotaResponse {
     pub(super) last_reset_epoch_secs: u64,
 }
 
+#[derive(Serialize)]
+pub(super) struct UserQuotaListData {
+    pub(super) users: Vec<UserQuotaEntry>,
+}
+
+#[derive(Serialize)]
+pub(super) struct UserQuotaEntry {
+    pub(super) username: String,
+    pub(super) data_quota_bytes: u64,
+    pub(super) used_bytes: u64,
+    pub(super) last_reset_epoch_secs: u64,
+}
+
 #[derive(Deserialize)]
 pub(super) struct CreateUserRequest {
     pub(super) username: String,

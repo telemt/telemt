@@ -68,7 +68,9 @@ use runtime_zero::{
     build_limits_effective_data, build_runtime_gates_data, build_security_posture_data,
     build_system_info_data,
 };
-use users::{create_user, delete_user, patch_user, rotate_secret, users_from_config};
+use users::{
+    build_user_quota_list, create_user, delete_user, patch_user, rotate_secret, users_from_config,
+};
 
 const API_MAX_CONTROL_CONNECTIONS: usize = 1024;
 const API_HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -503,6 +505,12 @@ async fn handle(
                 )
                 .await;
                 Ok(success_response(StatusCode::OK, users, revision))
+            }
+            ("GET", "/v1/users/quota") => {
+                let revision = current_revision(&shared.config_path).await?;
+                let disk_cfg = load_config_from_disk(&shared.config_path).await?;
+                let data = build_user_quota_list(&disk_cfg, shared.stats.as_ref());
+                Ok(success_response(StatusCode::OK, data, revision))
             }
             ("POST", "/v1/users") => {
                 if api_cfg.read_only {
