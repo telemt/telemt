@@ -378,6 +378,65 @@ fn accept_shards_per_listener(listener_count: usize) -> usize {
     (cpus / listener_count.max(1)).max(1)
 }
 
+/// Bundle of `Arc`-shared dependencies wired into every accepted connection.
+///
+/// Each accept loop normally has to `clone()` ~12 individual `Arc`s before
+/// spawning the per-connection task. On many-core hosts this pattern causes
+/// cache-line ping-pong on each `Arc`'s refcount. Packing them into a single
+/// `Arc<AcceptContext>` collapses the hot-path work to one atomic refcount
+/// bump per accept; the individual `Arc::clone`s happen inside the spawned
+/// task (off the accept loop's critical path) when we unpack the context for
+/// `ClientHandler::new_with_shared`. See docs section 1bis.5.
+struct AcceptContext {
+    stats: Arc<Stats>,
+    upstream_manager: Arc<UpstreamManager>,
+    replay_checker: Arc<ReplayChecker>,
+    buffer_pool: Arc<BufferPool>,
+    rng: Arc<SecureRandom>,
+    me_pool: Option<Arc<MePool>>,
+    route_runtime: Arc<RouteRuntimeController>,
+    tls_cache: Option<Arc<TlsFrontCache>>,
+    ip_tracker: Arc<UserIpTracker>,
+    beobachten: Arc<BeobachtenStore>,
+    shared: Arc<ProxySharedState>,
+}
+
+/// Split a global `max_connections` budget into per-shard sub-semaphores.
+///
+/// One global `Semaphore` becomes a single atomic contended by every accept
+/// task on every CPU. Splitting it into `shard_count` independent semaphores
+/// removes that serialization point at the cost of slightly less precise
+/// global accounting: an idle shard's spare permits cannot be borrowed by a
+/// saturated neighbour. For the high-concurrency case where load is roughly
+/// uniform across shards this is a net win; for small deployments
+/// (`shard_count == 1`) the behaviour is identical to the previous code.
+///
+/// Permits are distributed as evenly as possible; the first `remainder`
+/// shards each get one extra permit. `Semaphore::MAX_PERMITS` (the "unlimited"
+/// sentinel from `max_connections == 0`) is preserved by giving every shard
+/// `MAX_PERMITS`, which keeps the limiter effectively disabled.
+fn split_max_connections(global: &Arc<Semaphore>, shard_count: usize) -> Vec<Arc<Semaphore>> {
+    let shard_count = shard_count.max(1);
+    let total = global.available_permits();
+    if shard_count == 1 {
+        return vec![global.clone()];
+    }
+    if total >= Semaphore::MAX_PERMITS {
+        // Unlimited mode: every shard gets its own "unlimited" semaphore.
+        return (0..shard_count)
+            .map(|_| Arc::new(Semaphore::new(Semaphore::MAX_PERMITS)))
+            .collect();
+    }
+    let per_shard = total / shard_count;
+    let remainder = total % shard_count;
+    (0..shard_count)
+        .map(|i| {
+            let extra = if i < remainder { 1 } else { 0 };
+            Arc::new(Semaphore::new(per_shard + extra))
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_tcp_accept_loops(
     listeners: Vec<(TcpListener, bool)>,
@@ -406,30 +465,39 @@ pub(crate) fn spawn_tcp_accept_loops(
         );
     }
 
+    // Split the global `max_connections` budget across accept shards so that
+    // every CPU's accept task acquires permits from its own semaphore instead
+    // of contending on a single global atomic. See docs section 1bis.2.
+    let per_shard_semaphores = split_max_connections(&max_connections, shards);
+
+    // Bundle every per-connection Arc into a single AcceptContext. Each accept
+    // shard takes one `Arc::clone(&accept_ctx)` instead of N individual
+    // `Arc::clone`s, cutting refcount cache-line traffic in the hot accept
+    // loop by an order of magnitude. See docs section 1bis.5.
+    let accept_ctx = Arc::new(AcceptContext {
+        stats,
+        upstream_manager,
+        replay_checker,
+        buffer_pool,
+        rng,
+        me_pool,
+        route_runtime,
+        tls_cache,
+        ip_tracker,
+        beobachten,
+        shared,
+    });
+
     for (listener, listener_proxy_protocol) in listeners {
         // Share the listener between N accept tasks so that incoming connection
         // processing isn't bottlenecked by a single task on multi-core hosts.
         let listener = Arc::new(listener);
-        for _ in 0..shards {
+        for shard_semaphore in per_shard_semaphores.iter().take(shards) {
             let listener = Arc::clone(&listener);
             let mut config_rx: watch::Receiver<Arc<ProxyConfig>> = config_rx.clone();
             let admission_rx_tcp = admission_rx.clone();
-            let stats = stats.clone();
-            let upstream_manager = upstream_manager.clone();
-            let replay_checker = replay_checker.clone();
-            let buffer_pool = buffer_pool.clone();
-            let rng = rng.clone();
-            let me_pool = me_pool.clone();
-            let route_runtime = route_runtime.clone();
-            let tls_cache = tls_cache.clone();
-            let ip_tracker = ip_tracker.clone();
-            let beobachten = beobachten.clone();
-            let shared = shared.clone();
-            // TODO(perf): `max_connections` is a single global `Semaphore` —
-            // every accept across all shards contends on its internal atomic.
-            // Sharded sub-semaphores (one per accept shard) would remove that
-            // serialization point; see docs section 1bis.2.
-            let max_connections_tcp = max_connections.clone();
+            let accept_ctx = Arc::clone(&accept_ctx);
+            let max_connections_tcp = shard_semaphore.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -472,7 +540,7 @@ pub(crate) fn spawn_tcp_accept_loops(
                                     break;
                                 }
                                 Err(_) => {
-                                    stats.increment_accept_permit_timeout_total();
+                                    accept_ctx.stats.increment_accept_permit_timeout_total();
                                     debug!(
                                         peer = %peer_addr,
                                         timeout_ms = accept_permit_timeout_ms,
@@ -484,17 +552,9 @@ pub(crate) fn spawn_tcp_accept_loops(
                             }
                         };
                         let config = config_rx.borrow_and_update().clone();
-                        let stats = stats.clone();
-                        let upstream_manager = upstream_manager.clone();
-                        let replay_checker = replay_checker.clone();
-                        let buffer_pool = buffer_pool.clone();
-                        let rng = rng.clone();
-                        let me_pool = me_pool.clone();
-                        let route_runtime = route_runtime.clone();
-                        let tls_cache = tls_cache.clone();
-                        let ip_tracker = ip_tracker.clone();
-                        let beobachten = beobachten.clone();
-                        let shared = shared.clone();
+                        // One refcount bump on the hot accept path; individual
+                        // Arc clones happen inside the spawned task below.
+                        let ctx = Arc::clone(&accept_ctx);
                         let proxy_protocol_enabled = listener_proxy_protocol;
                         let real_peer_report = Arc::new(std::sync::Mutex::new(None));
                         let real_peer_report_for_handler = real_peer_report.clone();
@@ -505,17 +565,17 @@ pub(crate) fn spawn_tcp_accept_loops(
                                 stream,
                                 peer_addr,
                                 config,
-                                stats,
-                                upstream_manager,
-                                replay_checker,
-                                buffer_pool,
-                                rng,
-                                me_pool,
-                                route_runtime,
-                                tls_cache,
-                                ip_tracker,
-                                beobachten,
-                                shared,
+                                ctx.stats.clone(),
+                                ctx.upstream_manager.clone(),
+                                ctx.replay_checker.clone(),
+                                ctx.buffer_pool.clone(),
+                                ctx.rng.clone(),
+                                ctx.me_pool.clone(),
+                                ctx.route_runtime.clone(),
+                                ctx.tls_cache.clone(),
+                                ctx.ip_tracker.clone(),
+                                ctx.beobachten.clone(),
+                                ctx.shared.clone(),
                                 proxy_protocol_enabled,
                                 real_peer_report_for_handler,
                                 #[cfg(unix)]

@@ -19,13 +19,17 @@ const MAX_RECENT_IP_ENTRIES: u64 = 262_144;
 
 /// Tracks active and recent client IPs for per-user admission control.
 ///
-/// TODO(perf): `active_ips` / `recent_ips` are single global `RwLock<HashMap>`s
+/// TODO(perf, A): `active_ips` / `recent_ips` are single global `tokio::sync::RwLock<HashMap>`s
 /// taken with `write()` on every accept/disconnect. On 16+ vCPU hosts this is
 /// the dominant scaling bottleneck — see
 /// `docs/PERFORMANCE_AND_ANTIDETECT.ru.md` section 1bis.3. The planned fix is
-/// to shard both maps into 16-64 sub-maps keyed by `hash(user)`, but it
-/// touches the entire ~1100-line module and its adversarial test suite, so
-/// it's split out as a separate change.
+/// to shard both maps into 16-64 sub-maps keyed by `hash(user)` and route
+/// every method through the right shard while keeping the global atomic
+/// counters and adversarial-suite semantics intact. The change touches ~22
+/// public methods and ~74 references across this ~1100-line module, plus an
+/// extensive adversarial test suite (`adversarial_*`), so it is deliberately
+/// kept as a focused follow-up rather than mixed with the other scalability
+/// fixes shipped on this branch.
 #[derive(Debug, Clone)]
 pub struct UserIpTracker {
     active_ips: Arc<RwLock<HashMap<String, HashMap<IpAddr, usize>>>>,

@@ -7,6 +7,37 @@
 
 ---
 
+## Статус реализации (TODO A–K из плана)
+
+Часть рекомендаций уже переведена в код в этой ветке. Срез на текущий коммит:
+
+| ID | Рекомендация | Статус | Где |
+|---|---|---|---|
+| A | Шардинг IpTracker | **Отложено** — большой рефакторинг (~1100 LOC, adversarial-тесты), выделено в отдельный TODO | `src/ip_tracker.rs` (`TODO(perf)`) |
+| B | Accept-loop шардинг | **Частично** — userspace-шардинг (N таск на listener) сделан, kernel-level SO_REUSEPORT с N сокетами оставлен как TODO | `src/maestro/listeners.rs::spawn_tcp_accept_loops` (env `TELEMT_ACCEPT_SHARDS`) |
+| C | Шардинг `Semaphore` `max_connections` | **Сделано** — `split_max_connections()` делит лимит на N подсемафоров по числу accept-shard | `src/maestro/listeners.rs::split_max_connections` |
+| D | `DashMap::with_shard_amount(num_cpus*4)` | **Сделано** — `Stats::user_stats` и `traffic_limiter` шардированы по CPU | `src/stats/mod.rs`, `src/proxy/traffic_limiter.rs` |
+| E | Per-core buffer pool | **Сделано** — `BufferPool` стал façade'ом над N `BufferPoolShard`, thread-sticky выбор шарда | `src/stream/buffer_pool.rs` |
+| F | `me_c2me_channel_capacity` дефолт | **Сделано** — уже 1024 (`DEFAULT_ME_C2ME_CHANNEL_CAPACITY`) | `src/config/defaults.rs:28` |
+| G | DNS-кэш в `tls_front/fetcher` | **Сделано** — short-TTL LRU перед `lookup_host` | `src/tls_front/fetcher.rs` |
+| H | Убрать `spawn_blocking` для unknown-DC лога | **Не требуется** — `should_log_unknown_dc` уже rate-limit'ит по distinct DC (max-set фильтр), spawn_blocking не вызывается часто | `src/proxy/direct_relay.rs:66–85, 482–494` |
+| I | Явный `tokio::runtime::Builder` | **Сделано** — `TELEMT_WORKER_THREADS`, `TELEMT_MAX_BLOCKING_THREADS`, повышены `event_interval`/`global_queue_interval` | `src/main.rs` |
+| J | 3 task → 2 в middle-relay | **Отложено** — большой рефакторинг hot-path средневой релейной машины, требует отдельной сессии и нагрузочных тестов | `src/proxy/middle_relay.rs:1260, 1307` |
+| K | `Arc<AcceptContext>` на accept fan-out | **Сделано** — TCP accept loop делает 1 `Arc::clone` вместо ~12 | `src/maestro/listeners.rs::AcceptContext` |
+
+**Анти-детект, статус:**
+
+| Пункт | Статус | Где |
+|---|---|---|
+| GREASE по умолчанию (2.1) | **Сделано** — `grease_enabled = true` | `src/config/types.rs::EmulationConfig` |
+| Ротация cipher suite в эмулируемом ServerHello (2.2) | **Частично** — при отсутствии upstream-профиля выбор по hash(ClientHello digest) | `src/tls_front/emulator.rs` |
+| ECH parsing (2.3) | **Не сделано** — оставлено как roadmap |  |
+| Timing jitter ServerHello (2.4), Decoy records (2.5), ALPN profiles (2.6), Bad CH → mask-host fallback (2.7), Multi-host masking (2.8) | **Не сделано** — рекомендации остаются в этом документе |  |
+
+Все нереализованные пункты сохранены ниже с file:line, оценкой эффекта и эскизом подхода — чтобы можно было поднять их в отдельной фокусной сессии.
+
+---
+
 ## 0. TL;DR
 
 ### Почему на мощной VM ресурсы не утилизируются (главное)
