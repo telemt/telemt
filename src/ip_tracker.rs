@@ -18,6 +18,14 @@ const MAX_ACTIVE_IP_ENTRIES: u64 = 131_072;
 const MAX_RECENT_IP_ENTRIES: u64 = 262_144;
 
 /// Tracks active and recent client IPs for per-user admission control.
+///
+/// TODO(perf): `active_ips` / `recent_ips` are single global `RwLock<HashMap>`s
+/// taken with `write()` on every accept/disconnect. On 16+ vCPU hosts this is
+/// the dominant scaling bottleneck — see
+/// `docs/PERFORMANCE_AND_ANTIDETECT.ru.md` section 1bis.3. The planned fix is
+/// to shard both maps into 16-64 sub-maps keyed by `hash(user)`, but it
+/// touches the entire ~1100-line module and its adversarial test suite, so
+/// it's split out as a separate change.
 #[derive(Debug, Clone)]
 pub struct UserIpTracker {
     active_ips: Arc<RwLock<HashMap<String, HashMap<IpAddr, usize>>>>,

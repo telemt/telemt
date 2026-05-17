@@ -30,6 +30,47 @@ use x509_parser::prelude::FromDer;
 use crate::config::TlsFetchProfile;
 use crate::crypto::{SecureRandom, sha256};
 use crate::network::dns_overrides::resolve_socket_addr;
+
+// Small process-wide DNS cache shared by tls_front cert fetches. Each new
+// fetch otherwise calls tokio::net::lookup_host (getaddrinfo on the blocking
+// pool); under high client churn this both starves the blocking pool and adds
+// latency. Keep the TTL short (60s) so failover still works.
+const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+fn dns_cache()
+-> &'static parking_lot::Mutex<std::collections::HashMap<(String, u16), (Vec<SocketAddr>, Instant)>>
+{
+    static CACHE: OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<(String, u16), (Vec<SocketAddr>, Instant)>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn cached_lookup_host_v4(host: &str, port: u16) -> std::io::Result<Option<SocketAddr>> {
+    let now = Instant::now();
+    {
+        let cache = dns_cache().lock();
+        if let Some((addrs, deadline)) = cache.get(&(host.to_string(), port)) {
+            if *deadline > now {
+                return Ok(addrs.iter().copied().find(|a| a.is_ipv4()));
+            }
+        }
+    }
+
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+    let deadline = now + DNS_CACHE_TTL;
+    {
+        let mut cache = dns_cache().lock();
+        if cache.len() >= 4096 {
+            cache.retain(|_, (_, d)| *d > now);
+            if cache.len() >= 4096 {
+                cache.clear();
+            }
+        }
+        cache.insert((host.to_string(), port), (addrs.clone(), deadline));
+    }
+    Ok(addrs.into_iter().find(|a| a.is_ipv4()))
+}
 use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
 };
@@ -859,8 +900,8 @@ async fn connect_tcp_with_upstream(
         let resolved = if let Some(addr) = resolve_socket_addr(host, port) {
             Some(addr)
         } else {
-            match tokio::net::lookup_host((host, port)).await {
-                Ok(mut addrs) => addrs.find(|a| a.is_ipv4()),
+            match cached_lookup_host_v4(host, port).await {
+                Ok(addr) => addr,
                 Err(e) => {
                     if strict_route {
                         return Err(anyhow!(

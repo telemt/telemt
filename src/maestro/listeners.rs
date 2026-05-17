@@ -356,6 +356,28 @@ pub(crate) async fn bind_listeners(
     })
 }
 
+// TODO(perf): For true kernel-level accept distribution (especially with
+// SO_REUSEPORT), `bind_listeners` should optionally bind N sockets on the
+// same `(ip, port)` when `reuse_allow=true`. The current approach shares one
+// `TcpListener` between N tasks, which already distributes the userspace
+// per-accept overhead (config snapshot, permit acquire, Arc clones) but the
+// kernel still serializes the `accept()` syscall on a single socket queue.
+// See `docs/PERFORMANCE_AND_ANTIDETECT.ru.md` section 1bis.1.
+fn accept_shards_per_listener(listener_count: usize) -> usize {
+    if let Ok(v) = std::env::var("TELEMT_ACCEPT_SHARDS")
+        && let Ok(n) = v.parse::<usize>()
+        && n > 0
+    {
+        return n;
+    }
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    // Spread roughly one accept task per CPU across the configured listeners.
+    // Always keep at least 1 task per listener to preserve existing behaviour.
+    (cpus / listener_count.max(1)).max(1)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_tcp_accept_loops(
     listeners: Vec<(TcpListener, bool)>,
@@ -374,25 +396,44 @@ pub(crate) fn spawn_tcp_accept_loops(
     shared: Arc<ProxySharedState>,
     max_connections: Arc<Semaphore>,
 ) {
-    for (listener, listener_proxy_protocol) in listeners {
-        let mut config_rx: watch::Receiver<Arc<ProxyConfig>> = config_rx.clone();
-        let admission_rx_tcp = admission_rx.clone();
-        let stats = stats.clone();
-        let upstream_manager = upstream_manager.clone();
-        let replay_checker = replay_checker.clone();
-        let buffer_pool = buffer_pool.clone();
-        let rng = rng.clone();
-        let me_pool = me_pool.clone();
-        let route_runtime = route_runtime.clone();
-        let tls_cache = tls_cache.clone();
-        let ip_tracker = ip_tracker.clone();
-        let beobachten = beobachten.clone();
-        let shared = shared.clone();
-        let max_connections_tcp = max_connections.clone();
+    let listener_count = listeners.len();
+    let shards = accept_shards_per_listener(listener_count);
+    if shards > 1 {
+        info!(
+            shards_per_listener = shards,
+            listeners = listener_count,
+            "Spawning multiple accept tasks per listener to reduce per-task CPU pressure"
+        );
+    }
 
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
+    for (listener, listener_proxy_protocol) in listeners {
+        // Share the listener between N accept tasks so that incoming connection
+        // processing isn't bottlenecked by a single task on multi-core hosts.
+        let listener = Arc::new(listener);
+        for _ in 0..shards {
+            let listener = Arc::clone(&listener);
+            let mut config_rx: watch::Receiver<Arc<ProxyConfig>> = config_rx.clone();
+            let admission_rx_tcp = admission_rx.clone();
+            let stats = stats.clone();
+            let upstream_manager = upstream_manager.clone();
+            let replay_checker = replay_checker.clone();
+            let buffer_pool = buffer_pool.clone();
+            let rng = rng.clone();
+            let me_pool = me_pool.clone();
+            let route_runtime = route_runtime.clone();
+            let tls_cache = tls_cache.clone();
+            let ip_tracker = ip_tracker.clone();
+            let beobachten = beobachten.clone();
+            let shared = shared.clone();
+            // TODO(perf): `max_connections` is a single global `Semaphore` —
+            // every accept across all shards contends on its internal atomic.
+            // Sharded sub-semaphores (one per accept shard) would remove that
+            // serialization point; see docs section 1bis.2.
+            let max_connections_tcp = max_connections.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    match listener.accept().await {
                     Ok((stream, peer_addr)) => {
                         let rst_mode = config_rx.borrow().general.rst_on_close;
                         #[cfg(unix)]
@@ -568,5 +609,6 @@ pub(crate) fn spawn_tcp_accept_loops(
                 }
             }
         });
+        }
     }
 }

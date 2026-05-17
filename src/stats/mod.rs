@@ -357,7 +357,14 @@ impl UserStats {
 
 impl Stats {
     pub fn new() -> Self {
-        let stats = Self::default();
+        let mut stats = Self::default();
+        // Scale user_stats shards with CPU count to reduce contention on highly
+        // parallel hosts. DashMap requires a power-of-two shard count.
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+        let shards = (cpus * 4).next_power_of_two().max(64);
+        stats.user_stats = DashMap::with_shard_amount(shards);
         stats.apply_telemetry_policy(TelemetryPolicy::default());
         stats.refresh_cached_epoch_secs();
         *stats.start_time.write() = Some(Instant::now());

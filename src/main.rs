@@ -34,6 +34,34 @@ mod tls_front;
 mod transport;
 mod util;
 
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().thread_name("telemt-worker");
+
+    // Allow tuning the worker pool and blocking pool without recompiling.
+    // TELEMT_WORKER_THREADS / TELEMT_MAX_BLOCKING_THREADS override the defaults.
+    if let Some(n) = std::env::var("TELEMT_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+    {
+        builder.worker_threads(n);
+    }
+    let max_blocking = std::env::var("TELEMT_MAX_BLOCKING_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1024);
+    builder.max_blocking_threads(max_blocking);
+
+    // Reduce scheduler ping-pong on many-core hosts. These are advisory hints
+    // for how often workers visit the global queue / I/O driver.
+    builder.event_interval(31);
+    builder.global_queue_interval(31);
+
+    builder.build()
+}
+
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Install rustls crypto provider early
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -66,17 +94,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(maestro::run_with_daemon(daemon_opts))
+        build_runtime()?.block_on(maestro::run_with_daemon(daemon_opts))
     }
 
     #[cfg(not(unix))]
     {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(maestro::run())
+        build_runtime()?.block_on(maestro::run())
     }
 }

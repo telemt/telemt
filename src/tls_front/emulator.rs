@@ -227,7 +227,15 @@ pub fn build_emulated_server_hello(
     message.push(session_id.len() as u8);
     message.extend_from_slice(session_id);
     let cipher = if cached.server_hello_template.cipher_suite == [0, 0] {
-        [0x13, 0x01]
+        // Fallback when no upstream profile was captured: pick between the two
+        // common TLS 1.3 cipher suites to avoid a single hard-coded signature.
+        // The choice is derived from the ClientHello digest so it stays stable
+        // within a single handshake but varies across clients.
+        if client_digest[0] & 1 == 0 {
+            [0x13, 0x01] // TLS_AES_128_GCM_SHA256
+        } else {
+            [0x13, 0x02] // TLS_AES_256_GCM_SHA384
+        }
     } else {
         cached.server_hello_template.cipher_suite
     };

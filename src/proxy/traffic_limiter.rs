@@ -12,7 +12,16 @@ use ipnetwork::IpNetwork;
 
 use crate::config::RateLimitBps;
 
-const REGISTRY_SHARDS: usize = 64;
+/// Default number of registry shards used when CPU count is unavailable. Kept
+/// at 64 to preserve historical behaviour on small hosts.
+const REGISTRY_SHARDS_BASE: usize = 64;
+
+fn registry_shards() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    (cpus * 4).next_power_of_two().max(REGISTRY_SHARDS_BASE)
+}
 const FAIR_EPOCH_MS: u64 = 20;
 const MAX_BORROW_CHUNK_BYTES: u64 = 32 * 1024;
 const CLEANUP_INTERVAL_SECS: u64 = 60;
@@ -345,7 +354,7 @@ impl CidrBucket {
             rates,
             up: CidrDirectionBucket::default(),
             down: CidrDirectionBucket::default(),
-            users: ShardedRegistry::new(REGISTRY_SHARDS),
+            users: ShardedRegistry::new(registry_shards()),
             active_leases: AtomicU64::new(0),
         }
     }
@@ -622,8 +631,8 @@ impl TrafficLimiter {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             policy: ArcSwap::from_pointee(PolicySnapshot::default()),
-            user_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
-            cidr_buckets: ShardedRegistry::new(REGISTRY_SHARDS),
+            user_buckets: ShardedRegistry::new(registry_shards()),
+            cidr_buckets: ShardedRegistry::new(registry_shards()),
             user_scope: ScopeMetrics::default(),
             cidr_scope: ScopeMetrics::default(),
             last_cleanup_epoch_secs: AtomicU64::new(0),

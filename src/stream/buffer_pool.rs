@@ -16,8 +16,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Default buffer size
 pub const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Default maximum number of pooled buffers
-pub const DEFAULT_MAX_BUFFERS: usize = 1024;
+/// Default maximum number of pooled buffers.
+///
+/// 4096 sized to cover ~tens of thousands of concurrent connections without
+/// re-allocating buffers on every churn. Buffer memory is bounded by
+/// `DEFAULT_MAX_BUFFERS * DEFAULT_BUFFER_SIZE` ≈ 256 MiB; the pool only grows
+/// to satisfy actual demand.
+///
+/// TODO(perf): For very high core counts (>16 vCPU) replace the single
+/// `ArrayQueue` with a per-CPU shard array to remove cross-core cache-line
+/// bouncing on get/put. See `docs/PERFORMANCE_AND_ANTIDETECT.ru.md` 1bis.10.
+pub const DEFAULT_MAX_BUFFERS: usize = 4096;
 
 // ============= Buffer Pool =============
 

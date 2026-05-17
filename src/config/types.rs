@@ -1661,7 +1661,8 @@ pub struct TlsFetchConfig {
     pub total_budget_ms: u64,
 
     /// Adds GREASE-style values into selected ClientHello extensions.
-    #[serde(default)]
+    /// Default is `true` (RFC 8701) to break static JA3 fingerprints.
+    #[serde(default = "default_tls_fetch_grease_enabled")]
     pub grease_enabled: bool,
 
     /// Produces deterministic ClientHello randomness for debugging/tests.
@@ -1681,7 +1682,7 @@ impl Default for TlsFetchConfig {
             strict_route: default_tls_fetch_strict_route(),
             attempt_timeout_ms: default_tls_fetch_attempt_timeout_ms(),
             total_budget_ms: default_tls_fetch_total_budget_ms(),
-            grease_enabled: false,
+            grease_enabled: default_tls_fetch_grease_enabled(),
             deterministic: false,
             profile_cache_ttl_secs: default_tls_fetch_profile_cache_ttl_secs(),
         }

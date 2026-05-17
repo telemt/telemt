@@ -1245,6 +1245,10 @@ where
     let mut relay_idle_state = RelayClientIdleState::new(session_started_at);
     let last_downstream_activity_ms = Arc::new(AtomicU64::new(0));
 
+    // The configured default for `me_c2me_channel_capacity` is 1024
+    // (see `src/config/defaults.rs:DEFAULT_ME_C2ME_CHANNEL_CAPACITY`). The
+    // small fallback below only kicks in if the user explicitly sets a
+    // pathologically small value.
     let c2me_channel_capacity = config
         .general
         .me_c2me_channel_capacity

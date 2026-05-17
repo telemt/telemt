@@ -93,6 +93,10 @@ pub(crate) fn default_tls_fetch_profile_cache_ttl_secs() -> u64 {
     600
 }
 
+pub(crate) fn default_tls_fetch_grease_enabled() -> bool {
+    true
+}
+
 pub(crate) fn default_mask_port() -> u16 {
     443
 }
