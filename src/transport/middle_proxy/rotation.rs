@@ -191,3 +191,41 @@ pub async fn me_rotation_task(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{enqueue_reinit_trigger, MeReinitTrigger};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn me_reinit_trigger_as_str() {
+        assert_eq!(MeReinitTrigger::Periodic.as_str(), "periodic");
+        assert_eq!(MeReinitTrigger::MapChanged.as_str(), "map-change");
+    }
+
+    #[tokio::test]
+    async fn enqueue_ok_ordering() {
+        let (tx, mut rx) = mpsc::channel(2);
+        enqueue_reinit_trigger(&tx, MeReinitTrigger::Periodic);
+        enqueue_reinit_trigger(&tx, MeReinitTrigger::MapChanged);
+        assert_eq!(rx.recv().await, Some(MeReinitTrigger::Periodic));
+        assert_eq!(rx.recv().await, Some(MeReinitTrigger::MapChanged));
+    }
+
+    #[tokio::test]
+    async fn enqueue_full_silent() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(MeReinitTrigger::Periodic).unwrap();
+        enqueue_reinit_trigger(&tx, MeReinitTrigger::MapChanged);
+        drop(tx);
+        assert_eq!(rx.recv().await, Some(MeReinitTrigger::Periodic));
+        assert_eq!(rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn enqueue_closed_silent() {
+        let (tx, rx) = mpsc::channel::<MeReinitTrigger>(2);
+        drop(rx);
+        enqueue_reinit_trigger(&tx, MeReinitTrigger::Periodic);
+    }
+}

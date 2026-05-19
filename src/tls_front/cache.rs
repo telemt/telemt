@@ -497,6 +497,88 @@ mod tests {
         assert!(!cert_info_matches_domain(&cached));
     }
 
+    #[test]
+    fn cert_info_domain_match_passes_when_no_cert_info() {
+        let mut cached = cached_with_cert_info("b.com", None, Vec::new());
+        cached.cert_info = None;
+        // Without cert info the cache cannot reject — must default to true.
+        assert!(cert_info_matches_domain(&cached));
+    }
+
+    #[test]
+    fn cert_info_domain_match_falls_back_to_subject_cn_when_san_empty() {
+        let cached = cached_with_cert_info("b.com", Some("b.com"), Vec::new());
+        assert!(cert_info_matches_domain(&cached));
+
+        let cached = cached_with_cert_info("b.com", Some("other.com"), Vec::new());
+        assert!(!cert_info_matches_domain(&cached));
+    }
+
+    #[test]
+    fn cert_info_domain_match_ignores_subject_cn_when_san_present() {
+        // SAN takes precedence over subject_cn (RFC 6125). subject_cn=other.com
+        // doesn't poison the match when SAN includes b.com.
+        let cached = cached_with_cert_info("b.com", Some("other.com"), vec!["b.com"]);
+        assert!(cert_info_matches_domain(&cached));
+    }
+
+    #[test]
+    fn dns_name_matches_is_case_insensitive() {
+        assert!(dns_name_matches_domain("Example.COM", "example.com"));
+        assert!(dns_name_matches_domain("example.com", "EXAMPLE.COM"));
+        assert!(dns_name_matches_domain("Example.COM", "EXAMPLE.com"));
+    }
+
+    #[test]
+    fn dns_name_matches_strips_trailing_dot() {
+        // Trailing dot is allowed in DNS notation; the matcher must
+        // normalize it away so `example.com.` and `example.com` match.
+        assert!(dns_name_matches_domain("example.com.", "example.com"));
+        assert!(dns_name_matches_domain("example.com", "example.com."));
+    }
+
+    #[test]
+    fn dns_name_matches_wildcard_requires_exactly_one_label() {
+        // *.b.com must match exactly one label deep.
+        assert!(dns_name_matches_domain("*.b.com", "api.b.com"));
+        assert!(dns_name_matches_domain("*.b.com", "x.b.com"));
+        // Multi-label and bare-domain cases must not match.
+        assert!(!dns_name_matches_domain("*.b.com", "deep.api.b.com"));
+        assert!(!dns_name_matches_domain("*.b.com", "b.com"));
+        // Different parent domain.
+        assert!(!dns_name_matches_domain("*.b.com", "api.other.com"));
+    }
+
+    #[test]
+    fn dns_name_matches_rejects_non_wildcard_prefix() {
+        // Wildcard MUST be the literal leading `*.`. Other patterns must
+        // not be interpreted as wildcards.
+        assert!(!dns_name_matches_domain("a*.b.com", "abc.b.com"));
+        assert!(!dns_name_matches_domain("*a.b.com", "xa.b.com"));
+    }
+
+    #[test]
+    fn normalize_dns_name_lowercases_and_trims() {
+        assert_eq!(normalize_dns_name("Example.COM"), "example.com");
+        assert_eq!(normalize_dns_name("  Example.COM  "), "example.com");
+        assert_eq!(normalize_dns_name("example.com."), "example.com");
+        // `trim_end_matches('.')` strips *all* trailing dots, not just one —
+        // multiple dots in a row collapse to nothing.
+        assert_eq!(normalize_dns_name("example.com.."), "example.com");
+        // Already-normalized stays the same.
+        assert_eq!(normalize_dns_name("example.com"), "example.com");
+    }
+
+    #[test]
+    fn profile_source_label_round_trips_each_variant() {
+        // Labels are part of the metrics namespace (Prometheus counters);
+        // changing one without coordination with dashboards is a regression.
+        assert_eq!(profile_source_label(TlsProfileSource::Default), "default");
+        assert_eq!(profile_source_label(TlsProfileSource::Raw), "raw");
+        assert_eq!(profile_source_label(TlsProfileSource::Rustls), "rustls");
+        assert_eq!(profile_source_label(TlsProfileSource::Merged), "merged");
+    }
+
     #[tokio::test]
     async fn test_take_full_cert_budget_for_ip_uses_ttl() {
         let cache = TlsFrontCache::new(&["example.com".to_string()], 1024, "tlsfront-test-cache");

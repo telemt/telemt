@@ -667,4 +667,172 @@ mod tests {
             "Secure padding should create observable wire-length jitter"
         );
     }
+
+    // ============= Pure encode/decode round-trips =============
+    //
+    // The existing async tests above stream frames through a tokio `duplex`,
+    // which exercises both the codec and the framing harness. The tests
+    // below pin behavior at a lower level — building BytesMut by hand and
+    // calling `decode_*` / `encode_*` directly. That closes opt.md §2.4
+    // (frame_codec.rs:298 zero-copy split path) by giving the optimization
+    // a tight regression target without touching async code.
+
+    #[test]
+    fn decode_abridged_returns_none_on_empty_input() {
+        let mut buf = BytesMut::new();
+        assert!(decode_abridged(&mut buf, 1024).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_intermediate_returns_none_on_partial_header() {
+        // Intermediate has a 4-byte length prefix — give it 3.
+        let mut buf = BytesMut::from(&[0u8, 0, 0][..]);
+        assert!(decode_intermediate(&mut buf, 1024).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_intermediate_returns_none_when_body_not_yet_arrived() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&8u32.to_le_bytes());
+        buf.extend_from_slice(&[1, 2, 3]); // only 3 of 8 payload bytes
+        assert!(decode_intermediate(&mut buf, 1024).unwrap().is_none());
+        // Bytes must remain in the buffer — partial frames are kept for
+        // a later retry, not consumed.
+        assert_eq!(buf.len(), 4 + 3);
+    }
+
+    #[test]
+    fn encode_then_decode_intermediate_round_trip() {
+        let payload = Bytes::from_static(b"intermediate-frame-payload");
+        let frame = Frame::new(payload.clone());
+        let mut buf = BytesMut::new();
+        encode_intermediate(&frame, &mut buf).unwrap();
+        // Buffer must start with little-endian length.
+        let declared_len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        assert_eq!(declared_len, payload.len());
+        // And decode must return our payload back, consuming the bytes.
+        let decoded = decode_intermediate(&mut buf, 1024).unwrap().unwrap();
+        assert_eq!(decoded.data, payload);
+        assert!(buf.is_empty(), "decode must consume the full frame");
+    }
+
+    #[test]
+    fn decode_intermediate_rejects_frame_above_max_size() {
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(&10_000u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 10]);
+        assert!(decode_intermediate(&mut buf, 100).is_err());
+    }
+
+    #[test]
+    fn encode_then_decode_abridged_round_trip_for_aligned_payload() {
+        let payload = Bytes::from(vec![0xCDu8; 8]); // 4-byte aligned
+        let frame = Frame::new(payload.clone());
+        let mut buf = BytesMut::new();
+        encode_abridged(&frame, &mut buf).unwrap();
+        let decoded = decode_abridged(&mut buf, 1024).unwrap().unwrap();
+        assert_eq!(decoded.data, payload);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn encode_then_decode_secure_preserves_payload_after_padding_strip() {
+        let rng = SecureRandom::new();
+        let payload = Bytes::from(vec![0xABu8; 16]); // 4-byte aligned
+        let frame = Frame::new(payload.clone());
+        let mut buf = BytesMut::new();
+        encode_secure(&frame, &mut buf, &rng).unwrap();
+        let decoded = decode_secure(&mut buf, 1024).unwrap().unwrap();
+        // Secure mode strips 1..=3 random tail bytes; the recovered payload
+        // must be exactly the original 16-byte aligned input.
+        assert_eq!(decoded.data, payload);
+    }
+
+    // ============= proto_tag / min_header_size invariants =============
+
+    #[test]
+    fn each_codec_advertises_matching_proto_tag() {
+        let abridged = AbridgedCodec::new();
+        assert_eq!(FrameCodecTrait::proto_tag(&abridged), ProtoTag::Abridged);
+
+        let intermediate = IntermediateCodec::new();
+        assert_eq!(
+            FrameCodecTrait::proto_tag(&intermediate),
+            ProtoTag::Intermediate
+        );
+
+        let secure = SecureCodec::new(Arc::new(SecureRandom::new()));
+        assert_eq!(FrameCodecTrait::proto_tag(&secure), ProtoTag::Secure);
+    }
+
+    #[test]
+    fn min_header_size_matches_protocol_layout() {
+        // Abridged uses a 1-byte length tag (with optional 3-byte extension).
+        // Intermediate / Secure use a fixed 4-byte length prefix.
+        assert_eq!(FrameCodecTrait::min_header_size(&AbridgedCodec::new()), 1);
+        assert_eq!(FrameCodecTrait::min_header_size(&IntermediateCodec::new()), 4);
+        assert_eq!(
+            FrameCodecTrait::min_header_size(&SecureCodec::new(Arc::new(SecureRandom::new()))),
+            4
+        );
+    }
+
+    #[test]
+    fn create_codec_factory_returns_matching_dispatch_target() {
+        // The `Box<dyn FrameCodec>` path from `stream::frame::create_codec`
+        // is opt.md §7.2 — locking the factory's tag→codec mapping here
+        // guards against a refactor accidentally switching variants.
+        use crate::stream::frame::create_codec;
+        let rng = Arc::new(SecureRandom::new());
+        for &tag in &[ProtoTag::Abridged, ProtoTag::Intermediate, ProtoTag::Secure] {
+            let codec = create_codec(tag, rng.clone());
+            assert_eq!(codec.proto_tag(), tag, "factory wired wrong codec for {:?}", tag);
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn aligned_bytes()(len in 0usize..16384) -> Vec<u8> {
+            let aligned = (len / 4) * 4;
+            vec![0xABu8; aligned]
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn abridged_roundtrip(payload in aligned_bytes()) {
+            let data = Bytes::from(payload.clone());
+            let frame = Frame::new(data);
+            let mut buf = BytesMut::new();
+            encode_abridged(&frame, &mut buf).unwrap();
+            let decoded = decode_abridged(&mut buf, 16 * 1024 * 1024).unwrap().unwrap();
+            assert_eq!(decoded.data, payload);
+        }
+
+        #[test]
+        fn intermediate_roundtrip(payload in proptest::collection::vec(any::<u8>(), 0..16384)) {
+            let data = Bytes::from(payload.clone());
+            let frame = Frame::new(data);
+            let mut buf = BytesMut::new();
+            encode_intermediate(&frame, &mut buf).unwrap();
+            let decoded = decode_intermediate(&mut buf, 16 * 1024 * 1024).unwrap().unwrap();
+            assert_eq!(decoded.data, payload);
+        }
+
+        #[test]
+        fn secure_roundtrip(payload in aligned_bytes()) {
+            let rng = SecureRandom::new();
+            let data = Bytes::from(payload.clone());
+            let frame = Frame::new(data);
+            let mut buf = BytesMut::new();
+            encode_secure(&frame, &mut buf, &rng).unwrap();
+            let decoded = decode_secure(&mut buf, 16 * 1024 * 1024).unwrap().unwrap();
+            assert_eq!(decoded.data, payload);
+        }
+    }
 }

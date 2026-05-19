@@ -513,6 +513,52 @@ fn choose_interface_snapshot(previous: &[IpAddr], refreshed: Vec<IpAddr>) -> Vec
     refreshed
 }
 
+#[cfg(test)]
+mod choose_interface_snapshot_tests {
+    use super::choose_interface_snapshot;
+    use std::net::IpAddr;
+
+    fn v4(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn returns_refreshed_when_non_empty() {
+        let previous = vec![v4("10.0.0.1")];
+        let refreshed = vec![v4("10.0.0.2"), v4("10.0.0.3")];
+        let out = choose_interface_snapshot(&previous, refreshed.clone());
+        assert_eq!(out, refreshed);
+    }
+
+    #[test]
+    fn keeps_previous_when_refreshed_is_empty_and_previous_non_empty() {
+        // The whole point of this helper (related to opt.md §5.5): if a
+        // background interface enumeration came up empty (e.g. transient
+        // OS error), the masking layer must keep the previous IPs rather
+        // than flap to no-interface state.
+        let previous = vec![v4("10.0.0.1"), v4("10.0.0.2")];
+        let refreshed: Vec<IpAddr> = Vec::new();
+        let out = choose_interface_snapshot(&previous, refreshed);
+        assert_eq!(out, previous);
+    }
+
+    #[test]
+    fn returns_empty_when_both_empty() {
+        let previous: Vec<IpAddr> = Vec::new();
+        let refreshed: Vec<IpAddr> = Vec::new();
+        let out = choose_interface_snapshot(&previous, refreshed);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn empty_previous_and_non_empty_refreshed_returns_refreshed() {
+        let previous: Vec<IpAddr> = Vec::new();
+        let refreshed = vec![v4("192.168.0.1")];
+        let out = choose_interface_snapshot(&previous, refreshed.clone());
+        assert_eq!(out, refreshed);
+    }
+}
+
 #[cfg(unix)]
 #[derive(Default)]
 struct LocalInterfaceCache {
@@ -1200,3 +1246,37 @@ mod masking_baseline_invariant_tests;
 #[cfg(test)]
 #[path = "tests/masking_lognormal_timing_security_tests.rs"]
 mod masking_lognormal_timing_security_tests;
+
+#[cfg(test)]
+#[path = "tests/masking_pure_helper_invariant_tests.rs"]
+mod masking_pure_helper_invariant_tests;
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn next_mask_shape_bucket_non_decreasing(
+            total in 0usize..8192,
+            floor in 1usize..256,
+            cap in 256usize..16384
+        ) {
+            let cap = cap.max(floor);
+            let b1 = next_mask_shape_bucket(total, floor, cap);
+            let b2 = next_mask_shape_bucket(total + 1, floor, cap);
+            prop_assert!(b2 >= b1, "bucket must not shrink as total grows: {} < {}", b2, b1);
+        }
+
+        #[test]
+        fn next_mask_shape_bucket_never_exceeds_total_when_over_cap(
+            total in 8192usize..65536,
+            floor in 1usize..256,
+            cap in 256usize..4096
+        ) {
+            let bucket = next_mask_shape_bucket(total, floor, cap);
+            prop_assert_eq!(bucket, total, "total >= cap must return total");
+        }
+    }
+}

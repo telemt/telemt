@@ -1069,6 +1069,171 @@ where
 }
 
 #[cfg(test)]
+mod pure_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_delta_current_greater() {
+        assert_eq!(watchdog_delta(100, 60), 40);
+    }
+
+    #[test]
+    fn watchdog_delta_equal_returns_zero() {
+        assert_eq!(watchdog_delta(50, 50), 0);
+    }
+
+    #[test]
+    fn watchdog_delta_clock_skew_returns_zero() {
+        assert_eq!(watchdog_delta(10, 100), 0);
+    }
+
+    #[test]
+    fn watchdog_delta_zero_both() {
+        assert_eq!(watchdog_delta(0, 0), 0);
+    }
+
+    #[test]
+    fn quota_io_error_roundtrip_is_detected() {
+        let err = quota_io_error();
+        assert!(is_quota_io_error(&err));
+    }
+
+    #[test]
+    fn quota_io_error_other_kinds_not_detected() {
+        for kind in [
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::WriteZero,
+        ] {
+            let err = io::Error::new(kind, "not quota");
+            assert!(!is_quota_io_error(&err), "{kind:?} should not be quota");
+        }
+    }
+
+    #[test]
+    fn quota_io_error_permission_denied_without_sentinel() {
+        let err = io::Error::new(io::ErrorKind::PermissionDenied, "plain string");
+        assert!(!is_quota_io_error(&err));
+    }
+
+    #[test]
+    fn quota_adaptive_interval_monotonically_decreases() {
+        let mut prev = quota_adaptive_interval_bytes(u64::MAX);
+        for remaining in [1_000_000, 500_000, 100_000, 10_000, 1_000, 100] {
+            let cur = quota_adaptive_interval_bytes(remaining);
+            assert!(
+                cur <= prev,
+                "not monotonic: remaining={remaining}, cur={cur}, prev={prev}"
+            );
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn quota_adaptive_interval_floor_is_min() {
+        assert_eq!(
+            quota_adaptive_interval_bytes(0),
+            QUOTA_ADAPTIVE_INTERVAL_MIN_BYTES
+        );
+        assert_eq!(
+            quota_adaptive_interval_bytes(1),
+            QUOTA_ADAPTIVE_INTERVAL_MIN_BYTES
+        );
+    }
+
+    #[test]
+    fn quota_adaptive_interval_ceiling_is_max() {
+        assert_eq!(
+            quota_adaptive_interval_bytes(u64::MAX),
+            QUOTA_ADAPTIVE_INTERVAL_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn quota_adaptive_interval_midrange() {
+        let val = QUOTA_ADAPTIVE_INTERVAL_MIN_BYTES * 4;
+        let result = quota_adaptive_interval_bytes(val * 2);
+        assert_eq!(result, val);
+        assert!(result >= QUOTA_ADAPTIVE_INTERVAL_MIN_BYTES);
+        assert!(result <= QUOTA_ADAPTIVE_INTERVAL_MAX_BYTES);
+    }
+
+    #[test]
+    fn should_immediate_quota_check_near_limit_true() {
+        assert!(should_immediate_quota_check(QUOTA_NEAR_LIMIT_BYTES, 0));
+        assert!(should_immediate_quota_check(QUOTA_NEAR_LIMIT_BYTES - 1, 0));
+    }
+
+    #[test]
+    fn should_immediate_quota_check_large_charge_true() {
+        assert!(should_immediate_quota_check(u64::MAX, QUOTA_LARGE_CHARGE_BYTES));
+        assert!(should_immediate_quota_check(u64::MAX, QUOTA_LARGE_CHARGE_BYTES + 1));
+    }
+
+    #[test]
+    fn should_immediate_quota_check_small_fraction_false() {
+        let remaining = QUOTA_NEAR_LIMIT_BYTES * 100;
+        let charge = 128u64;
+        assert!(!should_immediate_quota_check(remaining, charge));
+    }
+
+    #[test]
+    fn should_immediate_quota_check_exact_boundary() {
+        let remaining = QUOTA_NEAR_LIMIT_BYTES + 1;
+        let charge = QUOTA_LARGE_CHARGE_BYTES - 1;
+        assert!(!should_immediate_quota_check(remaining, charge));
+    }
+
+    #[test]
+    fn watchdog_delta_handles_u64_max() {
+        assert_eq!(watchdog_delta(u64::MAX, u64::MAX - 1), 1);
+    }
+
+    #[test]
+    fn quota_io_error_wrong_kind_with_sentinel_not_detected() {
+        let err = io::Error::new(io::ErrorKind::BrokenPipe, QuotaIoSentinel);
+        assert!(!is_quota_io_error(&err));
+    }
+
+    #[test]
+    fn shared_counters_new_are_zero() {
+        let c = SharedCounters::new();
+        assert_eq!(c.c2s_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(c.s2c_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(c.last_activity_ms.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn shared_counters_touch_updates_last_activity() {
+        let c = SharedCounters::new();
+        let epoch = tokio::time::Instant::now();
+        let later = epoch + std::time::Duration::from_millis(42);
+        c.touch(later, epoch);
+        assert_eq!(c.last_activity_ms.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn shared_counters_idle_duration_reflects_elapsed() {
+        let c = SharedCounters::new();
+        let epoch = tokio::time::Instant::now();
+        c.touch(epoch + std::time::Duration::from_millis(100), epoch);
+        let idle = c.idle_duration(epoch + std::time::Duration::from_millis(350), epoch);
+        assert_eq!(idle, std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn shared_counters_idle_saturates_on_clock_rewind() {
+        let c = SharedCounters::new();
+        let epoch = tokio::time::Instant::now();
+        c.touch(epoch + std::time::Duration::from_millis(500), epoch);
+        let idle = c.idle_duration(epoch + std::time::Duration::from_millis(100), epoch);
+        assert_eq!(idle, std::time::Duration::from_millis(0));
+    }
+}
+
+#[cfg(test)]
 #[path = "tests/relay_adversarial_tests.rs"]
 mod adversarial_tests;
 
@@ -1099,3 +1264,4 @@ mod relay_atomic_quota_invariant_tests;
 #[cfg(test)]
 #[path = "tests/relay_baseline_invariant_tests.rs"]
 mod relay_baseline_invariant_tests;
+

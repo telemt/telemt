@@ -166,3 +166,119 @@ impl ProxySharedState {
         self.conntrack_pressure_active.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    fn dummy_event(reason: ConntrackCloseReason) -> ConntrackCloseEvent {
+        ConntrackCloseEvent {
+            src: "127.0.0.1:12345".parse().unwrap(),
+            dst: "127.0.0.1:54321".parse().unwrap(),
+            reason,
+        }
+    }
+
+    #[test]
+    fn new_returns_arc_and_initial_state() {
+        let state = ProxySharedState::new();
+
+        assert!(state.handshake.recent_user_ring.len() == HANDSHAKE_RECENT_USER_RING_LEN);
+        assert_eq!(state.handshake.recent_user_ring_seq.load(Relaxed), 0);
+        assert_eq!(
+            state
+                .handshake
+                .auth_expensive_checks_total
+                .load(Relaxed),
+            0
+        );
+        assert_eq!(
+            state
+                .handshake
+                .auth_budget_exhausted_total
+                .load(Relaxed),
+            0
+        );
+        assert!(!state.conntrack_pressure_active());
+        assert_eq!(state.middle_relay.relay_idle_mark_seq.load(Relaxed), 0);
+        assert!(state.handshake.auth_probe.is_empty());
+        assert!(state.handshake.sticky_user_by_ip.is_empty());
+        assert!(state.handshake.sticky_user_by_ip_prefix.is_empty());
+        assert!(state.handshake.sticky_user_by_sni_hash.is_empty());
+        assert!(state.middle_relay.desync_dedup.is_empty());
+        assert!(state.middle_relay.desync_dedup_previous.is_empty());
+    }
+
+    #[test]
+    fn conntrack_pressure_round_trip() {
+        let state = ProxySharedState::new();
+
+        assert!(!state.conntrack_pressure_active());
+
+        state.set_conntrack_pressure_active(true);
+        assert!(state.conntrack_pressure_active());
+
+        state.set_conntrack_pressure_active(false);
+        assert!(!state.conntrack_pressure_active());
+    }
+
+    #[tokio::test]
+    async fn conntrack_close_publish_disabled_when_no_sender() {
+        let state = ProxySharedState::new();
+        let result = state.publish_conntrack_close_event(dummy_event(ConntrackCloseReason::NormalEof));
+        assert_eq!(result, ConntrackClosePublishResult::Disabled);
+    }
+
+    #[tokio::test]
+    async fn conntrack_close_publish_sent() {
+        let state = ProxySharedState::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        state.set_conntrack_close_sender(tx);
+
+        let event = dummy_event(ConntrackCloseReason::Timeout);
+        let result = state.publish_conntrack_close_event(event);
+        assert_eq!(result, ConntrackClosePublishResult::Sent);
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.src, event.src);
+        assert_eq!(received.dst, event.dst);
+        assert_eq!(received.reason, event.reason);
+    }
+
+    #[tokio::test]
+    async fn conntrack_close_publish_queue_full() {
+        let state = ProxySharedState::new();
+        let (tx, _rx) = mpsc::channel(1);
+        state.set_conntrack_close_sender(tx);
+
+        let r = state.publish_conntrack_close_event(dummy_event(ConntrackCloseReason::Pressure));
+        assert_eq!(r, ConntrackClosePublishResult::Sent);
+
+        let r = state.publish_conntrack_close_event(dummy_event(ConntrackCloseReason::Reset));
+        assert_eq!(r, ConntrackClosePublishResult::QueueFull);
+    }
+
+    #[tokio::test]
+    async fn conntrack_close_publish_queue_closed() {
+        let state = ProxySharedState::new();
+        let (tx, rx) = mpsc::channel(4);
+        state.set_conntrack_close_sender(tx);
+        drop(rx);
+
+        let r = state.publish_conntrack_close_event(dummy_event(ConntrackCloseReason::Other));
+        assert_eq!(r, ConntrackClosePublishResult::QueueClosed);
+    }
+
+    #[tokio::test]
+    async fn conntrack_close_publish_disabled_after_disable() {
+        let state = ProxySharedState::new();
+        let (tx, _rx) = mpsc::channel(4);
+        state.set_conntrack_close_sender(tx);
+        state.disable_conntrack_close_sender();
+
+        let r = state.publish_conntrack_close_event(dummy_event(ConntrackCloseReason::NormalEof));
+        assert_eq!(r, ConntrackClosePublishResult::Disabled);
+    }
+
+}

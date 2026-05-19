@@ -2778,6 +2778,176 @@ where
 }
 
 #[cfg(test)]
+mod pure_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn quota_soft_cap_limit_zero_overshoot_zero() {
+        assert_eq!(quota_soft_cap(0, 0), 0);
+    }
+
+    #[test]
+    fn quota_soft_cap_limit_zero_overshoot_nonzero() {
+        assert_eq!(quota_soft_cap(0, 42), 42);
+    }
+
+    #[test]
+    fn quota_soft_cap_both_nonzero() {
+        assert_eq!(quota_soft_cap(100, 50), 150);
+    }
+
+    #[test]
+    fn quota_soft_cap_saturating_add() {
+        assert_eq!(quota_soft_cap(u64::MAX, 1), u64::MAX);
+        assert_eq!(quota_soft_cap(u64::MAX, u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn c2me_payload_permits_zero_maps_to_one() {
+        assert_eq!(c2me_payload_permits(0), 1);
+    }
+
+    #[test]
+    fn c2me_payload_permits_small_payload() {
+        let unit = C2ME_QUEUED_BYTE_PERMIT_UNIT;
+        assert_eq!(c2me_payload_permits(1), 1);
+        assert_eq!(c2me_payload_permits(unit), 1);
+        assert_eq!(c2me_payload_permits(unit + 1), 2);
+    }
+
+    #[test]
+    fn c2me_payload_permits_medium_payload() {
+        let unit = C2ME_QUEUED_BYTE_PERMIT_UNIT;
+        assert_eq!(c2me_payload_permits(unit * 3), 3);
+        assert_eq!(c2me_payload_permits(unit * 3 + 1), 4);
+    }
+
+    #[test]
+    fn c2me_payload_permits_monotonic_non_decreasing() {
+        let prev = c2me_payload_permits(0);
+        for len in 1..=C2ME_QUEUED_BYTE_PERMIT_UNIT * 5 {
+            let cur = c2me_payload_permits(len);
+            assert!(cur >= prev, "non-monotonic at len={len}: {cur} < {prev}");
+        }
+    }
+
+    #[test]
+    fn c2me_queued_permit_budget_frame_limit_zero_still_minimum_one() {
+        assert!(c2me_queued_permit_budget(0, 0) >= 1);
+    }
+
+    #[test]
+    fn c2me_queued_permit_budget_large_frame_limit_dominates() {
+        let cap = 2;
+        let huge_frame = C2ME_QUEUED_BYTE_PERMIT_UNIT * 100;
+        let budget = c2me_queued_permit_budget(cap, huge_frame);
+        let from_frame = c2me_payload_permits(huge_frame) as usize;
+        assert!(budget >= from_frame);
+    }
+
+    #[test]
+    fn should_yield_c2me_sender_truth_table() {
+        let budget = C2ME_SENDER_FAIRNESS_BUDGET;
+        assert!(!should_yield_c2me_sender(0, false));
+        assert!(!should_yield_c2me_sender(0, true));
+        assert!(!should_yield_c2me_sender(budget, false));
+        assert!(!should_yield_c2me_sender(budget - 1, true));
+        assert!(should_yield_c2me_sender(budget, true));
+        assert!(should_yield_c2me_sender(budget + 10, true));
+    }
+
+    #[test]
+    fn classify_me_d2c_flush_reason_ack_immediate() {
+        let r = classify_me_d2c_flush_reason(true, 0, 10, 0, 10, false);
+        assert!(matches!(r, MeD2cFlushReason::AckImmediate));
+    }
+
+    #[test]
+    fn classify_me_d2c_flush_reason_batch_frames() {
+        let r = classify_me_d2c_flush_reason(false, 10, 10, 0, 100, false);
+        assert!(matches!(r, MeD2cFlushReason::BatchFrames));
+    }
+
+    #[test]
+    fn classify_me_d2c_flush_reason_batch_bytes() {
+        let r = classify_me_d2c_flush_reason(false, 1, 10, 100, 100, false);
+        assert!(matches!(r, MeD2cFlushReason::BatchBytes));
+    }
+
+    #[test]
+    fn classify_me_d2c_flush_reason_max_delay() {
+        let r = classify_me_d2c_flush_reason(false, 1, 10, 1, 100, true);
+        assert!(matches!(r, MeD2cFlushReason::MaxDelay));
+    }
+
+    #[test]
+    fn classify_me_d2c_flush_reason_queue_drain() {
+        let r = classify_me_d2c_flush_reason(false, 1, 10, 1, 100, false);
+        assert!(matches!(r, MeD2cFlushReason::QueueDrain));
+    }
+
+    #[test]
+    fn classify_me_d2c_flush_reason_ack_immediate_overrides_all() {
+        let r = classify_me_d2c_flush_reason(true, 999, 1, 999, 1, true);
+        assert!(matches!(r, MeD2cFlushReason::AckImmediate));
+    }
+
+    #[test]
+    fn desync_forensics_len_bytes_small_value() {
+        let (bytes, overflowed) = desync_forensics_len_bytes(42);
+        assert!(!overflowed);
+        assert_eq!(bytes, 42u32.to_le_bytes());
+    }
+
+    #[test]
+    fn desync_forensics_len_bytes_zero() {
+        let (bytes, overflowed) = desync_forensics_len_bytes(0);
+        assert!(!overflowed);
+        assert_eq!(bytes, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn desync_forensics_len_bytes_exactly_u32_max() {
+        let (bytes, overflowed) = desync_forensics_len_bytes(u32::MAX as usize);
+        assert!(!overflowed);
+        assert_eq!(bytes, u32::MAX.to_le_bytes());
+    }
+
+    #[test]
+    fn desync_forensics_len_bytes_overflows() {
+        let (bytes, overflowed) = desync_forensics_len_bytes(u32::MAX as usize + 1);
+        assert!(overflowed);
+        assert_eq!(bytes, u32::MAX.to_le_bytes());
+    }
+
+    #[test]
+    fn hash_value_different_inputs_differ() {
+        let a = hash_value(&1u64);
+        let b = hash_value(&2u64);
+        let c = hash_value(&3u64);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn hash_ip_different_ips_differ() {
+        let ips: Vec<IpAddr> = vec![
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            "192.168.1.1".parse().unwrap(),
+            "::1".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+        ];
+        let hashes: Vec<u64> = ips.iter().map(|ip| hash_ip(*ip)).collect();
+        for i in 0..hashes.len() {
+            for j in (i + 1)..hashes.len() {
+                assert_ne!(hashes[i], hashes[j], "collision between ips");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 #[path = "tests/middle_relay_idle_policy_security_tests.rs"]
 mod idle_policy_security_tests;
 

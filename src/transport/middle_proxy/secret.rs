@@ -146,3 +146,35 @@ pub async fn download_proxy_secret_with_max_len_via_upstream(
     info!(len = data.len(), "Downloaded proxy-secret OK");
     Ok(data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_ok_at_min_len() {
+        assert!(validate_proxy_secret_len(32, 256).is_ok());
+    }
+
+    #[test]
+    fn validate_ok_at_max_len() {
+        assert!(validate_proxy_secret_len(256, 256).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_below_min() {
+        assert!(validate_proxy_secret_len(31, 256).is_err());
+        assert!(validate_proxy_secret_len(0, 256).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_above_max() {
+        assert!(validate_proxy_secret_len(257, 256).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_if_max_below_global_min() {
+        assert!(validate_proxy_secret_len(32, 16).is_err());
+    }
+
+}

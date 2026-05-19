@@ -577,3 +577,22 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod map_ip_preference_tests {
+        use super::*;
+
+        #[test]
+        fn all_variants() {
+            assert_eq!(map_ip_preference(IpPreference::Unknown), "unknown");
+            assert_eq!(map_ip_preference(IpPreference::PreferV6), "prefer_v6");
+            assert_eq!(map_ip_preference(IpPreference::PreferV4), "prefer_v4");
+            assert_eq!(map_ip_preference(IpPreference::BothWork), "both_work");
+            assert_eq!(map_ip_preference(IpPreference::Unavailable), "unavailable");
+        }
+    }
+
+}

@@ -1709,6 +1709,221 @@ impl RunningClientHandler {
 }
 
 #[cfg(test)]
+mod pure_helpers_tests {
+    use super::*;
+    use crate::error::StreamError;
+    use std::io;
+
+    #[test]
+    fn wrap_tls_application_record_header_format() {
+        let payload = b"hello";
+        let record = wrap_tls_application_record(payload);
+        assert_eq!(record[0], 0x17);
+        assert_eq!(&record[1..3], &[0x03, 0x03]);
+        let len = u16::from_be_bytes([record[3], record[4]]) as usize;
+        assert_eq!(len, payload.len());
+        assert_eq!(&record[5..], payload);
+        assert_eq!(record.len(), 5 + payload.len());
+    }
+
+    #[test]
+    fn wrap_tls_application_record_empty_payload() {
+        let record = wrap_tls_application_record(&[]);
+        assert_eq!(record[0], 0x17);
+        assert_eq!(&record[1..3], &[0x03, 0x03]);
+        assert_eq!(u16::from_be_bytes([record[3], record[4]]), 0);
+        assert_eq!(record.len(), 5);
+    }
+
+    #[test]
+    fn wrap_tls_application_record_large_payload_chunks() {
+        let payload = vec![0xAA; 70000];
+        let record = wrap_tls_application_record(&payload);
+        let mut offset = 0;
+        let mut chunk_idx = 0;
+        while offset < record.len() {
+            assert_eq!(record[offset], 0x17);
+            assert_eq!(&record[offset + 1..offset + 3], &[0x03, 0x03]);
+            let chunk_len = u16::from_be_bytes([record[offset + 3], record[offset + 4]]) as usize;
+            assert!(chunk_len <= u16::MAX as usize);
+            offset += 5 + chunk_len;
+            chunk_idx += 1;
+        }
+        assert!(chunk_idx >= 2);
+        assert_eq!(offset, record.len());
+    }
+
+    #[test]
+    fn tls_clienthello_len_in_bounds_below_min() {
+        assert!(!tls_clienthello_len_in_bounds(MIN_TLS_CLIENT_HELLO_SIZE - 1));
+    }
+
+    #[test]
+    fn tls_clienthello_len_in_bounds_at_min() {
+        assert!(tls_clienthello_len_in_bounds(MIN_TLS_CLIENT_HELLO_SIZE));
+    }
+
+    #[test]
+    fn tls_clienthello_len_in_bounds_at_max() {
+        assert!(tls_clienthello_len_in_bounds(MAX_TLS_PLAINTEXT_SIZE));
+    }
+
+    #[test]
+    fn tls_clienthello_len_in_bounds_above_max() {
+        assert!(!tls_clienthello_len_in_bounds(MAX_TLS_PLAINTEXT_SIZE + 1));
+    }
+
+    #[test]
+    fn tls_clienthello_len_in_bounds_zero() {
+        assert!(!tls_clienthello_len_in_bounds(0));
+    }
+
+    #[test]
+    fn should_prefetch_mask_classifier_window_empty_is_false() {
+        assert!(!should_prefetch_mask_classifier_window(&[]));
+    }
+
+    #[test]
+    fn should_prefetch_mask_classifier_window_long_input_false() {
+        let long = vec![b'a'; MASK_CLASSIFIER_PREFETCH_WINDOW + 1];
+        assert!(!should_prefetch_mask_classifier_window(&long));
+    }
+
+    #[test]
+    fn should_prefetch_mask_classifier_window_tls_handshake_prefix_false() {
+        assert!(!should_prefetch_mask_classifier_window(&[0x16]));
+        assert!(!should_prefetch_mask_classifier_window(&[0x16, 0x03, 0x01]));
+    }
+
+    #[test]
+    fn should_prefetch_mask_classifier_window_ssh_prefix_false() {
+        assert!(!should_prefetch_mask_classifier_window(b"SSH-2.0"));
+    }
+
+    #[test]
+    fn should_prefetch_mask_classifier_window_alpha_only_true() {
+        assert!(should_prefetch_mask_classifier_window(b"GET"));
+        assert!(should_prefetch_mask_classifier_window(b"POST"));
+        assert!(should_prefetch_mask_classifier_window(b"abc xyz"));
+    }
+
+    #[test]
+    fn should_prefetch_mask_classifier_window_non_alpha_false() {
+        assert!(!should_prefetch_mask_classifier_window(b"\x01\x02"));
+        assert!(!should_prefetch_mask_classifier_window(&[0x80]));
+    }
+
+    #[test]
+    fn classify_expected_64_got_0_mapped_kinds() {
+        assert_eq!(
+            classify_expected_64_got_0(io::ErrorKind::UnexpectedEof),
+            Some("expected_64_got_0_unexpected_eof")
+        );
+        assert_eq!(
+            classify_expected_64_got_0(io::ErrorKind::ConnectionReset),
+            Some("expected_64_got_0_connection_reset")
+        );
+        assert_eq!(
+            classify_expected_64_got_0(io::ErrorKind::ConnectionAborted),
+            Some("expected_64_got_0_connection_aborted")
+        );
+        assert_eq!(
+            classify_expected_64_got_0(io::ErrorKind::BrokenPipe),
+            Some("expected_64_got_0_broken_pipe")
+        );
+        assert_eq!(
+            classify_expected_64_got_0(io::ErrorKind::NotConnected),
+            Some("expected_64_got_0_not_connected")
+        );
+    }
+
+    #[test]
+    fn classify_expected_64_got_0_unmapped_kind() {
+        assert_eq!(classify_expected_64_got_0(io::ErrorKind::TimedOut), None);
+        assert_eq!(classify_expected_64_got_0(io::ErrorKind::WriteZero), None);
+    }
+
+    #[test]
+    fn classify_handshake_failure_class_io_with_mapped_kind() {
+        let err = ProxyError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "eof"));
+        assert_eq!(classify_handshake_failure_class(&err), "expected_64_got_0_unexpected_eof");
+    }
+
+    #[test]
+    fn classify_handshake_failure_class_io_with_unmapped_kind() {
+        let err = ProxyError::Io(io::Error::new(io::ErrorKind::TimedOut, "timeout"));
+        assert_eq!(classify_handshake_failure_class(&err), "other");
+    }
+
+    #[test]
+    fn classify_handshake_failure_class_stream_unexpected_eof() {
+        let err = ProxyError::Stream(StreamError::UnexpectedEof);
+        assert_eq!(classify_handshake_failure_class(&err), "expected_64_got_0_unexpected_eof");
+    }
+
+    #[test]
+    fn classify_handshake_failure_class_stream_io_mapped() {
+        let err = ProxyError::Stream(StreamError::Io(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "pipe",
+        )));
+        assert_eq!(classify_handshake_failure_class(&err), "expected_64_got_0_broken_pipe");
+    }
+
+    #[test]
+    fn classify_handshake_failure_class_other_variant() {
+        let err = ProxyError::InvalidHandshake("test".to_string());
+        assert_eq!(classify_handshake_failure_class(&err), "other");
+    }
+
+    #[test]
+    fn is_trusted_proxy_source_empty_list_false() {
+        assert!(!is_trusted_proxy_source("10.0.0.1".parse().unwrap(), &[]));
+    }
+
+    #[test]
+    fn is_trusted_proxy_source_matching_cidr_v4_true() {
+        let cidr: IpNetwork = "10.0.0.0/8".parse().unwrap();
+        assert!(is_trusted_proxy_source("10.1.2.3".parse().unwrap(), &[cidr]));
+    }
+
+    #[test]
+    fn is_trusted_proxy_source_non_matching_v4_false() {
+        let cidr: IpNetwork = "10.0.0.0/8".parse().unwrap();
+        assert!(!is_trusted_proxy_source("192.168.1.1".parse().unwrap(), &[cidr]));
+    }
+
+    #[test]
+    fn is_trusted_proxy_source_v6_matching() {
+        let cidr: IpNetwork = "2001:db8::/32".parse().unwrap();
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(is_trusted_proxy_source(ip, &[cidr]));
+    }
+
+    #[test]
+    fn is_trusted_proxy_source_v6_non_matching() {
+        let cidr: IpNetwork = "2001:db8::/32".parse().unwrap();
+        let ip: IpAddr = "fe80::1".parse().unwrap();
+        assert!(!is_trusted_proxy_source(ip, &[cidr]));
+    }
+
+    #[test]
+    fn synthetic_local_addr_ip_and_port() {
+        let addr = synthetic_local_addr(8080);
+        assert!(addr.is_ipv4());
+        assert_eq!(addr.ip(), IpAddr::from([0, 0, 0, 0]));
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn synthetic_local_addr_zero_port() {
+        let addr = synthetic_local_addr(0);
+        assert_eq!(addr.port(), 0);
+        assert_eq!(addr.ip(), IpAddr::from([0, 0, 0, 0]));
+    }
+}
+
+#[cfg(test)]
 #[path = "tests/client_security_tests.rs"]
 mod security_tests;
 

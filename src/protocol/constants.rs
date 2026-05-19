@@ -461,4 +461,135 @@ mod tests {
         assert_eq!(secure_payload_len_from_wire_len(2), None);
         assert_eq!(secure_payload_len_from_wire_len(3), None);
     }
+
+    #[test]
+    fn is_valid_secure_payload_len_only_accepts_aligned() {
+        for n in 0..32 {
+            assert_eq!(is_valid_secure_payload_len(n), n % 4 == 0);
+        }
+    }
+
+    #[test]
+    fn proto_tag_bytes_match_u32_le() {
+        // The byte constants and the enum-as-u32 must agree on the wire.
+        assert_eq!(
+            ProtoTag::Abridged.to_bytes(),
+            (ProtoTag::Abridged as u32).to_le_bytes()
+        );
+        assert_eq!(
+            ProtoTag::Intermediate.to_bytes(),
+            (ProtoTag::Intermediate as u32).to_le_bytes()
+        );
+        assert_eq!(
+            ProtoTag::Secure.to_bytes(),
+            (ProtoTag::Secure as u32).to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn rpc_byte_constants_match_their_u32_aliases() {
+        // The two parallel representations of each marker (`[u8; 4]` and
+        // `_U32`) must encode the same bytes — drift here would cause
+        // silent wire-format breakage.
+        assert_eq!(RPC_PROXY_REQ, RPC_PROXY_REQ_U32.to_le_bytes());
+        assert_eq!(RPC_PROXY_ANS, RPC_PROXY_ANS_U32.to_le_bytes());
+        assert_eq!(RPC_CLOSE_EXT, RPC_CLOSE_EXT_U32.to_le_bytes());
+        assert_eq!(RPC_SIMPLE_ACK, RPC_SIMPLE_ACK_U32.to_le_bytes());
+        assert_eq!(RPC_HANDSHAKE, RPC_HANDSHAKE_U32.to_le_bytes());
+        assert_eq!(RPC_NONCE, RPC_NONCE_U32.to_le_bytes());
+    }
+
+    #[test]
+    fn rpc_flag_pairs_agree() {
+        // The free-standing flag constants and the `rpc_flags::*` aliases
+        // must stay in lock-step; one renamed but not the other is a bug.
+        assert_eq!(RPC_FLAG_NOT_ENCRYPTED, rpc_flags::FLAG_NOT_ENCRYPTED);
+        assert_eq!(RPC_FLAG_HAS_AD_TAG, rpc_flags::FLAG_HAS_AD_TAG);
+        assert_eq!(RPC_FLAG_MAGIC, rpc_flags::FLAG_MAGIC);
+        assert_eq!(RPC_FLAG_EXTMODE2, rpc_flags::FLAG_EXTMODE2);
+        assert_eq!(RPC_FLAG_PAD, rpc_flags::FLAG_PAD);
+        assert_eq!(RPC_FLAG_INTERMEDIATE, rpc_flags::FLAG_INTERMEDIATE);
+        assert_eq!(RPC_FLAG_ABRIDGED, rpc_flags::FLAG_ABRIDGED);
+        assert_eq!(RPC_FLAG_QUICKACK, rpc_flags::FLAG_QUICKACK);
+    }
+
+    #[test]
+    fn middle_proxy_dc_indices_have_negative_aliases() {
+        // Telegram identifies a DC by `dc_idx`; the `-dc_idx` alias points
+        // to the "media" variant of the same DC. Every positive key must
+        // therefore have a matching negative key in the map.
+        for dc in 1i32..=5 {
+            assert!(
+                TG_MIDDLE_PROXIES_V4.contains_key(&dc),
+                "missing dc={} in V4 map",
+                dc
+            );
+            assert!(
+                TG_MIDDLE_PROXIES_V4.contains_key(&-dc),
+                "missing dc={} in V4 map",
+                -dc
+            );
+            assert!(
+                TG_MIDDLE_PROXIES_V6.contains_key(&dc),
+                "missing dc={} in V6 map",
+                dc
+            );
+            assert!(
+                TG_MIDDLE_PROXIES_V6.contains_key(&-dc),
+                "missing dc={} in V6 map",
+                -dc
+            );
+        }
+    }
+
+    #[test]
+    fn middle_proxies_flat_v4_matches_positive_entries() {
+        // The flat list is a convenience over the indexed map; every
+        // positive DC must show up exactly once in the flat list (same
+        // address as in the map). Bug we want to catch: silent drift if
+        // someone edits only one of the two collections.
+        for dc in 1i32..=5 {
+            let mapped = &TG_MIDDLE_PROXIES_V4[&dc][0];
+            assert!(
+                TG_MIDDLE_PROXIES_FLAT_V4.iter().any(|e| e == mapped),
+                "DC {} address {:?} missing from flat list",
+                dc,
+                mapped
+            );
+        }
+    }
+
+    #[test]
+    fn handshake_layout_fits_inside_handshake() {
+        // The handshake byte layout assumes these positions fit; if
+        // anyone bumps HANDSHAKE_LEN down, the layout is wrong.
+        assert!(SKIP_LEN + PREKEY_LEN + IV_LEN <= HANDSHAKE_LEN);
+        assert!(PROTO_TAG_POS + 4 <= HANDSHAKE_LEN);
+        assert!(DC_IDX_POS + 2 <= HANDSHAKE_LEN);
+        // DC_IDX must come after the proto tag so the two never overlap.
+        assert!(DC_IDX_POS >= PROTO_TAG_POS + 4);
+    }
+
+    #[test]
+    fn padding_filler_aligned_to_message_quantum() {
+        // The whole point of this constant is to drive message-length
+        // validation via `validate_message_length` (which requires
+        // `len % PADDING_FILLER.len() == 0`). It must be a power-of-two
+        // divider of MIN/MAX message lengths.
+        assert_eq!(MIN_MSG_LEN % PADDING_FILLER.len(), 0);
+        assert_eq!(MAX_MSG_LEN % PADDING_FILLER.len(), 0);
+        // Filler length itself must be > 0 to avoid div-by-zero downstream.
+        assert!(!PADDING_FILLER.is_empty());
+    }
+
+    #[test]
+    fn tls_size_limits_match_rfc_8446() {
+        // RFC 8446 §5.1 — plaintext fragment MUST be ≤ 2^14.
+        assert_eq!(MAX_TLS_PLAINTEXT_SIZE, 1 << 14);
+        // RFC 8446 §5.2 — ciphertext fragment MUST be ≤ 2^14 + 256.
+        assert_eq!(MAX_TLS_CIPHERTEXT_SIZE, (1 << 14) + 256);
+        // Ciphertext budget must strictly exceed plaintext budget
+        // (AEAD expansion is the whole reason it's separate).
+        assert!(MAX_TLS_CIPHERTEXT_SIZE > MAX_TLS_PLAINTEXT_SIZE);
+    }
 }

@@ -443,4 +443,221 @@ mod tests {
         let header = ProxyProtocolV1Builder::new().build();
         assert_eq!(header, b"PROXY UNKNOWN\r\n");
     }
+
+    #[test]
+    fn v1_builder_tcp6() {
+        let src: SocketAddr = "[2001:db8::1]:12345".parse().unwrap();
+        let dst: SocketAddr = "[2001:db8::2]:443".parse().unwrap();
+        let header = ProxyProtocolV1Builder::new().tcp6(src, dst).build();
+        let expected = b"PROXY TCP6 2001:db8::1 2001:db8::2 12345 443\r\n";
+        assert_eq!(header, expected);
+    }
+
+    #[test]
+    fn v2_builder_tcp4_layout() {
+        let src: SocketAddr = "192.168.1.1:12345".parse().unwrap();
+        let dst: SocketAddr = "10.0.0.1:443".parse().unwrap();
+        let header = ProxyProtocolV2Builder::new().with_addrs(src, dst).build();
+
+        // Total: 12 (signature) + 1 (ver/cmd) + 1 (fam/proto) + 2 (len) + 12 (addrs) = 28.
+        assert_eq!(header.len(), 12 + 1 + 1 + 2 + 12);
+        assert_eq!(&header[..12], PROXY_V2_SIGNATURE);
+        assert_eq!(header[12], 0x21); // v2 + PROXY
+        assert_eq!(header[13], 0x11); // INET + STREAM
+        assert_eq!(&header[14..16], &(12u16).to_be_bytes());
+        assert_eq!(&header[16..20], &[192, 168, 1, 1]);
+        assert_eq!(&header[20..24], &[10, 0, 0, 1]);
+        assert_eq!(&header[24..26], &(12345u16).to_be_bytes());
+        assert_eq!(&header[26..28], &(443u16).to_be_bytes());
+    }
+
+    #[test]
+    fn v2_builder_tcp6_layout() {
+        let src: SocketAddr = "[2001:db8::1]:12345".parse().unwrap();
+        let dst: SocketAddr = "[2001:db8::2]:443".parse().unwrap();
+        let header = ProxyProtocolV2Builder::new().with_addrs(src, dst).build();
+
+        // Total: 12 + 1 + 1 + 2 + 36 = 52.
+        assert_eq!(header.len(), 12 + 1 + 1 + 2 + 36);
+        assert_eq!(&header[..12], PROXY_V2_SIGNATURE);
+        assert_eq!(header[12], 0x21); // v2 + PROXY
+        assert_eq!(header[13], 0x21); // INET6 + STREAM
+        assert_eq!(&header[14..16], &(36u16).to_be_bytes());
+        // src ipv6 octets at [16..32], dst at [32..48], ports at [48..52].
+        let src_octets = match src {
+            SocketAddr::V6(v6) => v6.ip().octets(),
+            _ => unreachable!(),
+        };
+        assert_eq!(&header[16..32], &src_octets);
+        assert_eq!(&header[48..50], &(12345u16).to_be_bytes());
+        assert_eq!(&header[50..52], &(443u16).to_be_bytes());
+    }
+
+    #[test]
+    fn v2_builder_no_addrs_emits_local() {
+        let header = ProxyProtocolV2Builder::new().build();
+        // LOCAL command, family 0, length 0.
+        assert!(header.starts_with(PROXY_V2_SIGNATURE));
+        assert_eq!(header[12], 0x20); // v2 + LOCAL
+        assert_eq!(header[13], 0x00); // UNSPEC family
+        assert_eq!(&header[14..16], &0u16.to_be_bytes());
+    }
+
+    #[test]
+    fn proxy_protocol_info_new_sets_zero_version() {
+        let src: SocketAddr = "10.0.0.1:1234".parse().unwrap();
+        let info = ProxyProtocolInfo::new(src);
+        assert_eq!(info.src_addr, src);
+        assert!(info.dst_addr.is_none());
+        assert_eq!(info.version, 0);
+    }
+
+    #[tokio::test]
+    async fn parse_v1_tcp6_parses_addresses() {
+        let header = b"PROXY TCP6 2001:db8::1 2001:db8::2 1024 443\r\n";
+        let mut cursor = Cursor::new(&header[PROXY_V1_MIN_LEN..]);
+        let default = "0.0.0.0:0".parse().unwrap();
+
+        let info = parse_v1(&mut cursor, default).await.unwrap();
+        assert_eq!(info.version, 1);
+        assert_eq!(info.src_addr.ip().to_string(), "2001:db8::1");
+        assert_eq!(info.src_addr.port(), 1024);
+        let dst = info.dst_addr.unwrap();
+        assert_eq!(dst.ip().to_string(), "2001:db8::2");
+        assert_eq!(dst.port(), 443);
+    }
+
+    #[tokio::test]
+    async fn parse_v1_rejects_malformed_family() {
+        let header = b"PROXY WHAT 1.2.3.4 5.6.7.8 1 2\r\n";
+        let mut cursor = Cursor::new(&header[PROXY_V1_MIN_LEN..]);
+        let default = "0.0.0.0:0".parse().unwrap();
+        assert!(parse_v1(&mut cursor, default).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_v1_rejects_unparseable_ip() {
+        let header = b"PROXY TCP4 not-an-ip 1.2.3.4 1 2\r\n";
+        let mut cursor = Cursor::new(&header[PROXY_V1_MIN_LEN..]);
+        let default = "0.0.0.0:0".parse().unwrap();
+        assert!(parse_v1(&mut cursor, default).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_v1_rejects_overlong_line() {
+        // Construct a line that exceeds the 256-byte cap with no CRLF in
+        // sight — parser must bail out, not loop forever.
+        let mut input = Vec::from(&b"AAAA"[..]);
+        for _ in 0..400 {
+            input.push(b'X');
+        }
+        let mut cursor = Cursor::new(input);
+        let default = "0.0.0.0:0".parse().unwrap();
+        assert!(parse_v1(&mut cursor, default).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_v2_tcp6_parses_addresses() {
+        let mut header = [0u8; 16];
+        header[..12].copy_from_slice(PROXY_V2_SIGNATURE);
+        header[12] = 0x21; // v2 + PROXY
+        header[13] = 0x21; // INET6 + STREAM
+        header[14] = 0x00;
+        header[15] = 36;
+
+        let src: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let mut addr_data = Vec::with_capacity(36);
+        addr_data.extend_from_slice(&src.octets());
+        addr_data.extend_from_slice(&dst.octets());
+        addr_data.extend_from_slice(&(8443u16).to_be_bytes());
+        addr_data.extend_from_slice(&(443u16).to_be_bytes());
+
+        let mut cursor = Cursor::new(addr_data);
+        let default = "0.0.0.0:0".parse().unwrap();
+
+        let info = parse_v2(&mut cursor, &header, default).await.unwrap();
+        assert_eq!(info.version, 2);
+        assert_eq!(info.src_addr.ip().to_string(), "2001:db8::1");
+        assert_eq!(info.src_addr.port(), 8443);
+        let d = info.dst_addr.unwrap();
+        assert_eq!(d.ip().to_string(), "2001:db8::2");
+        assert_eq!(d.port(), 443);
+    }
+
+    #[tokio::test]
+    async fn parse_v2_rejects_wrong_version() {
+        let mut header = [0u8; 16];
+        header[..12].copy_from_slice(PROXY_V2_SIGNATURE);
+        header[12] = 0x11; // version 1 — invalid for v2 parser
+        header[13] = 0x11;
+        header[14] = 0x00;
+        header[15] = 0x0c;
+
+        let addr_data = vec![0u8; 12];
+        let mut cursor = Cursor::new(addr_data);
+        let default = "0.0.0.0:0".parse().unwrap();
+        assert!(parse_v2(&mut cursor, &header, default).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_v2_rejects_unknown_command() {
+        let mut header = [0u8; 16];
+        header[..12].copy_from_slice(PROXY_V2_SIGNATURE);
+        header[12] = 0x22; // v2, command=2 (undefined)
+        header[13] = 0x11;
+        header[14] = 0x00;
+        header[15] = 0x0c;
+
+        let addr_data = vec![0u8; 12];
+        let mut cursor = Cursor::new(addr_data);
+        let default = "0.0.0.0:0".parse().unwrap();
+        assert!(parse_v2(&mut cursor, &header, default).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_v2_unspec_family_yields_default_peer() {
+        let mut header = [0u8; 16];
+        header[..12].copy_from_slice(PROXY_V2_SIGNATURE);
+        header[12] = 0x21; // v2 + PROXY
+        header[13] = 0x00; // UNSPEC family
+        header[14] = 0x00;
+        header[15] = 0x00;
+
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let default: SocketAddr = "9.9.9.9:53".parse().unwrap();
+        let info = parse_v2(&mut cursor, &header, default).await.unwrap();
+        assert_eq!(info.version, 2);
+        assert_eq!(info.src_addr, default);
+        assert!(info.dst_addr.is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_v2_rejects_oversized_addr_len() {
+        let mut header = [0u8; 16];
+        header[..12].copy_from_slice(PROXY_V2_SIGNATURE);
+        header[12] = 0x21;
+        header[13] = 0x11;
+        // PROXY_V2_MAX_ADDR_LEN is 216 — claim 217.
+        header[14..16].copy_from_slice(&(217u16).to_be_bytes());
+
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let default = "0.0.0.0:0".parse().unwrap();
+        assert!(parse_v2(&mut cursor, &header, default).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn build_v1_and_parse_v1_roundtrip() {
+        let src: SocketAddr = "10.20.30.40:11000".parse().unwrap();
+        let dst: SocketAddr = "1.2.3.4:443".parse().unwrap();
+        let header = ProxyProtocolV1Builder::new().tcp4(src, dst).build();
+
+        // Drop the leading signature — parse_v1 expects what follows it.
+        let mut cursor = Cursor::new(&header[PROXY_V1_MIN_LEN..]);
+        let default = "0.0.0.0:0".parse().unwrap();
+        let info = parse_v1(&mut cursor, default).await.unwrap();
+        assert_eq!(info.src_addr, src);
+        assert_eq!(info.dst_addr, Some(dst));
+        assert_eq!(info.version, 1);
+    }
 }

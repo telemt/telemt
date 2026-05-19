@@ -267,8 +267,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        expected_handshake_close_description, is_expected_handshake_eof, peer_close_description,
-        resolve_runtime_base_dir, resolve_runtime_config_path,
+        expected_handshake_close_description, format_uptime, is_expected_handshake_eof,
+        normalize_runtime_dir, peer_close_description, resolve_runtime_base_dir,
+        resolve_runtime_config_path, unit_label,
     };
     use crate::error::{ProxyError, StreamError};
 
@@ -497,6 +498,114 @@ mod tests {
         for (err, expected) in cases {
             assert_eq!(expected_handshake_close_description(&err), Some(expected));
         }
+    }
+
+    #[test]
+    fn normalize_runtime_dir_absolute_returns_canonicalized() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp = std::env::temp_dir();
+        let subdir = tmp.join(format!("telemt_test_normalize_abs_{nonce}"));
+        std::fs::create_dir_all(&subdir).unwrap();
+        let result = normalize_runtime_dir(&subdir, Path::new("/ignored"));
+        assert_eq!(result, subdir.canonicalize().expect("subdir must canonicalize after create_dir_all"));
+        let _ = std::fs::remove_dir(&subdir);
+    }
+
+    #[test]
+    fn normalize_runtime_dir_relative_anchored_to_startup_cwd() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp = std::env::temp_dir();
+        let dirname = format!("telemt_test_normalize_rel_{nonce}");
+        let subdir = tmp.join(&dirname);
+        std::fs::create_dir_all(&subdir).unwrap();
+        let result = normalize_runtime_dir(Path::new(&dirname), &tmp);
+        assert_eq!(result, subdir.canonicalize().expect("subdir must canonicalize after create_dir_all"));
+        let _ = std::fs::remove_dir(&subdir);
+    }
+
+    #[test]
+    fn normalize_runtime_dir_nonexistent_uses_join_not_canonicalize() {
+        let cwd = std::env::temp_dir();
+        let result = normalize_runtime_dir(Path::new("nonexistent_dir_xyz"), &cwd);
+        assert_eq!(result, cwd.join("nonexistent_dir_xyz"));
+    }
+
+    #[test]
+    fn unit_label_singular_on_one() {
+        assert_eq!(unit_label(1, "second", "seconds"), "second");
+    }
+
+    #[test]
+    fn unit_label_plural_on_zero() {
+        assert_eq!(unit_label(0, "second", "seconds"), "seconds");
+    }
+
+    #[test]
+    fn unit_label_plural_on_two() {
+        assert_eq!(unit_label(2, "second", "seconds"), "seconds");
+    }
+
+    #[test]
+    fn format_uptime_zero_seconds() {
+        let result = format_uptime(0);
+        assert!(result.contains("0 seconds / 0 seconds"), "got: {result}");
+    }
+
+    #[test]
+    fn format_uptime_59_seconds() {
+        let result = format_uptime(59);
+        assert!(result.contains("59 seconds / 59 seconds"), "got: {result}");
+    }
+
+    #[test]
+    fn format_uptime_61_seconds_shows_minute_and_second() {
+        let result = format_uptime(61);
+        let parts: Vec<&str> = result.split('/').collect();
+        assert_eq!(parts.len(), 2, "expected exactly one '/' separator: {result}");
+        let pretty = parts[0].trim();
+        assert!(
+            pretty.contains("1 minute") && !pretty.contains("1 minutes"),
+            "expected singular 'minute' in pretty form, got: {pretty}"
+        );
+        assert!(
+            pretty.contains("1 second") && !pretty.contains("1 seconds"),
+            "expected singular 'second' in pretty form, got: {pretty}"
+        );
+        assert_eq!(parts[1].trim(), "61 seconds");
+    }
+
+    #[test]
+    fn format_uptime_3661_shows_hour_minute_second() {
+        let result = format_uptime(3661);
+        let parts: Vec<&str> = result.split('/').collect();
+        assert_eq!(parts.len(), 2, "expected exactly one '/' separator: {result}");
+        let pretty = parts[0].trim();
+        assert!(
+            pretty.contains("1 hour") && !pretty.contains("1 hours"),
+            "expected singular 'hour' in pretty form, got: {pretty}"
+        );
+        assert!(
+            pretty.contains("1 minute") && !pretty.contains("1 minutes"),
+            "expected singular 'minute' in pretty form, got: {pretty}"
+        );
+        assert!(
+            pretty.contains("1 second") && !pretty.contains("1 seconds"),
+            "expected singular 'second' in pretty form, got: {pretty}"
+        );
+        assert_eq!(parts[1].trim(), "3661 seconds");
+    }
+
+    #[test]
+    fn format_uptime_120_pluralizes_minutes() {
+        let result = format_uptime(120);
+        assert!(result.contains("2 minutes"), "got: {result}");
+        assert!(result.contains("0 seconds"), "got: {result}");
     }
 }
 

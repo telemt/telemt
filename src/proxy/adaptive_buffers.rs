@@ -405,4 +405,153 @@ mod tests {
         assert_eq!(transition.to, AdaptiveTier::Tier1);
         assert_eq!(transition.reason, TierTransitionReason::QuietDemotion);
     }
+
+    #[test]
+    fn tier_promote_ladder() {
+        assert_eq!(AdaptiveTier::Base.promote(), AdaptiveTier::Tier1);
+        assert_eq!(AdaptiveTier::Tier1.promote(), AdaptiveTier::Tier2);
+        assert_eq!(AdaptiveTier::Tier2.promote(), AdaptiveTier::Tier3);
+        assert_eq!(AdaptiveTier::Tier3.promote(), AdaptiveTier::Tier3);
+    }
+
+    #[test]
+    fn tier_demote_ladder() {
+        assert_eq!(AdaptiveTier::Tier3.demote(), AdaptiveTier::Tier2);
+        assert_eq!(AdaptiveTier::Tier2.demote(), AdaptiveTier::Tier1);
+        assert_eq!(AdaptiveTier::Tier1.demote(), AdaptiveTier::Base);
+        assert_eq!(AdaptiveTier::Base.demote(), AdaptiveTier::Base);
+    }
+
+    #[test]
+    fn tier_as_u8_roundtrip_via_promote_chain() {
+        let mut tier = AdaptiveTier::Base;
+        assert_eq!(tier.as_u8(), 0);
+        for _ in 0..3 {
+            tier = tier.promote();
+        }
+        assert_eq!(tier, AdaptiveTier::Tier3);
+        assert_eq!(tier.as_u8(), 3);
+        assert_eq!(tier.promote(), AdaptiveTier::Tier3);
+    }
+
+    #[test]
+    fn session_controller_new_sets_initial_tier_and_max() {
+        let ctrl = SessionAdaptiveController::new(AdaptiveTier::Tier2);
+        assert_eq!(ctrl.max_tier_seen(), AdaptiveTier::Tier2);
+    }
+
+    #[test]
+    fn session_controller_max_tier_tracks_promotions() {
+        let mut ctrl = SessionAdaptiveController::new(AdaptiveTier::Base);
+        let tick = 0.25;
+        let high = sample(300_000, 320_000, 250_000, 10, 0, 0);
+        for _ in 0..16 {
+            ctrl.observe(high, tick);
+        }
+        assert!(ctrl.max_tier_seen() > AdaptiveTier::Base);
+    }
+
+    #[test]
+    fn ema_lies_between_prev_and_value() {
+        let prev = 100.0;
+        let value = 200.0;
+        let result = ema(prev, value);
+        assert!(
+            result >= prev && result <= value,
+            "ema({prev}, {value}) = {result}, expected in [{prev}, {value}]"
+        );
+
+        let result_rev = ema(value, prev);
+        assert!(
+            result_rev >= prev && result_rev <= value,
+            "ema({value}, {prev}) = {result_rev}, expected in [{prev}, {value}]"
+        );
+    }
+
+    #[test]
+    fn ema_returns_value_when_prev_zero() {
+        assert_eq!(ema(0.0, 42.0), 42.0);
+    }
+
+    #[test]
+    fn ema_is_weighted_average() {
+        let result = ema(100.0, 200.0);
+        let expected = 100.0 * (1.0 - EMA_ALPHA) + 200.0 * EMA_ALPHA;
+        assert!((result - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn seed_tier_for_user_returns_base_for_unknown() {
+        let user = format!("test_unknown_{}", std::process::id());
+        assert_eq!(seed_tier_for_user(&user), AdaptiveTier::Base);
+    }
+
+    #[test]
+    fn record_and_read_user_tier() {
+        let user = format!("test_record_{}", std::process::id());
+        record_user_tier(&user, AdaptiveTier::Tier3);
+        assert_eq!(seed_tier_for_user(&user), AdaptiveTier::Tier3);
+    }
+
+    #[test]
+    fn record_user_tier_ignores_oversized_key() {
+        let long_key = "x".repeat(MAX_USER_KEY_BYTES + 1);
+        record_user_tier(&long_key, AdaptiveTier::Tier3);
+        assert_eq!(seed_tier_for_user(&long_key), AdaptiveTier::Base);
+    }
+
+    #[test]
+    fn direct_copy_buffers_for_tier_monotonic_with_tier() {
+        let base = 32 * 1024;
+        let lo = direct_copy_buffers_for_tier(AdaptiveTier::Base, base, base);
+        let hi = direct_copy_buffers_for_tier(AdaptiveTier::Tier3, base, base);
+        assert!(hi.0 >= lo.0, "higher tier should get >= buffers");
+        assert!(hi.1 >= lo.1, "higher tier should get >= buffers");
+    }
+
+    #[test]
+    fn direct_copy_buffers_for_tier_branch_table() {
+        for tier in [
+            AdaptiveTier::Base,
+            AdaptiveTier::Tier1,
+            AdaptiveTier::Tier2,
+            AdaptiveTier::Tier3,
+        ] {
+            let (c2s, s2c) = direct_copy_buffers_for_tier(tier, 16 * 1024, 32 * 1024);
+            assert!(c2s > 0);
+            assert!(s2c > 0);
+        }
+    }
+
+    #[test]
+    fn me_flush_policy_for_tier_branch_table() {
+        let base_delay = Duration::from_micros(500);
+        for tier in [
+            AdaptiveTier::Base,
+            AdaptiveTier::Tier1,
+            AdaptiveTier::Tier2,
+            AdaptiveTier::Tier3,
+        ] {
+            let (frames, bytes, delay) =
+                me_flush_policy_for_tier(tier, 32, 64 * 1024, base_delay);
+            assert!(frames >= 1, "frames >= 1 for {tier:?}");
+            assert!(bytes >= 4096, "bytes >= 4096 for {tier:?}");
+            assert!(delay >= Duration::from_micros(ME_DELAY_MIN_US));
+        }
+    }
+
+    #[test]
+    fn me_flush_policy_delays_decrease_with_higher_tier() {
+        let base_delay = Duration::from_micros(1000);
+        let d_base = me_flush_policy_for_tier(AdaptiveTier::Base, 32, 64 * 1024, base_delay).2;
+        let d_t3 = me_flush_policy_for_tier(AdaptiveTier::Tier3, 32, 64 * 1024, base_delay).2;
+        assert!(d_t3 <= d_base, "higher tier delay should be <= base");
+    }
+
+    #[test]
+    fn observe_zero_tick_returns_none() {
+        let mut ctrl = SessionAdaptiveController::new(AdaptiveTier::Base);
+        assert!(ctrl.observe(sample(999_999, 999_999, 999_999, 10, 5, 10), 0.0).is_none());
+    }
+
 }

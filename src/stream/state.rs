@@ -570,4 +570,467 @@ mod tests {
         assert!(r.is_eof());
         assert_eq!(r.ok(), None);
     }
+
+    // ============= Transition: remaining branches =============
+
+    #[test]
+    fn transition_has_output_for_complete_and_yield_only() {
+        let t: Transition<i32, &str> = Transition::Same;
+        assert!(!t.has_output());
+        let t: Transition<i32, &str> = Transition::Next(1);
+        assert!(!t.has_output());
+        let t: Transition<i32, &str> = Transition::Complete("ok");
+        assert!(t.has_output());
+        let t: Transition<i32, &str> = Transition::Yield("ok", 1);
+        assert!(t.has_output());
+        let t: Transition<i32, &str> =
+            Transition::Error(io::Error::new(io::ErrorKind::Other, "x"));
+        assert!(!t.has_output());
+    }
+
+    #[test]
+    fn transition_map_output_preserves_non_output_variants() {
+        let t: Transition<i32, String> = Transition::Same;
+        match t.map_output(|s: String| s.len()) {
+            Transition::Same => {}
+            _ => panic!("Same should stay Same"),
+        }
+        let t: Transition<i32, String> = Transition::Next(5);
+        match t.map_output(|s: String| s.len()) {
+            Transition::Next(5) => {}
+            _ => panic!("Next should preserve state"),
+        }
+        let t: Transition<i32, String> = Transition::Yield("yz".into(), 9);
+        match t.map_output(|s: String| s.len()) {
+            Transition::Yield(2, 9) => {}
+            _ => panic!("Yield output should be mapped"),
+        }
+        let t: Transition<i32, String> =
+            Transition::Error(io::Error::new(io::ErrorKind::Other, "x"));
+        match t.map_output(|s: String| s.len()) {
+            Transition::Error(_) => {}
+            _ => panic!("Error should remain Error"),
+        }
+    }
+
+    #[test]
+    fn transition_map_state_preserves_output_variants() {
+        let t: Transition<i32, &str> = Transition::Same;
+        match t.map_state(|x| x * 2) {
+            Transition::Same => {}
+            _ => panic!("Same should stay Same"),
+        }
+        let t: Transition<i32, &str> = Transition::Next(3);
+        match t.map_state(|x| x * 2) {
+            Transition::Next(6) => {}
+            _ => panic!("Next state should be mapped"),
+        }
+        let t: Transition<i32, &str> = Transition::Complete("kept");
+        match t.map_state(|x| x * 2) {
+            Transition::Complete("kept") => {}
+            _ => panic!("Complete output should be preserved"),
+        }
+        let t: Transition<i32, &str> = Transition::Yield("k", 3);
+        match t.map_state(|x| x * 2) {
+            Transition::Yield("k", 6) => {}
+            _ => panic!("Yield state should be mapped, output preserved"),
+        }
+    }
+
+    // ============= PollResult: remaining branches =============
+
+    #[test]
+    fn poll_result_pending_and_need_input_have_no_value() {
+        let r: PollResult<i32> = PollResult::Pending;
+        assert!(!r.is_ready());
+        assert!(!r.is_eof());
+        assert_eq!(r.ok(), None);
+
+        let r: PollResult<i32> = PollResult::NeedInput(7);
+        assert!(!r.is_ready());
+        assert!(!r.is_eof());
+        assert_eq!(r.ok(), None);
+    }
+
+    #[test]
+    fn poll_result_error_has_no_value() {
+        let r: PollResult<i32> =
+            PollResult::Error(io::Error::new(io::ErrorKind::Other, "boom"));
+        assert!(!r.is_ready());
+        assert!(!r.is_eof());
+        assert_eq!(r.ok(), None);
+    }
+
+    #[test]
+    fn poll_result_map_only_transforms_ready() {
+        let r: PollResult<i32> = PollResult::Ready(7);
+        assert!(matches!(r.map(|x| x + 1), PollResult::Ready(8)));
+
+        let r: PollResult<i32> = PollResult::Pending;
+        assert!(matches!(r.map(|x| x + 1), PollResult::Pending));
+
+        let r: PollResult<i32> = PollResult::NeedInput(3);
+        assert!(matches!(r.map(|x| x + 1), PollResult::NeedInput(3)));
+
+        let r: PollResult<i32> = PollResult::Eof;
+        assert!(matches!(r.map(|x| x + 1), PollResult::Eof));
+
+        let r: PollResult<i32> =
+            PollResult::Error(io::Error::new(io::ErrorKind::Other, "x"));
+        assert!(matches!(r.map(|x| x + 1), PollResult::Error(_)));
+    }
+
+    #[test]
+    fn poll_result_from_io_result_classifies_error_kinds() {
+        let r: PollResult<i32> = Ok::<i32, io::Error>(42).into();
+        assert!(matches!(r, PollResult::Ready(42)));
+
+        let r: PollResult<i32> = Err::<i32, io::Error>(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "block",
+        ))
+        .into();
+        assert!(matches!(r, PollResult::Pending));
+
+        let r: PollResult<i32> = Err::<i32, io::Error>(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "eof",
+        ))
+        .into();
+        assert!(matches!(r, PollResult::Eof));
+
+        let r: PollResult<i32> = Err::<i32, io::Error>(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "no",
+        ))
+        .into();
+        assert!(matches!(r, PollResult::Error(_)));
+    }
+
+    // ============= ReadBuffer: additional coverage =============
+
+    #[test]
+    fn read_buffer_take_exact_splits_only_when_enough() {
+        let mut buf = ReadBuffer::new();
+        buf.extend(b"abcdef");
+        assert!(buf.take_exact(10).is_none());
+        let three = buf.take_exact(3).unwrap();
+        assert_eq!(&three[..], b"abc");
+        assert_eq!(buf.len(), 3);
+        let rest = buf.take_exact(3).unwrap();
+        assert_eq!(&rest[..], b"def");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn read_buffer_clear_resets_target_and_data() {
+        let mut buf = ReadBuffer::with_target(10);
+        buf.extend(b"abc");
+        assert_eq!(buf.remaining(), 7);
+        buf.clear();
+        assert!(buf.is_empty());
+        // Target cleared → remaining is 0 for unset target.
+        assert_eq!(buf.remaining(), 0);
+        assert!(!buf.is_complete());
+    }
+
+    #[test]
+    fn read_buffer_set_target_changes_remaining() {
+        let mut buf = ReadBuffer::new();
+        buf.extend(b"abc");
+        assert_eq!(buf.remaining(), 0); // no target yet
+        buf.set_target(10);
+        assert_eq!(buf.remaining(), 7);
+        buf.set_target(2);
+        // Target shrinks below current length → completes immediately.
+        assert!(buf.is_complete());
+        assert_eq!(buf.remaining(), 0);
+    }
+
+    #[test]
+    fn read_buffer_default_capacity_does_not_set_target() {
+        let buf = ReadBuffer::with_capacity(1024);
+        assert_eq!(buf.remaining(), 0);
+        assert!(!buf.is_complete());
+    }
+
+    // ============= WriteBuffer: additional coverage =============
+
+    #[test]
+    fn write_buffer_remaining_capacity_decreases_as_extended() {
+        let mut buf = WriteBuffer::with_max_size(10);
+        assert_eq!(buf.remaining_capacity(), 10);
+        buf.extend(b"abc").unwrap();
+        assert_eq!(buf.remaining_capacity(), 7);
+    }
+
+    #[test]
+    fn write_buffer_is_full_at_capacity() {
+        let mut buf = WriteBuffer::with_max_size(5);
+        assert!(!buf.is_full());
+        buf.extend(b"hello").unwrap();
+        assert!(buf.is_full());
+        assert_eq!(buf.remaining_capacity(), 0);
+    }
+
+    #[test]
+    fn write_buffer_advance_past_end_resets() {
+        let mut buf = WriteBuffer::with_max_size(100);
+        buf.extend(b"hello").unwrap();
+        buf.advance(5);
+        // Fully consumed → buffer is reset, empty again with capacity.
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+        // Re-use must work after reset.
+        buf.extend(b"world").unwrap();
+        assert_eq!(buf.pending(), b"world");
+    }
+
+    #[test]
+    fn write_buffer_clear_resets_position_and_buffer() {
+        let mut buf = WriteBuffer::with_max_size(100);
+        buf.extend(b"hello").unwrap();
+        buf.advance(2);
+        assert_eq!(buf.pending(), b"llo");
+        buf.clear();
+        assert!(buf.is_empty());
+        assert_eq!(buf.pending(), b"");
+    }
+
+    // ============= HeaderBuffer: additional coverage =============
+
+    #[test]
+    fn header_buffer_take_returns_data_and_resets() {
+        let mut buf = HeaderBuffer::<4>::new();
+        buf.unfilled_mut()[..4].copy_from_slice(b"WXYZ");
+        buf.advance(4);
+        assert!(buf.is_complete());
+        let taken = buf.take();
+        assert_eq!(&taken, b"WXYZ");
+        // After take, buffer is fresh.
+        assert!(!buf.is_complete());
+        assert_eq!(buf.remaining(), 4);
+        assert_eq!(buf.as_slice(), b"");
+    }
+
+    #[test]
+    fn header_buffer_reset_marks_unfilled() {
+        let mut buf = HeaderBuffer::<3>::new();
+        buf.unfilled_mut()[..3].copy_from_slice(b"abc");
+        buf.advance(3);
+        buf.reset();
+        assert!(!buf.is_complete());
+        assert_eq!(buf.remaining(), 3);
+        // reset() does NOT zero the bytes — they will be overwritten on
+        // next read. But as_slice() (filled view) must be empty now.
+        assert_eq!(buf.as_slice(), b"");
+    }
+
+    #[test]
+    fn header_buffer_advance_clamps_at_n() {
+        let mut buf = HeaderBuffer::<3>::new();
+        buf.unfilled_mut()[..3].copy_from_slice(b"abc");
+        buf.advance(100); // over-advance must clamp to N
+        assert!(buf.is_complete());
+        assert_eq!(buf.remaining(), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn header_buffer_as_array_panics_when_not_complete() {
+        let buf = HeaderBuffer::<4>::new();
+        let _ = buf.as_array();
+    }
+
+    // ============= YieldBuffer: additional coverage =============
+
+    #[test]
+    fn yield_buffer_as_slice_reflects_advance() {
+        let mut buf = YieldBuffer::new(Bytes::from_static(b"abcdef"));
+        assert_eq!(buf.as_slice(), b"abcdef");
+        let mut dst = [0u8; 2];
+        buf.copy_to(&mut dst);
+        assert_eq!(buf.as_slice(), b"cdef");
+        assert_eq!(buf.remaining(), 4);
+    }
+
+    #[test]
+    fn yield_buffer_copy_to_zero_length_dst_is_noop() {
+        let mut buf = YieldBuffer::new(Bytes::from_static(b"abc"));
+        let mut dst: [u8; 0] = [];
+        assert_eq!(buf.copy_to(&mut dst), 0);
+        assert_eq!(buf.remaining(), 3);
+    }
+
+    // ============= Default trait instances =============
+
+    #[test]
+    fn read_buffer_default_is_new() {
+        let def = ReadBuffer::default();
+        assert!(def.is_empty());
+        assert_eq!(def.remaining(), 0);
+        assert!(!def.is_complete());
+    }
+
+    #[test]
+    fn write_buffer_default_is_256k() {
+        let def = WriteBuffer::default();
+        assert!(def.is_empty());
+        assert_eq!(def.remaining_capacity(), 256 * 1024);
+    }
+
+    #[test]
+    fn header_buffer_default_is_new() {
+        let def = HeaderBuffer::<8>::default();
+        assert!(!def.is_complete());
+        assert_eq!(def.remaining(), 8);
+        assert_eq!(def.as_slice(), b"");
+    }
+
+    // ============= WriteBuffer: edge cases =============
+
+    #[test]
+    fn write_buffer_extend_exactly_at_max_succeeds() {
+        let mut buf = WriteBuffer::with_max_size(4);
+        assert!(buf.extend(b"abcd").is_ok());
+        assert!(buf.is_full());
+        assert_eq!(buf.remaining_capacity(), 0);
+    }
+
+    #[test]
+    fn write_buffer_extend_one_over_max_fails() {
+        let mut buf = WriteBuffer::with_max_size(4);
+        assert!(buf.extend(b"abc").is_ok());
+        assert!(buf.extend(b"de").is_err());
+    }
+
+    #[test]
+    fn write_buffer_len_tracks_pending_after_partial_advance() {
+        let mut buf = WriteBuffer::with_max_size(100);
+        buf.extend(b"hello").unwrap();
+        assert_eq!(buf.len(), 5);
+        buf.advance(3);
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.pending(), b"lo");
+    }
+
+    // ============= ReadBuffer: accessor coverage =============
+
+    #[test]
+    fn read_buffer_as_slice_returns_extented_data() {
+        let mut buf = ReadBuffer::new();
+        buf.extend(b"hello");
+        assert_eq!(buf.as_slice(), b"hello");
+    }
+
+    #[test]
+    fn read_buffer_as_bytes_mut_allows_direct_write() {
+        let mut buf = ReadBuffer::new();
+        buf.as_bytes_mut().extend_from_slice(b"abc");
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf.as_slice(), b"abc");
+    }
+
+    #[test]
+    fn read_buffer_with_target_capacity_equals_target() {
+        let buf = ReadBuffer::with_target(256);
+        assert_eq!(buf.remaining(), 256);
+        assert!(buf.is_empty());
+        assert!(!buf.is_complete());
+    }
+
+    // ============= YieldBuffer: empty data =============
+
+    #[test]
+    fn yield_buffer_empty_data_is_immediately_exhausted() {
+        let mut buf = YieldBuffer::new(Bytes::from_static(b""));
+        assert!(buf.is_empty());
+        assert_eq!(buf.remaining(), 0);
+        let mut dst = [0u8; 1];
+        assert_eq!(buf.copy_to(&mut dst), 0);
+    }
+
+    #[test]
+    fn yield_buffer_as_slice_on_empty_is_empty() {
+        let buf = YieldBuffer::new(Bytes::from_static(b""));
+        assert_eq!(buf.as_slice(), b"");
+    }
+
+    // ============= HeaderBuffer: partial fill as_slice =============
+
+    #[test]
+    fn header_buffer_as_slice_returns_only_filled_portion() {
+        let mut buf = HeaderBuffer::<6>::new();
+        buf.unfilled_mut()[..3].copy_from_slice(b"abc");
+        buf.advance(3);
+        assert_eq!(buf.as_slice(), b"abc");
+        assert_eq!(buf.remaining(), 3);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn read_buffer_extend_then_take_preserves_bytes(
+            data in proptest::collection::vec(any::<u8>(), 0..512)
+        ) {
+            let mut buf = ReadBuffer::new();
+            buf.extend(&data);
+            let taken = buf.take();
+            prop_assert_eq!(&taken[..], &data[..]);
+        }
+
+        #[test]
+        fn read_buffer_take_exact_splits_correctly(
+            prefix_len in 1usize..64,
+            data in proptest::collection::vec(any::<u8>(), 65..256)
+        ) {
+            let mut buf = ReadBuffer::new();
+            buf.extend(&data);
+            let chunk = buf.take_exact(prefix_len);
+            prop_assert!(chunk.is_some());
+            prop_assert_eq!(&chunk.unwrap()[..], &data[..prefix_len]);
+            prop_assert_eq!(buf.len(), data.len() - prefix_len);
+        }
+
+        #[test]
+        fn write_buffer_extend_then_pending_preserves_order(
+            data in proptest::collection::vec(any::<u8>(), 1..256)
+        ) {
+            let mut buf = WriteBuffer::with_max_size(65536);
+            buf.extend(&data).unwrap();
+            prop_assert_eq!(buf.pending(), &data[..]);
+        }
+
+        #[test]
+        fn write_buffer_advance_reduces_pending(
+            data in proptest::collection::vec(any::<u8>(), 10..256),
+            advance in 1usize..9
+        ) {
+            // advance < data.len() guaranteed by ranges
+            let mut buf = WriteBuffer::with_max_size(65536);
+            buf.extend(&data).unwrap();
+            buf.advance(advance.min(data.len() - 1));
+            prop_assert_eq!(buf.pending(), &data[advance.min(data.len() - 1)..]);
+        }
+
+        #[test]
+        fn header_buffer_advance_and_remaining_consistent(
+            fill in 0usize..128
+        ) {
+            const N: usize = 128;
+            let mut buf = HeaderBuffer::<N>::new();
+            buf.advance(fill);
+            prop_assert_eq!(buf.remaining(), N - fill);
+            if fill >= N {
+                prop_assert!(buf.is_complete());
+            } else {
+                prop_assert!(!buf.is_complete());
+            }
+        }
+    }
 }

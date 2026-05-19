@@ -379,3 +379,258 @@ fn now_epoch_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_me_snapshot() -> StartupMeSnapshot {
+        StartupMeSnapshot {
+            status: StartupMeStatus::Pending,
+            current_stage: "pending".to_string(),
+            init_attempt: 0,
+            retry_limit: "unlimited".to_string(),
+            last_error: None,
+        }
+    }
+
+    fn make_component(
+        id: &'static str,
+        weight: f64,
+        status: StartupComponentStatus,
+    ) -> StartupComponentSnapshot {
+        StartupComponentSnapshot {
+            id,
+            title: "test",
+            weight,
+            status,
+            started_at_epoch_ms: None,
+            finished_at_epoch_ms: None,
+            duration_ms: None,
+            attempts: 0,
+            details: None,
+        }
+    }
+
+    fn make_snapshot(
+        status: StartupStatus,
+        components: Vec<StartupComponentSnapshot>,
+    ) -> StartupSnapshot {
+        StartupSnapshot {
+            status,
+            degraded: false,
+            current_stage: "test".to_string(),
+            started_at_epoch_secs: 1000,
+            ready_at_epoch_secs: None,
+            total_elapsed_ms: 500,
+            transport_mode: "test".to_string(),
+            me: make_me_snapshot(),
+            components,
+        }
+    }
+
+    // --- Enum as_str matrices ---
+
+    #[test]
+    fn startup_status_as_str() {
+        assert_eq!(StartupStatus::Initializing.as_str(), "initializing");
+        assert_eq!(StartupStatus::Ready.as_str(), "ready");
+    }
+
+    #[test]
+    fn component_status_as_str() {
+        assert_eq!(StartupComponentStatus::Pending.as_str(), "pending");
+        assert_eq!(StartupComponentStatus::Running.as_str(), "running");
+        assert_eq!(StartupComponentStatus::Ready.as_str(), "ready");
+        assert_eq!(StartupComponentStatus::Failed.as_str(), "failed");
+        assert_eq!(StartupComponentStatus::Skipped.as_str(), "skipped");
+    }
+
+    #[test]
+    fn me_status_as_str() {
+        assert_eq!(StartupMeStatus::Pending.as_str(), "pending");
+        assert_eq!(StartupMeStatus::Initializing.as_str(), "initializing");
+        assert_eq!(StartupMeStatus::Ready.as_str(), "ready");
+        assert_eq!(StartupMeStatus::Failed.as_str(), "failed");
+        assert_eq!(StartupMeStatus::Skipped.as_str(), "skipped");
+    }
+
+    // --- compute_progress_pct ---
+
+    #[test]
+    fn progress_ready_returns_100() {
+        let snap = make_snapshot(StartupStatus::Ready, vec![]);
+        assert_eq!(compute_progress_pct(&snap, None), 100.0);
+    }
+
+    #[test]
+    fn progress_all_pending_returns_0() {
+        let components = vec![
+            make_component("a", 5.0, StartupComponentStatus::Pending),
+            make_component("b", 10.0, StartupComponentStatus::Pending),
+        ];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        assert_eq!(compute_progress_pct(&snap, None), 0.0);
+    }
+
+    #[test]
+    fn progress_all_ready_returns_100() {
+        let components = vec![
+            make_component("a", 5.0, StartupComponentStatus::Ready),
+            make_component("b", 10.0, StartupComponentStatus::Ready),
+        ];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        let pct = compute_progress_pct(&snap, None);
+        assert!((pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_all_skipped_returns_100() {
+        let components = vec![
+            make_component("a", 5.0, StartupComponentStatus::Skipped),
+            make_component("b", 10.0, StartupComponentStatus::Skipped),
+        ];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        let pct = compute_progress_pct(&snap, None);
+        assert!((pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_all_failed_returns_100() {
+        let components = vec![
+            make_component("a", 5.0, StartupComponentStatus::Failed),
+            make_component("b", 10.0, StartupComponentStatus::Failed),
+        ];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        let pct = compute_progress_pct(&snap, None);
+        assert!((pct - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn progress_mixed_partial() {
+        let components = vec![
+            make_component("a", 5.0, StartupComponentStatus::Ready),
+            make_component("b", 10.0, StartupComponentStatus::Pending),
+        ];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        let pct = compute_progress_pct(&snap, None);
+        assert!((pct - 33.333_333_333_333_33).abs() < 0.001);
+    }
+
+    #[test]
+    fn progress_running_non_me_returns_0() {
+        let components = vec![make_component(
+            "some_other_stage",
+            10.0,
+            StartupComponentStatus::Running,
+        )];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        assert_eq!(compute_progress_pct(&snap, Some(0.5)), 0.0);
+    }
+
+    #[test]
+    fn progress_running_me_stage_partial() {
+        let components = vec![
+            make_component(
+                COMPONENT_ME_POOL_INIT_STAGE1,
+                24.0,
+                StartupComponentStatus::Running,
+            ),
+            make_component("other", 16.0, StartupComponentStatus::Ready),
+        ];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        let pct = compute_progress_pct(&snap, Some(0.5));
+        // me: 24.0 * 0.5 = 12.0, other: 16.0 * 1.0 = 16.0
+        // total = 40.0, completed = 28.0 → 70.0%
+        assert!((pct - 70.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn progress_empty_components_returns_0() {
+        let snap = make_snapshot(StartupStatus::Initializing, vec![]);
+        assert_eq!(compute_progress_pct(&snap, None), 0.0);
+    }
+
+    #[test]
+    fn progress_me_stage_negative_clamped_to_zero() {
+        let components = vec![make_component(
+            COMPONENT_ME_POOL_INIT_STAGE1,
+            10.0,
+            StartupComponentStatus::Running,
+        )];
+        let snap = make_snapshot(StartupStatus::Initializing, components);
+        let pct = compute_progress_pct(&snap, Some(-0.5));
+        assert_eq!(pct, 0.0);
+    }
+
+    // --- normalize_details ---
+
+    #[test]
+    fn normalize_details_none_returns_none() {
+        assert!(super::normalize_details(None).is_none());
+    }
+
+    #[test]
+    fn normalize_details_short_preserved() {
+        let s = "hello".to_string();
+        assert_eq!(super::normalize_details(Some(s.clone())), Some(s));
+    }
+
+    #[test]
+    fn normalize_details_exact_256_preserved() {
+        let s = "a".repeat(256);
+        assert_eq!(super::normalize_details(Some(s.clone())), Some(s));
+    }
+
+    #[test]
+    fn normalize_details_over_256_truncated() {
+        let s = "a".repeat(300);
+        let result = super::normalize_details(Some(s));
+        assert_eq!(result.map(|r| r.len()), Some(256));
+    }
+
+    #[test]
+    fn normalize_details_empty_string_preserved() {
+        let s = String::new();
+        assert_eq!(super::normalize_details(Some(s.clone())), Some(s));
+    }
+
+    // --- component_blueprint ---
+
+    #[test]
+    fn blueprint_has_16_components() {
+        assert_eq!(super::component_blueprint().len(), 16);
+    }
+
+    #[test]
+    fn blueprint_all_start_pending() {
+        let bp = super::component_blueprint();
+        assert!(bp.iter().all(|c| c.status == StartupComponentStatus::Pending));
+    }
+
+    #[test]
+    fn blueprint_known_ids_present() {
+        let bp = super::component_blueprint();
+        let ids: Vec<&str> = bp.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&COMPONENT_CONFIG_LOAD));
+        assert!(ids.contains(&COMPONENT_RUNTIME_READY));
+        assert!(ids.contains(&COMPONENT_ME_POOL_INIT_STAGE1));
+        assert!(ids.contains(&COMPONENT_DC_CONNECTIVITY_PING));
+    }
+
+    #[test]
+    fn blueprint_weights_all_positive() {
+        let bp = super::component_blueprint();
+        assert!(bp.iter().all(|c| c.weight > 0.0));
+    }
+
+    #[test]
+    fn blueprint_zero_attempts_and_no_timestamps() {
+        let bp = super::component_blueprint();
+        assert!(bp.iter().all(|c| c.attempts == 0));
+        assert!(bp.iter().all(|c| c.started_at_epoch_ms.is_none()));
+        assert!(bp.iter().all(|c| c.finished_at_epoch_ms.is_none()));
+        assert!(bp.iter().all(|c| c.duration_ms.is_none()));
+        assert!(bp.iter().all(|c| c.details.is_none()));
+    }
+}

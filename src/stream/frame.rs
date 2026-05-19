@@ -186,4 +186,43 @@ mod tests {
         assert_eq!(meta.padding_len, 3);
         assert!(meta.has_flags());
     }
+
+    #[test]
+    fn frame_with_meta_preserves_both_fields() {
+        let meta = FrameMeta::default().with_simple_ack().with_padding(7);
+        let f = Frame::with_meta(Bytes::from_static(b"payload"), meta);
+        assert_eq!(f.len(), 7);
+        assert!(!f.is_empty());
+        assert!(f.meta.simple_ack);
+        assert!(!f.meta.quickack);
+        assert_eq!(f.meta.padding_len, 7);
+    }
+
+    #[test]
+    fn frame_simple_ack_sets_only_simple_ack_flag() {
+        let f = Frame::simple_ack(Bytes::from_static(b"ack"));
+        assert!(f.meta.simple_ack);
+        assert!(!f.meta.quickack);
+        assert!(f.meta.has_flags());
+    }
+
+    #[test]
+    fn frame_meta_with_simple_ack_does_not_set_quickack() {
+        let meta = FrameMeta::default().with_simple_ack();
+        assert!(meta.simple_ack);
+        assert!(!meta.quickack);
+        assert_eq!(meta.padding_len, 0);
+        assert!(meta.has_flags());
+    }
+
+    #[test]
+    fn frame_meta_with_padding_does_not_set_any_flags() {
+        // `has_flags()` only looks at the two ACK flags — padding_len alone
+        // must NOT count as a "flag".
+        let meta = FrameMeta::default().with_padding(15);
+        assert!(!meta.quickack);
+        assert!(!meta.simple_ack);
+        assert_eq!(meta.padding_len, 15);
+        assert!(!meta.has_flags());
+    }
 }

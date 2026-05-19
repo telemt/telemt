@@ -230,3 +230,4 @@ pub(crate) async fn run_startup_connectivity(
     }
     *api_me_pool.write().await = me_pool.clone();
 }
+

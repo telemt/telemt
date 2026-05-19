@@ -4090,4 +4090,103 @@ mod tests {
         .unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
     }
+
+    #[test]
+    fn prometheus_label_value_escapes_backslash_and_quote() {
+        assert_eq!(prometheus_label_value(r#"hello\"world"#), r#"hello\\\"world"#);
+    }
+
+    #[test]
+    fn prometheus_label_value_escapes_backslash_only() {
+        assert_eq!(prometheus_label_value(r"path\to\file"), r"path\\to\\file");
+    }
+
+    #[test]
+    fn prometheus_label_value_escapes_double_quote_only() {
+        assert_eq!(prometheus_label_value(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn prometheus_label_value_passes_empty_string() {
+        assert_eq!(prometheus_label_value(""), "");
+    }
+
+    #[test]
+    fn prometheus_label_value_leaves_plain_ascii_alone() {
+        let plain = "example.com-port-443";
+        assert_eq!(prometheus_label_value(plain), plain);
+    }
+
+    #[test]
+    fn tls_front_domains_empty_when_tls_domain_cleared() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = String::new();
+        config.censorship.tls_domains = vec![];
+        let domains = tls_front_domains(&config);
+        assert!(domains.is_empty());
+    }
+
+    #[test]
+    fn tls_front_domains_primary_and_extras() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "a.example.com".to_string();
+        config.censorship.tls_domains = vec![
+            "b.example.com".to_string(),
+            "c.example.com".to_string(),
+        ];
+        let domains = tls_front_domains(&config);
+        assert_eq!(domains, vec!["a.example.com", "b.example.com", "c.example.com"]);
+    }
+
+    #[test]
+    fn tls_front_domains_deduplicates_against_primary() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "dup.example.com".to_string();
+        config.censorship.tls_domains = vec![
+            "dup.example.com".to_string(),
+            "other.example.com".to_string(),
+        ];
+        let domains = tls_front_domains(&config);
+        assert_eq!(domains, vec!["dup.example.com", "other.example.com"]);
+    }
+
+    #[test]
+    fn tls_front_domains_skips_empty_tls_domains_entries() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "primary.example.com".to_string();
+        config.censorship.tls_domains = vec![
+            String::new(),
+            "valid.example.com".to_string(),
+            String::new(),
+        ];
+        let domains = tls_front_domains(&config);
+        assert_eq!(domains, vec!["primary.example.com", "valid.example.com"]);
+    }
+
+    #[test]
+    fn render_beobachten_empty_store_returns_string() {
+        let store = BeobachtenStore::new();
+        let config = ProxyConfig::default();
+        let result = render_beobachten(&store, &config);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn render_beobachten_disabled_returns_disabled() {
+        let store = BeobachtenStore::new();
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = false;
+        let result = render_beobachten(&store, &config);
+        assert_eq!(result, "beobachten disabled\n");
+    }
+
+    #[test]
+    fn render_beobachten_enabled_empty_store() {
+        let store = BeobachtenStore::new();
+        let mut config = ProxyConfig::default();
+        config.general.beobachten = true;
+        config.general.beobachten_minutes = 10;
+        let result = render_beobachten(&store, &config);
+        assert_eq!(result, "empty\n");
+    }
 }

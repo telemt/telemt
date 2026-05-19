@@ -902,3 +902,227 @@ where
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    // ============= OneOrMany =============
+
+    #[derive(Deserialize)]
+    struct OneOrManyHolder {
+        v: OneOrMany,
+    }
+
+    #[test]
+    fn one_or_many_parses_string_as_one() {
+        let h: OneOrManyHolder = serde_json::from_str(r#"{"v": "single"}"#).unwrap();
+        assert!(matches!(h.v, OneOrMany::One(ref s) if s == "single"));
+    }
+
+    #[test]
+    fn one_or_many_parses_array_as_many() {
+        let h: OneOrManyHolder = serde_json::from_str(r#"{"v": ["a", "b", "c"]}"#).unwrap();
+        match h.v {
+            OneOrMany::Many(v) => assert_eq!(v, vec!["a", "b", "c"]),
+            _ => panic!("expected Many"),
+        }
+    }
+
+    #[test]
+    fn one_or_many_parses_empty_array_as_many() {
+        let h: OneOrManyHolder = serde_json::from_str(r#"{"v": []}"#).unwrap();
+        match h.v {
+            OneOrMany::Many(v) => assert!(v.is_empty()),
+            _ => panic!("expected Many"),
+        }
+    }
+
+    // ============= deserialize_dc_overrides =============
+
+    #[derive(Deserialize)]
+    struct DcHolder {
+        #[serde(deserialize_with = "deserialize_dc_overrides")]
+        dcs: HashMap<String, Vec<String>>,
+    }
+
+    #[test]
+    fn dc_overrides_accepts_single_string_value() {
+        let j = r#"{"dcs": {"2": "10.0.0.2:443"}}"#;
+        let h: DcHolder = serde_json::from_str(j).unwrap();
+        assert_eq!(h.dcs.get("2").unwrap(), &vec!["10.0.0.2:443".to_string()]);
+    }
+
+    #[test]
+    fn dc_overrides_accepts_array_value() {
+        let j = r#"{"dcs": {"2": ["10.0.0.2:443", "10.0.0.3:443"]}}"#;
+        let h: DcHolder = serde_json::from_str(j).unwrap();
+        assert_eq!(
+            h.dcs.get("2").unwrap(),
+            &vec!["10.0.0.2:443".to_string(), "10.0.0.3:443".to_string()]
+        );
+    }
+
+    #[test]
+    fn dc_overrides_strips_empty_strings_inside_array() {
+        // Whitespace-only entries are noise and must not survive parsing.
+        let j = r#"{"dcs": {"2": ["10.0.0.2:443", "", "  "]}}"#;
+        let h: DcHolder = serde_json::from_str(j).unwrap();
+        assert_eq!(h.dcs.get("2").unwrap(), &vec!["10.0.0.2:443".to_string()]);
+    }
+
+    #[test]
+    fn dc_overrides_drops_entirely_empty_entries() {
+        // DC with only-empty strings has no actionable addresses → must
+        // not appear in the resulting map (would otherwise look like an
+        // intentional "no override" sentinel and break callers).
+        let j = r#"{"dcs": {"5": ["", "   "]}}"#;
+        let h: DcHolder = serde_json::from_str(j).unwrap();
+        assert!(h.dcs.get("5").is_none());
+    }
+
+    #[test]
+    fn dc_overrides_drops_empty_single_string() {
+        let j = r#"{"dcs": {"5": ""}}"#;
+        let h: DcHolder = serde_json::from_str(j).unwrap();
+        assert!(h.dcs.get("5").is_none());
+    }
+
+    #[test]
+    fn dc_overrides_preserves_multiple_dc_keys() {
+        let j = r#"{"dcs": {"1": "a:1", "-2": ["b:2", "c:3"], "4": ""}}"#;
+        let h: DcHolder = serde_json::from_str(j).unwrap();
+        assert_eq!(h.dcs.len(), 2);
+        assert!(h.dcs.contains_key("1"));
+        assert!(h.dcs.contains_key("-2"));
+        assert!(!h.dcs.contains_key("4")); // dropped (empty)
+    }
+
+    // ============= Default lists =============
+
+    #[test]
+    fn default_stun_servers_contains_at_least_one_google_endpoint() {
+        let servers = default_stun_servers();
+        assert!(!servers.is_empty());
+        assert!(
+            servers.iter().any(|s| s.contains("stun.l.google.com")),
+            "Google STUN must be in the default set — it's the most
+             reliably reachable. Removing it without a replacement is a
+             regression."
+        );
+        // Every entry must look like host:port.
+        for s in &servers {
+            assert!(s.contains(':'), "STUN entry {:?} is missing :port", s);
+        }
+    }
+
+    #[test]
+    fn default_http_ip_detect_urls_are_all_https() {
+        // Plain HTTP would leak the request and the response — these
+        // endpoints reveal the proxy's public IP. The default list must
+        // never include http:// URLs.
+        let urls = default_http_ip_detect_urls();
+        assert!(!urls.is_empty());
+        for u in &urls {
+            assert!(
+                u.starts_with("https://"),
+                "ip-detect URL {:?} must be HTTPS",
+                u
+            );
+        }
+    }
+
+    #[test]
+    fn default_proxy_secret_len_max_is_within_protocol_limits() {
+        // Telegram middle-proxy secrets are bounded in practice; 256 is
+        // the current ceiling and matters because it controls Vec
+        // pre-allocation in the obfuscation KDF.
+        let n = default_proxy_secret_len_max();
+        assert!(n >= 32, "secret_len_max must allow at least one 32-byte secret");
+        assert!(n <= 4096, "secret_len_max must not be pathologically large");
+    }
+
+    #[test]
+    fn default_mask_relay_max_bytes_is_smaller_in_tests() {
+        // The two `#[cfg(test)]` overrides exist exactly so the relay
+        // budgets stay small enough for unit-test buffers. In test builds
+        // the value must be much less than the production 5 MiB.
+        let v = default_mask_relay_max_bytes();
+        assert!(v <= 1024 * 1024, "test-mode budget must stay sub-MiB");
+    }
+
+    #[test]
+    fn default_me_pool_min_fresh_ratio_is_a_probability() {
+        let r = default_me_pool_min_fresh_ratio();
+        assert!((0.0..=1.0).contains(&r), "min_fresh_ratio must be a fraction");
+    }
+
+    #[test]
+    fn pin_critical_defaults_snapshot() {
+        // Pinning protocol-significant defaults. Changes here are normally
+        // breaking changes for clients/operators and should be intentional.
+        // Tuning knobs (channel sizes, retry counts) are NOT pinned here.
+        assert_eq!(default_port(), 443);
+        assert_eq!(default_tls_domain(), "petrovich.ru");
+        assert_eq!(default_mask_port(), 443);
+        assert_eq!(default_fake_cert_len(), 2048);
+        assert_eq!(default_replay_check_len(), 65_536);
+        assert_eq!(default_replay_window_secs(), 120);
+        assert_eq!(default_handshake_timeout(), 60);
+        assert_eq!(default_connect_timeout(), 10);
+        assert_eq!(default_keepalive(), 15);
+        assert_eq!(default_ack_timeout(), 90);
+        assert_eq!(default_me_one_retry(), 12);
+        assert_eq!(default_me_one_timeout(), 1200);
+        assert_eq!(default_listen_addr(), "0.0.0.0");
+        assert_eq!(default_weight(), 1);
+        assert_eq!(default_server_max_connections(), 10_000);
+        assert_eq!(default_listen_backlog(), 1024);
+        assert_eq!(default_pool_size(), 8);
+        assert_eq!(default_proxy_secret_len_max(), 256);
+        assert_eq!(default_max_client_frame(), 16 * 1024 * 1024);
+        assert_eq!(default_crypto_pending_buffer(), 256 * 1024);
+        assert_eq!(default_api_listen(), "0.0.0.0:9091");
+        assert_eq!(default_api_request_body_limit_bytes(), 64 * 1024);
+        assert_eq!(default_api_runtime_edge_top_n(), 10);
+        assert_eq!(default_api_runtime_edge_events_capacity(), 256);
+        assert_eq!(default_proxy_protocol_header_timeout_ms(), 500);
+    }
+
+    #[test]
+    fn pin_access_defaults() {
+        let users = default_access_users();
+        assert_eq!(users.len(), 1);
+        assert!(users.contains_key("default"));
+        assert_eq!(users["default"], "00000000000000000000000000000000");
+    }
+
+    #[test]
+    fn pin_security_booleans() {
+        // Security-relevant default flags. Flipping any of these has
+        // observable security implications — pin to prevent silent regression.
+        assert!(default_alpn_enforce());
+        assert!(default_ntp_check());
+        assert!(default_me_snapshot_require_http_2xx());
+        assert!(default_me_snapshot_reject_empty_map());
+        assert!(default_proxy_secret_rotate_runtime());
+        assert!(default_me_secret_atomic_snapshot());
+        assert!(!default_mask_timing_normalization_enabled());
+        assert!(!default_serverhello_compact());
+    }
+
+    #[test]
+    fn bind_stale_ttl_equals_drain_ttl() {
+        // `default_me_bind_stale_ttl_secs` currently delegates to
+        // `default_me_pool_drain_ttl_secs` by design — bind staleness
+        // must not outlive the pool drain window or bound writers
+        // would point at evicted backends. Pin the relation so a
+        // future refactor that decouples them is forced to revisit
+        // this invariant.
+        assert_eq!(
+            default_me_bind_stale_ttl_secs(),
+            default_me_pool_drain_ttl_secs()
+        );
+    }
+}

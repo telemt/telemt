@@ -804,3 +804,387 @@ impl WorkerFairnessState {
         (conn_id as usize) % self.bucket_queued_bytes.len().max(1)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::protocol::constants::RPC_FLAG_QUICKACK;
+
+    fn default_config() -> WorkerFairnessConfig {
+        WorkerFairnessConfig::default()
+    }
+
+    mod config_defaults {
+        use super::*;
+
+        #[test]
+        fn worker_fairness_config_default_fields() {
+            let cfg = default_config();
+            assert_eq!(cfg.worker_id, 0);
+            assert!(cfg.backpressure_enabled);
+            assert_eq!(cfg.max_active_flows, 4096);
+            assert_eq!(cfg.max_total_queued_bytes, 16 * 1024 * 1024);
+            assert_eq!(cfg.max_flow_queued_bytes, 512 * 1024);
+            assert_eq!(cfg.base_quantum_bytes, 32 * 1024);
+            assert_eq!(cfg.pressured_quantum_bytes, 16 * 1024);
+            assert_eq!(cfg.penalized_quantum_bytes, 8 * 1024);
+            assert_eq!(cfg.standing_queue_min_age, Duration::from_millis(250));
+            assert_eq!(cfg.standing_queue_min_backlog_bytes, 64 * 1024);
+            assert_eq!(cfg.standing_stall_threshold, 3);
+            assert_eq!(cfg.max_consecutive_stalls_before_shed, 4);
+            assert_eq!(cfg.max_consecutive_stalls_before_close, 16);
+            assert_eq!(cfg.soft_bucket_count, 64);
+            assert_eq!(cfg.soft_bucket_share_pct, 25);
+            assert_eq!(cfg.default_flow_weight, 1);
+            assert_eq!(cfg.quickack_flow_weight, 4);
+        }
+
+    }
+
+    mod initial_state {
+        use super::*;
+
+        #[test]
+        fn new_pressure_state_normal() {
+            let state = WorkerFairnessState::new(default_config(), Instant::now());
+            assert_eq!(state.pressure_state(), PressureState::Normal);
+        }
+
+        #[test]
+        fn new_snapshot_zeroed() {
+            let state = WorkerFairnessState::new(default_config(), Instant::now());
+            let snap = state.snapshot();
+            assert_eq!(snap.pressure_state, PressureState::Normal);
+            assert_eq!(snap.active_flows, 0);
+            assert_eq!(snap.total_queued_bytes, 0);
+            assert_eq!(snap.standing_flows, 0);
+            assert_eq!(snap.backpressured_flows, 0);
+            assert_eq!(snap.scheduler_rounds, 0);
+            assert_eq!(snap.deficit_grants, 0);
+            assert_eq!(snap.deficit_skips, 0);
+            assert_eq!(snap.enqueue_rejects, 0);
+            assert_eq!(snap.shed_drops, 0);
+            assert_eq!(snap.fairness_penalties, 0);
+            assert_eq!(snap.downstream_stalls, 0);
+        }
+
+        #[test]
+        fn new_ring_consistency() {
+            let state = WorkerFairnessState::new(default_config(), Instant::now());
+            assert!(state.debug_check_active_ring_consistency());
+        }
+
+        #[test]
+        fn new_max_deficit_zero() {
+            let state = WorkerFairnessState::new(default_config(), Instant::now());
+            assert_eq!(state.debug_max_deficit_bytes(), 0);
+        }
+    }
+
+    mod enqueue {
+        use super::*;
+
+        #[test]
+        fn admit_single_frame() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            let decision = state.enqueue_data(1, 0, Bytes::from(vec![0u8; 1024]), Instant::now());
+            assert_eq!(decision, AdmissionDecision::Admit);
+        }
+
+        #[test]
+        fn admit_tracks_queued_bytes() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 1024]), now);
+            assert_eq!(state.snapshot().total_queued_bytes, 1024);
+            assert_eq!(state.snapshot().active_flows, 1);
+        }
+
+        #[test]
+        fn same_flow_accumulates_bytes() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 512]), now);
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 256]), now);
+            assert_eq!(state.snapshot().total_queued_bytes, 768);
+            assert_eq!(state.snapshot().active_flows, 1);
+        }
+
+        #[test]
+        fn reject_worker_cap() {
+            let mut cfg = default_config();
+            cfg.max_total_queued_bytes = 100;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let decision = state.enqueue_data(1, 0, Bytes::from(vec![0u8; 200]), Instant::now());
+            assert_eq!(decision, AdmissionDecision::RejectWorkerCap);
+        }
+
+        #[test]
+        fn reject_flow_cap() {
+            let mut cfg = default_config();
+            cfg.max_flow_queued_bytes = 256;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 128]), now);
+            let decision = state.enqueue_data(1, 0, Bytes::from(vec![0u8; 256]), now);
+            assert_eq!(decision, AdmissionDecision::RejectFlowCap);
+        }
+
+        #[test]
+        fn reject_count_incremented() {
+            let mut cfg = default_config();
+            cfg.max_total_queued_bytes = 100;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 200]), now);
+            assert_eq!(state.snapshot().enqueue_rejects, 1);
+            state.enqueue_data(2, 0, Bytes::from(vec![0u8; 200]), now);
+            assert_eq!(state.snapshot().enqueue_rejects, 2);
+        }
+
+        #[test]
+        fn quickack_flag_sets_higher_weight() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 32;
+            cfg.quickack_flow_weight = 8;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(10, 0, Bytes::from(vec![0u8; 64]), now);
+            state.enqueue_data(20, RPC_FLAG_QUICKACK, Bytes::from(vec![0u8; 64]), now);
+            match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => {
+                    assert_eq!(c.frame.conn_id, 20);
+                }
+                SchedulerDecision::Idle => panic!("expected Dispatch"),
+            }
+        }
+    }
+
+    mod next_decision {
+        use super::*;
+
+        #[test]
+        fn idle_when_no_flows() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            let decision = state.next_decision(Instant::now());
+            assert!(matches!(decision, SchedulerDecision::Idle));
+        }
+
+        #[test]
+        fn dispatches_single_flow() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 1024;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 64]), now);
+            match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => {
+                    assert_eq!(c.frame.conn_id, 1);
+                    assert_eq!(c.frame.queued_bytes(), 64);
+                }
+                SchedulerDecision::Idle => panic!("expected Dispatch"),
+            }
+        }
+
+        #[test]
+        fn two_flows_alternate() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 1024;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(10, 0, Bytes::from(vec![0u8; 64]), now);
+            state.enqueue_data(20, 0, Bytes::from(vec![0u8; 64]), now);
+            let id1 = match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => c.frame.conn_id,
+                _ => panic!("expected Dispatch"),
+            };
+            let id2 = match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => c.frame.conn_id,
+                _ => panic!("expected Dispatch"),
+            };
+            assert_ne!(id1, id2);
+        }
+
+        #[test]
+        fn deficit_accumulates_until_dispatch() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 64;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 256]), now);
+            for _ in 0..3 {
+                let d = state.next_decision(now);
+                assert!(matches!(d, SchedulerDecision::Idle));
+            }
+            match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => {
+                    assert_eq!(c.frame.queued_bytes(), 256);
+                }
+                SchedulerDecision::Idle => panic!("expected Dispatch after deficit accumulation"),
+            }
+        }
+
+        #[test]
+        fn drain_reduces_queued_bytes() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 1024;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 64]), now);
+            assert_eq!(state.snapshot().total_queued_bytes, 64);
+            let _ = state.next_decision(now);
+            assert_eq!(state.snapshot().total_queued_bytes, 0);
+        }
+
+        #[test]
+        fn scheduler_rounds_increment() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            assert_eq!(state.snapshot().scheduler_rounds, 0);
+            state.next_decision(Instant::now());
+            assert_eq!(state.snapshot().scheduler_rounds, 1);
+            state.next_decision(Instant::now());
+            assert_eq!(state.snapshot().scheduler_rounds, 2);
+        }
+    }
+
+    mod backpressure {
+        use super::*;
+
+        #[test]
+        fn disable_forces_normal() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            state.set_backpressure_enabled(false);
+            assert_eq!(state.pressure_state(), PressureState::Normal);
+        }
+
+        #[test]
+        fn reenable_stays_normal_no_data() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            state.set_backpressure_enabled(false);
+            assert_eq!(state.pressure_state(), PressureState::Normal);
+            state.set_backpressure_enabled(true);
+            assert_eq!(state.pressure_state(), PressureState::Normal);
+        }
+    }
+
+    mod snapshot_and_remove {
+        use super::*;
+
+        #[test]
+        fn snapshot_multiple_flows() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 100]), now);
+            state.enqueue_data(2, 0, Bytes::from(vec![0u8; 200]), now);
+            state.enqueue_data(3, 0, Bytes::from(vec![0u8; 300]), now);
+            let snap = state.snapshot();
+            assert_eq!(snap.active_flows, 3);
+            assert_eq!(snap.total_queued_bytes, 600);
+        }
+
+        #[test]
+        fn remove_flow_reclaims_bytes() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 1024]), now);
+            assert_eq!(state.snapshot().total_queued_bytes, 1024);
+            assert_eq!(state.snapshot().active_flows, 1);
+            state.remove_flow(1);
+            assert_eq!(state.snapshot().total_queued_bytes, 0);
+            assert_eq!(state.snapshot().active_flows, 0);
+        }
+
+        #[test]
+        fn remove_nonexistent_noop() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            state.remove_flow(999);
+            assert_eq!(state.snapshot().active_flows, 0);
+            assert_eq!(state.snapshot().total_queued_bytes, 0);
+        }
+
+        #[test]
+        fn remove_partial_flow_others_intact() {
+            let mut state = WorkerFairnessState::new(default_config(), Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 100]), now);
+            state.enqueue_data(2, 0, Bytes::from(vec![0u8; 200]), now);
+            state.remove_flow(1);
+            let snap = state.snapshot();
+            assert_eq!(snap.active_flows, 1);
+            assert_eq!(snap.total_queued_bytes, 200);
+        }
+    }
+
+    mod dispatch_feedback {
+        use super::*;
+
+        #[test]
+        fn routed_continues() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 1024;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 64]), now);
+            let candidate = match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => c,
+                SchedulerDecision::Idle => panic!("expected Dispatch"),
+            };
+            let action = state.apply_dispatch_feedback(1, candidate, DispatchFeedback::Routed, now);
+            assert_eq!(action, DispatchAction::Continue);
+        }
+
+        #[test]
+        fn channel_closed_removes_flow() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 1024;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 64]), now);
+            assert_eq!(state.snapshot().active_flows, 1);
+            let candidate = match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => c,
+                SchedulerDecision::Idle => panic!("expected Dispatch"),
+            };
+            let action =
+                state.apply_dispatch_feedback(1, candidate, DispatchFeedback::ChannelClosed, now);
+            assert_eq!(action, DispatchAction::CloseFlow);
+            assert_eq!(state.snapshot().active_flows, 0);
+        }
+
+        #[test]
+        fn no_conn_removes_flow() {
+            let mut cfg = default_config();
+            cfg.base_quantum_bytes = 1024;
+            let mut state = WorkerFairnessState::new(cfg, Instant::now());
+            let now = Instant::now();
+            state.enqueue_data(1, 0, Bytes::from(vec![0u8; 64]), now);
+            let candidate = match state.next_decision(now) {
+                SchedulerDecision::Dispatch(c) => c,
+                SchedulerDecision::Idle => panic!("expected Dispatch"),
+            };
+            let action =
+                state.apply_dispatch_feedback(1, candidate, DispatchFeedback::NoConn, now);
+            assert_eq!(action, DispatchAction::CloseFlow);
+            assert_eq!(state.snapshot().active_flows, 0);
+        }
+    }
+
+    mod weight_clamping {
+        use super::super::super::model::FlowFairnessState;
+
+        #[test]
+        fn weight_clamping() {
+            for (input, expected) in [(0u8, 1u8), (1, 1), (200, 200), (u8::MAX, u8::MAX)] {
+                let s = FlowFairnessState::new(1, 1, 0, input);
+                assert_eq!(
+                    s.weight_quanta, expected,
+                    "weight {input} should clamp to {expected}"
+                );
+            }
+        }
+    }
+}

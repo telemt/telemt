@@ -113,3 +113,58 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for WriteHalf<W> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod frame_meta_tests {
+        use super::*;
+
+        #[test]
+        fn default_all_false() {
+            let m = FrameMeta::new();
+            assert!(!m.quickack);
+            assert!(!m.simple_ack);
+            assert!(!m.skip_send);
+        }
+
+        #[test]
+        fn with_quickack_sets_only_quickack() {
+            let m = FrameMeta::new().with_quickack();
+            assert!(m.quickack);
+            assert!(!m.simple_ack);
+            assert!(!m.skip_send);
+        }
+
+        #[test]
+        fn with_simple_ack_sets_only_simple_ack() {
+            let m = FrameMeta::new().with_simple_ack();
+            assert!(!m.quickack);
+            assert!(m.simple_ack);
+            assert!(!m.skip_send);
+        }
+
+        #[test]
+        fn chained_builders_set_both() {
+            let m = FrameMeta::new().with_quickack().with_simple_ack();
+            assert!(m.quickack);
+            assert!(m.simple_ack);
+        }
+
+    }
+
+    mod read_frame_result_tests {
+        use super::*;
+
+        #[test]
+        fn frame_variant_carries_data() {
+            let r = ReadFrameResult::Frame(Bytes::from_static(b"data"), FrameMeta::new());
+            match r {
+                ReadFrameResult::Frame(d, _) => assert_eq!(&d[..], b"data"),
+                ReadFrameResult::Closed => panic!("expected Frame"),
+            }
+        }
+
+    }
+}

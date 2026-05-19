@@ -292,3 +292,69 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod parse_recent_events_limit_tests {
+        use super::*;
+
+        #[test]
+        fn none_query_returns_default() {
+            assert_eq!(parse_recent_events_limit(None, 50, 200), 50);
+        }
+
+        #[test]
+        fn empty_query_returns_default() {
+            assert_eq!(parse_recent_events_limit(Some(""), 50, 200), 50);
+        }
+
+        #[test]
+        fn valid_limit_parsed() {
+            assert_eq!(parse_recent_events_limit(Some("limit=10"), 50, 200), 10);
+        }
+
+        #[test]
+        fn clamps_to_max() {
+            assert_eq!(parse_recent_events_limit(Some("limit=999"), 50, 200), 200);
+        }
+
+        #[test]
+        fn clamps_to_one_for_zero() {
+            assert_eq!(parse_recent_events_limit(Some("limit=0"), 50, 200), 1);
+        }
+
+        #[test]
+        fn ignores_unrelated_params() {
+            assert_eq!(
+                parse_recent_events_limit(Some("foo=bar&baz=1"), 50, 200),
+                50
+            );
+        }
+
+        #[test]
+        fn picks_limit_among_other_params() {
+            assert_eq!(
+                parse_recent_events_limit(Some("foo=bar&limit=7&baz=1"), 50, 200),
+                7
+            );
+        }
+
+        #[test]
+        fn non_numeric_limit_returns_default() {
+            assert_eq!(
+                parse_recent_events_limit(Some("limit=abc"), 50, 200),
+                50
+            );
+        }
+
+        #[test]
+        fn first_valid_limit_wins() {
+            assert_eq!(
+                parse_recent_events_limit(Some("limit=3&limit=99"), 50, 200),
+                3
+            );
+        }
+    }
+}

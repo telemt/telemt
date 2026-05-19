@@ -182,4 +182,85 @@ mod tests {
         assert_eq!(info.preferred(false), Some("1.2.3.4".parse().unwrap()));
         assert_eq!(info.preferred(true), Some("::1".parse().unwrap()));
     }
+
+    // Helpers used by the additional tests below. They wrap repeated
+    // `"...".parse::<IpAddr>().unwrap()` so the assertions stay short.
+    fn v4(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+    fn v6(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn ip_info_default_has_no_ips() {
+        let info = IpInfo::default();
+        assert!(!info.has_any());
+        assert_eq!(info.preferred(false), None);
+        assert_eq!(info.preferred(true), None);
+    }
+
+    #[test]
+    fn ip_info_only_ipv6_prefers_ipv6_regardless_of_flag() {
+        let info = IpInfo {
+            ipv4: None,
+            ipv6: Some(v6("2001:db8::1")),
+        };
+        assert!(info.has_any());
+        assert_eq!(info.preferred(false), Some(v6("2001:db8::1")));
+        assert_eq!(info.preferred(true), Some(v6("2001:db8::1")));
+    }
+
+    #[test]
+    fn is_private_ip_rfc1918_v4() {
+        assert!(is_private_ip(v4("10.0.0.1")));
+        assert!(is_private_ip(v4("10.255.255.255")));
+        assert!(is_private_ip(v4("172.16.0.1")));
+        assert!(is_private_ip(v4("172.31.255.255")));
+        assert!(is_private_ip(v4("192.168.0.1")));
+        assert!(is_private_ip(v4("192.168.255.254")));
+    }
+
+    #[test]
+    fn is_private_ip_loopback() {
+        assert!(is_private_ip(v4("127.0.0.1")));
+        assert!(is_private_ip(v4("127.255.255.254")));
+        assert!(is_private_ip(v6("::1")));
+    }
+
+    #[test]
+    fn is_private_ip_link_local_v4() {
+        assert!(is_private_ip(v4("169.254.0.1")));
+        assert!(is_private_ip(v4("169.254.255.254")));
+    }
+
+    #[test]
+    fn is_private_ip_unique_local_v6() {
+        // ULA fc00::/7 — fc00..fdff.
+        assert!(is_private_ip(v6("fc00::1")));
+        assert!(is_private_ip(v6("fd00::abcd")));
+        assert!(is_private_ip(v6("fdff:ffff::1")));
+    }
+
+    #[test]
+    fn is_private_ip_public_v4() {
+        assert!(!is_private_ip(v4("8.8.8.8")));
+        assert!(!is_private_ip(v4("1.1.1.1")));
+        assert!(!is_private_ip(v4("149.154.175.50")));
+        // Boundaries just outside RFC1918 ranges.
+        assert!(!is_private_ip(v4("11.0.0.1")));
+        assert!(!is_private_ip(v4("172.15.255.255")));
+        assert!(!is_private_ip(v4("172.32.0.0")));
+        assert!(!is_private_ip(v4("192.167.255.255")));
+        assert!(!is_private_ip(v4("192.169.0.0")));
+    }
+
+    #[test]
+    fn is_private_ip_public_v6() {
+        assert!(!is_private_ip(v6("2001:4860:4860::8888")));
+        assert!(!is_private_ip(v6("2606:4700:4700::1111")));
+        // Just outside ULA range.
+        assert!(!is_private_ip(v6("fe00::1")));
+        assert!(!is_private_ip(v6("fbff::1")));
+    }
 }

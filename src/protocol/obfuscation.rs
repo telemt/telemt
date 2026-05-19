@@ -214,4 +214,143 @@ mod tests {
         assert!(is_valid_nonce(&nonce));
         assert_eq!(nonce.len(), HANDSHAKE_LEN);
     }
+
+    fn nonce_with_prefix(prefix: &[u8]) -> [u8; HANDSHAKE_LEN] {
+        let mut n = [0x42u8; HANDSHAKE_LEN];
+        n[..prefix.len()].copy_from_slice(prefix);
+        // Make the continuation block (bytes 4..8) non-reserved.
+        n[4..8].copy_from_slice(&[1, 2, 3, 4]);
+        n
+    }
+
+    #[test]
+    fn is_valid_nonce_rejects_each_reserved_beginning() {
+        // Every entry in RESERVED_NONCE_BEGINNINGS must be flagged.
+        for &reserved in RESERVED_NONCE_BEGINNINGS {
+            let n = nonce_with_prefix(&reserved);
+            assert!(
+                !is_valid_nonce(&n),
+                "is_valid_nonce should reject prefix {:02x?}",
+                reserved
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_nonce_rejects_each_reserved_continuation() {
+        // Every entry in RESERVED_NONCE_CONTINUES must be flagged when it
+        // appears at bytes 4..8 (with a non-reserved prefix at 0..4).
+        for &cont in RESERVED_NONCE_CONTINUES {
+            let mut n = [0x42u8; HANDSHAKE_LEN];
+            n[..4].copy_from_slice(&[1, 2, 3, 4]);
+            n[4..8].copy_from_slice(&cont);
+            assert!(
+                !is_valid_nonce(&n),
+                "is_valid_nonce should reject continuation {:02x?}",
+                cont
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_nonce_rejects_first_byte_only_collisions() {
+        // Only the first byte equals a reserved value (0xef), continuation
+        // and rest fine — must still be flagged.
+        for &b in RESERVED_NONCE_FIRST_BYTES {
+            let mut n = [0x42u8; HANDSHAKE_LEN];
+            n[0] = b;
+            n[4..8].copy_from_slice(&[1, 2, 3, 4]);
+            assert!(!is_valid_nonce(&n), "first byte {:02x} must be rejected", b);
+        }
+    }
+
+    #[test]
+    fn generate_nonce_does_not_loop_forever_with_valid_rng() {
+        // A trivial "RNG" that always returns a non-reserved nonce must
+        // succeed on the first iteration.
+        let calls = std::cell::Cell::new(0u32);
+        let nonce = generate_nonce(|n| {
+            calls.set(calls.get() + 1);
+            let mut v = vec![0x55u8; n];
+            v[4..8].copy_from_slice(&[1, 2, 3, 4]);
+            v
+        });
+        assert!(is_valid_nonce(&nonce));
+        assert_eq!(calls.get(), 1, "expected exactly one rng call");
+    }
+
+    #[test]
+    fn generate_nonce_retries_on_reserved_outputs() {
+        // First call returns a reserved nonce (0xef prefix), second call
+        // returns a valid one — generate_nonce must retry.
+        let calls = std::cell::Cell::new(0u32);
+        let nonce = generate_nonce(|n| {
+            let attempt = calls.get();
+            calls.set(attempt + 1);
+            let mut v = vec![0x33u8; n];
+            if attempt == 0 {
+                v[0] = 0xef; // reserved first byte
+            }
+            v[4..8].copy_from_slice(&[1, 2, 3, 4]);
+            v
+        });
+        assert!(is_valid_nonce(&nonce));
+        assert!(calls.get() >= 2, "expected retry on reserved nonce");
+    }
+
+    #[test]
+    fn prepare_tg_nonce_writes_proto_tag_at_fixed_offset() {
+        let mut nonce = [0x42u8; HANDSHAKE_LEN];
+        prepare_tg_nonce(&mut nonce, ProtoTag::Intermediate, None);
+        assert_eq!(
+            &nonce[PROTO_TAG_POS..PROTO_TAG_POS + 4],
+            &ProtoTag::Intermediate.to_bytes()
+        );
+        // Bytes outside the proto-tag slot must remain untouched when
+        // `enc_key_iv` is None.
+        for (i, &b) in nonce.iter().enumerate() {
+            if !(PROTO_TAG_POS..PROTO_TAG_POS + 4).contains(&i) {
+                assert_eq!(b, 0x42, "byte {} should be untouched", i);
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_tg_nonce_writes_reversed_key_iv_at_skip_offset() {
+        let mut nonce = [0x42u8; HANDSHAKE_LEN];
+        let key_iv: Vec<u8> = (0u8..(KEY_LEN + IV_LEN) as u8).collect();
+        prepare_tg_nonce(&mut nonce, ProtoTag::Secure, Some(&key_iv));
+
+        // Bytes [SKIP_LEN..SKIP_LEN+48] must equal the reverse of key_iv.
+        let mut expected = key_iv.clone();
+        expected.reverse();
+        assert_eq!(
+            &nonce[SKIP_LEN..SKIP_LEN + KEY_LEN + IV_LEN],
+            expected.as_slice()
+        );
+        // proto_tag block still set correctly.
+        assert_eq!(
+            &nonce[PROTO_TAG_POS..PROTO_TAG_POS + 4],
+            &ProtoTag::Secure.to_bytes()
+        );
+    }
+
+    #[test]
+    fn enc_key_iv_layout_is_key_then_iv_be() {
+        // Build params without going through the handshake parser — that
+        // keeps this test isolated from the crypto-derivation logic.
+        let params = ObfuscationParams {
+            decrypt_key: [0; 32],
+            decrypt_iv: 0,
+            encrypt_key: [0x11; 32],
+            encrypt_iv: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210u128,
+            proto_tag: ProtoTag::Intermediate,
+            dc_idx: 2,
+        };
+        let blob = params.enc_key_iv();
+        assert_eq!(blob.len(), KEY_LEN + IV_LEN);
+        assert_eq!(&blob[..KEY_LEN], &[0x11u8; 32]);
+        assert_eq!(&blob[KEY_LEN..], &params.encrypt_iv.to_be_bytes());
+    }
+
 }

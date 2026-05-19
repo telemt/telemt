@@ -1933,4 +1933,268 @@ mod tests {
             b"PROXY TCP4 198.51.100.10 203.0.113.20 42000 443\r\n"
         );
     }
+
+    #[test]
+    fn parse_server_hello_minimal() {
+        let mut body = vec![0x02];
+        let msg_body_len: u32 = 2 + 32 + 1 + 0 + 2 + 1 + 2;
+        body.extend_from_slice(&msg_body_len.to_be_bytes()[1..4]);
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0x00);
+        body.extend_from_slice(&[0x13, 0x01]);
+        body.push(0x00);
+        body.extend_from_slice(&[0x00, 0x00]);
+        let result = super::parse_server_hello(&body);
+        assert!(result.is_some());
+        let hello = result.unwrap();
+        assert_eq!(hello.version, [0x03, 0x03]);
+        assert_eq!(hello.cipher_suite, [0x13, 0x01]);
+        assert_eq!(hello.compression, 0x00);
+        assert!(hello.extensions.is_empty());
+    }
+
+    #[test]
+    fn parse_server_hello_rejects_wrong_type() {
+        let body = vec![0x01, 0x00, 0x00, 0x02, 0x03, 0x03];
+        assert!(super::parse_server_hello(&body).is_none());
+    }
+
+    #[test]
+    fn parse_server_hello_rejects_too_short() {
+        assert!(super::parse_server_hello(&[]).is_none());
+        assert!(super::parse_server_hello(&[0x02]).is_none());
+    }
+
+    #[test]
+    fn parse_server_hello_with_extensions() {
+        let mut body = vec![0x02];
+        let ext_data = vec![0x00, 0x33, 0x00, 0x02, 0x00, 0x1d];
+        let msg_body_len: u32 = 2 + 32 + 1 + 0 + 2 + 1 + 2 + ext_data.len() as u32;
+        body.extend_from_slice(&msg_body_len.to_be_bytes()[1..4]);
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0x00);
+        body.extend_from_slice(&[0x13, 0x01]);
+        body.push(0x00);
+        body.extend_from_slice(&(ext_data.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ext_data);
+        let result = super::parse_server_hello(&body).unwrap();
+        assert_eq!(result.extensions.len(), 1);
+        assert_eq!(result.extensions[0].ext_type, 0x0033);
+    }
+
+    #[test]
+    fn profile_cipher_suites_all_return_nonempty() {
+        use crate::config::TlsFetchProfile;
+        for profile in [
+            TlsFetchProfile::ModernChromeLike,
+            TlsFetchProfile::ModernFirefoxLike,
+            TlsFetchProfile::CompatTls12,
+            TlsFetchProfile::LegacyMinimal,
+        ] {
+            assert!(!super::profile_cipher_suites(profile).is_empty());
+        }
+    }
+
+    #[test]
+    fn profile_groups_modern_has_x25519() {
+        use crate::config::TlsFetchProfile;
+        let groups = super::profile_groups(TlsFetchProfile::ModernChromeLike);
+        assert!(groups.contains(&0x001d));
+    }
+
+    #[test]
+    fn profile_alpn_modern_has_h2() {
+        use crate::config::TlsFetchProfile;
+        let alpn = super::profile_alpn(TlsFetchProfile::ModernChromeLike);
+        assert!(alpn.iter().any(|v| *v == b"h2"));
+    }
+
+    #[test]
+    fn profile_alpn_labels_consistency() {
+        use crate::config::TlsFetchProfile;
+        for profile in [
+            TlsFetchProfile::ModernChromeLike,
+            TlsFetchProfile::ModernFirefoxLike,
+            TlsFetchProfile::CompatTls12,
+            TlsFetchProfile::LegacyMinimal,
+        ] {
+            let bytes = super::profile_alpn(profile);
+            let labels = super::profile_alpn_labels(profile);
+            assert_eq!(bytes.len(), labels.len());
+        }
+    }
+
+    #[test]
+    fn profile_session_id_len_modern_32() {
+        use crate::config::TlsFetchProfile;
+        assert_eq!(super::profile_session_id_len(TlsFetchProfile::ModernChromeLike), 32);
+        assert_eq!(super::profile_session_id_len(TlsFetchProfile::CompatTls12), 0);
+    }
+
+    #[test]
+    fn profile_supported_versions_modern_has_tls13() {
+        use crate::config::TlsFetchProfile;
+        let versions = super::profile_supported_versions(TlsFetchProfile::ModernChromeLike);
+        assert!(versions.contains(&0x0304));
+    }
+
+    #[test]
+    fn profile_padding_target_decreasing() {
+        use crate::config::TlsFetchProfile;
+        let chrome = super::profile_padding_target(TlsFetchProfile::ModernChromeLike);
+        let firefox = super::profile_padding_target(TlsFetchProfile::ModernFirefoxLike);
+        let compat = super::profile_padding_target(TlsFetchProfile::CompatTls12);
+        let legacy = super::profile_padding_target(TlsFetchProfile::LegacyMinimal);
+        assert!(chrome > firefox);
+        assert!(firefox > compat);
+        assert!(compat > legacy);
+    }
+
+    // ============= u24_bytes =============
+
+    #[test]
+    fn u24_bytes_encodes_known_values_big_endian() {
+        assert_eq!(super::u24_bytes(0), Some([0, 0, 0]));
+        assert_eq!(super::u24_bytes(1), Some([0, 0, 1]));
+        assert_eq!(super::u24_bytes(0x123456), Some([0x12, 0x34, 0x56]));
+        // Top byte set, bottom bytes zero.
+        assert_eq!(super::u24_bytes(0xff_0000), Some([0xff, 0, 0]));
+        // Maximum representable value.
+        assert_eq!(super::u24_bytes(0x00ff_ffff), Some([0xff, 0xff, 0xff]));
+    }
+
+    #[test]
+    fn u24_bytes_returns_none_on_overflow() {
+        // Anything strictly greater than 0x00ff_ffff overflows the 3-byte
+        // big-endian encoding and must be rejected.
+        assert_eq!(super::u24_bytes(0x0100_0000), None);
+        assert_eq!(super::u24_bytes(usize::MAX), None);
+    }
+
+    // ============= deterministic_bytes =============
+
+    #[test]
+    fn deterministic_bytes_is_deterministic_for_same_seed() {
+        let a = super::deterministic_bytes("seed-1", 64);
+        let b = super::deterministic_bytes("seed-1", 64);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+    }
+
+    #[test]
+    fn deterministic_bytes_differs_for_different_seed() {
+        let a = super::deterministic_bytes("seed-A", 64);
+        let b = super::deterministic_bytes("seed-B", 64);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn deterministic_bytes_returns_exact_length() {
+        for n in [0usize, 1, 31, 32, 33, 64, 100, 1024] {
+            let v = super::deterministic_bytes("any", n);
+            assert_eq!(v.len(), n, "expected exact length {n}, got {}", v.len());
+        }
+    }
+
+    #[test]
+    fn deterministic_bytes_prefix_stable_across_lengths() {
+        // The chunk-by-chunk SHA expansion means that the first N bytes of
+        // a request for M (M > N) must equal the standalone N-byte request,
+        // as long as N falls on a chunk boundary or below.
+        let small = super::deterministic_bytes("seed-X", 32);
+        let large = super::deterministic_bytes("seed-X", 256);
+        assert_eq!(&large[..32], small.as_slice());
+    }
+
+    // ============= classify_fetch_error =============
+
+    #[test]
+    fn classify_fetch_error_maps_io_kinds_via_downcast_chain() {
+        use super::{FetchErrorKind, classify_fetch_error};
+
+        // Direct io::Error in the cause chain — must match its kind.
+        let cases: &[(std::io::ErrorKind, FetchErrorKind)] = &[
+            (std::io::ErrorKind::TimedOut, FetchErrorKind::Timeout),
+            (std::io::ErrorKind::UnexpectedEof, FetchErrorKind::EarlyEof),
+            (std::io::ErrorKind::ConnectionRefused, FetchErrorKind::Connect),
+            (std::io::ErrorKind::ConnectionAborted, FetchErrorKind::Connect),
+            (std::io::ErrorKind::ConnectionReset, FetchErrorKind::Connect),
+            (std::io::ErrorKind::NotConnected, FetchErrorKind::Connect),
+            (std::io::ErrorKind::AddrNotAvailable, FetchErrorKind::Connect),
+        ];
+        for (kind, expected) in cases {
+            let err: anyhow::Error = std::io::Error::new(*kind, "test").into();
+            let got = classify_fetch_error(&err);
+            assert!(
+                matches!(got, ref _g if std::mem::discriminant(&got) == std::mem::discriminant(expected)),
+                "kind {:?} expected {:?}, got {:?}",
+                kind,
+                expected,
+                got
+            );
+        }
+    }
+
+    #[test]
+    fn classify_fetch_error_unmapped_io_kind_is_other() {
+        let err: anyhow::Error =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no").into();
+        assert!(matches!(
+            super::classify_fetch_error(&err),
+            super::FetchErrorKind::Other
+        ));
+    }
+
+    #[test]
+    fn classify_fetch_error_recognizes_message_substrings() {
+        use super::{FetchErrorKind, classify_fetch_error};
+        // No io::Error in the chain — falls back to message-substring match.
+        let route: anyhow::Error = anyhow::anyhow!("upstream route unavailable");
+        assert!(matches!(classify_fetch_error(&route), FetchErrorKind::Route));
+
+        let sh: anyhow::Error = anyhow::anyhow!("ServerHello not received within deadline");
+        assert!(matches!(
+            classify_fetch_error(&sh),
+            FetchErrorKind::ServerHelloMissing
+        ));
+
+        let alert: anyhow::Error = anyhow::anyhow!("received TLS alert: handshake_failure");
+        assert!(matches!(classify_fetch_error(&alert), FetchErrorKind::TlsAlert));
+
+        let parse: anyhow::Error = anyhow::anyhow!("failed to parse certificate");
+        assert!(matches!(classify_fetch_error(&parse), FetchErrorKind::Parse));
+
+        let to: anyhow::Error = anyhow::anyhow!("connection timed out");
+        assert!(matches!(classify_fetch_error(&to), FetchErrorKind::Timeout));
+
+        let deadline: anyhow::Error = anyhow::anyhow!("deadline has elapsed waiting for read");
+        assert!(matches!(
+            classify_fetch_error(&deadline),
+            FetchErrorKind::Timeout
+        ));
+
+        let eof: anyhow::Error = anyhow::anyhow!("got eof from remote");
+        assert!(matches!(classify_fetch_error(&eof), FetchErrorKind::EarlyEof));
+    }
+
+    #[test]
+    fn classify_fetch_error_unknown_message_is_other() {
+        let err: anyhow::Error = anyhow::anyhow!("something else happened");
+        assert!(matches!(
+            super::classify_fetch_error(&err),
+            super::FetchErrorKind::Other
+        ));
+    }
+
+    #[test]
+    fn classify_fetch_error_is_case_insensitive_for_messages() {
+        // The classifier lowercases the message before substring matching.
+        let upper: anyhow::Error = anyhow::anyhow!("UPSTREAM ROUTE BLEW UP");
+        assert!(matches!(
+            super::classify_fetch_error(&upper),
+            super::FetchErrorKind::Route
+        ));
+    }
 }

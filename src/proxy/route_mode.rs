@@ -134,3 +134,183 @@ mod security_tests;
 #[cfg(test)]
 #[path = "tests/route_mode_coherence_adversarial_tests.rs"]
 mod coherence_adversarial_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cutover_stagger_delay_is_deterministic() {
+        let a = cutover_stagger_delay(42, 7);
+        let b = cutover_stagger_delay(42, 7);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cutover_stagger_delay_range() {
+        for sid in [0, 1, u64::MAX / 2, u64::MAX] {
+            for g in [0, 1, 99, u64::MAX] {
+                let d = cutover_stagger_delay(sid, g);
+                assert!(d.as_millis() >= 1000, "min 1s for sid={sid} gen={g}");
+                assert!(d.as_millis() < 2000, "max <2s for sid={sid} gen={g}");
+            }
+        }
+    }
+
+    #[test]
+    fn cutover_stagger_delay_differs_for_different_inputs() {
+        assert_ne!(
+            cutover_stagger_delay(1, 0),
+            cutover_stagger_delay(2, 0)
+        );
+    }
+
+    #[test]
+    fn affected_cutover_state_branch_table() {
+        let ctrl = RouteRuntimeController::new(RelayRouteMode::Middle);
+        let rx = ctrl.subscribe();
+
+        assert!(affected_cutover_state(&rx, RelayRouteMode::Middle, 0).is_none());
+        assert!(affected_cutover_state(&rx, RelayRouteMode::Direct, 0).is_none());
+
+        ctrl.set_mode(RelayRouteMode::Direct);
+        assert!(
+            affected_cutover_state(&rx, RelayRouteMode::Middle, 0).is_some(),
+            "same generation but different mode after cutover"
+        );
+        assert!(
+            affected_cutover_state(&rx, RelayRouteMode::Direct, 0).is_none(),
+            "same mode, not affected"
+        );
+
+        let snap = ctrl.snapshot();
+        assert!(
+            affected_cutover_state(&rx, RelayRouteMode::Direct, snap.generation).is_none(),
+            "up-to-date generation"
+        );
+        assert!(
+            affected_cutover_state(&rx, RelayRouteMode::Middle, snap.generation).is_none(),
+            "up-to-date generation even with different mode"
+        );
+    }
+
+    #[test]
+    fn is_session_affected_by_cutover_branch_table() {
+        let state = RouteCutoverState {
+            mode: RelayRouteMode::Direct,
+            generation: 5,
+        };
+
+        assert!(!is_session_affected_by_cutover(state, RelayRouteMode::Direct, 5));
+        assert!(is_session_affected_by_cutover(state, RelayRouteMode::Middle, 4));
+        assert!(!is_session_affected_by_cutover(state, RelayRouteMode::Middle, 5));
+        assert!(!is_session_affected_by_cutover(state, RelayRouteMode::Direct, 6));
+    }
+
+    #[test]
+    fn relay_route_mode_values() {
+        assert_eq!(RelayRouteMode::Direct as u8, 0);
+        assert_eq!(RelayRouteMode::Middle as u8, 1);
+        assert_eq!(RelayRouteMode::Direct.as_str(), "direct");
+        assert_eq!(RelayRouteMode::Middle.as_str(), "middle");
+    }
+
+    #[test]
+    fn now_epoch_secs_returns_positive() {
+        let t = now_epoch_secs();
+        assert!(t > 1_700_000_000, "timestamp should be post-2023");
+    }
+
+    #[test]
+    fn controller_set_mode_advances_generation() {
+        let ctrl = RouteRuntimeController::new(RelayRouteMode::Direct);
+        assert_eq!(ctrl.snapshot().generation, 0);
+
+        ctrl.set_mode(RelayRouteMode::Middle);
+        assert_eq!(ctrl.snapshot().generation, 1);
+        assert_eq!(ctrl.snapshot().mode, RelayRouteMode::Middle);
+
+        ctrl.set_mode(RelayRouteMode::Direct);
+        assert_eq!(ctrl.snapshot().generation, 2);
+        assert_eq!(ctrl.snapshot().mode, RelayRouteMode::Direct);
+    }
+
+    #[test]
+    fn controller_set_same_mode_is_noop() {
+        let ctrl = RouteRuntimeController::new(RelayRouteMode::Direct);
+        assert!(ctrl.set_mode(RelayRouteMode::Direct).is_none());
+        assert_eq!(ctrl.snapshot().generation, 0);
+    }
+
+    #[test]
+    fn direct_since_epoch_secs_tracking() {
+        let ctrl = RouteRuntimeController::new(RelayRouteMode::Middle);
+        assert!(ctrl.direct_since_epoch_secs().is_none());
+
+        ctrl.set_mode(RelayRouteMode::Direct);
+        let t = ctrl.direct_since_epoch_secs().expect("set after direct");
+        assert!(t > 1_700_000_000);
+
+        ctrl.set_mode(RelayRouteMode::Middle);
+        assert!(ctrl.direct_since_epoch_secs().is_none());
+    }
+
+    mod tier_assertions {
+        use super::*;
+
+        #[test]
+        fn controller_new_initial_mode_direct() {
+            let ctrl = RouteRuntimeController::new(RelayRouteMode::Direct);
+            let snap = ctrl.snapshot();
+            assert_eq!(snap.mode, RelayRouteMode::Direct);
+            assert_eq!(snap.generation, 0);
+            assert!(ctrl.direct_since_epoch_secs().is_some());
+        }
+
+        #[test]
+        fn controller_new_initial_mode_middle() {
+            let ctrl = RouteRuntimeController::new(RelayRouteMode::Middle);
+            let snap = ctrl.snapshot();
+            assert_eq!(snap.mode, RelayRouteMode::Middle);
+            assert_eq!(snap.generation, 0);
+            assert!(ctrl.direct_since_epoch_secs().is_none());
+        }
+
+        #[test]
+        fn controller_subscribe_sees_initial_value() {
+            let ctrl = RouteRuntimeController::new(RelayRouteMode::Middle);
+            let rx = ctrl.subscribe();
+            let observed = *rx.borrow();
+            assert_eq!(observed.mode, RelayRouteMode::Middle);
+            assert_eq!(observed.generation, 0);
+        }
+
+        #[test]
+        fn controller_subscribe_sees_update_after_set_mode() {
+            let ctrl = RouteRuntimeController::new(RelayRouteMode::Middle);
+            let rx = ctrl.subscribe();
+
+            ctrl.set_mode(RelayRouteMode::Direct);
+            let observed = rx.borrow().clone();
+            assert_eq!(observed.mode, RelayRouteMode::Direct);
+            assert_eq!(observed.generation, 1);
+        }
+
+        #[test]
+        fn controller_set_mode_returns_state_with_new_mode() {
+            let ctrl = RouteRuntimeController::new(RelayRouteMode::Middle);
+            let result = ctrl.set_mode(RelayRouteMode::Direct);
+            let returned = result.expect("mode change must return Some");
+            assert_eq!(returned.mode, RelayRouteMode::Direct);
+            assert_eq!(returned.generation, 1);
+        }
+
+        #[test]
+        fn controller_snapshot_returns_watch_state() {
+            let ctrl = RouteRuntimeController::new(RelayRouteMode::Direct);
+            let snap = ctrl.snapshot();
+            let rx = ctrl.subscribe();
+            assert_eq!(snap, *rx.borrow());
+        }
+    }
+}

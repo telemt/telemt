@@ -192,4 +192,75 @@ mod tests {
         );
         assert_eq!(split_host_port("2001:db8::1:443"), None);
     }
+
+    #[test]
+    fn validate_rejects_empty_entry() {
+        let err = validate_entries(&[String::new()]).unwrap_err().to_string();
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_port() {
+        let err = validate_entries(&["example.com:127.0.0.1".to_string()])
+            .unwrap_err()
+            .to_string();
+        // Either port-parse failure or host-format failure — both are valid rejections.
+        assert!(err.contains("port is invalid") || err.contains("host:port:ip"));
+    }
+
+    #[test]
+    fn validate_rejects_oversized_port() {
+        let err = validate_entries(&["example.com:65536:127.0.0.1".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("port is invalid"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_ipv4() {
+        let err = validate_entries(&["example.com:443:999.999.999.999".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("IP is invalid"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_bracketed_ipv6() {
+        let err = validate_entries(&["example.com:443:[not-an-ip]".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("IPv6 override is invalid"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_host() {
+        let err = validate_entries(&[":443:127.0.0.1".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("host cannot be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_host_containing_colon() {
+        let err = validate_entries(&["foo:bar:443:127.0.0.1".to_string()])
+            .unwrap_err()
+            .to_string();
+        // Either port-parse fails on "bar" or host validation flags the embedded colon.
+        assert!(err.contains("port is invalid") || err.contains("host"));
+    }
+
+    #[test]
+    fn split_host_port_edge_cases() {
+        assert_eq!(split_host_port(""), None);
+        assert_eq!(split_host_port("no-port-here"), None);
+        assert_eq!(split_host_port("example.com:"), None);
+        assert_eq!(split_host_port(":443"), None);
+        assert_eq!(split_host_port("example.com:65536"), None);
+        assert_eq!(
+            split_host_port("Example.COM:443"),
+            Some(("example.com".to_string(), 443))
+        );
+        assert_eq!(split_host_port("[2001:db8::1]"), None);
+        assert_eq!(split_host_port("[2001:db8::1]443"), None);
+    }
 }

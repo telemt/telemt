@@ -561,3 +561,54 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn aes_ctr_roundtrip(
+            key in any::<[u8; 32]>(),
+            iv in any::<u128>(),
+            plaintext in proptest::collection::vec(any::<u8>(), 0..4096),
+        ) {
+            let mut enc = AesCtr::new(&key, iv);
+            let ciphertext = enc.encrypt(&plaintext);
+            let mut dec = AesCtr::new(&key, iv);
+            let recovered = dec.decrypt(&ciphertext);
+            assert_eq!(recovered, plaintext);
+        }
+
+        #[test]
+        fn aes_cbc_roundtrip(
+            key in any::<[u8; 32]>(),
+            iv in any::<[u8; 16]>(),
+            plaintext in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            let len = (plaintext.len() / 16) * 16;
+            let aligned = &plaintext[..len];
+            let cipher = AesCbc::new(key, iv);
+            let ciphertext = cipher.encrypt(aligned).unwrap();
+            let decrypted = cipher.decrypt(&ciphertext).unwrap();
+            assert_eq!(decrypted, aligned);
+        }
+
+        #[test]
+        fn aes_cbc_in_place_roundtrip(
+            key in any::<[u8; 32]>(),
+            iv in any::<[u8; 16]>(),
+            block_count in 1usize..32,
+        ) {
+            let len = block_count * 16;
+            let original: Vec<u8> = (0..len).map(|i| (i % 256) as u8).collect();
+            let mut buf = original.clone();
+            let cipher = AesCbc::new(key, iv);
+            cipher.encrypt_in_place(&mut buf).unwrap();
+            assert_ne!(buf, original, "ciphertext must differ from plaintext");
+            cipher.decrypt_in_place(&mut buf).unwrap();
+            assert_eq!(buf, original);
+        }
+    }
+}
