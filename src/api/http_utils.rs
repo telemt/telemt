@@ -86,3 +86,94 @@ async fn read_body_with_limit(body: Incoming, limit: usize) -> Result<Vec<u8>, A
     }
     Ok(collected)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::StatusCode;
+    use serde_json::Value;
+
+    async fn collect_body(resp: hyper::Response<Full<Bytes>>) -> Vec<u8> {
+        BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn success_response_ok_with_object_data() {
+        let resp = success_response(
+            StatusCode::OK,
+            serde_json::json!({"k": "v"}),
+            "r1".to_owned(),
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json; charset=utf-8"
+        );
+        let body: Value = serde_json::from_slice(&collect_body(resp).await).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"]["k"], "v");
+        assert_eq!(body["revision"], "r1");
+    }
+
+    #[tokio::test]
+    async fn success_response_created_with_numeric_data() {
+        let resp = success_response(StatusCode::CREATED, 42i32, String::new());
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body: Value = serde_json::from_slice(&collect_body(resp).await).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"], 42);
+        assert_eq!(body["revision"], "");
+    }
+
+    #[tokio::test]
+    async fn success_response_null_data() {
+        let resp = success_response(StatusCode::OK, Value::Null, "rev".to_owned());
+        let body: Value = serde_json::from_slice(&collect_body(resp).await).unwrap();
+        assert_eq!(body["ok"], true);
+        assert!(body["data"].is_null());
+    }
+
+    #[tokio::test]
+    async fn error_response_bad_request() {
+        let resp = error_response(42, ApiFailure::bad_request("missing"));
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json; charset=utf-8"
+        );
+        let body: Value = serde_json::from_slice(&collect_body(resp).await).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "bad_request");
+        assert_eq!(body["error"]["message"], "missing");
+        assert_eq!(body["request_id"], 42);
+    }
+
+    #[tokio::test]
+    async fn error_response_internal() {
+        let resp = error_response(7, ApiFailure::internal("oops"));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: Value = serde_json::from_slice(&collect_body(resp).await).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"]["code"], "internal_error");
+        assert_eq!(body["request_id"], 7);
+    }
+
+    #[tokio::test]
+    async fn error_response_not_found() {
+        let resp = error_response(
+            99,
+            ApiFailure::new(StatusCode::NOT_FOUND, "not_found", "no such resource"),
+        );
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body: Value = serde_json::from_slice(&collect_body(resp).await).unwrap();
+        assert_eq!(body["error"]["code"], "not_found");
+        assert_eq!(body["error"]["message"], "no such resource");
+    }
+
+    // read_body_with_limit / read_json / read_optional_json require
+    // hyper::body::Incoming and are covered by integration tests.
+}

@@ -587,3 +587,227 @@ pub(super) fn random_user_secret() -> String {
     rng.fill(&mut bytes);
     hex::encode(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============= ApiFailure constructors =============
+
+    #[test]
+    fn api_failure_internal_uses_500_with_internal_error_code() {
+        let f = ApiFailure::internal("boom");
+        assert_eq!(f.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(f.code, "internal_error");
+        assert_eq!(f.message, "boom");
+    }
+
+    #[test]
+    fn api_failure_bad_request_uses_400_with_bad_request_code() {
+        let f = ApiFailure::bad_request("nope");
+        assert_eq!(f.status, StatusCode::BAD_REQUEST);
+        assert_eq!(f.code, "bad_request");
+        assert_eq!(f.message, "nope");
+    }
+
+    #[test]
+    fn api_failure_new_preserves_caller_supplied_fields() {
+        let f = ApiFailure::new(StatusCode::CONFLICT, "user_exists", "duplicate");
+        assert_eq!(f.status, StatusCode::CONFLICT);
+        assert_eq!(f.code, "user_exists");
+        assert_eq!(f.message, "duplicate");
+    }
+
+    // ============= parse_optional_expiration =============
+
+    #[test]
+    fn parse_optional_expiration_returns_none_for_none() {
+        let r = parse_optional_expiration(None).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn parse_optional_expiration_accepts_zulu_rfc3339() {
+        let r = parse_optional_expiration(Some("2030-01-02T03:04:05Z")).unwrap();
+        let dt = r.unwrap();
+        assert_eq!(dt.to_rfc3339(), "2030-01-02T03:04:05+00:00");
+    }
+
+    #[test]
+    fn parse_optional_expiration_accepts_offset_rfc3339() {
+        let r = parse_optional_expiration(Some("2030-01-02T03:04:05+02:00")).unwrap();
+        let dt = r.unwrap();
+        // The result must be normalized to UTC.
+        assert_eq!(dt.to_rfc3339(), "2030-01-02T01:04:05+00:00");
+    }
+
+    #[test]
+    fn parse_optional_expiration_rejects_garbage() {
+        let err = parse_optional_expiration(Some("not-a-date")).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("RFC3339"));
+    }
+
+    #[test]
+    fn parse_optional_expiration_rejects_naive_datetime_without_offset() {
+        // RFC3339 requires a timezone offset; chrono refuses a bare timestamp.
+        let err = parse_optional_expiration(Some("2030-01-02T03:04:05")).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    // ============= parse_patch_expiration =============
+
+    #[test]
+    fn parse_patch_expiration_pass_through_unchanged_and_remove() {
+        assert!(matches!(
+            parse_patch_expiration(&Patch::Unchanged).unwrap(),
+            Patch::Unchanged
+        ));
+        assert!(matches!(
+            parse_patch_expiration(&Patch::Remove).unwrap(),
+            Patch::Remove
+        ));
+    }
+
+    #[test]
+    fn parse_patch_expiration_parses_valid_set_value() {
+        let out = parse_patch_expiration(&Patch::Set("2031-06-15T12:00:00Z".into())).unwrap();
+        match out {
+            Patch::Set(dt) => assert_eq!(dt.to_rfc3339(), "2031-06-15T12:00:00+00:00"),
+            _ => panic!("expected Patch::Set"),
+        }
+    }
+
+    #[test]
+    fn parse_patch_expiration_rejects_bad_rfc3339() {
+        let err = parse_patch_expiration(&Patch::Set("garbage".into())).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("RFC3339"));
+    }
+
+    // ============= is_valid_user_secret =============
+
+    #[test]
+    fn user_secret_accepts_exactly_32_hex_chars() {
+        assert!(is_valid_user_secret("0123456789abcdef0123456789ABCDEF"));
+        assert!(is_valid_user_secret("00000000000000000000000000000000"));
+        assert!(is_valid_user_secret("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"));
+    }
+
+    #[test]
+    fn user_secret_rejects_wrong_length() {
+        assert!(!is_valid_user_secret(""));
+        // 31 chars
+        assert!(!is_valid_user_secret("0123456789abcdef0123456789abcde"));
+        // 33 chars
+        assert!(!is_valid_user_secret("0123456789abcdef0123456789abcdefa"));
+    }
+
+    #[test]
+    fn user_secret_rejects_non_hex_chars() {
+        // Has a 'g' which is not hex.
+        assert!(!is_valid_user_secret("g123456789abcdef0123456789abcdef"));
+        // Has whitespace.
+        assert!(!is_valid_user_secret("0123456789abcdef0123456789abcde "));
+        // Has unicode.
+        assert!(!is_valid_user_secret("zzzz4567890abcdef0123456789abcde"));
+    }
+
+    // ============= is_valid_ad_tag =============
+
+    #[test]
+    fn ad_tag_follows_same_rules_as_user_secret() {
+        // ad_tag is byte-for-byte identical contract (32 hex chars).
+        assert!(is_valid_ad_tag("0123456789abcdef0123456789abcdef"));
+        assert!(!is_valid_ad_tag("not-an-ad-tag"));
+        assert!(!is_valid_ad_tag(""));
+    }
+
+    // ============= is_valid_username =============
+
+    #[test]
+    fn username_accepts_alnum_and_safe_punct() {
+        assert!(is_valid_username("alice"));
+        assert!(is_valid_username("user_42"));
+        assert!(is_valid_username("foo-bar.baz"));
+        assert!(is_valid_username("A"));
+        // Boundary: exactly MAX_USERNAME_LEN must pass.
+        let max = "a".repeat(MAX_USERNAME_LEN);
+        assert!(is_valid_username(&max));
+    }
+
+    #[test]
+    fn username_rejects_empty_and_oversized() {
+        assert!(!is_valid_username(""));
+        let too_long = "a".repeat(MAX_USERNAME_LEN + 1);
+        assert!(!is_valid_username(&too_long));
+    }
+
+    #[test]
+    fn username_rejects_unsafe_chars() {
+        assert!(!is_valid_username("alice/bob"));
+        assert!(!is_valid_username("user space"));
+        assert!(!is_valid_username("user@host"));
+        assert!(!is_valid_username("user;rm -rf /"));
+        assert!(!is_valid_username("ümlaut"));
+    }
+
+    // ============= random_user_secret =============
+
+    #[test]
+    fn random_user_secret_returns_valid_hex_secret() {
+        let s = random_user_secret();
+        assert!(is_valid_user_secret(&s));
+    }
+
+    #[test]
+    fn random_user_secret_does_not_repeat() {
+        let a = random_user_secret();
+        let b = random_user_secret();
+        // 128 bits of entropy: collision probability is negligible.
+        assert_ne!(a, b);
+    }
+
+    // ============= Request deserialization =============
+
+    #[test]
+    fn create_user_request_deserializes_minimum_fields() {
+        let raw = r#"{"username": "alice"}"#;
+        let req: CreateUserRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(req.username, "alice");
+        assert!(req.secret.is_none());
+        assert!(req.user_ad_tag.is_none());
+        assert!(req.max_tcp_conns.is_none());
+        assert!(req.expiration_rfc3339.is_none());
+        assert!(req.data_quota_bytes.is_none());
+        assert!(req.max_unique_ips.is_none());
+    }
+
+    #[test]
+    fn create_user_request_deserializes_all_fields() {
+        let raw = r#"{
+            "username": "bob",
+            "secret": "0123456789abcdef0123456789abcdef",
+            "user_ad_tag": "fedcba9876543210fedcba9876543210",
+            "max_tcp_conns": 100,
+            "expiration_rfc3339": "2030-01-02T03:04:05Z",
+            "data_quota_bytes": 1048576,
+            "max_unique_ips": 8
+        }"#;
+        let req: CreateUserRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(req.username, "bob");
+        assert_eq!(req.max_tcp_conns, Some(100));
+        assert_eq!(req.data_quota_bytes, Some(1_048_576));
+        assert_eq!(req.max_unique_ips, Some(8));
+    }
+
+    #[test]
+    fn rotate_secret_request_defaults_secret_to_none() {
+        let r = RotateSecretRequest::default();
+        assert!(r.secret.is_none());
+        let r: RotateSecretRequest = serde_json::from_str("{}").unwrap();
+        assert!(r.secret.is_none());
+        let r: RotateSecretRequest = serde_json::from_str(r#"{"secret": "abc"}"#).unwrap();
+        assert_eq!(r.secret.as_deref(), Some("abc"));
+    }
+}

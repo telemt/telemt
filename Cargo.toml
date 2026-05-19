@@ -95,6 +95,66 @@ futures = "0.3"
 name = "crypto_bench"
 harness = false
 
+[[bench]]
+name = "protocol_bench"
+harness = false
+
+[[bench]]
+name = "middle_proxy_codec_bench"
+harness = false
+
+[[bench]]
+name = "stream_bench"
+harness = false
+
+[[bench]]
+name = "network_bench"
+harness = false
+
+[[bench]]
+name = "proxy_protocol_bench"
+harness = false
+
+[[bench]]
+name = "proxy_masking_bench"
+harness = false
+
+[[bench]]
+name = "proxy_wrap_tls_bench"
+harness = false
+
+[[bench]]
+name = "tls_bench"
+harness = false
+
+[[bench]]
+name = "pressure_bench"
+harness = false
+
+[[bench]]
+name = "route_mode_bench"
+harness = false
+
+[[bench]]
+name = "scheduler_bench"
+harness = false
+
+[[bench]]
+name = "masking_classifier_bench"
+harness = false
+
+[[bench]]
+name = "handshake_authprobe_bench"
+harness = false
+
+[[bench]]
+name = "relay_quota_bench"
+harness = false
+
+[[bench]]
+name = "traffic_limiter_bench"
+harness = false
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

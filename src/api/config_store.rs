@@ -285,3 +285,209 @@ fn write_atomic_sync(path: &Path, contents: &str) -> std::io::Result<()> {
     }
     write_result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_toml_table_bounds_finds_existing_section() {
+        let src = "[general]\nfoo = 1\n[server]\nbar = 2\n";
+        let (start, end) = find_toml_table_bounds(src, "server").unwrap();
+        assert_eq!(&src[start..end], "[server]\nbar = 2\n");
+    }
+
+    #[test]
+    fn find_toml_table_bounds_returns_none_for_missing() {
+        let src = "[general]\nfoo = 1\n";
+        assert!(find_toml_table_bounds(src, "server").is_none());
+    }
+
+    #[test]
+    fn find_toml_table_bounds_section_at_end_of_file() {
+        let src = "[general]\nfoo = 1\n[access.users]\nadmin = \"secret\"";
+        let (start, end) = find_toml_table_bounds(src, "access.users").unwrap();
+        assert_eq!(&src[start..end], "[access.users]\nadmin = \"secret\"");
+        assert_eq!(end, src.len());
+    }
+
+    #[test]
+    fn find_toml_table_bounds_handles_multi_line_body() {
+        let src = "[general]\nfoo = 1\nbar = 2\nbaz = 3\n[server]\nport = 443\n";
+        let (start, end) = find_toml_table_bounds(src, "general").unwrap();
+        assert!(src[start..end].contains("foo = 1"));
+        assert!(src[start..end].contains("baz = 3"));
+    }
+
+    #[test]
+    fn upsert_toml_table_inserts_new_section_when_missing() {
+        let src = "[general]\nfoo = 1\n";
+        let replacement = "[server]\nport = 443\n";
+        let result = upsert_toml_table(src, "server", replacement);
+        assert!(result.contains("[general]\nfoo = 1"));
+        assert!(result.contains("[server]\nport = 443"));
+    }
+
+    #[test]
+    fn upsert_toml_table_replaces_existing_section() {
+        let src = "[general]\nfoo = 1\n[server]\nport = 80\n";
+        let replacement = "[server]\nport = 443\n";
+        let result = upsert_toml_table(src, "server", replacement);
+        assert!(result.contains("[general]\nfoo = 1"));
+        assert!(result.contains("[server]\nport = 443"));
+        assert!(!result.contains("port = 80"));
+    }
+
+    #[test]
+    fn upsert_toml_table_preserves_surrounding_content() {
+        let src = "[general]\nfoo = 1\n[server]\nport = 80\n[network]\nipv4 = true\n";
+        let replacement = "[server]\nport = 443\n";
+        let result = upsert_toml_table(src, "server", replacement);
+        assert!(result.contains("[general]\nfoo = 1"));
+        assert!(result.contains("[network]\nipv4 = true"));
+        assert!(result.contains("[server]\nport = 443"));
+    }
+
+    #[test]
+    fn upsert_toml_table_handles_no_trailing_newline() {
+        let src = "[general]\nfoo = 1";
+        let replacement = "[server]\nport = 443\n";
+        let result = upsert_toml_table(src, "server", replacement);
+        assert!(result.ends_with(&replacement));
+    }
+
+    #[test]
+    fn serialize_table_body_produces_parseable_toml() {
+        let mut map = BTreeMap::new();
+        map.insert("admin".to_string(), "secret123".to_string());
+        map.insert("user".to_string(), "abc456".to_string());
+        let body = serialize_table_body(&map).unwrap();
+        let parsed: BTreeMap<String, String> = toml::from_str(&body).unwrap();
+        assert_eq!(parsed.get("admin").unwrap(), "secret123");
+        assert_eq!(parsed.get("user").unwrap(), "abc456");
+    }
+
+    #[test]
+    fn compute_revision_is_deterministic() {
+        let content = "hello world";
+        assert_eq!(compute_revision(content), compute_revision(content));
+    }
+
+    #[test]
+    fn compute_revision_differs_for_different_content() {
+        assert_ne!(compute_revision("a"), compute_revision("b"));
+    }
+
+    #[test]
+    fn parse_if_match_extracts_quoted_value() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(IF_MATCH, "\"rev123\"".parse().unwrap());
+        assert_eq!(parse_if_match(&headers), Some("rev123".to_string()));
+    }
+
+    #[test]
+    fn parse_if_match_returns_none_when_missing() {
+        let headers = hyper::HeaderMap::new();
+        assert!(parse_if_match(&headers).is_none());
+    }
+
+    #[test]
+    fn access_section_is_empty_default_users_not_empty() {
+        let config = ProxyConfig::default();
+        assert!(!access_section_is_empty(&config, AccessSection::Users));
+        assert!(access_section_is_empty(&config, AccessSection::UserAdTags));
+        assert!(access_section_is_empty(&config, AccessSection::UserMaxTcpConns));
+        assert!(access_section_is_empty(&config, AccessSection::UserExpirations));
+        assert!(access_section_is_empty(&config, AccessSection::UserDataQuota));
+        assert!(access_section_is_empty(&config, AccessSection::UserMaxUniqueIps));
+    }
+
+    #[test]
+    fn access_section_is_empty_users_false_after_insert() {
+        let mut config = ProxyConfig::default();
+        config.access.users.insert("admin".to_string(), "secret".to_string());
+        assert!(!access_section_is_empty(&config, AccessSection::Users));
+    }
+
+    #[test]
+    fn access_section_is_empty_user_ad_tags_false_after_insert() {
+        let mut config = ProxyConfig::default();
+        config.access.user_ad_tags.insert("admin".to_string(), "tag1".to_string());
+        assert!(!access_section_is_empty(&config, AccessSection::UserAdTags));
+    }
+
+    #[test]
+    fn access_section_is_empty_user_max_tcp_conns_false_after_insert() {
+        let mut config = ProxyConfig::default();
+        config.access.user_max_tcp_conns.insert("admin".to_string(), 5);
+        assert!(!access_section_is_empty(&config, AccessSection::UserMaxTcpConns));
+    }
+
+    #[test]
+    fn access_section_is_empty_user_data_quota_false_after_insert() {
+        let mut config = ProxyConfig::default();
+        config.access.user_data_quota.insert("admin".to_string(), 1024);
+        assert!(!access_section_is_empty(&config, AccessSection::UserDataQuota));
+    }
+
+    #[test]
+    fn access_section_is_empty_user_max_unique_ips_false_after_insert() {
+        let mut config = ProxyConfig::default();
+        config.access.user_max_unique_ips.insert("admin".to_string(), 3);
+        assert!(!access_section_is_empty(&config, AccessSection::UserMaxUniqueIps));
+    }
+
+    #[test]
+    fn render_access_section_users_round_trips_via_toml() {
+        let mut config = ProxyConfig::default();
+        config.access.users.insert("alice".to_string(), "key1".to_string());
+        config.access.users.insert("bob".to_string(), "key2".to_string());
+        let rendered = render_access_section(&config, AccessSection::Users).unwrap();
+        assert!(rendered.starts_with("[access.users]\n"));
+        let body = rendered.trim_start_matches("[access.users]\n");
+        let parsed: BTreeMap<String, String> = toml::from_str(body).unwrap();
+        assert_eq!(parsed.get("alice").unwrap(), "key1");
+        assert_eq!(parsed.get("bob").unwrap(), "key2");
+    }
+
+    #[test]
+    fn render_access_section_user_max_tcp_conns_round_trips_via_toml() {
+        let mut config = ProxyConfig::default();
+        config.access.user_max_tcp_conns.insert("alice".to_string(), 10);
+        let rendered = render_access_section(&config, AccessSection::UserMaxTcpConns).unwrap();
+        assert!(rendered.starts_with("[access.user_max_tcp_conns]\n"));
+        let body = rendered.trim_start_matches("[access.user_max_tcp_conns]\n");
+        let parsed: BTreeMap<String, usize> = toml::from_str(body).unwrap();
+        assert_eq!(parsed.get("alice").unwrap(), &10);
+    }
+
+    #[test]
+    fn render_access_section_user_data_quota_round_trips_via_toml() {
+        let mut config = ProxyConfig::default();
+        config.access.user_data_quota.insert("alice".to_string(), 4096);
+        let rendered = render_access_section(&config, AccessSection::UserDataQuota).unwrap();
+        assert!(rendered.starts_with("[access.user_data_quota]\n"));
+        let body = rendered.trim_start_matches("[access.user_data_quota]\n");
+        let parsed: BTreeMap<String, u64> = toml::from_str(body).unwrap();
+        assert_eq!(parsed.get("alice").unwrap(), &4096);
+    }
+
+    #[test]
+    fn render_access_section_user_max_unique_ips_round_trips_via_toml() {
+        let mut config = ProxyConfig::default();
+        config.access.user_max_unique_ips.insert("alice".to_string(), 5);
+        let rendered = render_access_section(&config, AccessSection::UserMaxUniqueIps).unwrap();
+        assert!(rendered.starts_with("[access.user_max_unique_ips]\n"));
+        let body = rendered.trim_start_matches("[access.user_max_unique_ips]\n");
+        let parsed: BTreeMap<String, usize> = toml::from_str(body).unwrap();
+        assert_eq!(parsed.get("alice").unwrap(), &5);
+    }
+
+    #[test]
+    fn render_access_section_default_users_has_entry() {
+        let config = ProxyConfig::default();
+        let rendered = render_access_section(&config, AccessSection::Users).unwrap();
+        assert!(rendered.starts_with("[access.users]\n"));
+        assert!(rendered.contains("default"));
+    }
+}

@@ -742,3 +742,127 @@ fn print_links(username: &str, secret: &str, port: u16, domain: &str) {
     println!("Check: journalctl -u telemt.service | head -30");
     println!("===================");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_command_empty_args_defaults_to_run() {
+        let cmd = parse_command(&[]);
+        assert_eq!(cmd.subcommand, Subcommand::Run);
+        assert_eq!(cmd.config_path, "config.toml");
+    }
+
+    #[test]
+    fn parse_command_stop() {
+        let cmd = parse_command(&s(&["stop"]));
+        assert_eq!(cmd.subcommand, Subcommand::Stop);
+    }
+
+    #[test]
+    fn parse_command_reload() {
+        let cmd = parse_command(&s(&["reload"]));
+        assert_eq!(cmd.subcommand, Subcommand::Reload);
+    }
+
+    #[test]
+    fn parse_command_status() {
+        let cmd = parse_command(&s(&["status"]));
+        assert_eq!(cmd.subcommand, Subcommand::Status);
+    }
+
+    #[test]
+    fn parse_command_init_without_args() {
+        let cmd = parse_command(&s(&["--init"]));
+        assert_eq!(cmd.subcommand, Subcommand::Init);
+        let opts = cmd.init_opts.as_ref().unwrap();
+        assert_eq!(opts.port, 443);
+        assert_eq!(opts.domain, "www.google.com");
+    }
+
+    #[test]
+    fn parse_command_init_with_args() {
+        let cmd = parse_command(&s(&[
+            "--init",
+            "--port",
+            "8080",
+            "--domain",
+            "example.com",
+            "--user",
+            "admin",
+            "--config-dir",
+            "/opt/telemt",
+            "--no-start",
+        ]));
+        assert_eq!(cmd.subcommand, Subcommand::Init);
+        let opts = cmd.init_opts.as_ref().unwrap();
+        assert_eq!(opts.port, 8080);
+        assert_eq!(opts.domain, "example.com");
+        assert_eq!(opts.username, "admin");
+        assert_eq!(opts.config_dir, PathBuf::from("/opt/telemt"));
+        assert!(opts.no_start);
+    }
+
+    #[test]
+    fn parse_command_init_with_secret() {
+        let cmd = parse_command(&s(&["--init", "--secret", "deadbeefdeadbeefdeadbeefdeadbeef"]));
+        let opts = cmd.init_opts.as_ref().unwrap();
+        assert_eq!(opts.secret.as_deref(), Some("deadbeefdeadbeefdeadbeefdeadbeef"));
+    }
+
+    #[test]
+    fn parse_command_config_path_positional() {
+        let cmd = parse_command(&s(&["myconfig.toml"]));
+        assert_eq!(cmd.subcommand, Subcommand::Run);
+        assert_eq!(cmd.config_path, "myconfig.toml");
+    }
+
+    #[test]
+    fn parse_command_pid_file_long() {
+        let cmd = parse_command(&s(&["stop", "--pid-file", "/tmp/t.pid"]));
+        assert_eq!(cmd.pid_file, PathBuf::from("/tmp/t.pid"));
+    }
+
+    #[test]
+    fn parse_init_args_returns_none_without_init_flag() {
+        assert!(parse_init_args(&s(&["--port", "8080"])).is_none());
+    }
+
+    #[test]
+    fn parse_init_args_returns_some_with_init_flag() {
+        let result = parse_init_args(&s(&["--init", "--port", "9090"]));
+        let opts = result.unwrap();
+        assert_eq!(opts.port, 9090);
+    }
+
+    #[test]
+    fn generate_secret_is_32_hex_chars() {
+        let secret = generate_secret();
+        assert_eq!(secret.len(), 32);
+        assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generate_secret_is_non_deterministic() {
+        let a = generate_secret();
+        let b = generate_secret();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn generate_config_contains_all_sections() {
+        let config = generate_config("testuser", "abcd1234abcd1234abcd1234abcd1234", 8443, "example.com");
+        assert!(config.contains("[general]"));
+        assert!(config.contains("[server]"));
+        assert!(config.contains("[censorship]"));
+        assert!(config.contains("[access.users]"));
+        assert!(config.contains("testuser = \"abcd1234abcd1234abcd1234abcd1234\""));
+        assert!(config.contains("port = 8443"));
+        assert!(config.contains("tls_domain = \"example.com\""));
+    }
+}

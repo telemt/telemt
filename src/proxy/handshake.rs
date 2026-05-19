@@ -2070,6 +2070,111 @@ pub fn encrypt_tg_nonce(nonce: &[u8; HANDSHAKE_LEN]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+mod pure_tg_nonce_tests {
+    //! Pure regression tests for the TG-nonce encryption pure helpers.
+    //!
+    //! These functions encode the 48-byte reverse that opt.md §4.2 calls
+    //! out (`enc_key_iv.iter().rev().copied().collect()`). The tests below
+    //! lock the layout / round-trip so the reverse path can be optimized
+    //! later (stack-array swap, `[u8; 48]` + `reverse()`) without changing
+    //! observable behavior.
+
+    use super::*;
+
+    #[test]
+    fn encrypt_tg_nonce_with_ciphers_preserves_prefix_until_proto_tag() {
+        let mut nonce = [0x33u8; HANDSHAKE_LEN];
+        // Make the prefix recognizable so we can verify it survives encryption.
+        for i in 0..PROTO_TAG_POS {
+            nonce[i] = (i as u8).wrapping_mul(7);
+        }
+        let (out, _enc, _dec) = encrypt_tg_nonce_with_ciphers(&nonce);
+        assert_eq!(out.len(), HANDSHAKE_LEN);
+        // Bytes [0..PROTO_TAG_POS] must be the original nonce verbatim —
+        // only [PROTO_TAG_POS..] is replaced with the ciphertext.
+        assert_eq!(&out[..PROTO_TAG_POS], &nonce[..PROTO_TAG_POS]);
+        // And the trailing block must NOT equal the plaintext (it's been
+        // encrypted). With key=0 this could trivially match a stream of 0s,
+        // so use a non-zero plaintext sequence:
+        assert_ne!(&out[PROTO_TAG_POS..], &nonce[PROTO_TAG_POS..]);
+    }
+
+    #[test]
+    fn encrypt_tg_nonce_returns_same_bytes_as_with_ciphers_variant() {
+        let mut nonce = [0x55u8; HANDSHAKE_LEN];
+        for (i, b) in nonce.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_add(11);
+        }
+        let legacy = encrypt_tg_nonce(&nonce);
+        let (with_ciphers, _e, _d) = encrypt_tg_nonce_with_ciphers(&nonce);
+        // The two wrappers must produce byte-identical output — `encrypt_tg_nonce`
+        // is documented as a thin legacy wrapper around the cipher-returning form.
+        assert_eq!(legacy, with_ciphers);
+    }
+
+    #[test]
+    fn encrypt_tail_differs_from_plaintext_under_pseudo_random_keystream() {
+        // The cipher pair returned by `encrypt_tg_nonce_with_ciphers` is set up
+        // so that the encryptor (counter = 0..4) has already advanced past the
+        // first 4 AES-CTR blocks (= 64 bytes = HANDSHAKE_LEN). Feeding the
+        // encrypted tail back through the matching decryptor gives back the
+        // original plaintext tail.
+        let mut nonce = [0u8; HANDSHAKE_LEN];
+        for (i, b) in nonce.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(13).wrapping_add(7);
+        }
+        let (encrypted, _encryptor, mut _decryptor) =
+            encrypt_tg_nonce_with_ciphers(&nonce);
+        // The decryptor is built from the *reversed* key+IV — it isn't a
+        // mirror of `encryptor` in the AES-CTR sense. So we only sanity-check
+        // structural properties here: the encrypted payload must look random
+        // relative to the plaintext.
+        let head_eq = encrypted[..PROTO_TAG_POS] == nonce[..PROTO_TAG_POS];
+        assert!(head_eq, "header bytes must be preserved verbatim");
+        let tail_match_count = encrypted[PROTO_TAG_POS..]
+            .iter()
+            .zip(&nonce[PROTO_TAG_POS..])
+            .filter(|(a, b)| a == b)
+            .count();
+        // With pseudo-random keystream and a non-degenerate input, we expect
+        // at most a handful of accidental byte matches in the 8-byte tail.
+        let tail_len = HANDSHAKE_LEN - PROTO_TAG_POS;
+        assert!(
+            tail_match_count < tail_len,
+            "expected encrypted tail to differ from plaintext, matches={}/{}",
+            tail_match_count,
+            tail_len
+        );
+    }
+
+    #[test]
+    fn encrypt_tg_nonce_with_ciphers_is_deterministic_for_same_input() {
+        let nonce = [0x42u8; HANDSHAKE_LEN];
+        let a = encrypt_tg_nonce(&nonce);
+        let b = encrypt_tg_nonce(&nonce);
+        // Same input → same output. The key is derived from the input, so
+        // the function is a pure mapping from nonce bytes to ciphertext.
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn encrypt_tg_nonce_with_ciphers_differs_when_key_iv_section_changes() {
+        let mut a = [0x42u8; HANDSHAKE_LEN];
+        let mut b = a;
+        // Flip a single bit inside the key+iv region — the ciphertext tail
+        // must change. (Flipping inside [..PROTO_TAG_POS] before SKIP_LEN
+        // wouldn't be a robust check, since the prefix is preserved.)
+        a[SKIP_LEN] ^= 0x01;
+        b[SKIP_LEN] ^= 0x02;
+        let out_a = encrypt_tg_nonce(&a);
+        let out_b = encrypt_tg_nonce(&b);
+        assert_ne!(out_a, out_b);
+        assert_eq!(out_a.len(), HANDSHAKE_LEN);
+        assert_eq!(out_b.len(), HANDSHAKE_LEN);
+    }
+}
+
+#[cfg(test)]
 #[path = "tests/handshake_security_tests.rs"]
 mod security_tests;
 
@@ -2124,6 +2229,474 @@ mod handshake_key_material_zeroization_security_tests;
 #[cfg(test)]
 #[path = "tests/handshake_baseline_invariant_tests.rs"]
 mod handshake_baseline_invariant_tests;
+
+#[cfg(test)]
+mod pure_sync_helpers_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::time::{Duration, Instant};
+
+    // -----------------------------------------------------------------
+    // sni_hint_hash
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn sni_hint_hash_is_deterministic() {
+        assert_eq!(sni_hint_hash("example.com"), sni_hint_hash("example.com"));
+    }
+
+    #[test]
+    fn sni_hint_hash_case_insensitive() {
+        assert_eq!(sni_hint_hash("Example.COM"), sni_hint_hash("example.com"));
+    }
+
+    #[test]
+    fn sni_hint_hash_distinct_inputs_distinct_outputs() {
+        assert_ne!(sni_hint_hash("aaa.com"), sni_hint_hash("bbb.com"));
+    }
+
+    #[test]
+    fn sni_hint_hash_empty_string() {
+        let h = sni_hint_hash("");
+        assert_ne!(h, 0, "empty string should still hash to something");
+    }
+
+    #[test]
+    fn sni_hint_hash_utf8_bytes_not_normalized() {
+        // sni_hint_hash lowercases per-byte via to_ascii_lowercase().
+        // Multi-byte UTF-8 chars like ü (0xC3 0xBC) are not lowered by that
+        // operation, so ü and Ü produce different hashes.
+        let a = sni_hint_hash("münchen.de");
+        let b = sni_hint_hash("MÜNCHEN.DE");
+        assert_ne!(a, b, "non-ASCII case folding must not apply");
+    }
+
+    #[test]
+    fn sni_hint_hash_same_unicode_deterministic() {
+        assert_eq!(sni_hint_hash("münchen.de"), sni_hint_hash("münchen.de"));
+    }
+
+    // -----------------------------------------------------------------
+    // ip_prefix_hint_key
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ip_prefix_hint_key_ipv4_uses_first_three_octets() {
+        let a = ip_prefix_hint_key(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)));
+        let b = ip_prefix_hint_key(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)));
+        assert_eq!(a, b, "same /24 must produce same key");
+    }
+
+    #[test]
+    fn ip_prefix_hint_key_ipv4_different_prefix_diverges() {
+        let a = ip_prefix_hint_key(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+        let b = ip_prefix_hint_key(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1)));
+        assert_ne!(a, b, "different /24 must produce different key");
+    }
+
+    #[test]
+    fn ip_prefix_hint_key_ipv4_leading_byte_is_0x04() {
+        let key = ip_prefix_hint_key(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let bytes = key.to_be_bytes();
+        assert_eq!(bytes[0], 0x04);
+    }
+
+    #[test]
+    fn ip_prefix_hint_key_ipv6_uses_first_7_octets() {
+        let ip_a = Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 0x0064);
+        let ip_b = Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 0x00c8);
+        assert_eq!(
+            ip_prefix_hint_key(IpAddr::V6(ip_a)),
+            ip_prefix_hint_key(IpAddr::V6(ip_b)),
+            "same /56 must produce same key"
+        );
+    }
+
+    #[test]
+    fn ip_prefix_hint_key_ipv6_different_prefix_diverges() {
+        let ip_a = Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1);
+        let ip_b = Ipv6Addr::new(0x2001, 0xdb8, 2, 0, 0, 0, 0, 1);
+        assert_ne!(
+            ip_prefix_hint_key(IpAddr::V6(ip_a)),
+            ip_prefix_hint_key(IpAddr::V6(ip_b)),
+            "different /56 must produce different key"
+        );
+    }
+
+    #[test]
+    fn ip_prefix_hint_key_ipv6_leading_byte_is_0x06() {
+        let key = ip_prefix_hint_key(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        let bytes = key.to_be_bytes();
+        assert_eq!(bytes[0], 0x06);
+    }
+
+    // -----------------------------------------------------------------
+    // auth_probe_state_expired
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn auth_probe_state_expired_returns_true_when_past_retention() {
+        let now = Instant::now();
+        let state = AuthProbeState {
+            fail_streak: 1,
+            blocked_until: now,
+            last_seen: now - Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS + 1),
+        };
+        assert!(auth_probe_state_expired(&state, now));
+    }
+
+    #[test]
+    fn auth_probe_state_expired_returns_false_when_within_retention() {
+        let now = Instant::now();
+        let state = AuthProbeState {
+            fail_streak: 1,
+            blocked_until: now,
+            last_seen: now - Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS - 1),
+        };
+        assert!(!auth_probe_state_expired(&state, now));
+    }
+
+    #[test]
+    fn auth_probe_state_expired_boundary_exactly_at_retention() {
+        let now = Instant::now();
+        let state = AuthProbeState {
+            fail_streak: 0,
+            blocked_until: now,
+            last_seen: now - Duration::from_secs(AUTH_PROBE_TRACK_RETENTION_SECS),
+        };
+        assert!(!auth_probe_state_expired(&state, now), "exactly equal is not expired");
+    }
+
+    // -----------------------------------------------------------------
+    // mark_candidate_if_new
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn mark_candidate_if_new_returns_true_for_unseen_id() {
+        let mut tried = [0u32; 8];
+        let mut len = 0usize;
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 42));
+        assert_eq!(len, 1);
+        assert_eq!(tried[0], 42);
+    }
+
+    #[test]
+    fn mark_candidate_if_new_returns_false_for_duplicate() {
+        let mut tried = [0u32; 8];
+        let mut len = 0usize;
+        mark_candidate_if_new(&mut tried, &mut len, 10);
+        assert!(!mark_candidate_if_new(&mut tried, &mut len, 10));
+        assert_eq!(len, 1, "len must not grow on duplicate");
+    }
+
+    #[test]
+    fn mark_candidate_if_new_tracks_multiple_distinct_ids() {
+        let mut tried = [0u32; 4];
+        let mut len = 0usize;
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 1));
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 2));
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 3));
+        assert!(!mark_candidate_if_new(&mut tried, &mut len, 2));
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 4));
+        assert_eq!(len, 4);
+    }
+
+    #[test]
+    fn mark_candidate_if_new_does_not_overflow_buffer() {
+        let mut tried = [0u32; 2];
+        let mut len = 0usize;
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 1));
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 2));
+        assert!(mark_candidate_if_new(&mut tried, &mut len, 3));
+        assert_eq!(len, 2, "len capped at buffer size");
+        assert_eq!(tried, [1, 2]);
+    }
+
+    #[test]
+    fn mark_candidate_if_new_duplicate_not_in_buffer_still_false() {
+        let mut tried = [0u32; 2];
+        let mut len = 2usize;
+        tried[0] = 1;
+        tried[1] = 2;
+        assert!(!mark_candidate_if_new(&mut tried, &mut len, 1));
+    }
+
+    // -----------------------------------------------------------------
+    // budget_for_validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn budget_for_validation_zero_users() {
+        assert_eq!(budget_for_validation(0, false, false), 0);
+        assert_eq!(budget_for_validation(0, true, true), 0);
+    }
+
+    #[test]
+    fn budget_for_validation_not_overload_returns_all() {
+        assert_eq!(budget_for_validation(100, false, false), 100);
+        assert_eq!(budget_for_validation(5, false, true), 5);
+    }
+
+    #[test]
+    fn budget_for_validation_overload_with_hint_caps_at_hinted() {
+        let budget = budget_for_validation(1000, true, true);
+        assert_eq!(budget, OVERLOAD_CANDIDATE_BUDGET_HINTED);
+    }
+
+    #[test]
+    fn budget_for_validation_overload_without_hint_caps_at_unhinted() {
+        let budget = budget_for_validation(1000, true, false);
+        assert_eq!(budget, OVERLOAD_CANDIDATE_BUDGET_UNHINTED);
+    }
+
+    #[test]
+    fn budget_for_validation_overload_small_user_count_under_cap() {
+        assert_eq!(budget_for_validation(4, true, false), 4);
+        assert_eq!(budget_for_validation(4, true, true), 4);
+    }
+
+    // -----------------------------------------------------------------
+    // compute_tls_hmac_zeroed_digest
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn compute_tls_hmac_zeroed_digest_is_deterministic() {
+        let secret = b"test-secret-key!";
+        let mut handshake = vec![0u8; 256];
+        handshake[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN]
+            .copy_from_slice(&[0xAA; tls::TLS_DIGEST_LEN]);
+        let a = compute_tls_hmac_zeroed_digest(secret, &handshake);
+        let b = compute_tls_hmac_zeroed_digest(secret, &handshake);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn compute_tls_hmac_zeroed_digest_different_secrets_diverge() {
+        let handshake = vec![0x55u8; 128];
+        let a = compute_tls_hmac_zeroed_digest(b"secret-one-1234", &handshake);
+        let b = compute_tls_hmac_zeroed_digest(b"secret-two-5678", &handshake);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn compute_tls_hmac_zeroed_digest_different_handshake_diverge() {
+        let mut h1 = vec![0u8; 128];
+        let mut h2 = vec![0u8; 128];
+        h1[tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN] = 0xFF;
+        let a = compute_tls_hmac_zeroed_digest(b"same-secret-key", &h1);
+        let b = compute_tls_hmac_zeroed_digest(b"same-secret-key", &h2);
+        assert_ne!(a, b, "changing bytes after digest region must change HMAC");
+    }
+
+    #[test]
+    fn compute_tls_hmac_zeroed_digest_ignores_digest_region_value() {
+        let mut h1 = vec![0u8; 128];
+        let mut h2 = vec![0u8; 128];
+        h1[tls::TLS_DIGEST_POS] = 0x11;
+        h2[tls::TLS_DIGEST_POS] = 0x22;
+        let a = compute_tls_hmac_zeroed_digest(b"key", &h1);
+        let b = compute_tls_hmac_zeroed_digest(b"key", &h2);
+        assert_eq!(
+            a, b,
+            "digest region is zeroed in HMAC input, so value there must not matter"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // find_matching_tls_domain
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn find_matching_tls_domain_primary_exact_match() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "proxy.example.com".to_string();
+        assert_eq!(
+            find_matching_tls_domain(&config, "proxy.example.com"),
+            Some("proxy.example.com")
+        );
+    }
+
+    #[test]
+    fn find_matching_tls_domain_primary_case_insensitive() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "proxy.example.com".to_string();
+        assert_eq!(
+            find_matching_tls_domain(&config, "Proxy.Example.COM"),
+            Some("proxy.example.com")
+        );
+    }
+
+    #[test]
+    fn find_matching_tls_domain_secondary_match() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "primary.example.com".to_string();
+        config.censorship.tls_domains = vec!["alt.example.com".to_string()];
+        assert_eq!(
+            find_matching_tls_domain(&config, "alt.example.com"),
+            Some("alt.example.com")
+        );
+    }
+
+    #[test]
+    fn find_matching_tls_domain_secondary_case_insensitive() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "primary.example.com".to_string();
+        config.censorship.tls_domains = vec!["Alt.Example.COM".to_string()];
+        assert_eq!(
+            find_matching_tls_domain(&config, "alt.example.com"),
+            Some("Alt.Example.COM")
+        );
+    }
+
+    #[test]
+    fn find_matching_tls_domain_no_match_returns_none() {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_domain = "proxy.example.com".to_string();
+        assert_eq!(find_matching_tls_domain(&config, "evil.com"), None);
+    }
+
+    #[test]
+    fn find_matching_tls_domain_empty_config_returns_none() {
+        let config = ProxyConfig::default();
+        assert_eq!(find_matching_tls_domain(&config, "anything.com"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // parse_tls_auth_material
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parse_tls_auth_material_too_short_returns_none() {
+        let buf = vec![0u8; tls::TLS_DIGEST_POS];
+        assert!(parse_tls_auth_material(&buf, true, 300).is_none());
+    }
+
+    #[test]
+    fn parse_tls_auth_material_ignore_time_skew_sets_now_zero() {
+        let mut buf = vec![0u8; 256];
+        buf[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN]
+            .copy_from_slice(&[0xAB; tls::TLS_DIGEST_LEN]);
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 4;
+        let parsed = parse_tls_auth_material(&buf, true, 300).unwrap();
+        assert_eq!(parsed.now, 0);
+        assert!(parsed.ignore_time_skew);
+        assert_eq!(parsed.boot_time_cap_secs, 0);
+    }
+
+    #[test]
+    fn parse_tls_auth_material_session_id_len_zero() {
+        let mut buf = vec![0u8; 256];
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 0;
+        let parsed = parse_tls_auth_material(&buf, true, 300).unwrap();
+        assert_eq!(parsed.session_id_len, 0);
+    }
+
+    #[test]
+    fn parse_tls_auth_material_session_id_copied_correctly() {
+        let mut buf = vec![0u8; 256];
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 8;
+        let session_id_start = session_id_len_pos + 1;
+        buf[session_id_start..session_id_start + 8].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+        let parsed = parse_tls_auth_material(&buf, true, 300).unwrap();
+        assert_eq!(parsed.session_id_len, 8);
+        assert_eq!(&parsed.session_id[..8], &[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+    }
+
+    #[test]
+    fn parse_tls_auth_material_session_id_33_returns_none() {
+        let mut buf = vec![0u8; 256];
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 33;
+        assert!(parse_tls_auth_material(&buf, true, 300).is_none());
+    }
+
+    #[test]
+    fn parse_tls_auth_material_truncated_after_session_id_len_byte() {
+        let mut buf = vec![0u8; tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN + 2];
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 32;
+        assert!(parse_tls_auth_material(&buf, true, 300).is_none(), "buffer too short for claimed session_id");
+    }
+
+    #[test]
+    fn parse_tls_auth_material_session_id_32_full() {
+        let mut buf = vec![0u8; 256];
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 32;
+        let session_id_start = session_id_len_pos + 1;
+        for (i, b) in buf[session_id_start..session_id_start + 32].iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let parsed = parse_tls_auth_material(&buf, true, 300).unwrap();
+        assert_eq!(parsed.session_id_len, 32);
+        assert_eq!(&parsed.session_id[..32], &(0u8..32).collect::<Vec<u8>>());
+    }
+
+    #[test]
+    fn parse_tls_auth_material_without_time_skew_computes_boot_time_cap() {
+        let mut buf = vec![0u8; 256];
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 0;
+        let parsed = parse_tls_auth_material(&buf, false, 300).unwrap();
+        assert!(!parsed.ignore_time_skew);
+        let expected_cap = tls::BOOT_TIME_MAX_SECS
+            .min(300u32)
+            .min(tls::BOOT_TIME_COMPAT_MAX_SECS);
+        assert_eq!(parsed.boot_time_cap_secs, expected_cap);
+    }
+
+    #[test]
+    fn parse_tls_auth_material_digest_region_copied() {
+        let mut buf = vec![0u8; 256];
+        let digest: [u8; tls::TLS_DIGEST_LEN] = [0x42; tls::TLS_DIGEST_LEN];
+        buf[tls::TLS_DIGEST_POS..tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN]
+            .copy_from_slice(&digest);
+        let session_id_len_pos = tls::TLS_DIGEST_POS + tls::TLS_DIGEST_LEN;
+        buf[session_id_len_pos] = 0;
+        let parsed = parse_tls_auth_material(&buf, true, 300).unwrap();
+        assert_eq!(parsed.digest, digest);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn auth_probe_backoff_non_decreasing(a in 0u32..20, b in 0u32..20) {
+            if a <= b {
+                let da = auth_probe_backoff(a);
+                let db = auth_probe_backoff(b);
+                prop_assert!(
+                    da <= db,
+                    "backoff must be non-decreasing: backoff({}) = {:?} > backoff({}) = {:?}",
+                    a, da, b, db
+                );
+            }
+        }
+
+        #[test]
+        fn auth_probe_backoff_always_within_bounds(streak in 0u32..30) {
+            let d = auth_probe_backoff(streak);
+            prop_assert!(d <= Duration::from_millis(AUTH_PROBE_BACKOFF_MAX_MS));
+        }
+
+        #[test]
+        fn sni_hint_hash_case_insensitive(sni in "[a-zA-Z]{1,32}") {
+            let lower = sni.to_ascii_lowercase();
+            prop_assert_eq!(
+                sni_hint_hash(&sni),
+                sni_hint_hash(&lower),
+                "sni_hint_hash must treat input case-insensitively"
+            );
+        }
+    }
+}
 
 /// Compile-time guard: HandshakeSuccess holds cryptographic key material and
 /// must never be Copy.  A Copy impl would allow silent key duplication,

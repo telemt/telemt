@@ -225,3 +225,350 @@ impl PressureEvaluator {
         self.route_stalls_window = 0;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn low_signals() -> PressureSignals {
+        PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 100,
+            standing_flows: 0,
+            backpressured_flows: 0,
+        }
+    }
+
+    fn default_cfg() -> PressureConfig {
+        PressureConfig::default()
+    }
+
+    #[test]
+    fn pressure_config_default_values() {
+        let c = PressureConfig::default();
+        assert!(c.backpressure_enabled);
+        assert_eq!(c.evaluate_every_rounds, 8);
+        assert_eq!(c.transition_hysteresis_rounds, 3);
+        assert_eq!(c.standing_ratio_pressured_pct, 20);
+        assert_eq!(c.standing_ratio_shedding_pct, 35);
+        assert_eq!(c.standing_ratio_saturated_pct, 50);
+        assert_eq!(c.queue_ratio_pressured_pct, 65);
+        assert_eq!(c.queue_ratio_shedding_pct, 82);
+        assert_eq!(c.queue_ratio_saturated_pct, 94);
+        assert_eq!(c.reject_window, Duration::from_secs(2));
+        assert_eq!(c.rejects_pressured, 32);
+        assert_eq!(c.rejects_shedding, 96);
+        assert_eq!(c.rejects_saturated, 256);
+        assert_eq!(c.stalls_pressured, 32);
+        assert_eq!(c.stalls_shedding, 96);
+        assert_eq!(c.stalls_saturated, 256);
+    }
+
+    #[test]
+    fn evaluator_new_initial_state_normal() {
+        let ev = PressureEvaluator::new(Instant::now());
+        assert_eq!(ev.state(), PressureState::Normal);
+    }
+
+    #[test]
+    fn note_admission_reject_increments_observable() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        for _ in 0..cfg.rejects_saturated {
+            ev.note_admission_reject(now, &cfg);
+        }
+
+        let sig = low_signals();
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st, PressureState::Saturated);
+    }
+
+    #[test]
+    fn note_route_stall_increments_observable() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        for _ in 0..cfg.stalls_saturated {
+            ev.note_route_stall(now, &cfg);
+        }
+
+        let sig = low_signals();
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st, PressureState::Saturated);
+    }
+
+    #[test]
+    fn maybe_evaluate_disabled_always_normal() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let mut cfg = default_cfg();
+        cfg.backpressure_enabled = false;
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 9999,
+            standing_flows: 10,
+            backpressured_flows: 10,
+        };
+        let st = ev.maybe_evaluate(now, &cfg, 100, sig, false);
+        assert_eq!(st, PressureState::Normal);
+
+        for _ in 0..256 {
+            ev.note_admission_reject(now, &cfg);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 100, sig, true);
+        assert_eq!(st, PressureState::Normal);
+    }
+
+    #[test]
+    fn maybe_evaluate_rounds_guard_no_force() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 9999,
+            standing_flows: 10,
+            backpressured_flows: 10,
+        };
+
+        let st = ev.maybe_evaluate(now, &cfg, 100, sig, false);
+        assert_eq!(st, PressureState::Normal);
+    }
+
+    #[test]
+    fn maybe_evaluate_force_bypasses_guard() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 9999,
+            standing_flows: 10,
+            backpressured_flows: 10,
+        };
+
+        let mut st = PressureState::Normal;
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            st = ev.maybe_evaluate(now, &cfg, 100, sig, true);
+        }
+        assert_ne!(st, PressureState::Normal);
+    }
+
+    #[test]
+    fn hysteresis_same_target_three_times_transitions() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 660,
+            standing_flows: 0,
+            backpressured_flows: 0,
+        };
+
+        let st1 = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st1, PressureState::Normal);
+
+        let st2 = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st2, PressureState::Normal);
+
+        let st3 = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st3, PressureState::Pressured);
+
+        let st4 = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st4, PressureState::Pressured);
+    }
+
+    #[test]
+    fn derive_queue_ratio_pressured_crossing() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 660,
+            standing_flows: 0,
+            backpressured_flows: 0,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st, PressureState::Pressured);
+    }
+
+    #[test]
+    fn derive_queue_ratio_shedding_crossing() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 830,
+            standing_flows: 0,
+            backpressured_flows: 0,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st, PressureState::Shedding);
+    }
+
+    #[test]
+    fn derive_queue_ratio_saturated_crossing() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 950,
+            standing_flows: 0,
+            backpressured_flows: 0,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1000, sig, true);
+        assert_eq!(st, PressureState::Saturated);
+    }
+
+    #[test]
+    fn derive_standing_ratio_pressured_crossing() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 0,
+            standing_flows: 3,
+            backpressured_flows: 0,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        assert_eq!(st, PressureState::Pressured);
+    }
+
+    #[test]
+    fn derive_standing_ratio_shedding_crossing() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 0,
+            standing_flows: 4,
+            backpressured_flows: 0,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        assert_eq!(st, PressureState::Shedding);
+    }
+
+    #[test]
+    fn derive_standing_ratio_saturated_crossing() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 0,
+            standing_flows: 5,
+            backpressured_flows: 0,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        assert_eq!(st, PressureState::Saturated);
+    }
+
+    #[test]
+    fn derive_empty_max_queued_bytes_saturated() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 0,
+            total_queued_bytes: 0,
+            standing_flows: 0,
+            backpressured_flows: 0,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 0, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 0, sig, true);
+        assert_eq!(st, PressureState::Saturated);
+    }
+
+    #[test]
+    fn derive_backpressured_flows_majority_shedding() {
+        let now = Instant::now();
+        let mut ev = PressureEvaluator::new(now);
+        let cfg = default_cfg();
+
+        let sig = PressureSignals {
+            active_flows: 10,
+            total_queued_bytes: 0,
+            standing_flows: 0,
+            backpressured_flows: 6,
+        };
+
+        for _ in 0..cfg.transition_hysteresis_rounds {
+            ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        }
+        let st = ev.maybe_evaluate(now, &cfg, 1, sig, true);
+        assert!(st >= PressureState::Shedding);
+    }
+
+    #[test]
+    fn rotate_window_zero_duration_resets_counters() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(5);
+        let mut ev = PressureEvaluator::new(now);
+        let mut cfg = default_cfg();
+        cfg.reject_window = Duration::ZERO;
+
+        for _ in 0..300 {
+            ev.note_admission_reject(now, &cfg);
+        }
+
+        let sig = low_signals();
+        let st = ev.maybe_evaluate(later, &cfg, 1000, sig, true);
+        assert_eq!(st, PressureState::Normal);
+    }
+
+}

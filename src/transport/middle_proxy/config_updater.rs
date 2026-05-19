@@ -622,4 +622,148 @@ mod tests {
         assert_eq!(res.1, "91.108.4.195".parse::<IpAddr>().unwrap());
         assert_eq!(res.2, 8888);
     }
+
+    #[test]
+    fn parse_proxy_config_text_empty() {
+        let cfg = parse_proxy_config_text("", 200);
+        assert!(cfg.map.is_empty());
+        assert_eq!(cfg.default_dc, None);
+        assert_eq!(cfg.http_status, 200);
+        assert_eq!(cfg.proxy_for_lines, 0);
+    }
+
+    #[test]
+    fn parse_proxy_config_text_one_line_and_default() {
+        let text = "proxy_for 4 91.108.4.195:8888;\ndefault 4;";
+        let cfg = parse_proxy_config_text(text, 200);
+        assert_eq!(cfg.default_dc, Some(4));
+        assert_eq!(cfg.proxy_for_lines, 1);
+        let addrs = cfg.map.get(&4).unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].1, 8888);
+    }
+
+    #[test]
+    fn parse_proxy_config_text_v4_and_v6() {
+        let text = "\
+            proxy_for 4 91.108.4.195:8888;\n\
+            proxy_for 2 [2001:67c:04e8:f002::d]:80;\n\
+            proxy_for 4 149.154.167.40:443;";
+        let cfg = parse_proxy_config_text(text, 200);
+        assert_eq!(cfg.proxy_for_lines, 3);
+        assert_eq!(cfg.map.get(&4).unwrap().len(), 2);
+        assert_eq!(cfg.map.get(&2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_proxy_config_text_malformed_lines_skipped() {
+        let text = "\
+            garbage line\n\
+            proxy_for 4 91.108.4.195:8888;\n\
+            proxy_for X badhost:;\n\
+            default 2;";
+        let cfg = parse_proxy_config_text(text, 200);
+        assert_eq!(cfg.proxy_for_lines, 1);
+        assert_eq!(cfg.default_dc, Some(2));
+        assert!(cfg.map.contains_key(&4));
+    }
+
+    #[test]
+    fn parse_proxy_config_text_non_200_status_reflected() {
+        let cfg_200 = parse_proxy_config_text("proxy_for 4 1.2.3.4:443;", 200);
+        let cfg_503 = parse_proxy_config_text("proxy_for 4 1.2.3.4:443;", 503);
+        assert_eq!(cfg_200.http_status, 200);
+        assert_eq!(cfg_503.http_status, 503);
+        assert_eq!(cfg_200.map, cfg_503.map);
+    }
+
+    #[test]
+    fn hash_proxy_config_differs_on_content_change() {
+        let cfg_a = parse_proxy_config_text("proxy_for 4 91.108.4.195:8888;", 200);
+        let cfg_b = parse_proxy_config_text("proxy_for 4 149.154.167.40:443;", 200);
+        assert_ne!(hash_proxy_config(&cfg_a), hash_proxy_config(&cfg_b));
+    }
+
+    #[test]
+    fn hash_secret_differs_on_change() {
+        let a = b"abcdef0123456789abcdef0123456789";
+        let b = b"abcdef0123456789abcdef0123456780";
+        assert_ne!(hash_secret(a), hash_secret(b));
+    }
+
+    #[test]
+    fn parse_host_port_ipv4() {
+        let (ip, port) = parse_host_port("91.108.4.195:8888").unwrap();
+        assert_eq!(ip, "91.108.4.195".parse::<IpAddr>().unwrap());
+        assert_eq!(port, 8888);
+    }
+
+    #[test]
+    fn parse_host_port_ipv6_bracketed() {
+        let (ip, port) = parse_host_port("[2001:67c:04e8:f002::d]:80").unwrap();
+        assert_eq!(ip, "2001:67c:04e8:f002::d".parse::<IpAddr>().unwrap());
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn parse_host_port_rejects_empty_host() {
+        assert!(parse_host_port(":443").is_none());
+    }
+
+    #[test]
+    fn parse_host_port_rejects_malformed() {
+        assert!(parse_host_port("notaaddress").is_none());
+        assert!(parse_host_port("1.2.3.4:99999").is_none());
+        assert!(parse_host_port("1.2.3.4:").is_none());
+        assert!(parse_host_port("").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_non_proxy_for() {
+        assert!(parse_proxy_line("default 4;").is_none());
+        assert!(parse_proxy_line("random text").is_none());
+        assert!(parse_proxy_line("").is_none());
+    }
+
+    #[test]
+    fn parse_proxy_line_rejects_malformed_dc() {
+        assert!(parse_proxy_line("proxy_for abc 1.2.3.4:443;").is_none());
+    }
+
+    #[test]
+    fn snapshot_passes_guards_accepts_2xx_and_enough_lines() {
+        let cfg = ProxyConfig::default();
+        let snap = ProxyConfigData {
+            map: HashMap::new(),
+            default_dc: None,
+            http_status: 200,
+            proxy_for_lines: 5,
+        };
+        assert!(snapshot_passes_guards(&cfg, &snap, "test"));
+    }
+
+    #[test]
+    fn snapshot_passes_guards_rejects_non_2xx_when_required() {
+        let cfg = ProxyConfig::default();
+        let snap = ProxyConfigData {
+            map: HashMap::new(),
+            default_dc: None,
+            http_status: 503,
+            proxy_for_lines: 5,
+        };
+        assert!(!snapshot_passes_guards(&cfg, &snap, "test"));
+    }
+
+    #[test]
+    fn snapshot_passes_guards_rejects_too_few_proxy_for_lines() {
+        let mut cfg = ProxyConfig::default();
+        cfg.general.me_snapshot_min_proxy_for_lines = 10;
+        let snap = ProxyConfigData {
+            map: HashMap::new(),
+            default_dc: None,
+            http_status: 200,
+            proxy_for_lines: 3,
+        };
+        assert!(!snapshot_passes_guards(&cfg, &snap, "test"));
+    }
 }

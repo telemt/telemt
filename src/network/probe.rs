@@ -437,6 +437,275 @@ mod tests {
         assert!(decision.ipv4_me);
         assert!(!decision.ipv6_me);
     }
+
+    #[test]
+    fn is_bogon_v4_rejects_private_10() {
+        assert!(is_bogon_v4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(is_bogon_v4(Ipv4Addr::new(10, 255, 255, 255)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_private_172_16() {
+        assert!(is_bogon_v4(Ipv4Addr::new(172, 16, 0, 1)));
+        assert!(is_bogon_v4(Ipv4Addr::new(172, 31, 255, 255)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_private_192_168() {
+        assert!(is_bogon_v4(Ipv4Addr::new(192, 168, 0, 1)));
+        assert!(is_bogon_v4(Ipv4Addr::new(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_loopback() {
+        assert!(is_bogon_v4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_link_local() {
+        assert!(is_bogon_v4(Ipv4Addr::new(169, 254, 0, 1)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_zero_network() {
+        assert!(is_bogon_v4(Ipv4Addr::new(0, 0, 0, 0)));
+        assert!(is_bogon_v4(Ipv4Addr::new(0, 1, 2, 3)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_shared_nat_100_64() {
+        assert!(is_bogon_v4(Ipv4Addr::new(100, 64, 0, 1)));
+        assert!(is_bogon_v4(Ipv4Addr::new(100, 127, 255, 255)));
+    }
+
+    #[test]
+    fn is_bogon_v4_allows_100_non_shared() {
+        assert!(!is_bogon_v4(Ipv4Addr::new(100, 128, 0, 1)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_benchmark_198_18() {
+        assert!(is_bogon_v4(Ipv4Addr::new(198, 18, 0, 1)));
+        assert!(is_bogon_v4(Ipv4Addr::new(198, 19, 255, 255)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_documentation_192_0_2() {
+        assert!(is_bogon_v4(Ipv4Addr::new(192, 0, 2, 1)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_reserved_240_plus() {
+        assert!(is_bogon_v4(Ipv4Addr::new(240, 0, 0, 1)));
+        assert!(is_bogon_v4(Ipv4Addr::new(255, 255, 255, 254)));
+    }
+
+    #[test]
+    fn is_bogon_v4_rejects_broadcast() {
+        assert!(is_bogon_v4(Ipv4Addr::BROADCAST));
+    }
+
+    #[test]
+    fn is_bogon_v4_accepts_public() {
+        assert!(!is_bogon_v4(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(!is_bogon_v4(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!is_bogon_v4(Ipv4Addr::new(142, 250, 80, 46)));
+    }
+
+    #[test]
+    fn is_bogon_v6_rejects_unspecified() {
+        assert!(is_bogon_v6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn is_bogon_v6_rejects_loopback() {
+        assert!(is_bogon_v6(Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn is_bogon_v6_rejects_unique_local() {
+        assert!(is_bogon_v6("fd00::1".parse().unwrap()));
+        assert!(is_bogon_v6("fc00::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_bogon_v6_rejects_link_local() {
+        assert!(is_bogon_v6("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_bogon_v6_rejects_ipv4_mapped() {
+        assert!(is_bogon_v6("::ffff:192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_bogon_v6_rejects_documentation() {
+        assert!(is_bogon_v6("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_bogon_v6_rejects_6to4() {
+        assert!(is_bogon_v6("2002::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_bogon_v6_accepts_public() {
+        assert!(!is_bogon_v6("2607:f8b0::1".parse().unwrap()));
+        assert!(!is_bogon_v6("2a00:1450::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_bogon_dispatches_by_family() {
+        assert!(is_bogon(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_bogon(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(!is_bogon(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(!is_bogon(IpAddr::V6("2607:f8b0::1".parse().unwrap())));
+    }
+
+    #[test]
+    fn collect_stun_servers_deduplicates() {
+        let config = NetworkConfig {
+            stun_servers: vec![
+                "stun.l.google.com:19302".to_string(),
+                "stun.l.google.com:19302".to_string(),
+            ],
+            ..Default::default()
+        };
+        let servers = collect_stun_servers(&config);
+        assert_eq!(servers.len(), 1);
+    }
+
+    #[test]
+    fn collect_stun_servers_skips_empty() {
+        let config = NetworkConfig {
+            stun_servers: vec!["".to_string(), "stun.example.com:3478".to_string()],
+            ..Default::default()
+        };
+        let servers = collect_stun_servers(&config);
+        assert_eq!(servers, &["stun.example.com:3478"]);
+    }
+
+    #[test]
+    fn decide_ipv4_disabled_disables_dc_and_me() {
+        let config = NetworkConfig {
+            ipv4: false,
+            ..Default::default()
+        };
+        let probe = NetworkProbe {
+            detected_ipv4: Some(Ipv4Addr::new(1, 2, 3, 4)),
+            ..Default::default()
+        };
+        let d = decide_network_capabilities(&config, &probe, None);
+        assert!(!d.ipv4_dc);
+        assert!(!d.ipv4_me);
+    }
+
+    #[test]
+    fn decide_no_detected_ip_disables_dc() {
+        let config = NetworkConfig {
+            ipv4: true,
+            ..Default::default()
+        };
+        let probe = NetworkProbe::default();
+        let d = decide_network_capabilities(&config, &probe, None);
+        assert!(!d.ipv4_dc);
+        assert!(!d.ipv4_me);
+    }
+
+    #[test]
+    fn decide_prefer_6_falls_back_to_4_when_unavailable() {
+        let config = NetworkConfig {
+            ipv4: true,
+            prefer: 6,
+            ..Default::default()
+        };
+        let probe = NetworkProbe {
+            detected_ipv4: Some(Ipv4Addr::new(1, 2, 3, 4)),
+            ..Default::default()
+        };
+        let d = decide_network_capabilities(&config, &probe, None);
+        assert_eq!(d.effective_prefer, 4);
+    }
+
+    #[test]
+    fn decide_multipath_requires_both_families() {
+        let config = NetworkConfig {
+            ipv4: true,
+            ipv6: Some(true),
+            multipath: true,
+            ..Default::default()
+        };
+        let probe = NetworkProbe {
+            detected_ipv4: Some(Ipv4Addr::new(1, 2, 3, 4)),
+            detected_ipv6: Some("2607:f8b0::1".parse().unwrap()),
+            ..Default::default()
+        };
+        let d = decide_network_capabilities(&config, &probe, None);
+        assert!(d.effective_multipath);
+        assert!(d.ipv4_me);
+        assert!(d.ipv6_me);
+    }
+
+    #[test]
+    fn decide_multipath_false_when_single_family() {
+        let config = NetworkConfig {
+            ipv4: true,
+            ipv6: Some(false),
+            multipath: true,
+            ..Default::default()
+        };
+        let probe = NetworkProbe {
+            detected_ipv4: Some(Ipv4Addr::new(1, 2, 3, 4)),
+            ..Default::default()
+        };
+        let d = decide_network_capabilities(&config, &probe, None);
+        assert!(!d.effective_multipath);
+    }
+
+    #[test]
+    fn network_decision_prefer_ipv6_true() {
+        let d = NetworkDecision {
+            effective_prefer: 6,
+            ..Default::default()
+        };
+        assert!(d.prefer_ipv6());
+    }
+
+    #[test]
+    fn network_decision_prefer_ipv6_false() {
+        let d = NetworkDecision {
+            effective_prefer: 4,
+            ..Default::default()
+        };
+        assert!(!d.prefer_ipv6());
+    }
+
+    #[test]
+    fn network_decision_me_families_both() {
+        let d = NetworkDecision {
+            ipv4_me: true,
+            ipv6_me: true,
+            ..Default::default()
+        };
+        let families = d.me_families();
+        assert_eq!(families, vec![IpFamily::V4, IpFamily::V6]);
+    }
+
+    #[test]
+    fn network_decision_me_families_v4_only() {
+        let d = NetworkDecision {
+            ipv4_me: true,
+            ..Default::default()
+        };
+        let families = d.me_families();
+        assert_eq!(families, vec![IpFamily::V4]);
+    }
+
+    #[test]
+    fn network_decision_me_families_none() {
+        let d = NetworkDecision::default();
+        assert!(d.me_families().is_empty());
+    }
 }
 
 fn detect_local_ip_v4() -> Option<Ipv4Addr> {

@@ -869,4 +869,120 @@ mod tests {
                 .any(|entry| entry.domain == "front-a.example.com")
         );
     }
+
+    // ============= push_unique_host =============
+
+    #[test]
+    fn push_unique_host_appends_new_entry() {
+        let mut hosts = vec!["a".to_string(), "b".to_string()];
+        push_unique_host(&mut hosts, "c");
+        assert_eq!(hosts, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn push_unique_host_skips_existing_entry() {
+        let mut hosts = vec!["a".to_string(), "b".to_string()];
+        push_unique_host(&mut hosts, "a");
+        assert_eq!(hosts, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn push_unique_host_distinguishes_case_sensitively() {
+        // Function uses literal string equality — A and a are NOT collapsed.
+        let mut hosts = vec!["A".to_string()];
+        push_unique_host(&mut hosts, "a");
+        assert_eq!(hosts, vec!["A", "a"]);
+    }
+
+    // ============= push_host_from_legacy_listen =============
+
+    #[test]
+    fn push_host_from_legacy_listen_skips_empty_and_unspecified() {
+        let mut hosts = Vec::new();
+        push_host_from_legacy_listen(&mut hosts, "");
+        push_host_from_legacy_listen(&mut hosts, "   ");
+        push_host_from_legacy_listen(&mut hosts, "0.0.0.0");
+        push_host_from_legacy_listen(&mut hosts, "::");
+        assert!(hosts.is_empty(), "wildcard binds must be filtered");
+    }
+
+    #[test]
+    fn push_host_from_legacy_listen_keeps_concrete_ips_as_strings() {
+        let mut hosts = Vec::new();
+        push_host_from_legacy_listen(&mut hosts, "10.0.0.1");
+        push_host_from_legacy_listen(&mut hosts, "::1");
+        // Both are stored as their `to_string()` form.
+        assert_eq!(hosts, vec!["10.0.0.1", "::1"]);
+    }
+
+    #[test]
+    fn push_host_from_legacy_listen_passes_through_unparseable_as_hostname() {
+        // Non-IP strings are treated as DNS hostnames, kept verbatim.
+        let mut hosts = Vec::new();
+        push_host_from_legacy_listen(&mut hosts, "proxy.example.net");
+        push_host_from_legacy_listen(&mut hosts, "  proxy.example.net  ");
+        // The second call must dedupe via trim → push_unique_host.
+        assert_eq!(hosts, vec!["proxy.example.net"]);
+    }
+
+    #[test]
+    fn push_host_from_legacy_listen_dedupes_repeated_concrete_ips() {
+        let mut hosts = Vec::new();
+        push_host_from_legacy_listen(&mut hosts, "10.0.0.1");
+        push_host_from_legacy_listen(&mut hosts, "10.0.0.1");
+        assert_eq!(hosts.len(), 1);
+    }
+
+    // ============= resolve_tls_domains =============
+
+    fn cfg_with_tls_domains(primary: &str, extras: &[&str]) -> ProxyConfig {
+        let mut cfg = ProxyConfig::default();
+        cfg.censorship.tls_domain = primary.to_string();
+        cfg.censorship.tls_domains = extras.iter().map(|s| s.to_string()).collect();
+        cfg
+    }
+
+    #[test]
+    fn resolve_tls_domains_starts_with_primary_when_set() {
+        let cfg = cfg_with_tls_domains("a.example", &["b.example", "c.example"]);
+        let r = resolve_tls_domains(&cfg);
+        assert_eq!(r, vec!["a.example", "b.example", "c.example"]);
+    }
+
+    #[test]
+    fn resolve_tls_domains_skips_empty_primary() {
+        let cfg = cfg_with_tls_domains("", &["b.example", "c.example"]);
+        let r = resolve_tls_domains(&cfg);
+        assert_eq!(r, vec!["b.example", "c.example"]);
+    }
+
+    #[test]
+    fn resolve_tls_domains_dedupes_extras() {
+        let cfg = cfg_with_tls_domains(
+            "a.example",
+            &["b.example", "b.example", "a.example", "c.example"],
+        );
+        let r = resolve_tls_domains(&cfg);
+        // Order: primary first, then extras in original order, with duplicates dropped.
+        assert_eq!(r, vec!["a.example", "b.example", "c.example"]);
+    }
+
+    // ============= resolve_extra_tls_domains =============
+
+    #[test]
+    fn resolve_extra_tls_domains_excludes_primary() {
+        let cfg = cfg_with_tls_domains(
+            "a.example",
+            &["a.example", "b.example", "c.example", "a.example"],
+        );
+        let r = resolve_extra_tls_domains(&cfg);
+        // Primary "a.example" is never included; duplicates are dropped.
+        assert_eq!(r, vec!["b.example", "c.example"]);
+    }
+
+    #[test]
+    fn resolve_extra_tls_domains_returns_empty_when_no_extras() {
+        let cfg = cfg_with_tls_domains("a.example", &[]);
+        assert!(resolve_extra_tls_domains(&cfg).is_empty());
+    }
 }

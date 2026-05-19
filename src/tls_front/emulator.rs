@@ -408,7 +408,7 @@ mod tests {
     use std::time::SystemTime;
 
     use crate::tls_front::types::{
-        CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsProfileSource,
+        CachedTlsData, ParsedCertificateInfo, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsProfileSource,
     };
 
     use super::{
@@ -646,5 +646,456 @@ mod tests {
         assert_eq!(response[app_start], TLS_RECORD_APPLICATION);
         assert_eq!(app_len, 64);
         assert_eq!(app_start + 5 + app_len, response.len());
+    }
+
+    #[test]
+    fn app_data_body_capacity_empty() {
+        assert_eq!(super::app_data_body_capacity(&[]), 0);
+    }
+
+    #[test]
+    fn app_data_body_capacity_subtracts_17_per_record() {
+        assert_eq!(super::app_data_body_capacity(&[100]), 83);
+        assert_eq!(super::app_data_body_capacity(&[100, 200]), 83 + 183);
+    }
+
+    #[test]
+    fn app_data_body_capacity_saturates_small() {
+        assert_eq!(super::app_data_body_capacity(&[10]), 0);
+    }
+
+    #[test]
+    fn ensure_payload_capacity_noop_when_sufficient() {
+        let sizes = vec![200];
+        let result = super::ensure_payload_capacity(sizes.clone(), 100);
+        assert_eq!(result, sizes);
+    }
+
+    #[test]
+    fn ensure_payload_capacity_zero_payload() {
+        let sizes = vec![100, 200];
+        let result = super::ensure_payload_capacity(sizes.clone(), 0);
+        assert_eq!(result, sizes);
+    }
+
+    #[test]
+    fn build_compact_cert_info_payload_with_cn() {
+        let info = ParsedCertificateInfo {
+            subject_cn: Some("example.com".to_string()),
+            issuer_cn: None,
+            not_before_unix: None,
+            not_after_unix: None,
+            san_names: vec![],
+        };
+        let payload = super::build_compact_cert_info_payload(&info).unwrap();
+        let s = String::from_utf8(payload).unwrap();
+        assert_eq!(s, "CN=example.com");
+    }
+
+    #[test]
+    fn build_compact_cert_info_payload_with_all_fields() {
+        let info = ParsedCertificateInfo {
+            subject_cn: Some("a.com".to_string()),
+            issuer_cn: Some("ca.com".to_string()),
+            not_before_unix: Some(1000),
+            not_after_unix: Some(2000),
+            san_names: vec!["b.com".to_string()],
+        };
+        let payload = super::build_compact_cert_info_payload(&info).unwrap();
+        let s = String::from_utf8(payload).unwrap();
+        assert!(s.contains("CN=a.com"));
+        assert!(s.contains("ISSUER=ca.com"));
+        assert!(s.contains("NB=1000"));
+        assert!(s.contains("NA=2000"));
+        assert!(s.contains("SAN=b.com"));
+    }
+
+    #[test]
+    fn build_compact_cert_info_payload_none_when_empty() {
+        let info = ParsedCertificateInfo {
+            subject_cn: None,
+            issuer_cn: None,
+            not_before_unix: None,
+            not_after_unix: None,
+            san_names: vec![],
+        };
+        assert!(super::build_compact_cert_info_payload(&info).is_none());
+    }
+
+    #[test]
+    fn hash_compact_cert_info_payload_none_on_empty() {
+        assert!(super::hash_compact_cert_info_payload(vec![]).is_none());
+    }
+
+    #[test]
+    fn hash_compact_cert_info_payload_output_length_equals_input() {
+        let input = vec![0xAB; 64];
+        let output = super::hash_compact_cert_info_payload(input.clone()).unwrap();
+        assert_eq!(output.len(), input.len());
+    }
+
+    #[test]
+    fn hash_compact_cert_info_payload_deterministic() {
+        let input = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let a = super::hash_compact_cert_info_payload(input.clone()).unwrap();
+        let b = super::hash_compact_cert_info_payload(input).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hash_compact_cert_info_payload_single_byte() {
+        let output = super::hash_compact_cert_info_payload(vec![0xFF]).unwrap();
+        assert_eq!(output.len(), 1);
+    }
+
+    mod jitter_and_clamp {
+        use crate::crypto::SecureRandom;
+
+        const MIN_APP_DATA: usize = 64;
+        const MAX_APP_DATA: usize = 16_384 + 256;
+
+        #[test]
+        fn empty_input_returns_empty() {
+            let rng = SecureRandom::new();
+            let result = super::super::jitter_and_clamp_sizes(&[], &rng);
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn output_length_matches_input() {
+            let rng = SecureRandom::new();
+            let result = super::super::jitter_and_clamp_sizes(&[100, 200, 300], &rng);
+            assert_eq!(result.len(), 3);
+        }
+
+        #[test]
+        fn all_outputs_within_clamp_bounds() {
+            let rng = SecureRandom::new();
+            let inputs = &[10, 50, 64, 100, 500, 16_000, 20_000];
+            let result = super::super::jitter_and_clamp_sizes(inputs, &rng);
+            for &val in &result {
+                assert!(
+                    val >= MIN_APP_DATA && val <= MAX_APP_DATA,
+                    "value {val} out of [{MIN_APP_DATA}, {MAX_APP_DATA}]"
+                );
+            }
+        }
+
+        #[test]
+        fn below_min_clamped_up() {
+            let rng = SecureRandom::new();
+            let result = super::super::jitter_and_clamp_sizes(&[1], &rng);
+            assert!(
+                result[0] >= MIN_APP_DATA,
+                "value below MIN_APP_DATA must be clamped up"
+            );
+        }
+
+        #[test]
+        fn above_max_clamped_down() {
+            let rng = SecureRandom::new();
+            let result = super::super::jitter_and_clamp_sizes(&[99_999], &rng);
+            assert!(
+                result[0] <= MAX_APP_DATA,
+                "value above MAX_APP_DATA must be clamped down"
+            );
+        }
+
+        #[test]
+        fn exactly_min_stays_min_or_jittered_nearby() {
+            let rng = SecureRandom::new();
+            let result = super::super::jitter_and_clamp_sizes(&[MIN_APP_DATA], &rng);
+            assert!(result[0] >= MIN_APP_DATA && result[0] <= MAX_APP_DATA);
+        }
+    }
+
+    mod ensure_capacity {
+        #[test]
+        fn grows_last_element_when_headroom_exists() {
+            let sizes = vec![100];
+            let result = super::super::ensure_payload_capacity(sizes, 50);
+            let body = super::super::app_data_body_capacity(&result);
+            assert!(body >= 50, "body capacity {body} must be >= 50");
+            assert_eq!(result.len(), 1, "should grow in-place, not append");
+        }
+
+        #[test]
+        fn appends_records_when_last_saturated() {
+            let sizes = vec![16_640];
+            let payload_len = 20_000;
+            let result = super::super::ensure_payload_capacity(sizes, payload_len);
+            let body = super::super::app_data_body_capacity(&result);
+            assert!(
+                body >= payload_len,
+                "body capacity {body} must be >= {payload_len}"
+            );
+            assert!(
+                result.len() > 1,
+                "should append at least one extra record"
+            );
+        }
+
+        #[test]
+        fn empty_sizes_with_payload_appends() {
+            let result = super::super::ensure_payload_capacity(vec![], 200);
+            assert!(!result.is_empty());
+            let body = super::super::app_data_body_capacity(&result);
+            assert!(body >= 200, "body capacity {body} must be >= 200");
+        }
+
+        #[test]
+        fn exact_capacity_is_noop() {
+            let sizes = vec![217];
+            let body = super::super::app_data_body_capacity(&sizes);
+            let result = super::super::ensure_payload_capacity(sizes.clone(), body);
+            assert_eq!(result, sizes);
+        }
+    }
+
+    mod emulated_app_data {
+        use std::time::SystemTime;
+
+        use crate::tls_front::types::{
+            CachedTlsData, ParsedServerHello, TlsBehaviorProfile,
+            TlsProfileSource,
+        };
+
+        fn base_cached() -> CachedTlsData {
+            CachedTlsData {
+                server_hello_template: ParsedServerHello {
+                    version: [0x03, 0x03],
+                    random: [0u8; 32],
+                    session_id: Vec::new(),
+                    cipher_suite: [0x13, 0x01],
+                    compression: 0,
+                    extensions: Vec::new(),
+                },
+                cert_info: None,
+                cert_payload: None,
+                app_data_records_sizes: vec![512],
+                total_app_data_len: 512,
+                behavior_profile: TlsBehaviorProfile::default(),
+                fetched_at: SystemTime::now(),
+                domain: "example.com".to_string(),
+            }
+        }
+
+        #[test]
+        fn default_source_uses_app_data_records_sizes() {
+            let cached = base_cached();
+            let result = super::super::emulated_app_data_sizes(&cached);
+            assert_eq!(result, vec![512]);
+        }
+
+        #[test]
+        fn default_source_empty_sizes_falls_back_to_total_len() {
+            let mut cached = base_cached();
+            cached.app_data_records_sizes = vec![];
+            cached.total_app_data_len = 2048;
+            let result = super::super::emulated_app_data_sizes(&cached);
+            assert_eq!(result, vec![2048]);
+        }
+
+        #[test]
+        fn default_source_zero_total_falls_back_to_1024() {
+            let mut cached = base_cached();
+            cached.app_data_records_sizes = vec![];
+            cached.total_app_data_len = 0;
+            let result = super::super::emulated_app_data_sizes(&cached);
+            assert_eq!(result, vec![1024]);
+        }
+
+        #[test]
+        fn raw_source_prefers_cached_app_data_over_profile() {
+            let mut cached = base_cached();
+            cached.behavior_profile.source = TlsProfileSource::Raw;
+            cached.app_data_records_sizes = vec![300];
+            cached.behavior_profile.app_data_record_sizes = vec![999];
+            let result = super::super::emulated_app_data_sizes(&cached);
+            assert_eq!(result, vec![300]);
+        }
+
+        #[test]
+        fn merged_source_falls_back_to_profile_when_cached_empty() {
+            let mut cached = base_cached();
+            cached.behavior_profile.source = TlsProfileSource::Merged;
+            cached.app_data_records_sizes = vec![];
+            cached.behavior_profile.app_data_record_sizes = vec![777];
+            let result = super::super::emulated_app_data_sizes(&cached);
+            assert_eq!(result, vec![777]);
+        }
+
+        #[test]
+        fn raw_source_all_empty_falls_back_to_total_len() {
+            let mut cached = base_cached();
+            cached.behavior_profile.source = TlsProfileSource::Raw;
+            cached.app_data_records_sizes = vec![];
+            cached.behavior_profile.app_data_record_sizes = vec![];
+            cached.total_app_data_len = 3000;
+            let result = super::super::emulated_app_data_sizes(&cached);
+            assert_eq!(result, vec![3000]);
+        }
+    }
+
+    mod emulated_ccs {
+        use std::time::SystemTime;
+
+        use crate::tls_front::types::{
+            CachedTlsData, ParsedServerHello, TlsBehaviorProfile,
+        };
+
+        #[test]
+        fn always_returns_one() {
+            let cached = CachedTlsData {
+                server_hello_template: ParsedServerHello {
+                    version: [0x03, 0x03],
+                    random: [0u8; 32],
+                    session_id: Vec::new(),
+                    cipher_suite: [0x13, 0x01],
+                    compression: 0,
+                    extensions: Vec::new(),
+                },
+                cert_info: None,
+                cert_payload: None,
+                app_data_records_sizes: vec![],
+                total_app_data_len: 0,
+                behavior_profile: TlsBehaviorProfile::default(),
+                fetched_at: SystemTime::now(),
+                domain: "test".to_string(),
+            };
+            assert_eq!(super::super::emulated_change_cipher_spec_count(&cached), 1);
+        }
+    }
+
+    mod emulated_tickets {
+        use std::time::SystemTime;
+
+        use crate::crypto::SecureRandom;
+        use crate::tls_front::types::{
+            CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsProfileSource,
+        };
+
+        fn base_cached() -> CachedTlsData {
+            CachedTlsData {
+                server_hello_template: ParsedServerHello {
+                    version: [0x03, 0x03],
+                    random: [0u8; 32],
+                    session_id: Vec::new(),
+                    cipher_suite: [0x13, 0x01],
+                    compression: 0,
+                    extensions: Vec::new(),
+                },
+                cert_info: None,
+                cert_payload: None,
+                app_data_records_sizes: vec![],
+                total_app_data_len: 0,
+                behavior_profile: TlsBehaviorProfile::default(),
+                fetched_at: SystemTime::now(),
+                domain: "test".to_string(),
+            }
+        }
+
+        #[test]
+        fn zero_tickets_returns_empty() {
+            let rng = SecureRandom::new();
+            let cached = base_cached();
+            let result = super::super::emulated_ticket_record_sizes(&cached, 0, &rng);
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn raw_source_uses_profiled_sizes() {
+            let rng = SecureRandom::new();
+            let mut cached = base_cached();
+            cached.behavior_profile.source = TlsProfileSource::Raw;
+            cached.behavior_profile.ticket_record_sizes = vec![220, 180];
+            let result = super::super::emulated_ticket_record_sizes(&cached, 2, &rng);
+            assert_eq!(result, vec![220, 180]);
+        }
+
+        #[test]
+        fn default_source_generates_random_sizes_in_range() {
+            let rng = SecureRandom::new();
+            let cached = base_cached();
+            let result = super::super::emulated_ticket_record_sizes(&cached, 3, &rng);
+            assert_eq!(result.len(), 3);
+            for &size in &result {
+                assert!(
+                    (48..=95).contains(&size),
+                    "random ticket size {size} must be in [48, 95]"
+                );
+            }
+        }
+
+        #[test]
+        fn capped_at_max_ticket_records() {
+            let rng = SecureRandom::new();
+            let cached = base_cached();
+            let result = super::super::emulated_ticket_record_sizes(&cached, 10, &rng);
+            assert_eq!(result.len(), 4, "must cap at MAX_TICKET_RECORDS (4)");
+        }
+
+        #[test]
+        fn profiled_sizes_padded_with_random_when_fewer_than_requested() {
+            let rng = SecureRandom::new();
+            let mut cached = base_cached();
+            cached.behavior_profile.source = TlsProfileSource::Raw;
+            cached.behavior_profile.ticket_record_sizes = vec![200];
+            let result = super::super::emulated_ticket_record_sizes(&cached, 3, &rng);
+            assert_eq!(result.len(), 3);
+            assert_eq!(result[0], 200);
+            for &size in &result[1..] {
+                assert!((48..=95).contains(&size));
+            }
+        }
+    }
+
+    mod compact_cert_payload_edge_cases {
+        use crate::tls_front::types::ParsedCertificateInfo;
+
+        #[test]
+        fn san_truncated_to_eight_entries() {
+            let info = ParsedCertificateInfo {
+                subject_cn: None,
+                issuer_cn: None,
+                not_before_unix: None,
+                not_after_unix: None,
+                san_names: (0..20).map(|i| format!("s{i}.example.com")).collect(),
+            };
+            let payload = super::super::build_compact_cert_info_payload(&info).unwrap();
+            let s = String::from_utf8(payload).unwrap();
+            assert!(s.contains("s7.example.com"), "8th SAN (index 7) must appear");
+            assert!(
+                !s.contains("s8.example.com"),
+                "9th SAN (index 8) must be truncated"
+            );
+        }
+
+        #[test]
+        fn payload_truncated_at_512_bytes() {
+            let info = ParsedCertificateInfo {
+                subject_cn: Some("x".repeat(600)),
+                issuer_cn: None,
+                not_before_unix: None,
+                not_after_unix: None,
+                san_names: vec![],
+            };
+            let payload = super::super::build_compact_cert_info_payload(&info).unwrap();
+            assert_eq!(payload.len(), 512);
+        }
+
+        #[test]
+        fn only_san_names_produces_san_field() {
+            let info = ParsedCertificateInfo {
+                subject_cn: None,
+                issuer_cn: None,
+                not_before_unix: None,
+                not_after_unix: None,
+                san_names: vec!["a.com".to_string(), "b.com".to_string()],
+            };
+            let payload = super::super::build_compact_cert_info_payload(&info).unwrap();
+            let s = String::from_utf8(payload).unwrap();
+            assert!(s.starts_with("SAN=a.com,b.com"));
+        }
     }
 }

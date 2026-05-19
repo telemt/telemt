@@ -584,3 +584,37 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ProxyConfig;
+
+    #[test]
+    fn security_whitelist_data_default_config_has_loopback_entry() {
+        let cfg = ProxyConfig::default();
+        let data = build_security_whitelist_data(&cfg);
+        assert!(data.enabled, "default config must enable whitelist");
+        assert!(
+            data.entries_total >= 1,
+            "default config must have at least one entry"
+        );
+        let has_loopback = data.entries.iter().any(|e| e.contains("127.0.0.0/8"));
+        assert!(
+            has_loopback,
+            "default whitelist must include loopback range: {:?}",
+            data.entries
+        );
+    }
+
+    #[test]
+    fn security_whitelist_data_empty_whitelist_disabled() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.api.whitelist.clear();
+        let data = build_security_whitelist_data(&cfg);
+        assert!(!data.enabled);
+        assert_eq!(data.entries_total, 0);
+        assert!(data.entries.is_empty());
+    }
+
+}

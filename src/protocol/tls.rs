@@ -1032,6 +1032,828 @@ mod compile_time_security_checks {
     const_assert!(28 + 4 == TLS_DIGEST_LEN);
 }
 
+// ============= Pure-parser unit tests =============
+
+#[cfg(test)]
+mod pure_parser_tests {
+    use super::*;
+
+    // ---- ClientHello builder helper ----
+    //
+    // Hand-written ClientHello layout (TLS 1.3-style record). Lets the
+    // tests below craft hellos with specific SNI / ALPN / supported_versions
+    // extensions without dragging in rustls or other dependencies.
+    //
+    // RFC 8446 §4.1.2 reference layout:
+    //   handshake type | uint24 len | legacy_version | random | sid | cipher | comp | extensions
+    pub(super) fn build_client_hello(
+        sni: Option<&str>,
+        alpn: &[&[u8]],
+        supported_versions: &[u16],
+        legacy_version: u16,
+    ) -> Vec<u8> {
+        let mut exts: Vec<u8> = Vec::new();
+
+        // ---- server_name extension (0x0000) ----
+        if let Some(host) = sni {
+            let mut ext_body = Vec::new();
+            let entry_len = 1 + 2 + host.len();
+            ext_body.extend_from_slice(&(entry_len as u16).to_be_bytes()); // list len
+            ext_body.push(0); // name_type = host_name
+            ext_body.extend_from_slice(&(host.len() as u16).to_be_bytes());
+            ext_body.extend_from_slice(host.as_bytes());
+            exts.extend_from_slice(&0x0000u16.to_be_bytes()); // ext type
+            exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+            exts.extend_from_slice(&ext_body);
+        }
+
+        // ---- ALPN extension (0x0010) ----
+        if !alpn.is_empty() {
+            let mut list = Vec::new();
+            for proto in alpn {
+                list.push(proto.len() as u8);
+                list.extend_from_slice(proto);
+            }
+            let mut ext_body = Vec::new();
+            ext_body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+            ext_body.extend_from_slice(&list);
+            exts.extend_from_slice(&0x0010u16.to_be_bytes());
+            exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+            exts.extend_from_slice(&ext_body);
+        }
+
+        // ---- supported_versions extension (0x002b) ----
+        if !supported_versions.is_empty() {
+            let mut list = Vec::new();
+            list.push((supported_versions.len() * 2) as u8);
+            for &v in supported_versions {
+                list.extend_from_slice(&v.to_be_bytes());
+            }
+            exts.extend_from_slice(&0x002bu16.to_be_bytes());
+            exts.extend_from_slice(&(list.len() as u16).to_be_bytes());
+            exts.extend_from_slice(&list);
+        }
+
+        let mut hs_body = Vec::new();
+        hs_body.extend_from_slice(&legacy_version.to_be_bytes()); // legacy_version
+        hs_body.extend_from_slice(&[0u8; 32]); // random
+        hs_body.push(0); // session_id_len = 0
+        hs_body.extend_from_slice(&2u16.to_be_bytes()); // 2 bytes of ciphers
+        hs_body.extend_from_slice(&[0x13, 0x01]); // TLS_AES_128_GCM_SHA256
+        hs_body.push(1); // compression methods len
+        hs_body.push(0); // null compression
+        hs_body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        hs_body.extend_from_slice(&exts);
+
+        let mut handshake = Vec::new();
+        handshake.push(0x01); // ClientHello
+        let len = hs_body.len() as u32;
+        handshake.extend_from_slice(&[
+            (len >> 16) as u8,
+            (len >> 8) as u8,
+            len as u8,
+        ]); // uint24
+        handshake.extend_from_slice(&hs_body);
+
+        let mut record = Vec::new();
+        record.push(TLS_RECORD_HANDSHAKE);
+        record.extend_from_slice(&[0x03, 0x03]); // TLS 1.2 record version
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    // ============= is_tls_handshake =============
+
+    #[test]
+    fn is_tls_handshake_accepts_legacy_and_tls12_record_versions() {
+        // 0x16, 0x03, 0x01 (legacy TLS 1.0 record version, used by ClientHello).
+        assert!(is_tls_handshake(&[0x16, 0x03, 0x01, 0x00, 0x00]));
+        // 0x16, 0x03, 0x03 (TLS 1.2 record version, what TLS 1.3 sends).
+        assert!(is_tls_handshake(&[0x16, 0x03, 0x03, 0x00, 0x00]));
+    }
+
+    #[test]
+    fn is_tls_handshake_rejects_non_handshake_record_types() {
+        assert!(!is_tls_handshake(&[0x17, 0x03, 0x03])); // ApplicationData
+        assert!(!is_tls_handshake(&[0x14, 0x03, 0x03])); // ChangeCipherSpec
+        assert!(!is_tls_handshake(&[0x15, 0x03, 0x03])); // Alert
+    }
+
+    #[test]
+    fn is_tls_handshake_rejects_wrong_record_versions() {
+        // 0x16 + 0x03 + 0x02 is not in {0x01, 0x03}.
+        assert!(!is_tls_handshake(&[0x16, 0x03, 0x02]));
+        // 0x16 + 0x04 + ... rejects because second byte must be 0x03.
+        assert!(!is_tls_handshake(&[0x16, 0x04, 0x03]));
+    }
+
+    #[test]
+    fn is_tls_handshake_rejects_short_input() {
+        assert!(!is_tls_handshake(&[]));
+        assert!(!is_tls_handshake(&[0x16]));
+        assert!(!is_tls_handshake(&[0x16, 0x03]));
+    }
+
+    // ============= parse_tls_record_header =============
+
+    #[test]
+    fn parse_tls_record_header_accepts_tls10_and_tls12_versions() {
+        // TLS 1.0 record header (used by initial ClientHello).
+        let h = [0x16u8, 0x03, 0x01, 0x01, 0x00];
+        let (ty, len) = parse_tls_record_header(&h).unwrap();
+        assert_eq!(ty, TLS_RECORD_HANDSHAKE);
+        assert_eq!(len, 256);
+        // TLS 1.2 / 1.3 record header.
+        let h = [0x17u8, 0x03, 0x03, 0x00, 0x0a];
+        let (ty, len) = parse_tls_record_header(&h).unwrap();
+        assert_eq!(ty, TLS_RECORD_APPLICATION);
+        assert_eq!(len, 10);
+    }
+
+    #[test]
+    fn parse_tls_record_header_rejects_unknown_versions() {
+        // 0x03, 0x02 — TLS 1.1 — not accepted.
+        assert!(parse_tls_record_header(&[0x16, 0x03, 0x02, 0, 0]).is_none());
+        // 0x02, 0x00 — SSL 2.0 — not accepted.
+        assert!(parse_tls_record_header(&[0x16, 0x02, 0x00, 0, 0]).is_none());
+    }
+
+    // ============= is_valid_sni_hostname =============
+
+    #[test]
+    fn is_valid_sni_hostname_accepts_typical_hosts() {
+        assert!(is_valid_sni_hostname("example.com"));
+        assert!(is_valid_sni_hostname("a"));
+        assert!(is_valid_sni_hostname("api.v3.example.co.uk"));
+        assert!(is_valid_sni_hostname("xn--de-eka1c"));
+        // 63-byte label (max allowed).
+        let label = "a".repeat(63);
+        assert!(is_valid_sni_hostname(&format!("{label}.com")));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_rejects_obvious_invalid() {
+        assert!(!is_valid_sni_hostname(""));
+        // 64-byte label (over max).
+        let too_long_label = "a".repeat(64);
+        assert!(!is_valid_sni_hostname(&too_long_label));
+        // Whole hostname >253 bytes.
+        let huge = "a.".repeat(200);
+        assert!(!is_valid_sni_hostname(&huge));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_rejects_ip_literals() {
+        assert!(!is_valid_sni_hostname("127.0.0.1"));
+        assert!(!is_valid_sni_hostname("8.8.8.8"));
+        assert!(!is_valid_sni_hostname("::1"));
+        assert!(!is_valid_sni_hostname("2001:db8::1"));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_rejects_leading_trailing_dots_or_dashes() {
+        assert!(!is_valid_sni_hostname(".example.com"));
+        assert!(!is_valid_sni_hostname("example.com."));
+        assert!(!is_valid_sni_hostname("-bad.example.com"));
+        assert!(!is_valid_sni_hostname("bad-.example.com"));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_rejects_non_alnum_bytes() {
+        assert!(!is_valid_sni_hostname("ex_ample.com"));
+        assert!(!is_valid_sni_hostname("ex ample.com"));
+        // Non-ASCII (uppercase Cyrillic) bytes must be rejected — SNI is ASCII/punycode.
+        assert!(!is_valid_sni_hostname("привет.com"));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_rejects_empty_label() {
+        assert!(!is_valid_sni_hostname("foo..bar"));
+    }
+
+    // ============= extract_sni_from_client_hello =============
+
+    #[test]
+    fn extract_sni_returns_hostname_when_present() {
+        let ch = build_client_hello(Some("api.example.com"), &[], &[0x0304], 0x0303);
+        let sni = extract_sni_from_client_hello(&ch);
+        assert_eq!(sni.as_deref(), Some("api.example.com"));
+    }
+
+    #[test]
+    fn extract_sni_returns_none_when_extension_absent() {
+        let ch = build_client_hello(None, &[], &[0x0304], 0x0303);
+        assert!(extract_sni_from_client_hello(&ch).is_none());
+    }
+
+    #[test]
+    fn extract_sni_rejects_invalid_hostname_inside_extension() {
+        // Real-world malformed SNI: trailing dot must fail validation.
+        let ch = build_client_hello(Some("api.example.com."), &[], &[0x0304], 0x0303);
+        assert!(extract_sni_from_client_hello(&ch).is_none());
+    }
+
+    #[test]
+    fn extract_sni_rejects_non_tls_handshake_byte() {
+        let mut ch = build_client_hello(Some("a.example"), &[], &[0x0304], 0x0303);
+        ch[0] = 0x17; // ApplicationData record
+        assert!(extract_sni_from_client_hello(&ch).is_none());
+    }
+
+    #[test]
+    fn extract_sni_handles_truncated_input_gracefully() {
+        let ch = build_client_hello(Some("a.example"), &[], &[0x0304], 0x0303);
+        for cut in 0..ch.len().min(50) {
+            // Must not panic; result is best-effort.
+            let _ = extract_sni_from_client_hello(&ch[..cut]);
+        }
+    }
+
+    // ============= extract_alpn_from_client_hello =============
+
+    #[test]
+    fn extract_alpn_returns_protocols_in_offered_order() {
+        let alpn: &[&[u8]] = &[b"h2", b"http/1.1"];
+        let ch = build_client_hello(None, alpn, &[0x0304], 0x0303);
+        let got = extract_alpn_from_client_hello(&ch);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], b"h2");
+        assert_eq!(got[1], b"http/1.1");
+    }
+
+    #[test]
+    fn extract_alpn_returns_empty_when_extension_absent() {
+        let ch = build_client_hello(Some("a.example"), &[], &[0x0304], 0x0303);
+        let got = extract_alpn_from_client_hello(&ch);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn extract_alpn_returns_empty_for_non_handshake_record() {
+        let mut ch = build_client_hello(None, &[b"h2"], &[0x0304], 0x0303);
+        ch[0] = 0x17; // Not a Handshake record.
+        assert!(extract_alpn_from_client_hello(&ch).is_empty());
+    }
+
+    // ============= detect_client_hello_tls_version =============
+
+    #[test]
+    fn detect_tls_version_returns_tls13_when_supported_versions_contains_0304() {
+        let ch = build_client_hello(None, &[], &[0x0303, 0x0304], 0x0303);
+        assert_eq!(
+            detect_client_hello_tls_version(&ch),
+            Some(ClientHelloTlsVersion::Tls13)
+        );
+    }
+
+    #[test]
+    fn detect_tls_version_returns_tls12_when_only_legacy_versions_in_supported_versions() {
+        let ch = build_client_hello(None, &[], &[0x0303, 0x0302, 0x0301], 0x0303);
+        assert_eq!(
+            detect_client_hello_tls_version(&ch),
+            Some(ClientHelloTlsVersion::Tls12)
+        );
+    }
+
+    #[test]
+    fn detect_tls_version_falls_back_to_legacy_version_when_extension_absent() {
+        // No supported_versions extension → use legacy_version.
+        let ch = build_client_hello(None, &[], &[], 0x0303);
+        assert_eq!(
+            detect_client_hello_tls_version(&ch),
+            Some(ClientHelloTlsVersion::Tls12)
+        );
+    }
+
+    #[test]
+    fn detect_tls_version_returns_none_for_pre_tls12_legacy_with_no_extension() {
+        // legacy_version 0x0301 (TLS 1.0) without supported_versions ext.
+        let ch = build_client_hello(None, &[], &[], 0x0301);
+        assert!(detect_client_hello_tls_version(&ch).is_none());
+    }
+
+    #[test]
+    fn detect_tls_version_rejects_non_handshake_record() {
+        let mut ch = build_client_hello(None, &[], &[0x0304], 0x0303);
+        ch[0] = 0x17;
+        assert!(detect_client_hello_tls_version(&ch).is_none());
+    }
+
+    // ============= Combined invariants =============
+
+    #[test]
+    fn full_client_hello_roundtrip_parses_all_three_extensions_independently() {
+        // The opt.md §6.1 finding is that SNI/ALPN/version are parsed in
+        // three separate linear scans. They must agree on the same hello.
+        let ch = build_client_hello(
+            Some("svc.example.org"),
+            &[b"h2", b"http/1.1"],
+            &[0x0304],
+            0x0303,
+        );
+
+        assert_eq!(
+            extract_sni_from_client_hello(&ch).as_deref(),
+            Some("svc.example.org")
+        );
+        let alpn = extract_alpn_from_client_hello(&ch);
+        assert_eq!(alpn, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert_eq!(
+            detect_client_hello_tls_version(&ch),
+            Some(ClientHelloTlsVersion::Tls13)
+        );
+    }
+
+    // ============= system_time_to_unix_secs =============
+
+    #[test]
+    fn system_time_to_unix_secs_returns_some_for_epoch() {
+        let r = system_time_to_unix_secs(UNIX_EPOCH);
+        assert_eq!(r, Some(0));
+    }
+
+    #[test]
+    fn system_time_to_unix_secs_returns_some_for_known_future() {
+        // 2030-01-01 00:00:00 UTC = 1_893_456_000 seconds since epoch.
+        let t = UNIX_EPOCH + std::time::Duration::from_secs(1_893_456_000);
+        assert_eq!(system_time_to_unix_secs(t), Some(1_893_456_000));
+    }
+
+    #[test]
+    fn system_time_to_unix_secs_returns_none_for_pre_epoch() {
+        // Times before UNIX_EPOCH cause duration_since to fail.
+        let pre = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("UNIX_EPOCH - 1s must be representable");
+        assert!(system_time_to_unix_secs(pre).is_none());
+    }
+
+    // ============= validate_tls_handshake_at_time =============
+
+    /// Builds a 64-byte ClientHello that the validator can succeed on:
+    /// at offset TLS_DIGEST_POS lives a 32-byte digest = HMAC(secret, msg)
+    /// where bytes 28..32 carry `timestamp` XOR'd against the HMAC output.
+    /// Layout: 11 header bytes, 32 digest bytes, 1 session_id_len = 0, rest is padding.
+    fn build_validatable_handshake(secret: &[u8], timestamp: u32) -> Vec<u8> {
+        // 64 bytes total covers minimum size required by the validator.
+        let mut hs = vec![0u8; 64];
+        // Set a session_id_len of 0 right after the digest position.
+        hs[TLS_DIGEST_POS + TLS_DIGEST_LEN] = 0;
+
+        // Step 1: compute HMAC over the message that has the digest slot zeroed.
+        let computed = sha256_hmac(secret, &hs);
+
+        // Step 2: write digest into the handshake:
+        // - first 28 bytes = HMAC[0..28] (so ct_eq match succeeds).
+        // - last 4 bytes = HMAC[28..32] XOR timestamp_le.
+        let ts_le = timestamp.to_le_bytes();
+        hs[TLS_DIGEST_POS..TLS_DIGEST_POS + 28].copy_from_slice(&computed[..28]);
+        for i in 0..4 {
+            hs[TLS_DIGEST_POS + 28 + i] = computed[28 + i] ^ ts_le[i];
+        }
+        hs
+    }
+
+    #[test]
+    fn validate_at_time_accepts_handshake_with_in_window_timestamp() {
+        let secret = b"super-secret-bytes-xyz";
+        let now = 1_700_000_000_i64;
+        let hs = build_validatable_handshake(secret, now as u32);
+
+        let secrets = vec![("alice".to_string(), secret.to_vec())];
+        let res = validate_tls_handshake_at_time(&hs, &secrets, false, now)
+            .expect("validation must accept in-window handshake");
+        assert_eq!(res.user, "alice");
+        assert_eq!(res.timestamp, now as u32);
+        assert_eq!(res.digest.len(), TLS_DIGEST_LEN);
+        assert_eq!(res.session_id.len(), 0);
+    }
+
+    #[test]
+    fn validate_at_time_rejects_out_of_window_timestamp() {
+        let secret = b"abc";
+        let now = 1_700_000_000_i64;
+        // Timestamp 1 hour in the future — well outside TIME_SKEW_MAX (120 s).
+        let hs = build_validatable_handshake(secret, (now + 3600) as u32);
+
+        let secrets = vec![("alice".to_string(), secret.to_vec())];
+        assert!(validate_tls_handshake_at_time(&hs, &secrets, false, now).is_none());
+    }
+
+    #[test]
+    fn validate_at_time_ignore_skew_accepts_any_timestamp() {
+        let secret = b"abc";
+        // Wildly off — but ignore_time_skew skips the check.
+        let hs = build_validatable_handshake(secret, 1);
+        let now = 1_700_000_000_i64;
+
+        let secrets = vec![("alice".to_string(), secret.to_vec())];
+        let res = validate_tls_handshake_at_time(&hs, &secrets, true, now)
+            .expect("ignore_time_skew must accept any timestamp");
+        assert_eq!(res.timestamp, 1);
+    }
+
+    #[test]
+    fn validate_at_time_accepts_boot_time_under_cap() {
+        let secret = b"abc";
+        // Timestamp < BOOT_TIME_MAX_SECS is treated as boot uptime, not unix epoch.
+        let boot_ts = BOOT_TIME_MAX_SECS - 100;
+        let hs = build_validatable_handshake(secret, boot_ts);
+        // `now` doesn't matter for boot-time path — but the validator needs a value.
+        let now = 1_700_000_000_i64;
+        let secrets = vec![("alice".to_string(), secret.to_vec())];
+        let res = validate_tls_handshake_at_time(&hs, &secrets, false, now)
+            .expect("boot-time timestamp under cap must be accepted");
+        assert_eq!(res.timestamp, boot_ts);
+    }
+
+    #[test]
+    fn validate_at_time_rejects_when_no_secret_matches() {
+        let secret = b"correct";
+        let now = 1_700_000_000_i64;
+        let hs = build_validatable_handshake(secret, now as u32);
+        // Different secret in the table.
+        let secrets = vec![("eve".to_string(), b"wrong".to_vec())];
+        assert!(validate_tls_handshake_at_time(&hs, &secrets, false, now).is_none());
+    }
+
+    #[test]
+    fn validate_at_time_rejects_truncated_input() {
+        let short = vec![0u8; TLS_DIGEST_POS + 10]; // way below required length
+        let secrets = vec![("alice".to_string(), b"x".to_vec())];
+        assert!(validate_tls_handshake_at_time(&short, &secrets, false, 0).is_none());
+    }
+
+    #[test]
+    fn validate_at_time_rejects_oversized_session_id() {
+        // session_id_len byte = 33 (above the 32 cap).
+        let mut hs = vec![0u8; 64];
+        hs[TLS_DIGEST_POS + TLS_DIGEST_LEN] = 33;
+        let secrets = vec![("alice".to_string(), b"x".to_vec())];
+        assert!(validate_tls_handshake_at_time(&hs, &secrets, false, 0).is_none());
+    }
+
+    #[test]
+    fn validate_with_boot_cap_zero_disables_boot_time_path() {
+        let secret = b"abc";
+        // boot_ts is small — would be accepted with cap > ts, but with cap = 0
+        // the validator must fall through to the regular time-skew check and
+        // reject (since boot_ts is way out of the ±120 s window).
+        let boot_ts = 1234u32;
+        let hs = build_validatable_handshake(secret, boot_ts);
+        let now = 1_700_000_000_i64;
+        let secrets = vec![("alice".to_string(), secret.to_vec())];
+        assert!(
+            validate_tls_handshake_at_time_with_boot_cap(&hs, &secrets, false, now, 0).is_none()
+        );
+    }
+
+    #[test]
+    fn validate_picks_first_matching_secret_among_many() {
+        let secret_a = b"alpha-key";
+        let secret_b = b"beta-key";
+        let now = 1_700_000_000_i64;
+        let hs = build_validatable_handshake(secret_b, now as u32);
+
+        // `alpha` doesn't match the digest; `beta` does.
+        let secrets = vec![
+            ("alpha".to_string(), secret_a.to_vec()),
+            ("beta".to_string(), secret_b.to_vec()),
+        ];
+        let res = validate_tls_handshake_at_time(&hs, &secrets, false, now).unwrap();
+        assert_eq!(res.user, "beta");
+    }
+
+    // ============= gen_fake_x25519_key =============
+
+    #[test]
+    fn gen_fake_x25519_key_not_all_zero() {
+        // The basepoint × random scalar is overwhelmingly likely to be
+        // non-zero. If it IS all-zero, that's catastrophic for our
+        // anti-fingerprinting goal.
+        let rng = SecureRandom::new();
+        let k = gen_fake_x25519_key(&rng);
+        assert_ne!(k, [0u8; 32]);
+    }
+
+    #[test]
+    fn gen_fake_x25519_key_differs_across_calls() {
+        let rng = SecureRandom::new();
+        let a = gen_fake_x25519_key(&rng);
+        let b = gen_fake_x25519_key(&rng);
+        assert_ne!(a, b);
+    }
+
+    // ============= build_server_hello =============
+
+    fn fixed_secret() -> Vec<u8> {
+        b"super-secret-bytes-xyz".to_vec()
+    }
+
+    fn fixed_client_digest() -> [u8; TLS_DIGEST_LEN] {
+        let mut d = [0u8; TLS_DIGEST_LEN];
+        for (i, slot) in d.iter_mut().enumerate() {
+            *slot = (i as u8).wrapping_mul(7);
+        }
+        d
+    }
+
+    #[test]
+    fn build_server_hello_starts_with_well_formed_serverhello_record() {
+        let rng = SecureRandom::new();
+        let resp = build_server_hello(
+            &fixed_secret(),
+            &fixed_client_digest(),
+            &[],
+            128,
+            &rng,
+            None,
+            0,
+        );
+        // The first record must pass our own ServerHello validator.
+        // (Validator is `#[cfg(test)]`-only; this is the contract test.)
+        validate_server_hello_structure(&resp).expect("ServerHello header must be well-formed");
+        // Record header layout: HANDSHAKE | TLS_VERSION | u16 length.
+        assert_eq!(resp[0], TLS_RECORD_HANDSHAKE);
+        assert_eq!(&resp[1..3], &TLS_VERSION);
+    }
+
+    #[test]
+    fn build_server_hello_contains_change_cipher_spec_record() {
+        let rng = SecureRandom::new();
+        let resp = build_server_hello(
+            &fixed_secret(),
+            &fixed_client_digest(),
+            &[1, 2, 3],
+            128,
+            &rng,
+            None,
+            0,
+        );
+        // CCS record is a fixed 6-byte sequence; find it inside the response.
+        let ccs = [TLS_RECORD_CHANGE_CIPHER, TLS_VERSION[0], TLS_VERSION[1], 0x00, 0x01, 0x01];
+        assert!(
+            resp.windows(6).any(|w| w == ccs),
+            "expected ChangeCipherSpec record sequence inside response"
+        );
+    }
+
+    #[test]
+    fn build_server_hello_contains_application_data_record_of_requested_size() {
+        let rng = SecureRandom::new();
+        let fake_cert_len = 256;
+        let resp = build_server_hello(
+            &fixed_secret(),
+            &fixed_client_digest(),
+            &[],
+            fake_cert_len,
+            &rng,
+            None,
+            0,
+        );
+        // Scan for an ApplicationData record with the requested length.
+        // Layout: 0x17 | 0x03 0x03 | u16 length.
+        let mut found = false;
+        let mut i = 0;
+        while i + 5 <= resp.len() {
+            if resp[i] == TLS_RECORD_APPLICATION
+                && resp[i + 1..i + 3] == TLS_VERSION
+                && u16::from_be_bytes([resp[i + 3], resp[i + 4]]) as usize == fake_cert_len
+            {
+                found = true;
+                break;
+            }
+            i += 1;
+        }
+        assert!(found, "no ApplicationData record of length {fake_cert_len} found");
+    }
+
+    #[test]
+    fn build_server_hello_clamps_fake_cert_len_to_minimum() {
+        let rng = SecureRandom::new();
+        // Requested below MIN_APP_DATA (64); the produced AppData record
+        // must still be >= 64 bytes long.
+        let resp = build_server_hello(
+            &fixed_secret(),
+            &fixed_client_digest(),
+            &[],
+            8, // below the 64-byte floor
+            &rng,
+            None,
+            0,
+        );
+        let mut max_app_data_len: u16 = 0;
+        let mut i = 0;
+        while i + 5 <= resp.len() {
+            if resp[i] == TLS_RECORD_APPLICATION && resp[i + 1..i + 3] == TLS_VERSION {
+                let n = u16::from_be_bytes([resp[i + 3], resp[i + 4]]);
+                if n > max_app_data_len {
+                    max_app_data_len = n;
+                }
+            }
+            i += 1;
+        }
+        assert!(
+            max_app_data_len >= 64,
+            "AppData record must be clamped to >= 64 bytes, got {max_app_data_len}"
+        );
+    }
+
+    #[test]
+    fn build_server_hello_clamps_fake_cert_len_to_maximum() {
+        let rng = SecureRandom::new();
+        let resp = build_server_hello(
+            &fixed_secret(),
+            &fixed_client_digest(),
+            &[],
+            usize::MAX,
+            &rng,
+            None,
+            0,
+        );
+        // Every AppData record length must fit in u16 and not exceed
+        // MAX_TLS_CIPHERTEXT_SIZE.
+        let mut i = 0;
+        while i + 5 <= resp.len() {
+            if resp[i] == TLS_RECORD_APPLICATION && resp[i + 1..i + 3] == TLS_VERSION {
+                let n = u16::from_be_bytes([resp[i + 3], resp[i + 4]]) as usize;
+                assert!(n <= MAX_TLS_CIPHERTEXT_SIZE);
+            }
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn build_server_hello_clamps_session_ticket_count_to_four() {
+        let rng = SecureRandom::new();
+        // Ask for 10 tickets — the implementation caps at 4.
+        let resp = build_server_hello(
+            &fixed_secret(),
+            &fixed_client_digest(),
+            &[],
+            64,
+            &rng,
+            None,
+            10,
+        );
+        // Count ApplicationData records. The first AppData record is the
+        // fake-cert. Anything beyond it is a NewSessionTicket-like record.
+        let mut app_data_records = 0;
+        let mut i = 0;
+        while i + 5 <= resp.len() {
+            if resp[i] == TLS_RECORD_APPLICATION && resp[i + 1..i + 3] == TLS_VERSION {
+                let n = u16::from_be_bytes([resp[i + 3], resp[i + 4]]) as usize;
+                if i + 5 + n <= resp.len() {
+                    app_data_records += 1;
+                    i += 5 + n;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        // 1 (fake_cert) + up to 4 (tickets) = 5 max.
+        assert!(
+            app_data_records <= 5,
+            "expected at most 5 ApplicationData records (1 cert + 4 tickets), got {app_data_records}"
+        );
+    }
+
+    #[test]
+    fn build_server_hello_emits_zero_tickets_when_count_is_zero() {
+        let rng = SecureRandom::new();
+        let resp = build_server_hello(
+            &fixed_secret(),
+            &fixed_client_digest(),
+            &[],
+            64,
+            &rng,
+            None,
+            0,
+        );
+        let mut app_data_records = 0;
+        let mut i = 0;
+        while i + 5 <= resp.len() {
+            if resp[i] == TLS_RECORD_APPLICATION && resp[i + 1..i + 3] == TLS_VERSION {
+                let n = u16::from_be_bytes([resp[i + 3], resp[i + 4]]) as usize;
+                if i + 5 + n <= resp.len() {
+                    app_data_records += 1;
+                    i += 5 + n;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        // Exactly one AppData record (the fake_cert) when no tickets are requested.
+        assert_eq!(app_data_records, 1);
+    }
+
+    #[test]
+    fn build_server_hello_embeds_hmac_digest_at_fixed_offset() {
+        let rng = SecureRandom::new();
+        let secret = fixed_secret();
+        let client_digest = fixed_client_digest();
+        let resp = build_server_hello(&secret, &client_digest, &[], 128, &rng, None, 0);
+
+        // Compute the expected HMAC the same way the function does and
+        // verify it landed in the right slot. The function fills the
+        // digest slot *after* concatenating the whole response, so we
+        // re-derive the expected digest from a copy with that slot zeroed.
+        let mut input_view = Vec::with_capacity(TLS_DIGEST_LEN + resp.len());
+        input_view.extend_from_slice(&client_digest);
+        input_view.extend_from_slice(&resp);
+        // Zero out the digest slot in the appended copy.
+        let zero_start = TLS_DIGEST_LEN + TLS_DIGEST_POS;
+        for b in &mut input_view[zero_start..zero_start + TLS_DIGEST_LEN] {
+            *b = 0;
+        }
+        let expected = sha256_hmac(&secret, &input_view);
+        assert_eq!(&resp[TLS_DIGEST_POS..TLS_DIGEST_POS + TLS_DIGEST_LEN], &expected[..]);
+    }
+
+    // ============= validate_server_hello_structure =============
+
+    #[test]
+    fn validate_server_hello_structure_rejects_truncated() {
+        for n in 0..5 {
+            let buf = vec![0u8; n];
+            assert!(validate_server_hello_structure(&buf).is_err());
+        }
+    }
+
+    #[test]
+    fn validate_server_hello_structure_rejects_wrong_record_type() {
+        let mut buf = [0u8; 16];
+        buf[0] = 0x17; // ApplicationData, not Handshake
+        buf[1..3].copy_from_slice(&TLS_VERSION);
+        buf[3..5].copy_from_slice(&11u16.to_be_bytes());
+        let err = validate_server_hello_structure(&buf).unwrap_err();
+        assert!(
+            matches!(err, ProxyError::InvalidTlsRecord { .. }),
+            "expected InvalidTlsRecord, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_server_hello_structure_rejects_wrong_version() {
+        let mut buf = [0u8; 16];
+        buf[0] = TLS_RECORD_HANDSHAKE;
+        buf[1] = 0x03;
+        buf[2] = 0x02; // not TLS 1.2/1.3 record version
+        buf[3..5].copy_from_slice(&11u16.to_be_bytes());
+        assert!(validate_server_hello_structure(&buf).is_err());
+    }
+
+    #[test]
+    fn validate_server_hello_structure_rejects_record_truncation() {
+        let mut buf = [0u8; 10];
+        buf[0] = TLS_RECORD_HANDSHAKE;
+        buf[1..3].copy_from_slice(&TLS_VERSION);
+        // Claim 100 record bytes but provide only 5 after the header.
+        buf[3..5].copy_from_slice(&100u16.to_be_bytes());
+        assert!(validate_server_hello_structure(&buf).is_err());
+    }
+
+    #[test]
+    fn validate_server_hello_structure_rejects_non_serverhello_message_type() {
+        // ClientHello byte 0x01 instead of ServerHello 0x02.
+        let mut buf = vec![0u8; 16];
+        buf[0] = TLS_RECORD_HANDSHAKE;
+        buf[1..3].copy_from_slice(&TLS_VERSION);
+        buf[3..5].copy_from_slice(&11u16.to_be_bytes());
+        buf[5] = 0x01; // ClientHello
+        buf[6] = 0;
+        buf[7] = 0;
+        buf[8] = 7;
+        let err = validate_server_hello_structure(&buf).unwrap_err();
+        match err {
+            ProxyError::InvalidHandshake(msg) => assert!(msg.contains("ServerHello")),
+            _ => panic!("expected InvalidHandshake"),
+        }
+    }
+
+    #[test]
+    fn validate_server_hello_structure_rejects_message_length_mismatch() {
+        let mut buf = vec![0u8; 16];
+        buf[0] = TLS_RECORD_HANDSHAKE;
+        buf[1..3].copy_from_slice(&TLS_VERSION);
+        buf[3..5].copy_from_slice(&11u16.to_be_bytes());
+        buf[5] = 0x02; // ServerHello
+        // Claim message length 99 (≠ record_len - 4 = 7).
+        buf[6] = 0;
+        buf[7] = 0;
+        buf[8] = 99;
+        let err = validate_server_hello_structure(&buf).unwrap_err();
+        match err {
+            ProxyError::InvalidHandshake(msg) => {
+                assert!(msg.contains("Message length mismatch"));
+            }
+            _ => panic!("expected InvalidHandshake"),
+        }
+    }
+}
+
 // ============= Security-focused regression tests =============
 
 #[cfg(test)]
@@ -1049,3 +1871,661 @@ mod fuzz_security_tests;
 #[cfg(test)]
 #[path = "tests/tls_length_cast_hardening_security_tests.rs"]
 mod length_cast_hardening_security_tests;
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+    use crate::protocol::constants::TLS_RECORD_HANDSHAKE;
+
+    #[test]
+    fn tls_extension_builder_build_has_length_prefix() {
+        let mut builder = TlsExtensionBuilder::new();
+        let key = [0x42u8; 32];
+        builder.add_key_share(&key);
+        let built = builder.build();
+        let len = u16::from_be_bytes([built[0], built[1]]) as usize;
+        assert_eq!(len + 2, built.len());
+    }
+
+    #[test]
+    fn tls_extension_builder_supported_versions() {
+        // Extension layout: type (2) + ext-data-len (2) + version (2) = 6 bytes.
+        // The header makes 4 fixed bytes; only one version is currently supported.
+        let mut builder = TlsExtensionBuilder::new();
+        builder.add_supported_versions(0x0304);
+        let bytes = builder.as_bytes();
+        assert_eq!(bytes.len(), 6);
+        // Type bytes are the supported_versions marker (0x002b).
+        assert_eq!(&bytes[0..2], &[0x00, 0x2b]);
+        // Ext data length declares 2 bytes of payload (the version).
+        assert_eq!(&bytes[2..4], &(2u16).to_be_bytes());
+        // Payload is the requested TLS 1.3 version.
+        assert_eq!(&bytes[4..6], &(0x0304u16).to_be_bytes());
+    }
+
+    #[test]
+    fn server_hello_builder_record_has_tls_header() {
+        let builder = ServerHelloBuilder::new(vec![]);
+        let record = builder.build_record();
+        assert!(record.len() >= 5);
+        assert_eq!(record[0], TLS_RECORD_HANDSHAKE);
+    }
+
+    #[test]
+    fn server_hello_builder_session_id_echoed() {
+        let session_id = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let builder = ServerHelloBuilder::new(session_id.clone());
+        let msg = builder.build_message();
+        let sid_len = msg[4 + 2 + 32] as usize;
+        assert_eq!(sid_len, 4);
+        assert_eq!(&msg[4 + 2 + 32 + 1..4 + 2 + 32 + 1 + 4], &session_id);
+    }
+
+    #[test]
+    fn validate_server_hello_structure_accepts_valid() {
+        let builder = ServerHelloBuilder::new(vec![]);
+        let record = builder.build_record();
+        assert!(validate_server_hello_structure(&record).is_ok());
+    }
+
+    // `validate_server_hello_structure_rejects_too_short` removed in
+    // favor of `pure_parser_tests::validate_server_hello_structure_rejects_truncated`,
+    // which iterates `n in 0..5` and subsumes both inputs.
+
+    #[test]
+    fn validate_server_hello_structure_rejects_truncated() {
+        // Distinct from the pure_parser_tests variant: that one truncates
+        // *before* a valid record header is even written. This one starts
+        // with a fully-built ServerHello and chops the last byte, so it
+        // exercises the body-truncation branch (header parses, body short).
+        let builder = ServerHelloBuilder::new(vec![]);
+        let mut record = builder.build_record();
+        record.truncate(record.len() - 1);
+        assert!(validate_server_hello_structure(&record).is_err());
+    }
+
+    #[test]
+    fn validate_server_hello_structure_rejects_wrong_msg_type() {
+        let mut record = vec![
+            TLS_RECORD_HANDSHAKE,
+            0x03, 0x03,
+        ];
+        let msg = vec![0x01u8, 0x00, 0x00, 0x02, 0x03, 0x03];
+        let msg_len = msg.len() as u16;
+        record.extend_from_slice(&msg_len.to_be_bytes());
+        record.extend_from_slice(&msg);
+        assert!(validate_server_hello_structure(&record).is_err());
+    }
+
+    #[test]
+    fn build_server_hello_produces_valid_structure() {
+        let rng = crate::crypto::SecureRandom::new();
+        let secret = b"0123456789abcdef";
+        let digest = [0x42u8; 32];
+        let session_id = vec![0xAA; 32];
+
+        let response = super::build_server_hello(
+            secret,
+            &digest,
+            &session_id,
+            0,
+            &rng,
+            None,
+            0,
+        );
+
+        assert!(validate_server_hello_structure(&response).is_ok());
+    }
+
+    #[test]
+    fn build_server_hello_contains_ccs_and_app_data() {
+        let rng = crate::crypto::SecureRandom::new();
+        let response = super::build_server_hello(
+            b"0123456789abcdef",
+            &[0x42u8; 32],
+            &vec![0; 32],
+            0,
+            &rng,
+            None,
+            0,
+        );
+        assert!(response.len() > 5);
+        assert!(response.windows(2).any(|w| w == &[0x14, 0x03]));
+    }
+}
+
+// ============= Tail coverage: edge-case pure parsers & predicates =============
+
+#[cfg(test)]
+mod tail_coverage_tests {
+    use super::*;
+    // Re-use the ClientHello builder from pure_parser_tests (identical layout).
+    use super::pure_parser_tests::build_client_hello;
+
+    // Helper: build ClientHello with a non-zero session_id.
+    fn build_client_hello_with_session_id(
+        sni: Option<&str>,
+        session_id: &[u8],
+        supported_versions: &[u16],
+        legacy_version: u16,
+    ) -> Vec<u8> {
+        let mut exts: Vec<u8> = Vec::new();
+
+        if let Some(host) = sni {
+            let mut ext_body = Vec::new();
+            let entry_len = 1 + 2 + host.len();
+            ext_body.extend_from_slice(&(entry_len as u16).to_be_bytes());
+            ext_body.push(0);
+            ext_body.extend_from_slice(&(host.len() as u16).to_be_bytes());
+            ext_body.extend_from_slice(host.as_bytes());
+            exts.extend_from_slice(&0x0000u16.to_be_bytes());
+            exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+            exts.extend_from_slice(&ext_body);
+        }
+
+        if !supported_versions.is_empty() {
+            let mut list = Vec::new();
+            list.push((supported_versions.len() * 2) as u8);
+            for &v in supported_versions {
+                list.extend_from_slice(&v.to_be_bytes());
+            }
+            exts.extend_from_slice(&0x002bu16.to_be_bytes());
+            exts.extend_from_slice(&(list.len() as u16).to_be_bytes());
+            exts.extend_from_slice(&list);
+        }
+
+        let mut hs_body = Vec::new();
+        hs_body.extend_from_slice(&legacy_version.to_be_bytes());
+        hs_body.extend_from_slice(&[0u8; 32]);
+        hs_body.push(session_id.len() as u8);
+        hs_body.extend_from_slice(session_id);
+        hs_body.extend_from_slice(&2u16.to_be_bytes());
+        hs_body.extend_from_slice(&[0x13, 0x01]);
+        hs_body.push(1);
+        hs_body.push(0);
+        hs_body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        hs_body.extend_from_slice(&exts);
+
+        let mut handshake = Vec::new();
+        handshake.push(0x01);
+        let len = hs_body.len() as u32;
+        handshake.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
+        handshake.extend_from_slice(&hs_body);
+
+        let mut record = Vec::new();
+        record.push(TLS_RECORD_HANDSHAKE);
+        record.extend_from_slice(&[0x03, 0x03]);
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    // ---- is_valid_sni_hostname boundary tests ----
+
+    #[test]
+    fn is_valid_sni_hostname_accepts_exactly_253_chars() {
+        let label63 = "a".repeat(63);
+        let label61 = "a".repeat(61);
+        let host = format!("{label63}.{label63}.{label63}.{label61}");
+        assert_eq!(host.len(), 253);
+        assert!(is_valid_sni_hostname(&host));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_rejects_254_chars() {
+        let label63 = "a".repeat(63);
+        let label62 = "a".repeat(62);
+        let host = format!("{label63}.{label63}.{label63}.{label62}");
+        assert_eq!(host.len(), 254);
+        assert!(!is_valid_sni_hostname(&host));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_accepts_numeric_only_label() {
+        assert!(is_valid_sni_hostname("12345.example.com"));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_accepts_single_char_label() {
+        assert!(is_valid_sni_hostname("a"));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_rejects_label_with_underscore() {
+        assert!(!is_valid_sni_hostname("ex_ample.com"));
+    }
+
+    #[test]
+    fn is_valid_sni_hostname_accepts_consecutive_dashes_in_middle() {
+        assert!(is_valid_sni_hostname("a--b.example.com"));
+    }
+
+    // ---- extract_sni edge cases ----
+
+    #[test]
+    fn extract_sni_with_nonzero_session_id() {
+        let sid: Vec<u8> = (0u8..16).collect();
+        let ch = build_client_hello_with_session_id(
+            Some("telemt.example.com"),
+            &sid,
+            &[0x0304],
+            0x0303,
+        );
+        assert_eq!(
+            extract_sni_from_client_hello(&ch).as_deref(),
+            Some("telemt.example.com")
+        );
+    }
+
+    #[test]
+    fn extract_sni_with_max_32_byte_session_id() {
+        let sid: Vec<u8> = (0u8..32).collect();
+        let ch = build_client_hello_with_session_id(
+            Some("a.example"),
+            &sid,
+            &[0x0304],
+            0x0303,
+        );
+        assert_eq!(
+            extract_sni_from_client_hello(&ch).as_deref(),
+            Some("a.example")
+        );
+    }
+
+    #[test]
+    fn extract_sni_rejects_non_host_name_type() {
+        let mut exts: Vec<u8> = Vec::new();
+        let mut ext_body = Vec::new();
+        let host = "example.com";
+        let entry_len = 1 + 2 + host.len();
+        ext_body.extend_from_slice(&(entry_len as u16).to_be_bytes());
+        ext_body.push(1); // name_type = 1 (not hostname)
+        ext_body.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        ext_body.extend_from_slice(host.as_bytes());
+        exts.extend_from_slice(&0x0000u16.to_be_bytes());
+        exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&ext_body);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        assert!(extract_sni_from_client_hello(&ch).is_none());
+    }
+
+    #[test]
+    fn extract_sni_rejects_zero_length_hostname_in_extension() {
+        let mut exts: Vec<u8> = Vec::new();
+        let mut ext_body = Vec::new();
+        ext_body.extend_from_slice(&3u16.to_be_bytes()); // list_len = 3 (type + len)
+        ext_body.push(0); // name_type = 0
+        ext_body.extend_from_slice(&0u16.to_be_bytes()); // name_len = 0
+        exts.extend_from_slice(&0x0000u16.to_be_bytes());
+        exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&ext_body);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        assert!(extract_sni_from_client_hello(&ch).is_none());
+    }
+
+    #[test]
+    fn extract_sni_with_multiple_extensions_before_sni() {
+        let mut exts: Vec<u8> = Vec::new();
+
+        // Non-SNI extension first (e.g., supported_groups = 0x000a)
+        exts.extend_from_slice(&0x000au16.to_be_bytes());
+        exts.extend_from_slice(&2u16.to_be_bytes());
+        exts.extend_from_slice(&[0x00, 0x1d]); // x25519
+
+        // SNI extension second
+        let host = "delayed.example.com";
+        let mut ext_body = Vec::new();
+        let entry_len = 1 + 2 + host.len();
+        ext_body.extend_from_slice(&(entry_len as u16).to_be_bytes());
+        ext_body.push(0);
+        ext_body.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        ext_body.extend_from_slice(host.as_bytes());
+        exts.extend_from_slice(&0x0000u16.to_be_bytes());
+        exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&ext_body);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        assert_eq!(
+            extract_sni_from_client_hello(&ch).as_deref(),
+            Some("delayed.example.com")
+        );
+    }
+
+    fn build_client_hello_with_raw_extensions(ext_blob: &[u8]) -> Vec<u8> {
+        let mut hs_body = Vec::new();
+        hs_body.extend_from_slice(&0x0303u16.to_be_bytes());
+        hs_body.extend_from_slice(&[0u8; 32]);
+        hs_body.push(0); // session_id_len = 0
+        hs_body.extend_from_slice(&2u16.to_be_bytes());
+        hs_body.extend_from_slice(&[0x13, 0x01]);
+        hs_body.push(1);
+        hs_body.push(0);
+        hs_body.extend_from_slice(&(ext_blob.len() as u16).to_be_bytes());
+        hs_body.extend_from_slice(ext_blob);
+
+        let mut handshake = Vec::new();
+        handshake.push(0x01);
+        let len = hs_body.len() as u32;
+        handshake.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
+        handshake.extend_from_slice(&hs_body);
+
+        let mut record = Vec::new();
+        record.push(TLS_RECORD_HANDSHAKE);
+        record.extend_from_slice(&[0x03, 0x03]);
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    // ---- extract_alpn edge cases ----
+
+    #[test]
+    fn extract_alpn_single_protocol() {
+        let ch = build_client_hello(None, &[b"h2"], &[0x0304], 0x0303);
+        let got = extract_alpn_from_client_hello(&ch);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], b"h2");
+    }
+
+    #[test]
+    fn extract_alpn_empty_protocol_name_yields_empty_entry() {
+        let mut exts: Vec<u8> = Vec::new();
+        let mut list = Vec::new();
+        list.push(0); // zero-length protocol
+        let mut ext_body = Vec::new();
+        ext_body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        ext_body.extend_from_slice(&list);
+        exts.extend_from_slice(&0x0010u16.to_be_bytes());
+        exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&ext_body);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        let got = extract_alpn_from_client_hello(&ch);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].is_empty());
+    }
+
+    #[test]
+    fn extract_alpn_with_extensions_before_alpn() {
+        let mut exts: Vec<u8> = Vec::new();
+
+        // Non-ALPN extension first
+        exts.extend_from_slice(&0x000au16.to_be_bytes());
+        exts.extend_from_slice(&2u16.to_be_bytes());
+        exts.extend_from_slice(&[0x00, 0x1d]);
+
+        // ALPN extension second
+        let mut list = Vec::new();
+        list.push(2);
+        list.extend_from_slice(b"h2");
+        let mut ext_body = Vec::new();
+        ext_body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        ext_body.extend_from_slice(&list);
+        exts.extend_from_slice(&0x0010u16.to_be_bytes());
+        exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&ext_body);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        let got = extract_alpn_from_client_hello(&ch);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], b"h2");
+    }
+
+    #[test]
+    fn extract_alpn_truncated_mid_protocol_stops_cleanly() {
+        let mut exts: Vec<u8> = Vec::new();
+        let mut list = Vec::new();
+        list.push(10); // claims 10-byte protocol but only 2 follow
+        list.extend_from_slice(b"ht");
+        let mut ext_body = Vec::new();
+        ext_body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        ext_body.extend_from_slice(&list);
+        exts.extend_from_slice(&0x0010u16.to_be_bytes());
+        exts.extend_from_slice(&(ext_body.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&ext_body);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        let got = extract_alpn_from_client_hello(&ch);
+        assert!(got.is_empty());
+    }
+
+    // ---- detect_client_hello_tls_version edge cases ----
+
+    #[test]
+    fn detect_tls_version_empty_supported_versions_list_returns_none() {
+        let mut exts: Vec<u8> = Vec::new();
+        let mut list = Vec::new();
+        list.push(0); // list_len = 0 (empty)
+        exts.extend_from_slice(&0x002bu16.to_be_bytes());
+        exts.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&list);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        assert!(detect_client_hello_tls_version(&ch).is_none());
+    }
+
+    #[test]
+    fn detect_tls_version_odd_length_version_list_returns_none() {
+        let mut exts: Vec<u8> = Vec::new();
+        let mut list = Vec::new();
+        list.push(3); // odd length
+        list.extend_from_slice(&[0x03, 0x03, 0x03]); // 3 bytes (not even)
+        exts.extend_from_slice(&0x002bu16.to_be_bytes());
+        exts.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&list);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        assert!(detect_client_hello_tls_version(&ch).is_none());
+    }
+
+    #[test]
+    fn detect_tls_version_unknown_versions_only_returns_none() {
+        let mut exts: Vec<u8> = Vec::new();
+        let mut list = Vec::new();
+        list.push(4); // 2 version entries
+        list.extend_from_slice(&0x0f0fu16.to_be_bytes()); // unknown
+        list.extend_from_slice(&0x0e0eu16.to_be_bytes()); // unknown
+        exts.extend_from_slice(&0x002bu16.to_be_bytes());
+        exts.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        exts.extend_from_slice(&list);
+
+        let ch = build_client_hello_with_raw_extensions(&exts);
+        assert!(detect_client_hello_tls_version(&ch).is_none());
+    }
+
+    #[test]
+    fn detect_tls_version_tls13_first_among_many() {
+        let ch = build_client_hello(None, &[], &[0x0304, 0x0303, 0x0302], 0x0303);
+        assert_eq!(
+            detect_client_hello_tls_version(&ch),
+            Some(ClientHelloTlsVersion::Tls13)
+        );
+    }
+
+    #[test]
+    fn detect_tls_version_with_nonzero_session_id() {
+        let sid: Vec<u8> = (0u8..16).collect();
+        let ch = build_client_hello_with_session_id(None, &sid, &[0x0304], 0x0303);
+        assert_eq!(
+            detect_client_hello_tls_version(&ch),
+            Some(ClientHelloTlsVersion::Tls13)
+        );
+    }
+
+    // ---- parse_tls_record_header additional coverage ----
+
+    #[test]
+    fn parse_tls_record_header_accepts_alert_record_type() {
+        let h = [0x15u8, 0x03, 0x03, 0x00, 0x02];
+        let (ty, len) = parse_tls_record_header(&h).unwrap();
+        assert_eq!(ty, 0x15);
+        assert_eq!(len, 2);
+    }
+
+    #[test]
+    fn parse_tls_record_header_accepts_change_cipher_spec_record() {
+        let h = [0x14u8, 0x03, 0x03, 0x00, 0x01];
+        let (ty, len) = parse_tls_record_header(&h).unwrap();
+        assert_eq!(ty, 0x14);
+        assert_eq!(len, 1);
+    }
+
+    #[test]
+    fn parse_tls_record_header_accepts_max_record_length() {
+        let h = [0x16u8, 0x03, 0x03, 0xff, 0xff];
+        let (ty, len) = parse_tls_record_header(&h).unwrap();
+        assert_eq!(ty, 0x16);
+        assert_eq!(len, 0xffff);
+    }
+
+    // ---- TlsExtensionBuilder edge cases ----
+
+    #[test]
+    fn tls_extension_builder_empty_produces_zero_length_prefix() {
+        let builder = TlsExtensionBuilder::new();
+        let built = builder.build();
+        assert_eq!(built.len(), 2);
+        assert_eq!(u16::from_be_bytes([built[0], built[1]]), 0);
+    }
+
+    #[test]
+    fn tls_extension_builder_as_bytes_empty() {
+        let builder = TlsExtensionBuilder::new();
+        assert!(builder.as_bytes().is_empty());
+    }
+
+    #[test]
+    fn tls_extension_builder_key_share_embeds_exact_32_byte_key() {
+        let mut builder = TlsExtensionBuilder::new();
+        let key = [0xABu8; 32];
+        builder.add_key_share(&key);
+        let bytes = builder.as_bytes();
+
+        // Extension type = 0x0033
+        assert_eq!(&bytes[0..2], &extension_type::KEY_SHARE.to_be_bytes());
+        // Extension data length = 36 (2 curve + 2 key_len + 32 key)
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 36);
+        // Curve = X25519
+        assert_eq!(&bytes[4..6], &named_curve::X25519.to_be_bytes());
+        // Key length = 32
+        assert_eq!(u16::from_be_bytes([bytes[6], bytes[7]]), 32);
+        // Key data
+        assert_eq!(&bytes[8..40], &[0xABu8; 32]);
+    }
+
+    // ---- ServerHelloBuilder edge cases ----
+
+    #[test]
+    fn server_hello_builder_oversized_session_id_returns_empty_message() {
+        let long_sid = vec![0u8; 256]; // > 255
+        let builder = ServerHelloBuilder::new(long_sid);
+        assert!(builder.build_message().is_empty());
+    }
+
+    #[test]
+    fn server_hello_builder_max_session_id() {
+        let sid = vec![0xAA; 32]; // RFC max
+        let builder = ServerHelloBuilder::new(sid.clone());
+        let msg = builder.build_message();
+        assert!(!msg.is_empty());
+        // Verify session_id_len at the expected offset
+        let sid_len_pos = 4 + 2 + 32; // header(1+3) + version(2) + random(32)
+        assert_eq!(msg[sid_len_pos], 32);
+        assert_eq!(&msg[sid_len_pos + 1..sid_len_pos + 1 + 32], &sid);
+    }
+
+    #[test]
+    fn server_hello_builder_message_type_is_server_hello() {
+        let builder = ServerHelloBuilder::new(vec![]);
+        let msg = builder.build_message();
+        assert_eq!(msg[0], 0x02); // ServerHello handshake type
+    }
+
+    #[test]
+    fn server_hello_builder_cipher_suite_is_aes_128_gcm() {
+        let builder = ServerHelloBuilder::new(vec![]);
+        let msg = builder.build_message();
+        // After: header(1+3) + version(2) + random(32) + sid_len(1) = 39
+        let cipher_pos = 39;
+        assert_eq!(&msg[cipher_pos..cipher_pos + 2], &cipher_suite::TLS_AES_128_GCM_SHA256);
+    }
+
+    #[test]
+    fn server_hello_builder_compression_is_null() {
+        let builder = ServerHelloBuilder::new(vec![]);
+        let msg = builder.build_message();
+        // 1(type) + 3(len) + 2(ver) + 32(rand) + 1(sid_len=0) + 2(cipher) = 41
+        let comp_pos = 41;
+        assert_eq!(msg[comp_pos], 0x00);
+    }
+
+    // ---- extract_sni / extract_alpn / detect_version on all-zeros input ----
+
+    #[test]
+    fn extract_sni_all_zeros_no_panic() {
+        let zero = vec![0u8; 256];
+        let result = extract_sni_from_client_hello(&zero);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_alpn_all_zeros_no_panic() {
+        let zero = vec![0u8; 256];
+        let got = extract_alpn_from_client_hello(&zero);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn detect_tls_version_all_zeros_no_panic() {
+        let zero = vec![0u8; 256];
+        let result = detect_client_hello_tls_version(&zero);
+        assert!(result.is_none());
+    }
+
+    // ---- parse_tls_record_header on adversarial bytes ----
+
+    #[test]
+    fn parse_tls_record_header_all_zeros_returns_none() {
+        assert!(parse_tls_record_header(&[0u8; 5]).is_none());
+    }
+
+    #[test]
+    fn parse_tls_record_header_all_ones_returns_none() {
+        assert!(parse_tls_record_header(&[0xFFu8; 5]).is_none());
+    }
+
+    // ---- validate_tls_handshake delegation ----
+
+    #[test]
+    fn validate_tls_handshake_delegates_with_default_boot_cap() {
+        let secret = b"deleg-test";
+        let now_offset = 60_i64;
+        let ts = (system_time_to_unix_secs(SystemTime::now()).unwrap() + now_offset) as u32;
+        let mut hs = vec![0u8; 64];
+        let computed = sha256_hmac(secret, &hs);
+        let ts_le = ts.to_le_bytes();
+        hs[TLS_DIGEST_POS..TLS_DIGEST_POS + 28].copy_from_slice(&computed[..28]);
+        for i in 0..4 {
+            hs[TLS_DIGEST_POS + 28 + i] = computed[28 + i] ^ ts_le[i];
+        }
+
+        let secrets = vec![("user1".to_string(), secret.to_vec())];
+        let res = validate_tls_handshake(&hs, &secrets, false);
+        assert!(res.is_some());
+        assert_eq!(res.unwrap().user, "user1");
+    }
+
+    // ---- is_tls_handshake with exactly 3 bytes ----
+
+    #[test]
+    fn is_tls_handshake_exact_three_bytes_accepted() {
+        assert!(is_tls_handshake(&[0x16, 0x03, 0x01]));
+    }
+
+    #[test]
+    fn is_tls_handshake_exact_three_bytes_rejected() {
+        assert!(!is_tls_handshake(&[0x16, 0x03, 0x02]));
+    }
+}

@@ -554,6 +554,428 @@ where
 }
 
 #[cfg(test)]
+mod pure_helpers_tests {
+    use super::*;
+
+    // ============= validated_scope_hint =============
+
+    #[test]
+    fn validated_scope_hint_accepts_well_formed_scopes() {
+        assert_eq!(validated_scope_hint("scope_eu-west-1"), Some("eu-west-1"));
+        assert_eq!(validated_scope_hint("scope_a"), Some("a"));
+        assert_eq!(validated_scope_hint("scope_123-xyz"), Some("123-xyz"));
+    }
+
+    #[test]
+    fn validated_scope_hint_rejects_users_without_prefix() {
+        assert!(validated_scope_hint("alice").is_none());
+        assert!(validated_scope_hint("scope").is_none());
+        assert!(validated_scope_hint("Scope_eu").is_none()); // case-sensitive prefix
+        assert!(validated_scope_hint("").is_none());
+    }
+
+    #[test]
+    fn validated_scope_hint_rejects_empty_or_oversized_scope() {
+        assert!(validated_scope_hint("scope_").is_none());
+        let too_long = format!("scope_{}", "a".repeat(MAX_SCOPE_HINT_LEN + 1));
+        assert!(validated_scope_hint(&too_long).is_none());
+
+        // Boundary: exactly MAX is allowed.
+        let max = format!("scope_{}", "a".repeat(MAX_SCOPE_HINT_LEN));
+        assert_eq!(
+            validated_scope_hint(&max),
+            Some(&max[6..]),
+            "MAX_SCOPE_HINT_LEN boundary must be inclusive"
+        );
+    }
+
+    #[test]
+    fn validated_scope_hint_rejects_non_alnum_dash_chars() {
+        assert!(validated_scope_hint("scope_eu_west").is_none()); // underscore
+        assert!(validated_scope_hint("scope_eu.west").is_none()); // dot
+        assert!(validated_scope_hint("scope_eu west").is_none()); // space
+        assert!(validated_scope_hint("scope_eu/west").is_none()); // slash
+    }
+
+    // ============= classify_conntrack_close_reason =============
+
+    fn io_err(kind: std::io::ErrorKind) -> ProxyError {
+        ProxyError::Io(std::io::Error::new(kind, "test"))
+    }
+
+    #[test]
+    fn classify_close_reason_ok_is_normal_eof() {
+        let r: Result<()> = Ok(());
+        assert!(matches!(
+            classify_conntrack_close_reason(&r),
+            ConntrackCloseReason::NormalEof
+        ));
+    }
+
+    #[test]
+    fn classify_close_reason_timeout_is_timeout() {
+        let r: Result<()> = Err(io_err(std::io::ErrorKind::TimedOut));
+        assert!(matches!(
+            classify_conntrack_close_reason(&r),
+            ConntrackCloseReason::Timeout
+        ));
+    }
+
+    #[test]
+    fn classify_close_reason_reset_family_is_reset() {
+        // The five "client-disappeared" io::ErrorKinds all classify as Reset.
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let r: Result<()> = Err(io_err(kind));
+            assert!(
+                matches!(
+                    classify_conntrack_close_reason(&r),
+                    ConntrackCloseReason::Reset
+                ),
+                "expected Reset for {:?}",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn classify_close_reason_pressure_keyword_is_pressure() {
+        let r: Result<()> = Err(ProxyError::Proxy("backpressure exceeded".to_string()));
+        assert!(matches!(
+            classify_conntrack_close_reason(&r),
+            ConntrackCloseReason::Pressure
+        ));
+        let r: Result<()> = Err(ProxyError::Proxy(
+            "session evicted by admission control".to_string(),
+        ));
+        assert!(matches!(
+            classify_conntrack_close_reason(&r),
+            ConntrackCloseReason::Pressure
+        ));
+    }
+
+    #[test]
+    fn classify_close_reason_unrelated_errors_are_other() {
+        let r: Result<()> = Err(ProxyError::Proxy("unrelated message".to_string()));
+        assert!(matches!(
+            classify_conntrack_close_reason(&r),
+            ConntrackCloseReason::Other
+        ));
+        let r: Result<()> = Err(io_err(std::io::ErrorKind::PermissionDenied));
+        assert!(matches!(
+            classify_conntrack_close_reason(&r),
+            ConntrackCloseReason::Other
+        ));
+    }
+
+    // ============= should_log_unknown_dc_with_set =============
+    //
+    // Pure variant taking an explicit set — easy to drive without touching
+    // the global `LOGGED_UNKNOWN_DCS` static.
+
+    #[test]
+    fn should_log_unknown_dc_returns_true_only_for_first_sight() {
+        let set = Mutex::new(HashSet::new());
+        assert!(should_log_unknown_dc_with_set(&set, 999));
+        // Same dc seen again must NOT relog.
+        assert!(!should_log_unknown_dc_with_set(&set, 999));
+        // Different dc still loggable.
+        assert!(should_log_unknown_dc_with_set(&set, 1000));
+    }
+
+    #[test]
+    fn should_log_unknown_dc_respects_distinct_limit() {
+        let set = Mutex::new(HashSet::new());
+        // Fill to the cap.
+        for i in 0..UNKNOWN_DC_LOG_DISTINCT_LIMIT as i16 {
+            assert!(should_log_unknown_dc_with_set(&set, i));
+        }
+        // Next unseen dc must be rejected — at the cap.
+        assert!(!should_log_unknown_dc_with_set(
+            &set,
+            UNKNOWN_DC_LOG_DISTINCT_LIMIT as i16 + 1
+        ));
+    }
+
+    #[test]
+    fn should_log_unknown_dc_handles_negative_and_extreme_indices() {
+        let set = Mutex::new(HashSet::new());
+        assert!(should_log_unknown_dc_with_set(&set, i16::MIN));
+        assert!(should_log_unknown_dc_with_set(&set, i16::MAX));
+        assert!(should_log_unknown_dc_with_set(&set, 0));
+        assert!(should_log_unknown_dc_with_set(&set, -1));
+        // Each re-seen index returns false.
+        assert!(!should_log_unknown_dc_with_set(&set, i16::MIN));
+        assert!(!should_log_unknown_dc_with_set(&set, 0));
+    }
+
+    // ============= classify_conntrack_close_reason — extended variant coverage =============
+
+    #[test]
+    fn classify_close_reason_other_variants() {
+        // All ProxyError variants that have no dedicated mapping in
+        // classify_conntrack_close_reason must fall through to `Other`.
+        // Collapsed from per-variant tests — one assertion per variant
+        // with a descriptive failure message identifies regressions just
+        // as precisely.
+        let cases: Vec<Result<()>> = vec![
+            Err(ProxyError::Crypto("aes failed".to_string())),
+            Err(ProxyError::InvalidKeyLength { expected: 32, got: 16 }),
+            Err(ProxyError::InvalidHandshake("bad padding".to_string())),
+            Err(ProxyError::InvalidProtoTag([0xDE, 0xAD, 0xBE, 0xEF])),
+            Err(ProxyError::RouteSwitched),
+            Err(ProxyError::MiddleConnectionLost),
+            Err(ProxyError::TgHandshakeTimeout),
+            Err(ProxyError::ConnectionTimeout {
+                addr: "149.154.175.50:443".to_string(),
+            }),
+            Err(ProxyError::ConnectionRefused {
+                addr: "149.154.175.50:443".to_string(),
+            }),
+            Err(ProxyError::RateLimited),
+            Err(ProxyError::Internal("bug".to_string())),
+            Err(ProxyError::UnknownUser),
+            Err(ProxyError::Config("missing field".to_string())),
+            Err(ProxyError::TlsHandshakeFailed {
+                reason: "cert rejected".to_string(),
+            }),
+        ];
+        for variant in &cases {
+            let reason = classify_conntrack_close_reason(variant);
+            assert!(
+                matches!(reason, ConntrackCloseReason::Other),
+                "variant {:?} should classify as Other, got {:?}",
+                variant,
+                reason
+            );
+        }
+    }
+
+    // ============= get_dc_addr_static — boundary & edge cases =============
+
+    #[test]
+    fn dc_addr_zero_falls_to_default_fallback() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        let addr = get_dc_addr_static(0, &cfg).expect("dc_idx=0 must resolve to fallback");
+
+        // default_dc is None → falls to 2 → TG_DATACENTERS_V4[1]:443
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[1], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_six_out_of_range_falls_to_default() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        let addr = get_dc_addr_static(6, &cfg).expect("dc_idx=6 must resolve to fallback");
+
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[1], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_negative_one_maps_to_dc1() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        let addr = get_dc_addr_static(-1, &cfg).expect("dc_idx=-1 must resolve via abs");
+
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[0], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_negative_five_maps_to_dc5() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        let addr = get_dc_addr_static(-5, &cfg).expect("dc_idx=-5 must resolve via abs");
+
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[4], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_negative_six_out_of_range_falls_to_default() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        let addr = get_dc_addr_static(-6, &cfg).expect("dc_idx=-6 must resolve to fallback");
+
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[1], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_default_dc_none_falls_to_dc2() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        assert!(cfg.default_dc.is_none());
+
+        let addr = get_dc_addr_static(99, &cfg).expect("unknown dc must resolve via fallback");
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[1], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_default_dc_out_of_range_clamps_to_first() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let mut cfg = ProxyConfig::default();
+        cfg.default_dc = Some(42);
+
+        let addr = get_dc_addr_static(99, &cfg).expect("unknown dc with bad default must still resolve");
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[0], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_override_empty_vec_falls_to_static_table() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let mut cfg = ProxyConfig::default();
+        cfg.dc_overrides.insert("2".to_string(), vec![]);
+
+        let addr = get_dc_addr_static(2, &cfg).expect("empty override must fall to static table");
+        let expected = SocketAddr::new(TG_DATACENTERS_V4[1], TG_DATACENTER_PORT);
+        assert_eq!(addr, expected);
+    }
+
+    #[test]
+    fn dc_addr_prefer_v4_with_only_ipv6_override_degrades_to_first() {
+        let mut cfg = ProxyConfig::default();
+        // prefer=4 is default, ipv6 is Some(false) by default
+        assert_eq!(cfg.network.prefer, 4);
+        cfg.dc_overrides.insert(
+            "2".to_string(),
+            vec!["[2001:db8::1]:443".to_string()],
+        );
+
+        let addr = get_dc_addr_static(2, &cfg).expect("ipv6-only override with prefer=4 must degrade");
+        assert_eq!(addr, "[2001:db8::1]:443".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn dc_addr_all_valid_dcs_resolve_to_correct_ipv4() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        for dc in 1..=5i16 {
+            let addr = get_dc_addr_static(dc, &cfg).unwrap_or_else(|e| {
+                panic!("dc_idx={dc} must resolve: {e}")
+            });
+            let expected = SocketAddr::new(TG_DATACENTERS_V4[(dc - 1) as usize], TG_DATACENTER_PORT);
+            assert_eq!(addr, expected, "mismatch for dc_idx={dc}");
+        }
+    }
+
+    #[test]
+    fn dc_addr_all_negative_valid_dcs_resolve_to_correct_ipv4() {
+        use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4};
+
+        let cfg = ProxyConfig::default();
+        for dc in -1..=-5i16 {
+            let abs_dc = dc.unsigned_abs() as usize;
+            let addr = get_dc_addr_static(dc, &cfg).unwrap_or_else(|e| {
+                panic!("dc_idx={dc} must resolve: {e}")
+            });
+            let expected = SocketAddr::new(TG_DATACENTERS_V4[abs_dc - 1], TG_DATACENTER_PORT);
+            assert_eq!(addr, expected, "mismatch for dc_idx={dc}");
+        }
+    }
+
+    #[test]
+    fn dc_addr_override_mixed_v4_v6_prefers_matching_family() {
+        let mut cfg = ProxyConfig::default();
+        // prefer=4 (default) should pick the IPv4 entry
+        cfg.dc_overrides.insert(
+            "3".to_string(),
+            vec![
+                "[2001:db8::1]:443".to_string(),
+                "198.51.100.7:443".to_string(),
+            ],
+        );
+
+        let addr = get_dc_addr_static(3, &cfg).expect("must resolve");
+        assert!(
+            addr.is_ipv4(),
+            "prefer=4 must select IPv4 override, got {addr}"
+        );
+        assert_eq!(addr, "198.51.100.7:443".parse::<SocketAddr>().unwrap());
+    }
+
+    // ============= validated_scope_hint — additional edge cases =============
+
+    #[test]
+    fn scope_hint_allows_max_boundary_length() {
+        let max_scope = "a".repeat(MAX_SCOPE_HINT_LEN);
+        let input = format!("scope_{max_scope}");
+        assert_eq!(
+            validated_scope_hint(&input),
+            Some(max_scope.as_str()),
+            "exactly MAX_SCOPE_HINT_LEN chars must be accepted"
+        );
+    }
+
+    #[test]
+    fn scope_hint_rejects_one_over_max() {
+        let over = "a".repeat(MAX_SCOPE_HINT_LEN + 1);
+        let input = format!("scope_{over}");
+        assert_eq!(validated_scope_hint(&input), None);
+    }
+
+    #[test]
+    fn scope_hint_allows_digits_only() {
+        assert_eq!(validated_scope_hint("scope_123456"), Some("123456"));
+    }
+
+    #[test]
+    fn scope_hint_allows_hyphen_only_scope() {
+        assert_eq!(validated_scope_hint("scope_a-b-c"), Some("a-b-c"));
+    }
+
+    // ============= should_log_unknown_dc_with_set — edge cases =============
+
+    #[test]
+    fn should_log_dc_poisoned_mutex_returns_false() {
+        use std::sync::Mutex;
+
+        let _set: Mutex<HashSet<i16>> = Mutex::new(HashSet::new());
+        // The empty set is unused — the actual poisoned set is created below.
+
+        // Manually poison: create a Mutex, lock it, then panic inside a catch.
+        let poisoned: Mutex<HashSet<i16>> = Mutex::new(HashSet::new());
+        let _ = std::panic::catch_unwind(|| {
+            let _g = poisoned.lock().unwrap();
+            panic!("intentional poison");
+        });
+        assert!(
+            !should_log_unknown_dc_with_set(&poisoned, 42),
+            "poisoned mutex must return false (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn should_log_dc_returns_false_for_repeated_within_limit() {
+        let set = Mutex::new(HashSet::new());
+        assert!(should_log_unknown_dc_with_set(&set, 7));
+        assert!(!should_log_unknown_dc_with_set(&set, 7));
+        assert!(!should_log_unknown_dc_with_set(&set, 7));
+        // Still can log new dc.
+        assert!(should_log_unknown_dc_with_set(&set, 8));
+    }
+}
+
+#[cfg(test)]
 #[path = "tests/direct_relay_security_tests.rs"]
 mod security_tests;
 
@@ -568,3 +990,22 @@ mod common_mistakes_tests;
 #[cfg(test)]
 #[path = "tests/direct_relay_subtle_adversarial_tests.rs"]
 mod subtle_adversarial_tests;
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn should_log_unknown_dc_first_sight_true_replay_false(
+            dc_idx in any::<i16>()
+        ) {
+            let set = Mutex::new(HashSet::new());
+            let first = should_log_unknown_dc_with_set(&set, dc_idx);
+            prop_assert!(first, "first sight of dc_idx={dc_idx} must log");
+            let replay = should_log_unknown_dc_with_set(&set, dc_idx);
+            prop_assert!(!replay, "second sight of dc_idx={dc_idx} must not log");
+        }
+    }
+}

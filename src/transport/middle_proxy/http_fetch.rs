@@ -181,3 +181,68 @@ pub(crate) async fn https_get(
         body,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod extract_host_port_path_tests {
+        use super::*;
+
+        #[test]
+        fn full_url_with_path_and_query() {
+            let (host, port, path) =
+                extract_host_port_path("https://example.com:8443/api/v1?foo=bar").unwrap();
+            assert_eq!(host, "example.com");
+            assert_eq!(port, 8443);
+            assert_eq!(path, "/api/v1?foo=bar");
+        }
+
+        #[test]
+        fn default_https_port_443() {
+            let (_, port, _) = extract_host_port_path("https://example.com/").unwrap();
+            assert_eq!(port, 443);
+        }
+
+        #[test]
+        fn empty_path_normalized_to_slash() {
+            let (_, _, path) = extract_host_port_path("https://example.com").unwrap();
+            assert_eq!(path, "/");
+        }
+
+        #[test]
+        fn ipv4_host() {
+            let (host, _, _) = extract_host_port_path("https://1.2.3.4:443/x").unwrap();
+            assert_eq!(host, "1.2.3.4");
+        }
+
+        #[test]
+        fn ipv6_host_bracketed() {
+            let (host, _, _) = extract_host_port_path("https://[::1]:443/x").unwrap();
+            assert_eq!(host, "[::1]");
+        }
+
+        #[test]
+        fn http_scheme_rejected() {
+            let err = extract_host_port_path("http://example.com/").unwrap_err();
+            let msg = format!("{}", err);
+            assert!(msg.contains("https"));
+        }
+
+        #[test]
+        fn ftp_scheme_rejected() {
+            assert!(extract_host_port_path("ftp://example.com/").is_err());
+        }
+
+        #[test]
+        fn malformed_url_rejected() {
+            assert!(extract_host_port_path("not a url").is_err());
+        }
+
+        #[test]
+        fn url_with_only_query_no_path() {
+            let (_, _, path) = extract_host_port_path("https://example.com/?a=1").unwrap();
+            assert_eq!(path, "/?a=1");
+        }
+    }
+}

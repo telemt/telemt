@@ -123,3 +123,16 @@ impl MePool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SnapshotApplyOutcome;
+
+    #[test]
+    fn changed_truth_table() {
+        assert!(SnapshotApplyOutcome::AppliedChanged.changed());
+        assert!(!SnapshotApplyOutcome::AppliedNoDelta.changed());
+        assert!(!SnapshotApplyOutcome::RejectedEmpty.changed());
+    }
+
+}

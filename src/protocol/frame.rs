@@ -119,4 +119,36 @@ mod tests {
         assert!(!validate_message_length(8)); // Too small
         assert!(!validate_message_length(13)); // Not aligned to 4
     }
+
+    #[test]
+    fn validate_message_length_boundaries() {
+        use super::super::constants::{MAX_MSG_LEN, MIN_MSG_LEN};
+        // Just-below MIN must fail.
+        assert!(!validate_message_length(MIN_MSG_LEN - 1));
+        // Exact MIN must pass.
+        assert!(validate_message_length(MIN_MSG_LEN));
+        // Exact MAX must pass (assuming MAX % 4 == 0, which it does: 1<<24).
+        assert!(validate_message_length(MAX_MSG_LEN));
+        // Just-above MAX must fail.
+        assert!(!validate_message_length(MAX_MSG_LEN + 4));
+    }
+
+    #[test]
+    fn validate_message_length_rejects_all_non_multiples_of_four() {
+        for off in 1..=3 {
+            assert!(!validate_message_length(16 + off));
+        }
+    }
+
+    #[test]
+    fn frame_mode_max_overhead_matches_protocol() {
+        // The header layout for each protocol variant is part of the wire
+        // contract — bumping any of these is a wire-format change and
+        // should fail this test loudly.
+        assert_eq!(FrameMode::Abridged.max_overhead(), 4);
+        assert_eq!(FrameMode::Intermediate.max_overhead(), 4);
+        assert_eq!(FrameMode::SecureIntermediate.max_overhead(), 7);
+        assert_eq!(FrameMode::Full.max_overhead(), 28);
+    }
+
 }

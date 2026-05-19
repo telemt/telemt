@@ -258,3 +258,22 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bnd_addr_status_as_str() {
+        assert_eq!(BndAddrStatus::Ok.as_str(), "ok");
+        assert_eq!(BndAddrStatus::Bogon.as_str(), "bogon");
+        assert_eq!(BndAddrStatus::Error.as_str(), "error");
+    }
+
+    #[test]
+    fn bnd_port_status_as_str() {
+        assert_eq!(BndPortStatus::Ok.as_str(), "ok");
+        assert_eq!(BndPortStatus::Zero.as_str(), "zero");
+        assert_eq!(BndPortStatus::Error.as_str(), "error");
+    }
+}

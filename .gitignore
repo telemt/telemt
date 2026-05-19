@@ -22,3 +22,7 @@ target
 
 proxy-secret
 coverage-html/
+
+# Local LLM-agent harness state — the `crush` CLI is not part of
+# this project, but developers using it keep transient state here.
+.crush/

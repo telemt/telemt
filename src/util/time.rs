@@ -79,3 +79,22 @@ pub async fn time_sync_task(check_interval: Duration) -> ! {
         tokio::time::sleep(check_interval).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_time_skew_secs_constant() {
+        // Pin the global threshold so any tightening/loosening lands in a
+        // commit diff rather than a silent runtime behavior change.
+        assert_eq!(MAX_TIME_SKEW_SECS, 30);
+    }
+
+    #[test]
+    fn time_sync_url_uses_https() {
+        // The default endpoint must be HTTPS to prevent skew injection
+        // (an MITM could otherwise advertise a fake Date header).
+        assert!(TIME_SYNC_URL.starts_with("https://"));
+    }
+}

@@ -851,3 +851,712 @@ fn limiter_epoch_start() -> &'static Instant {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now)
 }
+
+#[cfg(test)]
+mod pure_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn decrement_saturating_does_nothing_when_zero_or_by_zero() {
+        let c = AtomicU64::new(0);
+        decrement_atomic_saturating(&c, 5);
+        assert_eq!(c.load(Ordering::Relaxed), 0);
+
+        let c = AtomicU64::new(100);
+        decrement_atomic_saturating(&c, 0);
+        assert_eq!(c.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
+    fn decrement_saturating_clamps_at_zero() {
+        let c = AtomicU64::new(3);
+        decrement_atomic_saturating(&c, 10);
+        assert_eq!(c.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn decrement_saturating_subtracts_normally() {
+        let c = AtomicU64::new(50);
+        decrement_atomic_saturating(&c, 20);
+        assert_eq!(c.load(Ordering::Relaxed), 30);
+        decrement_atomic_saturating(&c, 30);
+        assert_eq!(c.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn bytes_per_epoch_is_zero_when_bps_is_zero() {
+        assert_eq!(bytes_per_epoch(0), 0);
+    }
+
+    #[test]
+    fn bytes_per_epoch_floors_at_one_for_nonzero_bps() {
+        // 1 bit/s is way below the 20 ms-worth threshold but the function
+        // contract is "never zero when bps>0" — useful so we don't starve
+        // tiny budgets to literally zero.
+        assert_eq!(bytes_per_epoch(1), 1);
+        assert_eq!(bytes_per_epoch(7), 1);
+    }
+
+    #[test]
+    fn bytes_per_epoch_matches_expected_math() {
+        // 8 Mbps × 20 ms / 8 (bits→bytes) / 1000 (ms→s) = 20_000 bytes.
+        // The function computes (bps × 20) / 8_000.
+        assert_eq!(bytes_per_epoch(8_000_000), 20_000);
+        // 1 Mbps → 2500 bytes per 20 ms epoch.
+        assert_eq!(bytes_per_epoch(1_000_000), 2_500);
+        // 100 Mbps → 250_000 bytes per epoch.
+        assert_eq!(bytes_per_epoch(100_000_000), 250_000);
+    }
+
+    #[test]
+    fn bytes_per_epoch_saturates_on_overflow() {
+        // u64::MAX bps must not overflow — saturating_mul/div protect us.
+        let b = bytes_per_epoch(u64::MAX);
+        assert!(b > 0);
+    }
+
+    #[test]
+    fn next_refill_delay_is_within_fair_epoch_window() {
+        let d = next_refill_delay();
+        let ms = d.as_millis() as u64;
+        assert!(ms >= 1, "delay must be at least 1 ms");
+        assert!(
+            ms <= FAIR_EPOCH_MS,
+            "delay must not exceed FAIR_EPOCH_MS ({} ms), got {}",
+            FAIR_EPOCH_MS,
+            ms
+        );
+    }
+
+    #[test]
+    fn limiter_epoch_start_is_stable_across_calls() {
+        // The OnceLock-backed start time must be the same instant every
+        // time — without that invariant `current_epoch()` and
+        // `next_refill_delay()` would drift relative to each other.
+        let a = *limiter_epoch_start();
+        let b = *limiter_epoch_start();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn current_epoch_is_monotonic_non_decreasing() {
+        let e1 = current_epoch();
+        let e2 = current_epoch();
+        assert!(e2 >= e1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // ── AtomicRatePair set/get direction isolation ───────────
+
+    mod atomic_rate_pair {
+        use super::*;
+
+        #[test]
+        fn set_up_does_not_affect_down() {
+            let pair = AtomicRatePair::default();
+            pair.set(RateLimitBps {
+                up_bps: 1000,
+                down_bps: 0,
+            });
+            assert_eq!(pair.get(RateDirection::Up), 1000);
+            assert_eq!(pair.get(RateDirection::Down), 0);
+        }
+
+        #[test]
+        fn set_down_does_not_affect_up() {
+            let pair = AtomicRatePair::default();
+            pair.set(RateLimitBps {
+                up_bps: 0,
+                down_bps: 500,
+            });
+            assert_eq!(pair.get(RateDirection::Up), 0);
+            assert_eq!(pair.get(RateDirection::Down), 500);
+        }
+
+        #[test]
+        fn set_both_independent() {
+            let pair = AtomicRatePair::default();
+            pair.set(RateLimitBps {
+                up_bps: 200,
+                down_bps: 400,
+            });
+            assert_eq!(pair.get(RateDirection::Up), 200);
+            assert_eq!(pair.get(RateDirection::Down), 400);
+        }
+
+        #[test]
+        fn overwrite_previous() {
+            let pair = AtomicRatePair::default();
+            pair.set(RateLimitBps {
+                up_bps: 100,
+                down_bps: 200,
+            });
+            pair.set(RateLimitBps {
+                up_bps: 300,
+                down_bps: 400,
+            });
+            assert_eq!(pair.get(RateDirection::Up), 300);
+            assert_eq!(pair.get(RateDirection::Down), 400);
+        }
+    }
+
+    // ── DirectionBucket token math ───────────────────────────
+
+    mod direction_bucket {
+        use super::*;
+
+        #[test]
+        fn try_consume_requested_zero_grants_zero() {
+            let bucket = DirectionBucket::default();
+            let granted = bucket.try_consume(1000, 0);
+            assert_eq!(granted, 0);
+        }
+
+        #[test]
+        fn try_consume_cap_zero_grants_all() {
+            let bucket = DirectionBucket::default();
+            let granted = bucket.try_consume(0, 500);
+            assert_eq!(granted, 500);
+        }
+
+        #[test]
+        fn try_consume_within_cap_grants_requested() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let granted = bucket.try_consume(cap_bps, 100);
+            assert_eq!(granted, 100);
+        }
+
+        #[test]
+        fn try_consume_exceeds_cap_grants_partial() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let cap_epoch = bytes_per_epoch(cap_bps);
+            let requested = cap_epoch + 1000;
+            let granted = bucket.try_consume(cap_bps, requested);
+            assert!(granted <= cap_epoch);
+            assert!(granted > 0);
+        }
+
+        #[test]
+        fn try_consume_drains_to_zero_then_blocks() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let cap_epoch = bytes_per_epoch(cap_bps);
+
+            let first = bucket.try_consume(cap_bps, cap_epoch);
+            assert!(first > 0);
+
+            let second = bucket.try_consume(cap_bps, 1);
+            assert_eq!(second, 0);
+        }
+
+        #[test]
+        fn try_consume_multiple_small_requests_exhaust_cap() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let cap_epoch = bytes_per_epoch(cap_bps);
+
+            let mut total_granted = 0u64;
+            for _ in 0..cap_epoch {
+                let g = bucket.try_consume(cap_bps, 1);
+                total_granted += g;
+                if g == 0 {
+                    break;
+                }
+            }
+            assert_eq!(total_granted, cap_epoch);
+        }
+
+        #[test]
+        fn refund_noop_on_zero() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let g1 = bucket.try_consume(cap_bps, 100);
+            bucket.refund(0);
+            let g2 = bucket.try_consume(cap_bps, 100);
+            assert_eq!(g1 + g2, 200);
+        }
+
+        #[test]
+        fn refund_restores_capacity() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let cap_epoch = bytes_per_epoch(cap_bps);
+
+            let first = bucket.try_consume(cap_bps, cap_epoch);
+            assert!(first > 0);
+
+            bucket.refund(first);
+
+            let after_refund = bucket.try_consume(cap_bps, first);
+            assert_eq!(after_refund, first);
+        }
+
+        #[test]
+        fn refund_clamps_at_cap() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let cap_epoch = bytes_per_epoch(cap_bps);
+
+            bucket.refund(cap_epoch * 10);
+
+            let granted = bucket.try_consume(cap_bps, cap_epoch);
+            assert_eq!(granted, cap_epoch);
+            let extra = bucket.try_consume(cap_bps, 1);
+            assert_eq!(extra, 0);
+        }
+
+        #[test]
+        fn sync_epoch_resets_used() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let _ = bucket.try_consume(cap_bps, 500);
+
+            let epoch = current_epoch() + 1_000_000;
+            bucket.sync_epoch(epoch);
+
+            assert_eq!(bucket.used.load(Ordering::Relaxed), 0);
+            assert_eq!(bucket.epoch.load(Ordering::Relaxed), epoch);
+        }
+
+        #[test]
+        fn sync_epoch_same_epoch_noop() {
+            let bucket = DirectionBucket::default();
+            let epoch = current_epoch();
+            bucket.sync_epoch(epoch);
+            let used_before = bucket.used.load(Ordering::Relaxed);
+            bucket.sync_epoch(epoch);
+            assert_eq!(bucket.used.load(Ordering::Relaxed), used_before);
+        }
+
+        #[test]
+        fn monotonicity_after_consume() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let n = 50u64;
+            let _ = bucket.try_consume(cap_bps, n);
+            let used = bucket.used.load(Ordering::Relaxed);
+            assert!(used >= n);
+        }
+    }
+
+    // ── UserBucket direction isolation ───────────────────────
+
+    mod user_bucket {
+        use super::*;
+
+        #[test]
+        fn new_sets_initial_rates() {
+            let limits = RateLimitBps {
+                up_bps: 1000,
+                down_bps: 2000,
+            };
+            let ub = UserBucket::new(limits);
+            assert_eq!(ub.rates.get(RateDirection::Up), 1000);
+            assert_eq!(ub.rates.get(RateDirection::Down), 2000);
+        }
+
+        #[test]
+        fn set_rates_updates_both() {
+            let ub = UserBucket::new(RateLimitBps {
+                up_bps: 0,
+                down_bps: 0,
+            });
+            ub.set_rates(RateLimitBps {
+                up_bps: 500,
+                down_bps: 600,
+            });
+            assert_eq!(ub.rates.get(RateDirection::Up), 500);
+            assert_eq!(ub.rates.get(RateDirection::Down), 600);
+        }
+
+        #[test]
+        fn try_consume_up_does_not_touch_down() {
+            let limits = RateLimitBps {
+                up_bps: 8_000_000,
+                down_bps: 8_000_000,
+            };
+            let ub = UserBucket::new(limits);
+            let up_granted = ub.try_consume(RateDirection::Up, 100);
+            assert_eq!(up_granted, 100);
+            let down_used = ub.down.used.load(Ordering::Relaxed);
+            assert_eq!(down_used, 0);
+        }
+
+        #[test]
+        fn try_consume_down_does_not_touch_up() {
+            let limits = RateLimitBps {
+                up_bps: 8_000_000,
+                down_bps: 8_000_000,
+            };
+            let ub = UserBucket::new(limits);
+            let down_granted = ub.try_consume(RateDirection::Down, 100);
+            assert_eq!(down_granted, 100);
+            let up_used = ub.up.used.load(Ordering::Relaxed);
+            assert_eq!(up_used, 0);
+        }
+
+        #[test]
+        fn refund_direction_isolation() {
+            let limits = RateLimitBps {
+                up_bps: 8_000_000,
+                down_bps: 8_000_000,
+            };
+            let ub = UserBucket::new(limits);
+            let _ = ub.try_consume(RateDirection::Up, 200);
+            let _ = ub.try_consume(RateDirection::Down, 200);
+            ub.refund(RateDirection::Up, 200);
+            assert_eq!(ub.up.used.load(Ordering::Relaxed), 0);
+            assert_eq!(ub.down.used.load(Ordering::Relaxed), 200);
+        }
+    }
+
+    // ── ShardedRegistry routing ──────────────────────────────
+
+    mod sharded_registry {
+        use super::*;
+
+        #[test]
+        fn shard_index_deterministic() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(64);
+            let key = "user-12345";
+            let i1 = reg.shard_index(key);
+            let i2 = reg.shard_index(key);
+            assert_eq!(i1, i2);
+        }
+
+        #[test]
+        fn shard_index_different_keys_may_differ() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(64);
+            let a = reg.shard_index("alice");
+            let b = reg.shard_index("bob");
+            assert!(a < 64);
+            assert!(b < 64);
+        }
+
+        #[test]
+        fn shard_index_within_bounds() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(64);
+            for key in &["a", "b", "c", "d", "e", "f", "g", "h"] {
+                let idx = reg.shard_index(key);
+                assert!(idx < 64, "shard index {} out of bounds for key {}", idx, key);
+            }
+        }
+
+        #[test]
+        fn shard_index_uniformity_modulo() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(64);
+            let mut seen = std::collections::HashSet::new();
+            for i in 0..200u64 {
+                let key = format!("key-{i}");
+                seen.insert(reg.shard_index(&key));
+            }
+            assert!(
+                seen.len() > 8,
+                "expected spread across many shards, got only {}",
+                seen.len()
+            );
+        }
+
+        #[test]
+        fn new_rounds_to_power_of_two() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(10);
+            assert_eq!(reg.shards.len(), 16);
+            assert_eq!(reg.mask, 15);
+        }
+
+        #[test]
+        fn new_with_one_shard() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(1);
+            assert_eq!(reg.shards.len(), 1);
+            assert_eq!(reg.mask, 0);
+        }
+
+        #[test]
+        fn get_or_insert_creates_then_returns_same() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(4);
+            let a = reg.get_or_insert_with("x", || 42);
+            let b = reg.get_or_insert_with("x", || 99);
+            assert_eq!(*a, 42);
+            assert_eq!(*b, 42);
+        }
+
+        #[test]
+        fn remove_if_returns_false_for_absent_key() {
+            let reg: ShardedRegistry<u64> = ShardedRegistry::new(4);
+            assert!(!reg.remove_if("nope", |_| true));
+        }
+
+        #[test]
+        fn retain_removes_matching() {
+            let reg: ShardedRegistry<String> = ShardedRegistry::new(4);
+            reg.get_or_insert_with("keep", || "keep".to_string());
+            reg.get_or_insert_with("drop", || "drop".to_string());
+            reg.retain(|_, v| v.as_str() != "drop");
+            let val = reg.get_or_insert_with("keep", || unreachable!());
+            assert_eq!(val.as_str(), "keep");
+        }
+    }
+
+    // ── PolicySnapshot CIDR matching ─────────────────────────
+
+    mod policy_cidr {
+        use super::*;
+
+        fn make_rule(cidr: &str, up: u64, down: u64) -> CidrRule {
+            let network: IpNetwork = cidr.parse().unwrap();
+            CidrRule {
+                key: cidr.to_string(),
+                cidr: network,
+                limits: RateLimitBps {
+                    up_bps: up,
+                    down_bps: down,
+                },
+                prefix_len: network.prefix(),
+            }
+        }
+
+        #[test]
+        fn match_cidr_v4_hit() {
+            let mut snap = PolicySnapshot::default();
+            snap.cidr_rules_v4.push(make_rule("10.0.0.0/8", 100, 200));
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
+            let rule = snap.match_cidr(ip).unwrap();
+            assert_eq!(rule.limits.up_bps, 100);
+        }
+
+        #[test]
+        fn match_cidr_v4_miss() {
+            let mut snap = PolicySnapshot::default();
+            snap.cidr_rules_v4.push(make_rule("10.0.0.0/8", 100, 200));
+            let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+            assert!(snap.match_cidr(ip).is_none());
+        }
+
+        #[test]
+        fn match_cidr_v6_hit() {
+            let mut snap = PolicySnapshot::default();
+            snap.cidr_rules_v6.push(make_rule("fd00::/64", 300, 400));
+            let ip = IpAddr::V6("fd00::1".parse().unwrap());
+            let rule = snap.match_cidr(ip).unwrap();
+            assert_eq!(rule.limits.down_bps, 400);
+        }
+
+        #[test]
+        fn match_cidr_v6_miss() {
+            let mut snap = PolicySnapshot::default();
+            snap.cidr_rules_v6.push(make_rule("fd00::/64", 300, 400));
+            let ip = IpAddr::V6("fe80::1".parse().unwrap());
+            assert!(snap.match_cidr(ip).is_none());
+        }
+
+        #[test]
+        fn match_cidr_prefers_longest_prefix_v4() {
+            let mut snap = PolicySnapshot::default();
+            snap.cidr_rules_v4.push(make_rule("10.0.0.0/8", 100, 100));
+            snap.cidr_rules_v4.push(make_rule("10.0.1.0/24", 200, 200));
+            snap.cidr_rules_v4.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 5));
+            let rule = snap.match_cidr(ip).unwrap();
+            assert_eq!(rule.limits.up_bps, 200);
+        }
+
+        #[test]
+        fn match_cidr_empty_rules_returns_none() {
+            let snap = PolicySnapshot::default();
+            let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+            assert!(snap.match_cidr(ip).is_none());
+        }
+    }
+
+    // ── CidrUserDirectionState epoch tracking ────────────────
+
+    mod cidr_user_state {
+        use super::*;
+
+        #[test]
+        fn sync_epoch_sets_used_to_zero() {
+            let state = CidrUserDirectionState::default();
+            state.used.store(100, Ordering::Relaxed);
+            let epoch = current_epoch() + 5_000_000;
+            let active = AtomicU64::new(0);
+            state.sync_epoch_and_mark_active(epoch, &active);
+            assert_eq!(state.used.load(Ordering::Relaxed), 0);
+            assert_eq!(active.load(Ordering::Relaxed), 1);
+        }
+
+        #[test]
+        fn sync_epoch_same_epoch_noop() {
+            let state = CidrUserDirectionState::default();
+            let epoch = current_epoch();
+            let active = AtomicU64::new(5);
+            state.epoch.store(epoch, Ordering::Relaxed);
+            state.used.store(999, Ordering::Relaxed);
+            state.sync_epoch_and_mark_active(epoch, &active);
+            assert_eq!(state.used.load(Ordering::Relaxed), 999);
+            assert_eq!(active.load(Ordering::Relaxed), 5);
+        }
+
+        #[test]
+        fn refund_noop_on_zero() {
+            let state = CidrUserDirectionState::default();
+            state.used.store(100, Ordering::Relaxed);
+            state.refund(0);
+            assert_eq!(state.used.load(Ordering::Relaxed), 100);
+        }
+
+        #[test]
+        fn refund_decrements() {
+            let state = CidrUserDirectionState::default();
+            state.used.store(100, Ordering::Relaxed);
+            state.refund(30);
+            assert_eq!(state.used.load(Ordering::Relaxed), 70);
+        }
+
+        #[test]
+        fn refund_clamps_at_zero() {
+            let state = CidrUserDirectionState::default();
+            state.used.store(5, Ordering::Relaxed);
+            state.refund(100);
+            assert_eq!(state.used.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    // ── ScopeMetrics direction isolation ─────────────────────
+
+    mod scope_metrics {
+        use super::*;
+
+        #[test]
+        fn throttle_up_only_increments_up() {
+            let m = ScopeMetrics::default();
+            m.throttle(RateDirection::Up);
+            assert_eq!(m.throttle_up_total.load(Ordering::Relaxed), 1);
+            assert_eq!(m.throttle_down_total.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn throttle_down_only_increments_down() {
+            let m = ScopeMetrics::default();
+            m.throttle(RateDirection::Down);
+            assert_eq!(m.throttle_up_total.load(Ordering::Relaxed), 0);
+            assert_eq!(m.throttle_down_total.load(Ordering::Relaxed), 1);
+        }
+
+        #[test]
+        fn wait_ms_up_accumulates() {
+            let m = ScopeMetrics::default();
+            m.wait_ms(RateDirection::Up, 10);
+            m.wait_ms(RateDirection::Up, 20);
+            assert_eq!(m.wait_up_ms_total.load(Ordering::Relaxed), 30);
+            assert_eq!(m.wait_down_ms_total.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn wait_ms_down_accumulates() {
+            let m = ScopeMetrics::default();
+            m.wait_ms(RateDirection::Down, 5);
+            assert_eq!(m.wait_down_ms_total.load(Ordering::Relaxed), 5);
+            assert_eq!(m.wait_up_ms_total.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    // ── Edge cases: saturating arithmetic ────────────────────
+
+    mod edge_cases {
+        use super::*;
+
+        #[test]
+        fn decrement_saturating_at_u64_max() {
+            let c = AtomicU64::new(u64::MAX);
+            decrement_atomic_saturating(&c, 1);
+            assert_eq!(c.load(Ordering::Relaxed), u64::MAX - 1);
+        }
+
+        #[test]
+        fn decrement_saturating_overflow_by_sub() {
+            let c = AtomicU64::new(1);
+            decrement_atomic_saturating(&c, u64::MAX);
+            assert_eq!(c.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn bytes_per_epoch_large_bps_does_not_panic() {
+            let _ = bytes_per_epoch(u64::MAX / 2);
+        }
+
+        #[test]
+        fn direction_bucket_consume_then_full_refund() {
+            let bucket = DirectionBucket::default();
+            let cap_bps = 8_000_000;
+            let cap_epoch = bytes_per_epoch(cap_bps);
+            let g = bucket.try_consume(cap_bps, cap_epoch);
+            assert_eq!(g, cap_epoch);
+            bucket.refund(g);
+            let g2 = bucket.try_consume(cap_bps, cap_epoch);
+            assert_eq!(g2, cap_epoch);
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn try_consume_never_exceeds_cap(
+            cap_bps in 1_000u64..100_000_000u64,
+            request in 1u64..500_000u64,
+        ) {
+            let bucket = DirectionBucket::default();
+            let cap_epoch = bytes_per_epoch(cap_bps);
+            let mut total_granted = 0u64;
+            for _ in 0..100 {
+                let g = bucket.try_consume(cap_bps, request);
+                total_granted += g;
+                if g == 0 {
+                    break;
+                }
+            }
+            assert!(
+                total_granted <= cap_epoch,
+                "total_granted {} exceeded cap_epoch {}",
+                total_granted,
+                cap_epoch
+            );
+        }
+
+        #[test]
+        fn refund_clamps_to_cap(
+            cap_bps in 1_000u64..100_000_000u64,
+            refund_amount in 1u64..10_000_000u64,
+        ) {
+            let bucket = DirectionBucket::default();
+            let cap_epoch = bytes_per_epoch(cap_bps);
+            bucket.refund(refund_amount);
+            let granted = bucket.try_consume(cap_bps, cap_epoch.saturating_add(1));
+            assert!(
+                granted <= cap_epoch,
+                "granted {} exceeded cap_epoch {} after refund",
+                granted,
+                cap_epoch
+            );
+        }
+
+        #[test]
+        fn bytes_per_epoch_never_zero_for_nonzero_bps(bps in 1u64..u64::MAX) {
+            let result = bytes_per_epoch(bps);
+            assert!(result > 0, "bytes_per_epoch({}) returned 0", bps);
+        }
+    }
+}

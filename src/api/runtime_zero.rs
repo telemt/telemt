@@ -336,3 +336,30 @@ fn me_writer_pick_mode_label(mode: MeWriterPickMode) -> &'static str {
         MeWriterPickMode::P2c => "p2c",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // These labels are part of the public /v1/runtime/zero JSON schema.
+    // Renaming them is a breaking change for API consumers, so the tests
+    // pin them as drift-detection.
+    use super::*;
+
+    #[test]
+    fn user_max_unique_ips_mode_labels() {
+        assert_eq!(user_max_unique_ips_mode_label(UserMaxUniqueIpsMode::ActiveWindow), "active_window");
+        assert_eq!(user_max_unique_ips_mode_label(UserMaxUniqueIpsMode::TimeWindow), "time_window");
+        assert_eq!(user_max_unique_ips_mode_label(UserMaxUniqueIpsMode::Combined), "combined");
+    }
+
+    #[test]
+    fn me_floor_mode_labels() {
+        assert_eq!(me_floor_mode_label(MeFloorMode::Static), "static");
+        assert_eq!(me_floor_mode_label(MeFloorMode::Adaptive), "adaptive");
+    }
+
+    #[test]
+    fn me_writer_pick_mode_labels() {
+        assert_eq!(me_writer_pick_mode_label(MeWriterPickMode::SortedRr), "sorted_rr");
+        assert_eq!(me_writer_pick_mode_label(MeWriterPickMode::P2c), "p2c");
+    }
+}

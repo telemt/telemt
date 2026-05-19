@@ -823,4 +823,100 @@ mod tests {
         assert!(!shared.conntrack_pressure_active());
         assert!(!stats.get_conntrack_pressure_active());
     }
+
+    #[test]
+    fn effective_conntrack_enabled_requires_all_conditions() {
+        let cfg = ProxyConfig::default();
+        let full = ConntrackRuntimeSupport {
+            netfilter_backend: Some(NetfilterBackend::Nftables),
+            has_cap_net_admin: true,
+            has_conntrack_binary: true,
+        };
+        assert!(effective_conntrack_enabled(&cfg, full));
+
+        let no_cap = ConntrackRuntimeSupport {
+            netfilter_backend: Some(NetfilterBackend::Nftables),
+            has_cap_net_admin: false,
+            has_conntrack_binary: true,
+        };
+        assert!(!effective_conntrack_enabled(&cfg, no_cap));
+
+        let no_backend = ConntrackRuntimeSupport {
+            netfilter_backend: None,
+            has_cap_net_admin: true,
+            has_conntrack_binary: true,
+        };
+        assert!(!effective_conntrack_enabled(&cfg, no_backend));
+
+        let no_binary = ConntrackRuntimeSupport {
+            netfilter_backend: Some(NetfilterBackend::Nftables),
+            has_cap_net_admin: true,
+            has_conntrack_binary: false,
+        };
+        assert!(!effective_conntrack_enabled(&cfg, no_binary));
+    }
+
+    #[test]
+    fn effective_conntrack_enabled_false_when_config_disabled() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.conntrack_control.inline_conntrack_control = false;
+        let full = ConntrackRuntimeSupport {
+            netfilter_backend: Some(NetfilterBackend::Nftables),
+            has_cap_net_admin: true,
+            has_conntrack_binary: true,
+        };
+        assert!(!effective_conntrack_enabled(&cfg, full));
+    }
+
+    #[test]
+    fn listener_port_set_uses_legacy_port_when_no_listeners() {
+        let cfg = ProxyConfig::default();
+        assert!(cfg.server.listeners.is_empty());
+        let ports = listener_port_set(&cfg);
+        assert_eq!(ports, vec![443]);
+    }
+
+    #[test]
+    fn listener_port_set_deduplicates_and_sorts() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        let mut cfg = ProxyConfig::default();
+        cfg.server.port = 8080;
+        cfg.server.listeners = vec![
+            crate::config::ListenerConfig {
+                ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+                port: Some(443),
+                announce: None,
+                announce_ip: None,
+                proxy_protocol: None,
+                reuse_allow: false,
+            },
+            crate::config::ListenerConfig {
+                ip: IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)),
+                port: Some(443),
+                announce: None,
+                announce_ip: None,
+                proxy_protocol: None,
+                reuse_allow: false,
+            },
+            crate::config::ListenerConfig {
+                ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                port: None,
+                announce: None,
+                announce_ip: None,
+                proxy_protocol: None,
+                reuse_allow: false,
+            },
+        ];
+        let ports = listener_port_set(&cfg);
+        assert_eq!(ports, vec![443, 8080]);
+    }
+
+    #[test]
+    fn notrack_targets_tracked_mode_is_empty() {
+        let cfg = ProxyConfig::default();
+        let (v4, v6) = notrack_targets(&cfg);
+        assert!(v4.is_empty());
+        assert!(v6.is_empty());
+    }
 }

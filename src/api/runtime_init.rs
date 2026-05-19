@@ -180,3 +180,60 @@ fn ratio_01(part: usize, total: usize) -> f64 {
     }
     ((part as f64) / (total as f64)).clamp(0.0, 1.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod ratio_01_tests {
+        use super::*;
+
+        #[test]
+        fn zero_total_returns_zero() {
+            assert_eq!(ratio_01(0, 0), 0.0);
+            assert_eq!(ratio_01(5, 0), 0.0);
+        }
+
+        #[test]
+        fn full_coverage() {
+            assert_eq!(ratio_01(10, 10), 1.0);
+        }
+
+        #[test]
+        fn half_coverage() {
+            assert!((ratio_01(5, 10) - 0.5).abs() < f64::EPSILON);
+        }
+
+        #[test]
+        fn clamps_above_one() {
+            assert_eq!(ratio_01(20, 10), 1.0);
+        }
+
+        #[test]
+        fn small_fraction() {
+            let r = ratio_01(1, 100);
+            assert!((r - 0.01).abs() < f64::EPSILON);
+        }
+    }
+
+    mod is_me_component_tests {
+        use super::*;
+
+        #[test]
+        fn known_components_match() {
+            assert!(is_me_component(COMPONENT_ME_SECRET_FETCH));
+            assert!(is_me_component(COMPONENT_ME_PROXY_CONFIG_V4));
+            assert!(is_me_component(COMPONENT_ME_PROXY_CONFIG_V6));
+            assert!(is_me_component(COMPONENT_ME_POOL_CONSTRUCT));
+            assert!(is_me_component(COMPONENT_ME_POOL_INIT_STAGE1));
+            assert!(is_me_component(COMPONENT_ME_CONNECTIVITY_PING));
+        }
+
+        #[test]
+        fn unknown_does_not_match() {
+            assert!(!is_me_component("unknown"));
+            assert!(!is_me_component(""));
+            assert!(!is_me_component("direct_relay"));
+        }
+    }
+}

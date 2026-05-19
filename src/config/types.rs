@@ -2163,3 +2163,140 @@ impl<'de> Deserialize<'de> for ShowLink {
         deserializer.deserialize_any(ShowLinkVisitor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ============= ShowLink::is_empty =============
+
+    #[test]
+    fn show_link_is_empty_for_none_and_empty_specific() {
+        assert!(ShowLink::None.is_empty());
+        assert!(ShowLink::Specific(Vec::new()).is_empty());
+        // Non-empty must NOT be empty.
+        assert!(!ShowLink::Specific(vec!["alice".to_string()]).is_empty());
+        assert!(!ShowLink::All.is_empty());
+    }
+
+    // ============= ShowLink::resolve_users =============
+
+    fn three_users() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert("carol".to_string(), "secret-c".to_string());
+        m.insert("alice".to_string(), "secret-a".to_string());
+        m.insert("bob".to_string(), "secret-b".to_string());
+        m
+    }
+
+    #[test]
+    fn show_link_resolve_users_none_returns_empty() {
+        let users = three_users();
+        assert!(ShowLink::None.resolve_users(&users).is_empty());
+    }
+
+    #[test]
+    fn show_link_resolve_users_all_returns_sorted_list() {
+        let users = three_users();
+        let resolved = ShowLink::All.resolve_users(&users);
+        let names: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+        // The function commits to a sorted output — relied on by deterministic
+        // link generation for shareable invitation URLs.
+        assert_eq!(names, vec!["alice", "bob", "carol"]);
+    }
+
+    #[test]
+    fn show_link_resolve_users_specific_returns_requested_names_verbatim() {
+        let users = three_users();
+        // Bind to a named local so the resolved references outlive the call.
+        let want = ShowLink::Specific(vec!["bob".to_string(), "alice".to_string()]);
+        let resolved = want.resolve_users(&users);
+        let names: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+        // Order is preserved (not sorted) — contract is "show in the order
+        // the operator listed them".
+        assert_eq!(names, vec!["bob", "alice"]);
+    }
+
+    #[test]
+    fn show_link_resolve_users_specific_does_not_validate_membership() {
+        // The function does not filter by `users` — it returns the names
+        // as-given, even if they are not in the runtime user table. That
+        // matters because callers expect this to be a pure projection.
+        let users = HashMap::<String, String>::new();
+        let want = ShowLink::Specific(vec!["ghost".to_string()]);
+        let resolved = want.resolve_users(&users);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], "ghost");
+    }
+
+    // ============= ShowLink: serde =============
+
+    #[test]
+    fn show_link_serializes_all_as_star() {
+        let s = serde_json::to_string(&ShowLink::All).unwrap();
+        assert_eq!(s, r#""*""#);
+    }
+
+    #[test]
+    fn show_link_serializes_none_as_empty_array() {
+        let s = serde_json::to_string(&ShowLink::None).unwrap();
+        assert_eq!(s, "[]");
+    }
+
+    #[test]
+    fn show_link_serializes_specific_as_array() {
+        let s = serde_json::to_string(&ShowLink::Specific(vec![
+            "alice".to_string(),
+            "bob".to_string(),
+        ]))
+        .unwrap();
+        assert_eq!(s, r#"["alice","bob"]"#);
+    }
+
+    #[test]
+    fn show_link_deserializes_star_as_all() {
+        let v: ShowLink = serde_json::from_str(r#""*""#).unwrap();
+        assert!(matches!(v, ShowLink::All));
+    }
+
+    #[test]
+    fn show_link_deserializes_empty_array_as_none() {
+        let v: ShowLink = serde_json::from_str("[]").unwrap();
+        assert!(matches!(v, ShowLink::None));
+    }
+
+    #[test]
+    fn show_link_deserializes_non_empty_array_as_specific() {
+        let v: ShowLink = serde_json::from_str(r#"["alice", "bob"]"#).unwrap();
+        match v {
+            ShowLink::Specific(names) => assert_eq!(names, vec!["alice", "bob"]),
+            _ => panic!("expected ShowLink::Specific"),
+        }
+    }
+
+    #[test]
+    fn show_link_rejects_non_star_string() {
+        // The custom deserializer accepts only `"*"` as a string form;
+        // any other string (e.g. `"all"`) must fail.
+        let r: Result<ShowLink, _> = serde_json::from_str(r#""all""#);
+        assert!(r.is_err());
+        let r: Result<ShowLink, _> = serde_json::from_str(r#""""#);
+        assert!(r.is_err());
+    }
+
+    // ============= Default invariants for major config structs =============
+
+    #[test]
+    fn network_config_default_prefers_ipv4_and_enables_stun() {
+        let n = NetworkConfig::default();
+        assert!(n.ipv4);
+        assert!(n.prefer == 4 || n.prefer == 6, "prefer must be 4 or 6");
+        assert!(n.stun_use, "STUN must be enabled by default");
+        assert!(!n.stun_servers.is_empty(), "STUN servers must be populated");
+        assert!(
+            !n.http_ip_detect_urls.is_empty(),
+            "ip-detect URLs must be populated"
+        );
+        assert!(n.dns_overrides.is_empty(), "no DNS overrides by default");
+    }
+}

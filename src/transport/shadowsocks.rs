@@ -58,3 +58,63 @@ pub(crate) async fn connect_shadowsocks(
         .await
         .map_err(ProxyError::Io)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod connect_opts_for_interface_tests {
+        use super::*;
+
+        #[test]
+        fn none_yields_default() {
+            let opts = connect_opts_for_interface(&None);
+            assert!(opts.bind_local_addr.is_none());
+            assert!(opts.bind_interface.is_none());
+        }
+
+        #[test]
+        fn ipv4_literal_binds_local_addr() {
+            let iface = Some("192.168.1.1".to_string());
+            let opts = connect_opts_for_interface(&iface);
+            assert!(opts.bind_local_addr.is_some());
+            assert!(opts.bind_interface.is_none());
+            let addr = opts.bind_local_addr.unwrap();
+            assert_eq!(addr.ip().to_string(), "192.168.1.1");
+            assert_eq!(addr.port(), 0);
+        }
+
+        #[test]
+        fn ipv6_literal_binds_local_addr() {
+            let iface = Some("::1".to_string());
+            let opts = connect_opts_for_interface(&iface);
+            assert!(opts.bind_local_addr.is_some());
+            assert!(opts.bind_interface.is_none());
+        }
+
+        #[test]
+        fn interface_name_sets_bind_interface() {
+            let iface = Some("eth0".to_string());
+            let opts = connect_opts_for_interface(&iface);
+            assert!(opts.bind_local_addr.is_none());
+            assert_eq!(opts.bind_interface.as_deref(), Some("eth0"));
+        }
+    }
+
+    mod parse_server_config_tests {
+        use super::*;
+
+        #[test]
+        fn invalid_url_returns_err() {
+            let err = parse_server_config("not a url", Duration::from_secs(1));
+            assert!(err.is_err());
+            let msg = format!("{}", err.unwrap_err());
+            assert!(msg.contains("invalid shadowsocks url"));
+        }
+
+        #[test]
+        fn sanitize_invalid_url_returns_err() {
+            assert!(sanitize_shadowsocks_url("definitely not a ss url").is_err());
+        }
+    }
+}

@@ -298,3 +298,77 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    mod round3_tests {
+        use super::*;
+
+        #[test]
+        fn rounds_to_three_decimals() {
+            assert_eq!(round3(1.23456), 1.235);
+        }
+
+        #[test]
+        fn exact_value_unchanged() {
+            assert_eq!(round3(1.5), 1.5);
+        }
+
+        #[test]
+        fn negative_rounds() {
+            assert_eq!(round3(-1.23456), -1.235);
+        }
+    }
+
+    mod classify_ip_tests {
+        use super::*;
+
+        #[test]
+        fn loopback_v4() {
+            assert_eq!(classify_ip(IpAddr::V4(Ipv4Addr::LOCALHOST)), "loopback");
+        }
+
+        #[test]
+        fn loopback_v6() {
+            assert_eq!(classify_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)), "loopback");
+        }
+
+        #[test]
+        fn private_v4_is_bogon() {
+            assert_eq!(
+                classify_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+                "bogon"
+            );
+            assert_eq!(
+                classify_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+                "bogon"
+            );
+        }
+
+        #[test]
+        fn public_v4_is_good() {
+            assert_eq!(
+                classify_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+                "good"
+            );
+        }
+    }
+
+    mod map_route_kind_tests {
+        use super::*;
+
+        #[test]
+        fn all_variants_mapped() {
+            assert_eq!(map_route_kind(UpstreamRouteKind::Direct), "direct");
+            assert_eq!(map_route_kind(UpstreamRouteKind::Socks4), "socks4");
+            assert_eq!(map_route_kind(UpstreamRouteKind::Socks5), "socks5");
+            assert_eq!(
+                map_route_kind(UpstreamRouteKind::Shadowsocks),
+                "shadowsocks"
+            );
+        }
+    }
+}

@@ -1676,4 +1676,198 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn reload_state_new_with_hash() {
+        let state = ReloadState::new(Some(42));
+        assert!(state.is_applied(42));
+        assert!(!state.is_applied(43));
+    }
+
+    #[test]
+    fn reload_state_new_without_hash() {
+        let state = ReloadState::new(None);
+        assert!(!state.is_applied(0));
+    }
+
+    #[test]
+    fn reload_state_mark_applied() {
+        let mut state = ReloadState::new(None);
+        state.mark_applied(100);
+        assert!(state.is_applied(100));
+        assert!(!state.is_applied(99));
+    }
+
+    #[test]
+    fn reload_state_mark_overwrites() {
+        let mut state = ReloadState::new(Some(1));
+        state.mark_applied(2);
+        assert!(!state.is_applied(1));
+        assert!(state.is_applied(2));
+    }
+
+    // ============= canonicalize_json =============
+
+    #[test]
+    fn canonicalize_json_sorts_object_keys_recursively() {
+        let mut v: serde_json::Value = serde_json::from_str(
+            r#"{"z": 1, "a": {"y": 2, "b": 3}, "m": [{"k": 1, "a": 0}]}"#,
+        )
+        .unwrap();
+        canonicalize_json(&mut v);
+        // The serialized form must come out with sorted keys at every level.
+        let out = serde_json::to_string(&v).unwrap();
+        assert_eq!(out, r#"{"a":{"b":3,"y":2},"m":[{"a":0,"k":1}],"z":1}"#);
+    }
+
+    #[test]
+    fn canonicalize_json_is_idempotent() {
+        let raw = r#"{"b":2,"a":[1,{"y":1,"x":0}]}"#;
+        let mut v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        canonicalize_json(&mut v);
+        let first = serde_json::to_string(&v).unwrap();
+        canonicalize_json(&mut v);
+        let second = serde_json::to_string(&v).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn canonicalize_json_preserves_array_order() {
+        // Arrays must NOT be reordered — only their object children.
+        let mut v: serde_json::Value = serde_json::from_str(r#"[3, 1, 2]"#).unwrap();
+        canonicalize_json(&mut v);
+        let out = serde_json::to_string(&v).unwrap();
+        assert_eq!(out, "[3,1,2]");
+    }
+
+    #[test]
+    fn canonicalize_json_preserves_scalars_unchanged() {
+        for raw in ["1", "1.5", "\"x\"", "true", "false", "null"] {
+            let mut v: serde_json::Value = serde_json::from_str(raw).unwrap();
+            canonicalize_json(&mut v);
+            assert_eq!(serde_json::to_string(&v).unwrap(), raw);
+        }
+    }
+
+    // ============= config_equal =============
+
+    #[test]
+    fn config_equal_identical_default_returns_true() {
+        let a = sample_config();
+        let b = sample_config();
+        assert!(config_equal(&a, &b));
+    }
+
+    #[test]
+    fn config_equal_detects_mutation_inside_nested_struct() {
+        let a = sample_config();
+        let mut b = sample_config();
+        b.server.port = a.server.port.wrapping_add(1);
+        assert!(!config_equal(&a, &b));
+    }
+
+    #[test]
+    fn config_equal_ignores_hashmap_iteration_order() {
+        // Two ProxyConfigs that differ ONLY in HashMap insertion order
+        // must be considered equal — that's exactly why we canonicalize.
+        let mut a = sample_config();
+        let mut b = sample_config();
+        a.access.users.insert(
+            "alice".to_string(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        );
+        a.access.users.insert(
+            "bob".to_string(),
+            "fedcba9876543210fedcba9876543210".to_string(),
+        );
+        // Insert in the reverse order.
+        b.access.users.insert(
+            "bob".to_string(),
+            "fedcba9876543210fedcba9876543210".to_string(),
+        );
+        b.access.users.insert(
+            "alice".to_string(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        );
+        assert!(config_equal(&a, &b));
+    }
+
+    // ============= listeners_equal =============
+
+    fn mk_listener(port: u16) -> crate::config::ListenerConfig {
+        // `ListenerConfig` has no `Default` impl (the `ip` field is bound
+        // to a concrete IpAddr in operator-supplied configs). For tests
+        // we anchor at the unspecified IPv4 sentinel.
+        crate::config::ListenerConfig {
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: Some(port),
+            announce: None,
+            announce_ip: None,
+            proxy_protocol: None,
+            reuse_allow: false,
+        }
+    }
+
+    #[test]
+    fn listeners_equal_for_identical_short_vec() {
+        let a = vec![mk_listener(8080)];
+        let b = vec![mk_listener(8080)];
+        assert!(listeners_equal(&a, &b));
+    }
+
+    #[test]
+    fn listeners_equal_rejects_different_length() {
+        let a = vec![mk_listener(8080)];
+        let b = vec![mk_listener(8080), mk_listener(8081)];
+        assert!(!listeners_equal(&a, &b));
+    }
+
+    #[test]
+    fn listeners_equal_rejects_port_mismatch() {
+        let a = vec![mk_listener(8080)];
+        let b = vec![mk_listener(9090)];
+        assert!(!listeners_equal(&a, &b));
+    }
+
+    #[test]
+    fn listeners_equal_compares_position_wise_not_set_wise() {
+        // Two listeners in different order are NOT equal — order matters.
+        let a = vec![mk_listener(1), mk_listener(2)];
+        let b = vec![mk_listener(2), mk_listener(1)];
+        assert!(!listeners_equal(&a, &b));
+    }
+
+    // ============= resolve_default_link_port =============
+
+    #[test]
+    fn resolve_default_link_port_returns_first_listener_port() {
+        let mut cfg = sample_config();
+        cfg.server.port = 9999;
+        cfg.server.listeners = vec![mk_listener(8081), mk_listener(8082)];
+        assert_eq!(resolve_default_link_port(&cfg), 8081);
+    }
+
+    #[test]
+    fn resolve_default_link_port_falls_back_to_server_port_when_no_listeners() {
+        let mut cfg = sample_config();
+        cfg.server.port = 4242;
+        cfg.server.listeners = Vec::new();
+        assert_eq!(resolve_default_link_port(&cfg), 4242);
+    }
+
+    #[test]
+    fn resolve_default_link_port_falls_back_when_listener_has_no_port() {
+        let mut cfg = sample_config();
+        cfg.server.port = 7777;
+        let l = crate::config::ListenerConfig {
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: None,
+            announce: None,
+            announce_ip: None,
+            proxy_protocol: None,
+            reuse_allow: false,
+        };
+        cfg.server.listeners = vec![l];
+        assert_eq!(resolve_default_link_port(&cfg), 7777);
+    }
 }

@@ -274,7 +274,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_log_destination_default() {
+    fn parse_log_destination_default() {
         let args: Vec<String> = vec![];
         assert!(matches!(
             parse_log_destination(&args),
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_log_destination_file() {
+    fn parse_log_destination_file() {
         let args = vec!["--log-file".to_string(), "/var/log/telemt.log".to_string()];
         match parse_log_destination(&args) {
             LogDestination::File { path, rotate_daily } => {
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_log_destination_file_daily() {
+    fn parse_log_destination_file_daily() {
         let args = vec!["--log-file-daily=/var/log/telemt".to_string()];
         match parse_log_destination(&args) {
             LogDestination::File { path, rotate_daily } => {
@@ -308,7 +308,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_parse_log_destination_syslog() {
+    fn parse_log_destination_syslog() {
         let args = vec!["--syslog".to_string()];
         assert!(matches!(
             parse_log_destination(&args),
@@ -316,9 +316,78 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn parse_log_destination_file_equals_syntax() {
+        let args = vec!["--log-file=/tmp/app.log".to_string()];
+        match parse_log_destination(&args) {
+            LogDestination::File { path, rotate_daily } => {
+                assert_eq!(path, "/tmp/app.log");
+                assert!(!rotate_daily);
+            }
+            _ => panic!("Expected File destination"),
+        }
+    }
+
+    #[test]
+    fn parse_log_destination_file_without_value_falls_through() {
+        let args = vec!["--log-file".to_string()];
+        assert!(matches!(
+            parse_log_destination(&args),
+            LogDestination::Stderr
+        ));
+    }
+
+    #[test]
+    fn parse_log_destination_daily_separate_arg() {
+        let args = vec![
+            "--log-file-daily".to_string(),
+            "/var/log/daily".to_string(),
+        ];
+        match parse_log_destination(&args) {
+            LogDestination::File { path, rotate_daily } => {
+                assert_eq!(path, "/var/log/daily");
+                assert!(rotate_daily);
+            }
+            _ => panic!("Expected File destination"),
+        }
+    }
+
+    #[test]
+    fn parse_log_destination_skips_unrelated_args() {
+        let args = vec![
+            "--debug".to_string(),
+            "--port".to_string(),
+            "443".to_string(),
+            "--log-file".to_string(),
+            "/var/log/proxy.log".to_string(),
+            "--other".to_string(),
+        ];
+        match parse_log_destination(&args) {
+            LogDestination::File { path, .. } => assert_eq!(path, "/var/log/proxy.log"),
+            _ => panic!("Expected File destination"),
+        }
+    }
+
+    #[test]
+    fn parse_log_destination_first_match_wins() {
+        let args = vec![
+            "--log-file=/first.log".to_string(),
+            "--log-file-daily=/second.log".to_string(),
+        ];
+        match parse_log_destination(&args) {
+            LogDestination::File {
+                path, rotate_daily, ..
+            } => {
+                assert_eq!(path, "/first.log");
+                assert!(!rotate_daily);
+            }
+            _ => panic!("Expected File destination"),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
-    fn test_syslog_priority_for_level_mapping() {
+    fn syslog_priority_for_level_mapping() {
         assert_eq!(
             syslog_priority_for_level(&tracing::Level::ERROR),
             libc::LOG_ERR

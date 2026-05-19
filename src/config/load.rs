@@ -4176,4 +4176,385 @@ mod tests {
         assert_eq!(cfg.network.dns_overrides.len(), 2);
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn levenshtein_empty_strings() {
+        assert_eq!(levenshtein_distance("", ""), 0);
+    }
+
+    #[test]
+    fn levenshtein_one_empty() {
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn levenshtein_identical() {
+        assert_eq!(levenshtein_distance("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn levenshtein_known_values() {
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+        assert_eq!(levenshtein_distance("saturday", "sunday"), 3);
+    }
+
+    #[test]
+    fn levenshtein_single_char_diff() {
+        assert_eq!(levenshtein_distance("abc", "adc"), 1);
+    }
+
+    #[test]
+    fn unknown_key_suggestion_finds_close_match() {
+        let known = &["server", "secret", "users", "port"];
+        let suggestion = unknown_key_suggestion("servre", known);
+        assert_eq!(suggestion.as_deref(), Some("server"));
+    }
+
+    #[test]
+    fn unknown_key_suggestion_none_when_too_far() {
+        let known = &["server", "secret"];
+        let suggestion = unknown_key_suggestion("zzzzzzzzzz", known);
+        assert!(suggestion.is_none());
+    }
+
+    #[test]
+    fn unknown_key_suggestion_case_insensitive() {
+        let known = &["Server"];
+        let suggestion = unknown_key_suggestion("server", known);
+        assert_eq!(suggestion.as_deref(), Some("Server"));
+    }
+
+    #[test]
+    fn hash_rendered_snapshot_deterministic() {
+        let h1 = hash_rendered_snapshot("test payload");
+        let h2 = hash_rendered_snapshot("test payload");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hash_rendered_snapshot_different_inputs() {
+        let h1 = hash_rendered_snapshot("aaa");
+        let h2 = hash_rendered_snapshot("bbb");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn table_at_navigates_nested() {
+        let val: toml::Value = toml::from_str(
+            r#"[general]
+            config_strict = true"#,
+        )
+        .unwrap();
+        let table = table_at(&val, &["general"]).unwrap();
+        assert_eq!(table.get("config_strict").unwrap().as_bool(), Some(true));
+    }
+
+    #[test]
+    fn table_at_returns_none_for_missing() {
+        let val: toml::Value = toml::from_str("[other]\nkey = 1").unwrap();
+        assert!(table_at(&val, &["missing"]).is_none());
+    }
+
+    #[test]
+    fn user_auth_snapshot_from_users_basic() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_string(), "0102030405060708090a0b0c0d0e0f10".to_string());
+        let snap = UserAuthSnapshot::from_users(&users).unwrap();
+        assert_eq!(snap.user_id_by_name("alice"), Some(0));
+        assert!(snap.user_id_by_name("bob").is_none());
+        assert_eq!(snap.entries().len(), 1);
+        assert_eq!(snap.entries()[0].user, "alice");
+    }
+
+    #[test]
+    fn user_auth_snapshot_entry_by_id() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_string(), "0102030405060708090a0b0c0d0e0f10".to_string());
+        users.insert("bob".to_string(), "1112131415161718191a1b1c1d1e1f20".to_string());
+        let snap = UserAuthSnapshot::from_users(&users).unwrap();
+        let alice_entry = snap.entry_by_id(0).unwrap();
+        assert_eq!(alice_entry.user, "alice");
+        let bob_entry = snap.entry_by_id(1).unwrap();
+        assert_eq!(bob_entry.user, "bob");
+        assert!(snap.entry_by_id(99).is_none());
+    }
+
+    #[test]
+    fn user_auth_snapshot_sni_candidates() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_string(), "0102030405060708090a0b0c0d0e0f10".to_string());
+        let snap = UserAuthSnapshot::from_users(&users).unwrap();
+        let candidates = snap.sni_candidates("alice");
+        assert!(candidates.is_some());
+        assert_eq!(candidates.unwrap(), &[0u32]);
+    }
+
+    #[test]
+    fn user_auth_snapshot_sni_initial_candidates() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_string(), "0102030405060708090a0b0c0d0e0f10".to_string());
+        let snap = UserAuthSnapshot::from_users(&users).unwrap();
+        let candidates = snap.sni_initial_candidates("alice");
+        assert!(candidates.is_some());
+        assert_eq!(candidates.unwrap(), &[0u32]);
+    }
+
+    #[test]
+    fn user_auth_snapshot_rejects_bad_hex() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_string(), "not_hex_at_all".to_string());
+        assert!(UserAuthSnapshot::from_users(&users).is_err());
+    }
+
+    #[test]
+    fn user_auth_snapshot_rejects_wrong_length() {
+        let mut users = HashMap::new();
+        users.insert("alice".to_string(), "0102030405".to_string());
+        assert!(UserAuthSnapshot::from_users(&users).is_err());
+    }
+
+    #[test]
+    fn sni_lookup_hash_case_insensitive() {
+        let h1 = UserAuthSnapshot::sni_lookup_hash("Alice");
+        let h2 = UserAuthSnapshot::sni_lookup_hash("alice");
+        assert_eq!(h1, h2);
+    }
+
+    // ============= is_valid_tls_domain_name =============
+
+    #[test]
+    fn tls_domain_name_accepts_typical_hosts() {
+        assert!(is_valid_tls_domain_name("example.com"));
+        assert!(is_valid_tls_domain_name("api.v3.example.co.uk"));
+        // Even unusual but slash/space-free strings pass — this is a
+        // lenient sanity filter, not a full FQDN validator.
+        assert!(is_valid_tls_domain_name("xn--de-eka1c"));
+    }
+
+    #[test]
+    fn tls_domain_name_rejects_empty() {
+        assert!(!is_valid_tls_domain_name(""));
+    }
+
+    #[test]
+    fn tls_domain_name_rejects_path_separators() {
+        // Forward and back slashes are the canonical indicators of
+        // accidental path-injection (e.g. operator typed `cache/x.com`).
+        assert!(!is_valid_tls_domain_name("evil/example.com"));
+        assert!(!is_valid_tls_domain_name("evil\\example.com"));
+    }
+
+    #[test]
+    fn tls_domain_name_rejects_whitespace_anywhere() {
+        assert!(!is_valid_tls_domain_name(" example.com"));
+        assert!(!is_valid_tls_domain_name("example.com "));
+        assert!(!is_valid_tls_domain_name("ex ample.com"));
+        assert!(!is_valid_tls_domain_name("ex\tample.com"));
+        assert!(!is_valid_tls_domain_name("ex\nample.com"));
+    }
+
+    // ============= is_valid_ad_tag =============
+
+    #[test]
+    fn ad_tag_validator_in_load_mirrors_api_model_validator() {
+        // Both are 32-char hex validators. Tests below ensure the local
+        // helper does not drift from `crate::api::model::is_valid_ad_tag`
+        // (kept as a separate function for module boundaries, but they
+        // must agree byte-for-byte on all inputs).
+        let cases = [
+            ("0123456789abcdef0123456789abcdef", true),
+            ("0123456789ABCDEF0123456789ABCDEF", true),
+            ("", false),
+            ("short", false),
+            (
+                "0123456789abcdef0123456789abcde",
+                false, // 31 chars
+            ),
+            (
+                "0123456789abcdef0123456789abcdefa",
+                false, // 33 chars
+            ),
+            (
+                "g123456789abcdef0123456789abcdef",
+                false, // non-hex
+            ),
+        ];
+        for (tag, expected) in cases {
+            assert_eq!(
+                super::is_valid_ad_tag(tag),
+                expected,
+                "ad_tag {:?} expected {}",
+                tag,
+                expected
+            );
+        }
+    }
+
+    // ============= sanitize_ad_tag =============
+
+    #[test]
+    fn sanitize_ad_tag_clears_invalid_tag() {
+        let mut t = Some("not-valid-hex".to_string());
+        super::sanitize_ad_tag(&mut t);
+        assert!(t.is_none());
+    }
+
+    #[test]
+    fn sanitize_ad_tag_keeps_valid_tag() {
+        let valid = "0123456789abcdef0123456789abcdef".to_string();
+        let mut t = Some(valid.clone());
+        super::sanitize_ad_tag(&mut t);
+        assert_eq!(t, Some(valid));
+    }
+
+    #[test]
+    fn sanitize_ad_tag_noop_on_none() {
+        let mut t: Option<String> = None;
+        super::sanitize_ad_tag(&mut t);
+        assert!(t.is_none());
+    }
+
+    // ============= push_unique_nonempty =============
+
+    #[test]
+    fn push_unique_nonempty_appends_new() {
+        let mut v: Vec<String> = vec!["a".into(), "b".into()];
+        super::push_unique_nonempty(&mut v, "c".to_string());
+        assert_eq!(v, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn push_unique_nonempty_skips_duplicates() {
+        let mut v: Vec<String> = vec!["a".into()];
+        super::push_unique_nonempty(&mut v, "a".to_string());
+        super::push_unique_nonempty(&mut v, "a".to_string());
+        assert_eq!(v, vec!["a"]);
+    }
+
+    #[test]
+    fn push_unique_nonempty_trims_before_inserting() {
+        let mut v: Vec<String> = Vec::new();
+        super::push_unique_nonempty(&mut v, "  hello  ".to_string());
+        assert_eq!(v, vec!["hello"]);
+    }
+
+    #[test]
+    fn push_unique_nonempty_skips_empty_and_whitespace_only() {
+        let mut v: Vec<String> = Vec::new();
+        super::push_unique_nonempty(&mut v, String::new());
+        super::push_unique_nonempty(&mut v, "   ".to_string());
+        super::push_unique_nonempty(&mut v, "\t".to_string());
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn push_unique_nonempty_dedupes_against_trimmed_form() {
+        // The trimmed form is compared to the existing entries.
+        let mut v: Vec<String> = vec!["x".into()];
+        super::push_unique_nonempty(&mut v, "  x  ".to_string());
+        assert_eq!(v, vec!["x"]);
+    }
+
+    // ============= validate_network_cfg =============
+
+    fn mk_net(ipv4: bool, ipv6: Option<bool>, prefer: u8) -> NetworkConfig {
+        let mut n = NetworkConfig::default();
+        n.ipv4 = ipv4;
+        n.ipv6 = ipv6;
+        n.prefer = prefer;
+        n
+    }
+
+    #[test]
+    fn validate_network_cfg_rejects_both_v4_and_v6_disabled() {
+        let mut n = mk_net(false, Some(false), 4);
+        let err = super::validate_network_cfg(&mut n).unwrap_err();
+        match err {
+            ProxyError::Config(msg) => assert!(msg.contains("Both ipv4 and ipv6")),
+            _ => panic!("expected Config error"),
+        }
+    }
+
+    #[test]
+    fn validate_network_cfg_rejects_non_4_or_6_prefer() {
+        for prefer in [0u8, 1, 2, 3, 5, 7, 255] {
+            let mut n = mk_net(true, Some(true), prefer);
+            assert!(
+                super::validate_network_cfg(&mut n).is_err(),
+                "prefer={} must be rejected",
+                prefer
+            );
+        }
+    }
+
+    #[test]
+    fn validate_network_cfg_forces_prefer6_when_ipv4_disabled() {
+        let mut n = mk_net(false, Some(true), 4);
+        super::validate_network_cfg(&mut n).unwrap();
+        assert_eq!(n.prefer, 6);
+    }
+
+    #[test]
+    fn validate_network_cfg_forces_prefer4_when_ipv6_explicitly_disabled() {
+        let mut n = mk_net(true, Some(false), 6);
+        super::validate_network_cfg(&mut n).unwrap();
+        assert_eq!(n.prefer, 4);
+    }
+
+    #[test]
+    fn validate_network_cfg_keeps_prefer_when_consistent_with_flags() {
+        let mut n = mk_net(true, Some(true), 4);
+        super::validate_network_cfg(&mut n).unwrap();
+        assert_eq!(n.prefer, 4);
+
+        let mut n = mk_net(true, Some(true), 6);
+        super::validate_network_cfg(&mut n).unwrap();
+        assert_eq!(n.prefer, 6);
+    }
+
+    // ============= is_strict_config =============
+
+    #[test]
+    fn is_strict_config_defaults_to_false_when_absent() {
+        let parsed: toml::Value = toml::from_str("").unwrap();
+        assert!(!super::is_strict_config(&parsed));
+
+        let parsed: toml::Value = toml::from_str("[general]\nfoo = 1\n").unwrap();
+        assert!(!super::is_strict_config(&parsed));
+    }
+
+    #[test]
+    fn is_strict_config_returns_true_only_when_general_strict_is_true() {
+        let parsed: toml::Value =
+            toml::from_str("[general]\nconfig_strict = true\n").unwrap();
+        assert!(super::is_strict_config(&parsed));
+
+        let parsed: toml::Value =
+            toml::from_str("[general]\nconfig_strict = false\n").unwrap();
+        assert!(!super::is_strict_config(&parsed));
+    }
+
+    #[test]
+    fn is_strict_config_ignores_top_level_config_strict_key() {
+        // The flag only counts when it sits inside `[general]`.
+        let parsed: toml::Value = toml::from_str("config_strict = true\n").unwrap();
+        assert!(!super::is_strict_config(&parsed));
+    }
+
+    // ============= known_config_keys_for_suggestion =============
+
+    #[test]
+    fn known_config_keys_for_suggestion_contains_top_level_keys() {
+        // The suggestion list must include each top-level section header,
+        // otherwise typo-suggestion can't reach them.
+        let keys = super::known_config_keys_for_suggestion();
+        for required in &["general", "network", "server", "access", "upstreams"] {
+            assert!(
+                keys.contains(required),
+                "missing top-level key {:?} in suggestion list",
+                required
+            );
+        }
+    }
 }

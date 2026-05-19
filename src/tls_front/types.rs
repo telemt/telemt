@@ -148,4 +148,41 @@ mod tests {
         assert!(cached.behavior_profile.ticket_record_sizes.is_empty());
         assert_eq!(cached.behavior_profile.source, TlsProfileSource::Default);
     }
+
+    #[test]
+    fn tls_behavior_profile_default_has_one_change_cipher_spec() {
+        // RFC 8446 compat mode: clients expect exactly one CCS before the
+        // encrypted flight. The default must match real-world observation,
+        // not zero. Bumping this default is a wire-shape change.
+        let p = TlsBehaviorProfile::default();
+        assert_eq!(p.change_cipher_spec_count, 1);
+        assert!(p.app_data_record_sizes.is_empty());
+        assert!(p.ticket_record_sizes.is_empty());
+        assert_eq!(p.source, TlsProfileSource::Default);
+    }
+
+    #[test]
+    fn tls_profile_source_serializes_snake_case() {
+        // The `#[serde(rename_all = "snake_case")]` attribute on the enum
+        // is part of the persisted-cache contract. Round-trip each variant.
+        for src in [
+            TlsProfileSource::Default,
+            TlsProfileSource::Raw,
+            TlsProfileSource::Rustls,
+            TlsProfileSource::Merged,
+        ] {
+            let json = serde_json::to_string(&src).unwrap();
+            let back: TlsProfileSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(src, back, "round-trip failed for {:?}", src);
+        }
+        // Spot-check exact strings to lock the wire shape.
+        assert_eq!(
+            serde_json::to_string(&TlsProfileSource::Default).unwrap(),
+            r#""default""#
+        );
+        assert_eq!(
+            serde_json::to_string(&TlsProfileSource::Rustls).unwrap(),
+            r#""rustls""#
+        );
+    }
 }

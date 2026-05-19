@@ -112,3 +112,60 @@ fn quota_user_state(quota: UserQuotaSnapshot) -> QuotaUserState {
         last_reset_epoch_secs: quota.last_reset_epoch_secs,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_user_state_copies_fields_verbatim() {
+        let snap = UserQuotaSnapshot {
+            used_bytes: 123_456,
+            last_reset_epoch_secs: 999,
+        };
+        let s = quota_user_state(snap);
+        assert_eq!(s.used_bytes, 123_456);
+        assert_eq!(s.last_reset_epoch_secs, 999);
+    }
+
+    #[test]
+    fn quota_state_file_round_trips_through_json() {
+        let mut original = QuotaStateFile {
+            last_reset_epoch_secs: 1_700_000_000,
+            users: BTreeMap::new(),
+        };
+        original.users.insert(
+            "alice".to_string(),
+            QuotaUserState {
+                used_bytes: 42,
+                last_reset_epoch_secs: 1_699_990_000,
+            },
+        );
+        original.users.insert(
+            "bob".to_string(),
+            QuotaUserState {
+                used_bytes: 0,
+                last_reset_epoch_secs: 0,
+            },
+        );
+
+        let json = serde_json::to_string(&original).unwrap();
+        let back: QuotaStateFile = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.last_reset_epoch_secs, 1_700_000_000);
+        assert_eq!(back.users.len(), 2);
+        assert_eq!(back.users["alice"].used_bytes, 42);
+        assert_eq!(back.users["alice"].last_reset_epoch_secs, 1_699_990_000);
+        assert_eq!(back.users["bob"].used_bytes, 0);
+    }
+
+    #[test]
+    fn now_epoch_secs_is_monotonic_within_a_test_run() {
+        // Cheap smoke test — just ensures the helper doesn't panic and
+        // returns a value > 0 on any sane system clock.
+        let t1 = now_epoch_secs();
+        let t2 = now_epoch_secs();
+        assert!(t1 > 0, "epoch seconds must be positive");
+        assert!(t2 >= t1, "time must not go backwards within a single test");
+    }
+}

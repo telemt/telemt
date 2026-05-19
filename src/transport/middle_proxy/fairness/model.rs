@@ -140,3 +140,155 @@ pub(crate) enum DispatchAction {
     Continue,
     CloseFlow,
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use std::time::Instant;
+
+    use super::*;
+
+    #[test]
+    fn pressure_state_as_u8() {
+        assert_eq!(PressureState::Normal.as_u8(), 0);
+        assert_eq!(PressureState::Pressured.as_u8(), 1);
+        assert_eq!(PressureState::Shedding.as_u8(), 2);
+        assert_eq!(PressureState::Saturated.as_u8(), 3);
+    }
+
+    #[test]
+    fn pressure_state_default() {
+        assert_eq!(PressureState::default(), PressureState::Normal);
+    }
+
+    #[test]
+    fn pressure_state_ordering() {
+        assert!(PressureState::Normal < PressureState::Pressured);
+        assert!(PressureState::Pressured < PressureState::Shedding);
+        assert!(PressureState::Shedding < PressureState::Saturated);
+
+        assert!(PressureState::Normal < PressureState::Shedding);
+        assert!(PressureState::Normal < PressureState::Saturated);
+        assert!(PressureState::Pressured < PressureState::Saturated);
+
+        assert_eq!(PressureState::Normal, PressureState::Normal);
+        assert_eq!(PressureState::Pressured, PressureState::Pressured);
+        assert_eq!(PressureState::Shedding, PressureState::Shedding);
+        assert_eq!(PressureState::Saturated, PressureState::Saturated);
+
+        assert!(PressureState::Normal <= PressureState::Normal);
+        assert!(PressureState::Saturated >= PressureState::Saturated);
+    }
+
+    #[test]
+    fn queued_bytes_empty() {
+        let frame = QueuedFrame {
+            conn_id: 1,
+            flags: 0,
+            data: Bytes::new(),
+            enqueued_at: Instant::now(),
+        };
+        assert_eq!(frame.queued_bytes(), 0);
+    }
+
+    #[test]
+    fn queued_bytes_1024() {
+        let frame = QueuedFrame {
+            conn_id: 1,
+            flags: 0,
+            data: Bytes::from(vec![0u8; 1024]),
+            enqueued_at: Instant::now(),
+        };
+        assert_eq!(frame.queued_bytes(), 1024);
+    }
+
+    #[test]
+    fn queued_bytes_max_u16() {
+        let frame = QueuedFrame {
+            conn_id: 1,
+            flags: 0,
+            data: Bytes::from(vec![0u8; 0xFFFF]),
+            enqueued_at: Instant::now(),
+        };
+        assert_eq!(frame.queued_bytes(), 0xFFFF);
+    }
+
+    #[test]
+    fn flow_fairness_state_passthrough_fields() {
+        let s = FlowFairnessState::new(42, 7, 3, 10);
+        assert_eq!(s._flow_id, 42);
+        assert_eq!(s._worker_id, 7);
+        assert_eq!(s.bucket_id, 3);
+    }
+
+    #[test]
+    fn flow_fairness_state_weight_zero_clamps_to_one() {
+        let s = FlowFairnessState::new(1, 1, 0, 0);
+        assert_eq!(s.weight_quanta, 1);
+    }
+
+    #[test]
+    fn flow_fairness_state_weight_one_preserved() {
+        let s = FlowFairnessState::new(1, 1, 0, 1);
+        assert_eq!(s.weight_quanta, 1);
+    }
+
+    #[test]
+    fn flow_fairness_state_weight_200_preserved() {
+        let s = FlowFairnessState::new(1, 1, 0, 200);
+        assert_eq!(s.weight_quanta, 200);
+    }
+
+    #[test]
+    fn flow_fairness_state_zeroed_fields() {
+        let s = FlowFairnessState::new(1, 1, 0, 5);
+        assert_eq!(s.pending_bytes, 0);
+        assert_eq!(s.deficit_bytes, 0);
+        assert_eq!(s.recent_drain_bytes, 0);
+    }
+
+    #[test]
+    fn flow_fairness_state_counter_fields_zero() {
+        let s = FlowFairnessState::new(1, 1, 0, 5);
+        assert_eq!(s.consecutive_stalls, 0);
+        assert_eq!(s.consecutive_skips, 0);
+        assert_eq!(s.penalty_score, 0);
+    }
+
+    #[test]
+    fn flow_fairness_state_none_timestamps() {
+        let s = FlowFairnessState::new(1, 1, 0, 5);
+        assert!(s.queue_started_at.is_none());
+        assert!(s.last_drain_at.is_none());
+    }
+
+    #[test]
+    fn flow_fairness_state_default_enums() {
+        let s = FlowFairnessState::new(1, 1, 0, 5);
+        assert_eq!(s.pressure_class, FlowPressureClass::Healthy);
+        assert_eq!(s.standing_state, StandingQueueState::Transient);
+        assert_eq!(s.scheduler_state, FlowSchedulerState::Idle);
+    }
+
+    #[test]
+    fn flow_fairness_state_not_in_active_ring() {
+        let s = FlowFairnessState::new(1, 1, 0, 5);
+        assert!(!s.in_active_ring);
+    }
+
+    #[test]
+    fn queued_frame_clone_preserves_fields() {
+        let now = Instant::now();
+        let original = QueuedFrame {
+            conn_id: 99,
+            flags: 0xABCD,
+            data: Bytes::from(vec![0u8; 512]),
+            enqueued_at: now,
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.conn_id, 99);
+        assert_eq!(cloned.flags, 0xABCD);
+        assert_eq!(cloned.data.len(), 512);
+        assert_eq!(cloned.enqueued_at, now);
+    }
+}
