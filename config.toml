@@ -25,11 +25,11 @@ show = "*"
 # show = ["alice", "bob"] # Only show links for alice and bob
 # show = "*"              # Show links for all users
 # public_host = "proxy.example.com"  # Host (IP or domain) for tg:// links
-# public_port = 443                  # Port for tg:// links (default: server.port)
+# public_port = 9443                  # Port for tg:// links (default: server.port)
 
 # === Server Binding ===
 [server]
-port = 443
+port = 9443
 # proxy_protocol = false           # Enable if behind HAProxy/nginx with PROXY protocol
 # metrics_port = 9090
 # metrics_listen = "127.0.0.1:9090" # Listen address for metrics (overrides metrics_port)
@@ -50,7 +50,7 @@ ip = "0.0.0.0"
 [censorship]
 # Fake-TLS / SNI masking domain used in generated ee-links.
 # Changing tls_domain invalidates previously generated TLS links.
-tls_domain = "petrovich.ru"
+tls_domain = "yandex.ru"
 
 mask = true
 tls_emulation = true         # Fetch real cert lengths and emulate TLS records
@@ -58,4 +58,4 @@ tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 
 [access.users]
 # format: "username" = "32_hex_chars_secret"
-hello = "00000000000000000000000000000000"
+raven = "7Qifpal$l_RBT+-Rkk-RmhQyp-Rijz6&"
