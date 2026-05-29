@@ -4,13 +4,11 @@
 
 [🇷🇺 README на русском](https://github.com/telemt/telemt/blob/main/README.ru.md)
 
-***Löst Probleme, bevor andere überhaupt wissen, dass sie existieren*** / ***It solves problems before others even realize they exist***
-
 > [!NOTE]
 >
-> Fixed TLS ClientHello is now available in official clients for Desktop / Android / iOS
+> Telegram Clients TLS ClientHello has been banned by JA3 Fingerprint: we are already looking for ways to solve this problem
 >
-> To work with EE-MTProxy, please update your client!
+> You can try build your client with our Telegram Devlibrary - [tdlib-obf](https://github.com/telemt/tdlib-obf)
 
 <p align="center">
   <a href="https://t.me/telemtrs">
