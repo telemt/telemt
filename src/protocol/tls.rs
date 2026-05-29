@@ -105,6 +105,8 @@ mod extension_type {
 /// TLS Cipher Suites
 mod cipher_suite {
     pub const TLS_AES_128_GCM_SHA256: [u8; 2] = [0x13, 0x01];
+    pub const TLS_AES_256_GCM_SHA384: [u8; 2] = [0x13, 0x02];
+    pub const TLS_CHACHA20_POLY1305_SHA256: [u8; 2] = [0x13, 0x03];
 }
 
 /// TLS Named Curves
@@ -238,6 +240,13 @@ impl ServerHelloBuilder {
     fn with_tls13_version(mut self) -> Self {
         // TLS 1.3 = 0x0304
         self.extensions.add_supported_versions(0x0304);
+        self
+    }
+
+    fn with_cipher_suite(mut self, cipher_suite: [u8; 2]) -> Self {
+        if cipher_suite != [0, 0] {
+            self.cipher_suite = cipher_suite;
+        }
         self
     }
 
@@ -521,6 +530,33 @@ pub fn build_server_hello(
     alpn: Option<Vec<u8>>,
     new_session_tickets: u8,
 ) -> Vec<u8> {
+    build_server_hello_with_cipher(
+        secret,
+        client_digest,
+        session_id,
+        fake_cert_len,
+        rng,
+        cipher_suite::TLS_AES_128_GCM_SHA256,
+        alpn,
+        new_session_tickets,
+    )
+}
+
+/// Build TLS ServerHello response with a caller-selected cipher suite.
+///
+/// The caller is responsible for selecting a suite that is compatible with the
+/// already-authenticated ClientHello. Keeping the selection outside this
+/// builder avoids extra ClientHello parsing in the response construction path.
+pub(crate) fn build_server_hello_with_cipher(
+    secret: &[u8],
+    client_digest: &[u8; TLS_DIGEST_LEN],
+    session_id: &[u8],
+    fake_cert_len: usize,
+    rng: &SecureRandom,
+    selected_cipher_suite: [u8; 2],
+    alpn: Option<Vec<u8>>,
+    new_session_tickets: u8,
+) -> Vec<u8> {
     const MIN_APP_DATA: usize = 64;
     const MAX_APP_DATA: usize = MAX_TLS_CIPHERTEXT_SIZE;
     let fake_cert_len = fake_cert_len.clamp(MIN_APP_DATA, MAX_APP_DATA);
@@ -528,6 +564,7 @@ pub fn build_server_hello(
 
     // Build ServerHello
     let server_hello = ServerHelloBuilder::new(session_id.to_vec())
+        .with_cipher_suite(selected_cipher_suite)
         .with_x25519_key(&x25519_key)
         .with_tls13_version()
         .build_record();
@@ -538,28 +575,14 @@ pub fn build_server_hello(
         TLS_VERSION[0],
         TLS_VERSION[1],
         0x00,
-        0x01, // length = 1
-        0x01, // CCS byte
+        0x01,
+        0x01,
     ];
 
     // Build first encrypted flight mimic as opaque ApplicationData bytes.
-    // Embed a compact EncryptedExtensions-like ALPN block when selected.
+    // ALPN belongs inside encrypted EncryptedExtensions in real TLS 1.3.
     let mut fake_cert = Vec::with_capacity(fake_cert_len);
-    if let Some(proto) = alpn
-        .as_ref()
-        .filter(|p| !p.is_empty() && p.len() <= u8::MAX as usize)
-    {
-        let proto_list_len = 1usize + proto.len();
-        let ext_data_len = 2usize + proto_list_len;
-        let marker_len = 4usize + ext_data_len;
-        if marker_len <= fake_cert_len {
-            fake_cert.extend_from_slice(&0x0010u16.to_be_bytes());
-            fake_cert.extend_from_slice(&(ext_data_len as u16).to_be_bytes());
-            fake_cert.extend_from_slice(&(proto_list_len as u16).to_be_bytes());
-            fake_cert.push(proto.len() as u8);
-            fake_cert.extend_from_slice(proto);
-        }
-    }
+    let _ = alpn;
     if fake_cert.len() < fake_cert_len {
         fake_cert.extend_from_slice(&rng.bytes(fake_cert_len - fake_cert.len()));
     } else if fake_cert.len() > fake_cert_len {
@@ -580,7 +603,7 @@ pub fn build_server_hello(
     let ticket_count = new_session_tickets.min(4);
     if ticket_count > 0 {
         for _ in 0..ticket_count {
-            let ticket_len: usize = rng.range(48) + 48; // 48-95 bytes
+            let ticket_len: usize = rng.range(48) + 48;
             let mut record = Vec::with_capacity(5 + ticket_len);
             record.push(TLS_RECORD_APPLICATION);
             record.extend_from_slice(&TLS_VERSION);
@@ -925,6 +948,112 @@ pub fn detect_client_hello_tls_version(handshake: &[u8]) -> Option<ClientHelloTl
     } else {
         None
     }
+}
+
+fn client_hello_cipher_suites_range(handshake: &[u8]) -> Option<(usize, usize)> {
+    if handshake.len() < 5 || handshake[0] != TLS_RECORD_HANDSHAKE {
+        return None;
+    }
+
+    let record_len = u16::from_be_bytes([handshake[3], handshake[4]]) as usize;
+    let record_end = 5usize.checked_add(record_len)?;
+    if record_end > handshake.len() {
+        return None;
+    }
+
+    let mut pos = 5;
+    if handshake.get(pos) != Some(&0x01) {
+        return None;
+    }
+    pos += 1;
+
+    if pos + 3 > record_end {
+        return None;
+    }
+    let handshake_len = ((handshake[pos] as usize) << 16)
+        | ((handshake[pos + 1] as usize) << 8)
+        | handshake[pos + 2] as usize;
+    pos += 3;
+    let handshake_end = pos.checked_add(handshake_len)?;
+    if handshake_end > record_end {
+        return None;
+    }
+
+    if pos + 2 + 32 > handshake_end {
+        return None;
+    }
+    pos += 2 + 32;
+
+    let session_id_len = *handshake.get(pos)? as usize;
+    pos = pos.checked_add(1)?.checked_add(session_id_len)?;
+    if pos + 2 > handshake_end {
+        return None;
+    }
+
+    let cipher_len = u16::from_be_bytes([handshake[pos], handshake[pos + 1]]) as usize;
+    if cipher_len == 0 || cipher_len % 2 != 0 {
+        return None;
+    }
+    pos += 2;
+    let cipher_end = pos.checked_add(cipher_len)?;
+    if cipher_end > handshake_end {
+        return None;
+    }
+
+    Some((pos, cipher_end))
+}
+
+fn client_hello_offers_cipher_suite(
+    handshake: &[u8],
+    range: (usize, usize),
+    suite: [u8; 2],
+) -> bool {
+    let mut pos = range.0;
+    while pos + 1 < range.1 {
+        if handshake[pos] == suite[0] && handshake[pos + 1] == suite[1] {
+            return true;
+        }
+        pos += 2;
+    }
+    false
+}
+
+fn is_tls13_cipher_suite(suite: [u8; 2]) -> bool {
+    suite == cipher_suite::TLS_AES_128_GCM_SHA256
+        || suite == cipher_suite::TLS_AES_256_GCM_SHA384
+        || suite == cipher_suite::TLS_CHACHA20_POLY1305_SHA256
+}
+
+/// Select the ServerHello cipher suite from the already-received ClientHello.
+///
+/// This is intentionally a borrowed, zero-allocation scan. It runs only for an
+/// authenticated success response and keeps malformed or unexpected ClientHello
+/// shapes on the previous fallback behavior.
+pub(crate) fn select_server_hello_cipher_suite(handshake: &[u8], preferred: [u8; 2]) -> [u8; 2] {
+    let preferred = if is_tls13_cipher_suite(preferred) {
+        preferred
+    } else {
+        cipher_suite::TLS_AES_128_GCM_SHA256
+    };
+    let Some(range) = client_hello_cipher_suites_range(handshake) else {
+        return preferred;
+    };
+
+    if client_hello_offers_cipher_suite(handshake, range, preferred) {
+        return preferred;
+    }
+
+    for fallback in [
+        cipher_suite::TLS_AES_128_GCM_SHA256,
+        cipher_suite::TLS_CHACHA20_POLY1305_SHA256,
+        cipher_suite::TLS_AES_256_GCM_SHA384,
+    ] {
+        if client_hello_offers_cipher_suite(handshake, range, fallback) {
+            return fallback;
+        }
+    }
+
+    preferred
 }
 
 /// Check if bytes look like a TLS ClientHello

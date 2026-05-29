@@ -77,26 +77,24 @@ struct HotBindingTable {
 
 struct BindingState {
     inner: Mutex<BindingInner>,
+    writer_idle_since_epoch_secs: DashMap<u64, u64>,
+    bound_clients_by_writer: DashMap<u64, usize>,
+    active_sessions_by_target_dc: DashMap<i16, usize>,
+    last_meta_for_writer: DashMap<u64, ConnMeta>,
 }
 
 struct BindingInner {
-    writers: HashMap<u64, mpsc::Sender<WriterCommand>>,
     writer_for_conn: HashMap<u64, u64>,
     conns_for_writer: HashMap<u64, HashSet<u64>>,
     meta: HashMap<u64, ConnMeta>,
-    last_meta_for_writer: HashMap<u64, ConnMeta>,
-    writer_idle_since_epoch_secs: HashMap<u64, u64>,
 }
 
 impl BindingInner {
     fn new() -> Self {
         Self {
-            writers: HashMap::new(),
             writer_for_conn: HashMap::new(),
             conns_for_writer: HashMap::new(),
             meta: HashMap::new(),
-            last_meta_for_writer: HashMap::new(),
-            writer_idle_since_epoch_secs: HashMap::new(),
         }
     }
 }
@@ -149,6 +147,10 @@ impl ConnRegistry {
             },
             binding: BindingState {
                 inner: Mutex::new(BindingInner::new()),
+                writer_idle_since_epoch_secs: DashMap::new(),
+                bound_clients_by_writer: DashMap::new(),
+                active_sessions_by_target_dc: DashMap::new(),
+                last_meta_for_writer: DashMap::new(),
             },
             next_id: AtomicU64::new(start),
             route_channel_capacity,

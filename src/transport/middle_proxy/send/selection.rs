@@ -15,7 +15,10 @@ impl MePool {
         routed_dc: i32,
         include_warm: bool,
     ) -> Vec<usize> {
-        let preferred = self.preferred_endpoints_for_dc(routed_dc).await;
+        let preferred_snapshot = self.preferred_endpoints_by_dc.load();
+        let Some(preferred) = preferred_snapshot.get(&routed_dc) else {
+            return Vec::new();
+        };
         if preferred.is_empty() {
             return Vec::new();
         }
@@ -25,7 +28,7 @@ impl MePool {
             if !self.writer_eligible_for_selection(w, include_warm) {
                 continue;
             }
-            if w.writer_dc == routed_dc && preferred.contains(&w.addr) {
+            if w.writer_dc == routed_dc && preferred.binary_search(&w.addr).is_ok() {
                 out.push(idx);
             }
         }

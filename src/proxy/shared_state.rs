@@ -59,7 +59,7 @@ pub(crate) struct MiddleRelaySharedState {
     pub(crate) desync_hasher: RandomState,
     pub(crate) desync_full_cache_last_emit_at: Mutex<Option<Instant>>,
     pub(crate) desync_dedup_rotation_state: Mutex<DesyncDedupRotationState>,
-    pub(crate) relay_idle_registry: Mutex<RelayIdleCandidateRegistry>,
+    pub(crate) relay_idle_registry: RelayIdleCandidateRegistry,
     pub(crate) relay_idle_mark_seq: AtomicU64,
 }
 
@@ -97,7 +97,7 @@ impl ProxySharedState {
                 desync_hasher: RandomState::new(),
                 desync_full_cache_last_emit_at: Mutex::new(None),
                 desync_dedup_rotation_state: Mutex::new(DesyncDedupRotationState::default()),
-                relay_idle_registry: Mutex::new(RelayIdleCandidateRegistry::default()),
+                relay_idle_registry: RelayIdleCandidateRegistry::default(),
                 relay_idle_mark_seq: AtomicU64::new(0),
             },
             traffic_limiter: TrafficLimiter::new(),

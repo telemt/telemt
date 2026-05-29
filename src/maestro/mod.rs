@@ -49,6 +49,7 @@ use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 use helpers::{
     parse_cli, print_maestro_line, resolve_runtime_base_dir, resolve_runtime_config_path,
+    set_maestro_colors_enabled,
 };
 
 #[cfg(unix)]
@@ -314,6 +315,7 @@ async fn run_telemt_core(
         eprintln!("[telemt] Invalid network.dns_overrides: {}", e);
         std::process::exit(1);
     }
+    set_maestro_colors_enabled(!config.general.disable_colors);
     startup_tracker
         .complete_component(COMPONENT_CONFIG_LOAD, Some("config is ready".to_string()))
         .await;

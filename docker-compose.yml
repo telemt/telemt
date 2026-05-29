@@ -10,12 +10,15 @@ services:
       - "443:443"
       - "127.0.0.1:9090:9090"
       - "127.0.0.1:9091:9091"
-    # Allow caching 'proxy-secret' in read-only container
-    working_dir: /etc/telemt
+    # Working dir uses tmpfs for caching 'proxy-secret' at runtime.
+    # Config is mounted as a directory (not a single file) so the API can
+    # atomically update config.toml via write-temp → rename within the same FS.
+    working_dir: /run/telemt
+    command: ["/etc/telemt/config.toml"]
     volumes:
-      - ./config.toml:/etc/telemt/config.toml:ro
+      - ./config:/etc/telemt:rw
     tmpfs:
-      - /etc/telemt:rw,mode=1777,size=4m
+      - /run/telemt:rw,mode=1777,size=4m
     environment:
       - RUST_LOG=info
     healthcheck:
@@ -24,8 +27,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # Uncomment this line if you want to use host network for IPv6, but bridge is default and usually better
-    # network_mode: host
     cap_drop:
       - ALL
     cap_add:

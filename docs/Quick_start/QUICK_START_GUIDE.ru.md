@@ -235,7 +235,10 @@ curl -s http://127.0.0.1:9091/v1/users | jq -r '.data[] | "[\(.username)]", (.li
 
 # Telemt через Docker Compose
 
-**1. Отредактируйте `config.toml` в корневом каталоге репозитория (как минимум: порт, пользовательские секреты, tls_domain)**  
+**1. Создайте директорию `config/` и поместите в неё отрдеактированный `config.toml` (указав как минимум: порт, пользовательские секреты, tls_domain):**
+```bash
+mkdir config && mv config.toml config/
+```
 **2. Запустите контейнер:**
 ```bash
 docker compose up -d --build
@@ -249,7 +252,7 @@ docker compose logs -f telemt
 docker compose down
 ```
 > [!NOTE]
-> - В `docker-compose.yml` файл `./config.toml` монтируется в `/app/config.toml` (доступно только для чтения)  
+> - Директория `./config/` монтируется в `/etc/telemt/` (read-write), что позволяет API атомарно обновлять config.toml
 > - По умолчанию публикуются порты 443:443, а контейнер запускается со сброшенными привилегиями (добавлена только `NET_BIND_SERVICE`)  
 > - Если вам действительно нужна сеть хоста (обычно это требуется только для некоторых конфигураций IPv6), раскомментируйте `network_mode: host`
 

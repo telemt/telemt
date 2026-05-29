@@ -1,12 +1,8 @@
-use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tracing::warn;
-
-use crate::network::IpFamily;
 
 use super::super::MePool;
 use super::{
@@ -17,18 +13,18 @@ use super::{
 impl MePool {
     pub(super) async fn wait_for_writer_until(&self, deadline: Instant) -> bool {
         let mut rx = self.writer_epoch.subscribe();
-        if !self.writers.read().await.is_empty() {
+        if !self.writers.snapshot().is_empty() {
             return true;
         }
         let now = Instant::now();
         if now >= deadline {
-            return !self.writers.read().await.is_empty();
+            return !self.writers.snapshot().is_empty();
         }
         let timeout = deadline.saturating_duration_since(now);
         if tokio::time::timeout(timeout, rx.changed()).await.is_ok() {
-            return !self.writers.read().await.is_empty();
+            return !self.writers.snapshot().is_empty();
         }
-        !self.writers.read().await.is_empty()
+        !self.writers.snapshot().is_empty()
     }
 
     pub(super) async fn wait_for_candidate_until(&self, routed_dc: i32, deadline: Instant) -> bool {
@@ -58,11 +54,11 @@ impl MePool {
 
     pub(super) async fn has_candidate_for_target_dc(&self, routed_dc: i32) -> bool {
         let writers_snapshot = {
-            let ws = self.writers.read().await;
+            let ws = self.writers.snapshot();
             if ws.is_empty() {
                 return false;
             }
-            ws.clone()
+            ws
         };
         let mut candidate_indices = self
             .candidate_indices_for_dc(&writers_snapshot, routed_dc, false)
@@ -79,7 +75,7 @@ impl MePool {
         self: &Arc<Self>,
         routed_dc: i32,
     ) -> bool {
-        let endpoints = self.endpoint_candidates_for_target_dc(routed_dc).await;
+        let endpoints = self.preferred_endpoints_for_dc(routed_dc).await;
         if endpoints.is_empty() {
             return false;
         }
@@ -92,31 +88,17 @@ impl MePool {
 
     pub(super) async fn trigger_async_recovery_global(self: &Arc<Self>) {
         self.stats.increment_me_async_recovery_trigger_total();
-        let mut seen = HashSet::<(i32, SocketAddr)>::new();
-        for family in self.family_order() {
-            let map_guard = match family {
-                IpFamily::V4 => self.proxy_map_v4.read().await,
-                IpFamily::V6 => self.proxy_map_v6.read().await,
-            };
-            for (dc, addrs) in map_guard.iter() {
-                for (ip, port) in addrs {
-                    let addr = SocketAddr::new(*ip, *port);
-                    if seen.insert((*dc, addr)) {
-                        self.trigger_immediate_refill_for_dc(addr, *dc);
-                    }
-                    if seen.len() >= 8 {
-                        return;
-                    }
+        let preferred = self.preferred_endpoints_by_dc.load();
+        let mut triggered = 0usize;
+        for (dc, addrs) in preferred.iter() {
+            for addr in addrs {
+                self.trigger_immediate_refill_for_dc(*addr, *dc);
+                triggered = triggered.saturating_add(1);
+                if triggered >= 8 {
+                    return;
                 }
             }
         }
-    }
-
-    pub(super) async fn endpoint_candidates_for_target_dc(
-        &self,
-        routed_dc: i32,
-    ) -> Vec<SocketAddr> {
-        self.preferred_endpoints_for_dc(routed_dc).await
     }
 
     pub(super) async fn maybe_trigger_hybrid_recovery(

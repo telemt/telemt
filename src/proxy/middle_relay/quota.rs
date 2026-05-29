@@ -41,11 +41,12 @@ pub(super) async fn reserve_user_quota_with_yield(
             return Err(MiddleQuotaReserveError::DeadlineExceeded);
         }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+            biased;
             _ = cancel.cancelled() => {
                 stats.increment_quota_acquire_cancelled_total();
                 return Err(MiddleQuotaReserveError::Cancelled);
             }
+            _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
         }
         backoff_rounds = backoff_rounds.saturating_add(1);
         if backoff_rounds >= QUOTA_RESERVE_MAX_BACKOFF_ROUNDS {
@@ -128,11 +129,12 @@ pub(super) async fn wait_for_traffic_budget_or_cancel(
             return Err(ProxyError::TrafficBudgetWaitDeadlineExceeded);
         }
         tokio::select! {
-            _ = tokio::time::sleep(next_refill_delay()) => {}
+            biased;
             _ = cancel.cancelled() => {
                 stats.increment_flow_wait_middle_rate_limit_cancelled_total();
                 return Err(ProxyError::TrafficBudgetWaitCancelled);
             }
+            _ = tokio::time::sleep(next_refill_delay()) => {}
         }
         let wait_ms = wait_started_at
             .elapsed()

@@ -15,6 +15,7 @@ pub(super) struct ApiFailure {
     pub(super) status: StatusCode,
     pub(super) code: &'static str,
     pub(super) message: String,
+    pub(super) allow: Option<&'static str>,
 }
 
 impl ApiFailure {
@@ -23,6 +24,7 @@ impl ApiFailure {
             status,
             code,
             message: message.into(),
+            allow: None,
         }
     }
 
@@ -32,6 +34,15 @@ impl ApiFailure {
 
     pub(super) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
+    }
+
+    pub(super) fn method_not_allowed(allow: &'static str) -> Self {
+        Self {
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            code: "method_not_allowed",
+            message: "Unsupported HTTP method for this route".to_string(),
+            allow: Some(allow),
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 use http_body_util::{BodyExt, Full};
 use hyper::StatusCode;
 use hyper::body::{Bytes, Incoming};
+use hyper::header::ALLOW;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -25,6 +26,8 @@ pub(super) fn success_response<T: Serialize>(
 }
 
 pub(super) fn error_response(request_id: u64, failure: ApiFailure) -> hyper::Response<Full<Bytes>> {
+    let status = failure.status;
+    let allow = failure.allow;
     let payload = ErrorResponse {
         ok: false,
         error: ErrorBody {
@@ -40,11 +43,13 @@ pub(super) fn error_response(request_id: u64, failure: ApiFailure) -> hyper::Res
         )
         .into_bytes()
     });
-    hyper::Response::builder()
-        .status(failure.status)
-        .header("content-type", "application/json; charset=utf-8")
-        .body(Full::new(Bytes::from(body)))
-        .unwrap()
+    let mut builder = hyper::Response::builder()
+        .status(status)
+        .header("content-type", "application/json; charset=utf-8");
+    if let Some(allow) = allow {
+        builder = builder.header(ALLOW, allow);
+    }
+    builder.body(Full::new(Bytes::from(body))).unwrap()
 }
 
 pub(super) async fn read_json<T: DeserializeOwned>(

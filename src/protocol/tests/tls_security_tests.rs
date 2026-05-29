@@ -1385,6 +1385,7 @@ fn emulated_server_hello_never_places_alpn_in_server_hello_extensions() {
         false,
         true,
         ClientHelloTlsVersion::Tls13,
+        [0x13, 0x01],
         &rng,
         Some(b"h2".to_vec()),
         0,
@@ -1509,12 +1510,22 @@ fn test_validate_tls_handshake_format() {
 }
 
 fn build_client_hello_with_exts(exts: Vec<(u16, Vec<u8>)>, host: &str) -> Vec<u8> {
+    build_client_hello_with_ciphers_and_exts(&[[0x13, 0x01]], exts, host)
+}
+
+fn build_client_hello_with_ciphers_and_exts(
+    cipher_suites: &[[u8; 2]],
+    exts: Vec<(u16, Vec<u8>)>,
+    host: &str,
+) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&TLS_VERSION);
     body.extend_from_slice(&[0u8; 32]);
     body.push(0);
-    body.extend_from_slice(&2u16.to_be_bytes());
-    body.extend_from_slice(&[0x13, 0x01]);
+    body.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
+    for suite in cipher_suites {
+        body.extend_from_slice(suite);
+    }
     body.push(1);
     body.push(0);
 
@@ -1652,6 +1663,52 @@ fn detect_client_hello_tls_version_rejects_malformed_supported_versions() {
     let ch =
         build_client_hello_with_exts(vec![(0x002b, malformed_supported_versions)], "example.com");
     assert!(detect_client_hello_tls_version(&ch).is_none());
+}
+
+#[test]
+fn select_server_hello_cipher_suite_keeps_profile_cipher_when_offered() {
+    let ch = build_client_hello_with_ciphers_and_exts(
+        &[[0x13, 0x01], [0x13, 0x03]],
+        Vec::new(),
+        "example.com",
+    );
+    assert_eq!(
+        select_server_hello_cipher_suite(&ch, [0x13, 0x03]),
+        [0x13, 0x03]
+    );
+}
+
+#[test]
+fn select_server_hello_cipher_suite_ignores_profile_tls12_cipher() {
+    let ch = build_client_hello_with_ciphers_and_exts(
+        &[[0xc0, 0x2f], [0x13, 0x03]],
+        Vec::new(),
+        "example.com",
+    );
+    assert_eq!(
+        select_server_hello_cipher_suite(&ch, [0xc0, 0x2f]),
+        [0x13, 0x03]
+    );
+}
+
+#[test]
+fn select_server_hello_cipher_suite_falls_back_to_offered_tls13_suite() {
+    let ch = build_client_hello_with_ciphers_and_exts(&[[0x13, 0x03]], Vec::new(), "example.com");
+    assert_eq!(
+        select_server_hello_cipher_suite(&ch, [0x13, 0x01]),
+        [0x13, 0x03]
+    );
+}
+
+#[test]
+fn select_server_hello_cipher_suite_keeps_preferred_for_malformed_clienthello() {
+    let mut ch =
+        build_client_hello_with_ciphers_and_exts(&[[0x13, 0x03]], Vec::new(), "example.com");
+    ch.truncate(12);
+    assert_eq!(
+        select_server_hello_cipher_suite(&ch, [0x13, 0x01]),
+        [0x13, 0x01]
+    );
 }
 
 #[test]
@@ -2179,7 +2236,7 @@ fn light_fuzz_boot_time_timestamp_matrix_with_short_replay_window_obeys_boot_cap
 }
 
 #[test]
-fn server_hello_application_data_contains_alpn_marker_when_selected() {
+fn server_hello_application_data_omits_alpn_marker_when_selected() {
     let secret = b"alpn_marker_test";
     let client_digest = [0x55u8; TLS_DIGEST_LEN];
     let session_id = vec![0xAB; 32];
@@ -2206,8 +2263,8 @@ fn server_hello_application_data_contains_alpn_marker_when_selected() {
     assert!(
         app_payload
             .windows(expected.len())
-            .any(|window| window == expected),
-        "first application payload must carry ALPN marker for selected protocol"
+            .all(|window| window != expected),
+        "first application payload must not expose plaintext ALPN marker bytes"
     );
 }
 
@@ -2303,14 +2360,14 @@ fn server_hello_ignores_oversized_alpn_when_marker_would_not_fit() {
 }
 
 #[test]
-fn server_hello_embeds_full_alpn_marker_when_it_exactly_fits_fake_cert_len() {
+fn server_hello_omits_alpn_marker_even_when_it_would_fit_fake_cert_len() {
     let secret = b"alpn_exact_fit_test";
     let client_digest = [0x58u8; TLS_DIGEST_LEN];
     let session_id = vec![0xA5; 32];
     let rng = crate::crypto::SecureRandom::new();
     let proto = vec![b'z'; 57];
 
-    // marker_len = 4 + (2 + (1 + proto_len)) = 7 + proto_len = 64
+    // marker_len = 4 + (2 + (1 + proto_len)) = 7 + proto_len = 64.
     let response = build_server_hello(
         secret,
         &client_digest,
@@ -2336,7 +2393,7 @@ fn server_hello_embeds_full_alpn_marker_when_it_exactly_fits_fake_cert_len() {
     expected_marker.extend_from_slice(&proto);
 
     assert_eq!(app_payload.len(), expected_marker.len());
-    assert_eq!(app_payload, expected_marker.as_slice());
+    assert_ne!(app_payload, expected_marker.as_slice());
 }
 
 #[test]

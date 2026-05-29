@@ -1,6 +1,6 @@
+use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap};
 #[cfg(test)]
 use std::future::Future;
 #[cfg(test)]

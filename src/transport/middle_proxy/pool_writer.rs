@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use rand::RngExt;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -26,6 +27,7 @@ const ME_ACTIVE_PING_JITTER_SECS: i64 = 5;
 const ME_IDLE_KEEPALIVE_MAX_SECS: u64 = 5;
 const ME_RPC_PROXY_REQ_RESPONSE_WAIT_MS: u64 = 700;
 const ME_PING_TRACKER_CLEANUP_EVERY: u32 = 32;
+const ME_SERVICE_SIGNAL_SEND_TIMEOUT_MS: u64 = 50;
 
 #[derive(Clone, Copy)]
 enum WriterTeardownMode {
@@ -45,6 +47,11 @@ enum WriterLifecycleExit {
     Cancelled,
 }
 
+enum ServiceWriterCommandSendError {
+    Closed,
+    TimedOut,
+}
+
 async fn writer_command_loop(
     mut rx: mpsc::Receiver<WriterCommand>,
     mut rpc_writer: RpcWriter,
@@ -52,6 +59,8 @@ async fn writer_command_loop(
 ) -> Result<()> {
     loop {
         tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
             cmd = rx.recv() => {
                 match cmd {
                     Some(WriterCommand::Data(payload)) => {
@@ -69,7 +78,27 @@ async fn writer_command_loop(
                     Some(WriterCommand::Close) | None => return Ok(()),
                 }
             }
-            _ = cancel.cancelled() => return Ok(()),
+        }
+    }
+}
+
+async fn send_service_writer_command(
+    tx: &mpsc::Sender<WriterCommand>,
+    cmd: WriterCommand,
+) -> std::result::Result<(), ServiceWriterCommandSendError> {
+    match tx.try_send(cmd) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Closed(_)) => Err(ServiceWriterCommandSendError::Closed),
+        Err(TrySendError::Full(cmd)) => {
+            let wait = Duration::from_millis(ME_SERVICE_SIGNAL_SEND_TIMEOUT_MS);
+            match tokio::time::timeout(wait, tx.reserve()).await {
+                Ok(Ok(permit)) => {
+                    permit.send(cmd);
+                    Ok(())
+                }
+                Ok(Err(_)) => Err(ServiceWriterCommandSendError::Closed),
+                Err(_) => Err(ServiceWriterCommandSendError::TimedOut),
+            }
         }
     }
 }
@@ -108,6 +137,7 @@ async fn ping_loop(
         Duration::from_secs(wait)
     };
     tokio::select! {
+        biased;
         _ = cancel_ping_token.cancelled() => return,
         _ = tokio::time::sleep(startup_jitter) => {}
     }
@@ -131,6 +161,7 @@ async fn ping_loop(
             Duration::from_secs(secs)
         };
         tokio::select! {
+            biased;
             _ = cancel_ping_token.cancelled() => return,
             _ = tokio::time::sleep(wait) => {}
         }
@@ -151,14 +182,24 @@ async fn ping_loop(
         }
         ping_id = ping_id.wrapping_add(1);
         stats_ping.increment_me_keepalive_sent();
-        if tx_ping
-            .send(WriterCommand::ControlAndFlush(payload))
-            .await
-            .is_err()
+        if let Err(error) =
+            send_service_writer_command(&tx_ping, WriterCommand::ControlAndFlush(payload)).await
         {
+            {
+                let mut tracker = ping_tracker_ping.lock().await;
+                tracker.remove(&sent_id);
+            }
             stats_ping.increment_me_keepalive_failed();
-            debug!("ME ping failed, removing dead writer");
-            return;
+            match error {
+                ServiceWriterCommandSendError::Closed => {
+                    debug!("ME ping failed, removing dead writer");
+                    return;
+                }
+                ServiceWriterCommandSendError::TimedOut => {
+                    debug!("ME ping skipped: writer command channel is full");
+                    continue;
+                }
+            }
         }
     }
 }
@@ -191,6 +232,7 @@ async fn rpc_proxy_req_signal_loop(
     };
 
     tokio::select! {
+        biased;
         _ = cancel_signal.cancelled() => return,
         _ = tokio::time::sleep(Duration::from_millis(startup_jitter_ms)) => {}
     }
@@ -207,6 +249,7 @@ async fn rpc_proxy_req_signal_loop(
         };
 
         tokio::select! {
+            biased;
             _ = cancel_signal.cancelled() => return,
             _ = tokio::time::sleep(wait) => {}
         }
@@ -233,14 +276,15 @@ async fn rpc_proxy_req_signal_loop(
             meta.proto_flags,
         );
 
-        if tx_signal
-            .send(WriterCommand::DataAndFlush(payload))
-            .await
-            .is_err()
+        if let Err(error) =
+            send_service_writer_command(&tx_signal, WriterCommand::DataAndFlush(payload)).await
         {
             stats_signal.increment_me_rpc_proxy_req_signal_failed_total();
             let _ = pool.registry.unregister(conn_id).await;
-            return;
+            match error {
+                ServiceWriterCommandSendError::Closed => return,
+                ServiceWriterCommandSendError::TimedOut => continue,
+            }
         }
 
         stats_signal.increment_me_rpc_proxy_req_signal_sent_total();
@@ -258,14 +302,16 @@ async fn rpc_proxy_req_signal_loop(
 
         let close_payload = build_control_payload(RPC_CLOSE_EXT_U32, conn_id);
 
-        if tx_signal
-            .send(WriterCommand::ControlAndFlush(close_payload))
-            .await
-            .is_err()
+        if let Err(error) =
+            send_service_writer_command(&tx_signal, WriterCommand::ControlAndFlush(close_payload))
+                .await
         {
             stats_signal.increment_me_rpc_proxy_req_signal_failed_total();
             let _ = pool.registry.unregister(conn_id).await;
-            return;
+            match error {
+                ServiceWriterCommandSendError::Closed => return,
+                ServiceWriterCommandSendError::TimedOut => continue,
+            }
         }
 
         stats_signal.increment_me_rpc_proxy_req_signal_close_sent_total();

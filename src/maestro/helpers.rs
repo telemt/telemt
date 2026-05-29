@@ -1,6 +1,7 @@
 #![allow(clippy::items_after_test_module)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -18,8 +19,27 @@ use crate::transport::middle_proxy::{
 const MAESTRO_COLOR: &str = "\x1b[92m";
 const COLOR_RESET: &str = "\x1b[0m";
 
+static MAESTRO_COLORS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Enables or disables ANSI color in direct MAESTRO status lines.
+pub(crate) fn set_maestro_colors_enabled(enabled: bool) {
+    MAESTRO_COLORS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+fn format_maestro_line(message: impl AsRef<str>, colors_enabled: bool) -> String {
+    if colors_enabled {
+        format!("{MAESTRO_COLOR}MAESTRO{COLOR_RESET}: {}", message.as_ref())
+    } else {
+        format!("MAESTRO: {}", message.as_ref())
+    }
+}
+
+/// Prints a direct MAESTRO status line outside the tracing subscriber.
 pub(crate) fn print_maestro_line(message: impl AsRef<str>) {
-    eprintln!("{MAESTRO_COLOR}MAESTRO{COLOR_RESET}: {}", message.as_ref());
+    eprintln!(
+        "{}",
+        format_maestro_line(message, MAESTRO_COLORS_ENABLED.load(Ordering::Relaxed))
+    );
 }
 
 pub(crate) fn resolve_runtime_config_path(
@@ -274,10 +294,23 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        expected_handshake_close_description, is_expected_handshake_eof, peer_close_description,
-        resolve_runtime_base_dir, resolve_runtime_config_path,
+        expected_handshake_close_description, format_maestro_line, is_expected_handshake_eof,
+        peer_close_description, resolve_runtime_base_dir, resolve_runtime_config_path,
     };
     use crate::error::{ProxyError, StreamError};
+
+    #[test]
+    fn maestro_line_formatter_respects_disabled_colors() {
+        let plain = format_maestro_line("boot", false);
+        assert_eq!(plain, "MAESTRO: boot");
+        assert!(!plain.contains('\x1b'));
+    }
+
+    #[test]
+    fn maestro_line_formatter_keeps_color_when_enabled() {
+        let colored = format_maestro_line("boot", true);
+        assert!(colored.contains("\x1b[92mMAESTRO\x1b[0m"));
+    }
 
     #[test]
     fn resolve_runtime_config_path_anchors_relative_to_startup_cwd() {

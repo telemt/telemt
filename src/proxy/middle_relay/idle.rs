@@ -1,4 +1,5 @@
 use super::*;
+use dashmap::DashMap;
 
 mod read;
 
@@ -10,10 +11,10 @@ pub(crate) use self::read::{
 
 #[derive(Default)]
 pub(crate) struct RelayIdleCandidateRegistry {
-    pub(in crate::proxy::middle_relay) by_conn_id: HashMap<u64, RelayIdleCandidateMeta>,
-    pub(in crate::proxy::middle_relay) ordered: BTreeSet<(u64, u64)>,
-    pressure_event_seq: u64,
-    pressure_consumed_seq: u64,
+    pub(in crate::proxy::middle_relay) by_conn_id: DashMap<u64, RelayIdleCandidateMeta>,
+    pub(in crate::proxy::middle_relay) ordered: parking_lot::Mutex<BTreeSet<(u64, u64)>>,
+    pressure_event_seq: AtomicU64,
+    pressure_consumed_seq: AtomicU64,
 }
 
 /// Queue metadata used to preserve FIFO ordering for idle relay eviction.
@@ -23,25 +24,10 @@ pub(in crate::proxy::middle_relay) struct RelayIdleCandidateMeta {
     pub(in crate::proxy::middle_relay) mark_pressure_seq: u64,
 }
 
-pub(super) fn relay_idle_candidate_registry_lock_in(
-    shared: &ProxySharedState,
-) -> std::sync::MutexGuard<'_, RelayIdleCandidateRegistry> {
-    let registry = &shared.middle_relay.relay_idle_registry;
-    match registry.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = RelayIdleCandidateRegistry::default();
-            registry.clear_poison();
-            guard
-        }
-    }
-}
-
 pub(super) fn mark_relay_idle_candidate_in(shared: &ProxySharedState, conn_id: u64) -> bool {
-    let mut guard = relay_idle_candidate_registry_lock_in(shared);
+    let registry = &shared.middle_relay.relay_idle_registry;
 
-    if guard.by_conn_id.contains_key(&conn_id) {
+    if registry.by_conn_id.contains_key(&conn_id) {
         return false;
     }
 
@@ -52,24 +38,38 @@ pub(super) fn mark_relay_idle_candidate_in(shared: &ProxySharedState, conn_id: u
         .saturating_add(1);
     let meta = RelayIdleCandidateMeta {
         mark_order_seq,
-        mark_pressure_seq: guard.pressure_event_seq,
+        mark_pressure_seq: registry.pressure_event_seq.load(Ordering::Relaxed),
     };
-    guard.by_conn_id.insert(conn_id, meta);
-    guard.ordered.insert((meta.mark_order_seq, conn_id));
-    true
+    match registry.by_conn_id.entry(conn_id) {
+        dashmap::mapref::entry::Entry::Occupied(_) => false,
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            entry.insert(meta);
+            registry
+                .ordered
+                .lock()
+                .insert((meta.mark_order_seq, conn_id));
+            true
+        }
+    }
 }
 
 pub(super) fn clear_relay_idle_candidate_in(shared: &ProxySharedState, conn_id: u64) {
-    let mut guard = relay_idle_candidate_registry_lock_in(shared);
+    let registry = &shared.middle_relay.relay_idle_registry;
 
-    if let Some(meta) = guard.by_conn_id.remove(&conn_id) {
-        guard.ordered.remove(&(meta.mark_order_seq, conn_id));
+    if let Some((_, meta)) = registry.by_conn_id.remove(&conn_id) {
+        registry
+            .ordered
+            .lock()
+            .remove(&(meta.mark_order_seq, conn_id));
     }
 }
 
 pub(super) fn note_relay_pressure_event_in(shared: &ProxySharedState) {
-    let mut guard = relay_idle_candidate_registry_lock_in(shared);
-    guard.pressure_event_seq = guard.pressure_event_seq.wrapping_add(1);
+    shared
+        .middle_relay
+        .relay_idle_registry
+        .pressure_event_seq
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn note_global_relay_pressure(shared: &ProxySharedState) {
@@ -77,8 +77,11 @@ pub(crate) fn note_global_relay_pressure(shared: &ProxySharedState) {
 }
 
 pub(super) fn relay_pressure_event_seq_in(shared: &ProxySharedState) -> u64 {
-    let guard = relay_idle_candidate_registry_lock_in(shared);
-    guard.pressure_event_seq
+    shared
+        .middle_relay
+        .relay_idle_registry
+        .pressure_event_seq
+        .load(Ordering::Relaxed)
 }
 
 pub(super) fn maybe_evict_idle_candidate_on_pressure_in(
@@ -87,33 +90,52 @@ pub(super) fn maybe_evict_idle_candidate_on_pressure_in(
     seen_pressure_seq: &mut u64,
     stats: &Stats,
 ) -> bool {
-    let mut guard = relay_idle_candidate_registry_lock_in(shared);
+    let registry = &shared.middle_relay.relay_idle_registry;
 
-    let latest_pressure_seq = guard.pressure_event_seq;
+    let latest_pressure_seq = registry.pressure_event_seq.load(Ordering::Relaxed);
     if latest_pressure_seq == *seen_pressure_seq {
         return false;
     }
     *seen_pressure_seq = latest_pressure_seq;
 
-    if latest_pressure_seq == guard.pressure_consumed_seq {
+    let consumed_pressure_seq = registry.pressure_consumed_seq.load(Ordering::Relaxed);
+    if latest_pressure_seq == consumed_pressure_seq {
         return false;
     }
 
-    if guard.ordered.is_empty() {
-        guard.pressure_consumed_seq = latest_pressure_seq;
-        return false;
-    }
-
-    let oldest = guard
-        .ordered
-        .iter()
-        .next()
-        .map(|(_, candidate_conn_id)| *candidate_conn_id);
+    let oldest = {
+        let mut ordered = registry.ordered.lock();
+        loop {
+            let Some((mark_order_seq, candidate_conn_id)) = ordered.iter().next().copied() else {
+                // Empty queues consume the event so later candidates cannot replay stale pressure.
+                let _ = registry.pressure_consumed_seq.compare_exchange(
+                    consumed_pressure_seq,
+                    latest_pressure_seq,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                return false;
+            };
+            let Some(candidate_meta) = registry.by_conn_id.get(&candidate_conn_id) else {
+                ordered.remove(&(mark_order_seq, candidate_conn_id));
+                continue;
+            };
+            if candidate_meta.mark_order_seq != mark_order_seq {
+                ordered.remove(&(mark_order_seq, candidate_conn_id));
+                continue;
+            }
+            break Some(candidate_conn_id);
+        }
+    };
     if oldest != Some(conn_id) {
         return false;
     }
 
-    let Some(candidate_meta) = guard.by_conn_id.get(&conn_id).copied() else {
+    let Some(candidate_meta) = registry
+        .by_conn_id
+        .get(&conn_id)
+        .map(|entry| *entry.value())
+    else {
         return false;
     };
 
@@ -121,10 +143,27 @@ pub(super) fn maybe_evict_idle_candidate_on_pressure_in(
         return false;
     }
 
-    if let Some(meta) = guard.by_conn_id.remove(&conn_id) {
-        guard.ordered.remove(&(meta.mark_order_seq, conn_id));
+    // Claim the global pressure budget before removal; otherwise racing sessions
+    // can observe the next FIFO item and spend the same event more than once.
+    if registry
+        .pressure_consumed_seq
+        .compare_exchange(
+            consumed_pressure_seq,
+            latest_pressure_seq,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return false;
     }
-    guard.pressure_consumed_seq = latest_pressure_seq;
+
+    if let Some((_, meta)) = registry.by_conn_id.remove(&conn_id) {
+        registry
+            .ordered
+            .lock()
+            .remove(&(meta.mark_order_seq, conn_id));
+    }
     stats.increment_relay_pressure_evict_total();
     true
 }
@@ -220,72 +259,32 @@ pub(crate) fn mark_relay_idle_candidate_for_testing(
     shared: &ProxySharedState,
     conn_id: u64,
 ) -> bool {
-    let registry = &shared.middle_relay.relay_idle_registry;
-    let mut guard = match registry.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = RelayIdleCandidateRegistry::default();
-            registry.clear_poison();
-            guard
-        }
-    };
-
-    if guard.by_conn_id.contains_key(&conn_id) {
-        return false;
-    }
-
-    let mark_order_seq = shared
-        .middle_relay
-        .relay_idle_mark_seq
-        .fetch_add(1, Ordering::Relaxed);
-    let mark_pressure_seq = guard.pressure_event_seq;
-    let meta = RelayIdleCandidateMeta {
-        mark_order_seq,
-        mark_pressure_seq,
-    };
-    guard.by_conn_id.insert(conn_id, meta);
-    guard.ordered.insert((mark_order_seq, conn_id));
-    true
+    mark_relay_idle_candidate_in(shared, conn_id)
 }
 
 #[cfg(test)]
 pub(crate) fn oldest_relay_idle_candidate_for_testing(shared: &ProxySharedState) -> Option<u64> {
     let registry = &shared.middle_relay.relay_idle_registry;
-    let guard = match registry.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = RelayIdleCandidateRegistry::default();
-            registry.clear_poison();
-            guard
-        }
-    };
-    guard.ordered.iter().next().map(|(_, conn_id)| *conn_id)
+    registry
+        .ordered
+        .lock()
+        .iter()
+        .next()
+        .map(|(_, conn_id)| *conn_id)
 }
 
 #[cfg(test)]
 pub(crate) fn clear_relay_idle_candidate_for_testing(shared: &ProxySharedState, conn_id: u64) {
-    let registry = &shared.middle_relay.relay_idle_registry;
-    let mut guard = match registry.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = RelayIdleCandidateRegistry::default();
-            registry.clear_poison();
-            guard
-        }
-    };
-    if let Some(meta) = guard.by_conn_id.remove(&conn_id) {
-        guard.ordered.remove(&(meta.mark_order_seq, conn_id));
-    }
+    clear_relay_idle_candidate_in(shared, conn_id);
 }
 
 #[cfg(test)]
 pub(crate) fn clear_relay_idle_pressure_state_for_testing_in_shared(shared: &ProxySharedState) {
-    if let Ok(mut guard) = shared.middle_relay.relay_idle_registry.lock() {
-        *guard = RelayIdleCandidateRegistry::default();
-    }
+    let registry = &shared.middle_relay.relay_idle_registry;
+    registry.by_conn_id.clear();
+    registry.ordered.lock().clear();
+    registry.pressure_event_seq.store(0, Ordering::Relaxed);
+    registry.pressure_consumed_seq.store(0, Ordering::Relaxed);
     shared
         .middle_relay
         .relay_idle_mark_seq
@@ -327,15 +326,10 @@ pub(crate) fn set_relay_pressure_state_for_testing(
     pressure_consumed_seq: u64,
 ) {
     let registry = &shared.middle_relay.relay_idle_registry;
-    let mut guard = match registry.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = RelayIdleCandidateRegistry::default();
-            registry.clear_poison();
-            guard
-        }
-    };
-    guard.pressure_event_seq = pressure_event_seq;
-    guard.pressure_consumed_seq = pressure_consumed_seq;
+    registry
+        .pressure_event_seq
+        .store(pressure_event_seq, Ordering::Relaxed);
+    registry
+        .pressure_consumed_seq
+        .store(pressure_consumed_seq, Ordering::Relaxed);
 }

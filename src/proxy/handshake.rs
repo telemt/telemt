@@ -1504,6 +1504,13 @@ where
     let validation_session_id_slice = &validation_session_id[..validation_session_id_len];
 
     let response = if let Some((cached_entry, use_full_cert_payload)) = cached {
+        let preferred_cipher_suite = if cached_entry.server_hello_template.cipher_suite == [0, 0] {
+            [0x13, 0x01]
+        } else {
+            cached_entry.server_hello_template.cipher_suite
+        };
+        let selected_cipher_suite =
+            tls::select_server_hello_cipher_suite(handshake, preferred_cipher_suite);
         emulator::build_emulated_server_hello(
             &validated_secret,
             &validation_digest,
@@ -1512,17 +1519,20 @@ where
             use_full_cert_payload,
             config.censorship.serverhello_compact,
             client_tls_version,
+            selected_cipher_suite,
             rng,
             selected_alpn.clone(),
             config.censorship.tls_new_session_tickets,
         )
     } else {
-        tls::build_server_hello(
+        let selected_cipher_suite = tls::select_server_hello_cipher_suite(handshake, [0x13, 0x01]);
+        tls::build_server_hello_with_cipher(
             &validated_secret,
             &validation_digest,
             validation_session_id_slice,
             config.censorship.fake_cert_len,
             rng,
+            selected_cipher_suite,
             selected_alpn.clone(),
             config.censorship.tls_new_session_tickets,
         )

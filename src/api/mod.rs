@@ -41,7 +41,9 @@ mod runtime_watch;
 mod runtime_zero;
 mod users;
 
-use config_store::{current_revision, load_config_from_disk, parse_if_match};
+use config_store::{
+    current_revision, ensure_expected_revision, load_config_from_disk, parse_if_match,
+};
 use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
@@ -75,6 +77,10 @@ use users::{
 const API_MAX_CONTROL_CONNECTIONS: usize = 1024;
 const API_HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 const ROUTE_USERNAME_ERROR: &str = "username must match [A-Za-z0-9_.-] and be 1..64 chars";
+const ALLOW_GET: &str = "GET";
+const ALLOW_POST: &str = "POST";
+const ALLOW_GET_POST: &str = "GET, POST";
+const ALLOW_GET_PATCH_DELETE: &str = "GET, PATCH, DELETE";
 
 pub(super) struct ApiRuntimeState {
     pub(super) process_started_at_epoch_secs: u64,
@@ -122,6 +128,57 @@ fn parse_route_username(user: &str) -> Result<&str, ApiFailure> {
         Ok(user)
     } else {
         Err(ApiFailure::bad_request(ROUTE_USERNAME_ERROR))
+    }
+}
+
+fn user_action_route_matches(path: &str, suffix: &str) -> bool {
+    path.strip_prefix("/v1/users/")
+        .and_then(|path| path.strip_suffix(suffix))
+        .map(|user| !user.is_empty() && !user.contains('/'))
+        .unwrap_or(false)
+}
+
+fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
+    match path {
+        "/v1/health"
+        | "/v1/health/ready"
+        | "/v1/system/info"
+        | "/v1/runtime/gates"
+        | "/v1/runtime/initialization"
+        | "/v1/limits/effective"
+        | "/v1/security/posture"
+        | "/v1/security/whitelist"
+        | "/v1/stats/summary"
+        | "/v1/stats/zero/all"
+        | "/v1/stats/upstreams"
+        | "/v1/stats/minimal/all"
+        | "/v1/stats/me-writers"
+        | "/v1/stats/dcs"
+        | "/v1/runtime/me-pool-state"
+        | "/v1/runtime/me_pool_state"
+        | "/v1/runtime/me-quality"
+        | "/v1/runtime/me_quality"
+        | "/v1/runtime/upstream-quality"
+        | "/v1/runtime/upstream_quality"
+        | "/v1/runtime/nat-stun"
+        | "/v1/runtime/nat_stun"
+        | "/v1/runtime/me-selftest"
+        | "/v1/runtime/connections/summary"
+        | "/v1/runtime/events/recent"
+        | "/v1/stats/users/active-ips"
+        | "/v1/stats/users/quota"
+        | "/v1/stats/users" => Some(ALLOW_GET),
+        "/v1/users" => Some(ALLOW_GET_POST),
+        _ if user_action_route_matches(path, "/reset-quota") => Some(ALLOW_POST),
+        _ if user_action_route_matches(path, "/rotate-secret") => Some(ALLOW_POST),
+        _ if path
+            .strip_prefix("/v1/users/")
+            .map(|user| !user.is_empty() && !user.contains('/'))
+            .unwrap_or(false) =>
+        {
+            Some(ALLOW_GET_PATCH_DELETE)
+        }
+        _ => None,
     }
 }
 
@@ -435,22 +492,22 @@ async fn handle(
                 let data = build_dcs_data(shared.as_ref(), api_cfg).await;
                 Ok(success_response(StatusCode::OK, data, revision))
             }
-            ("GET", "/v1/runtime/me_pool_state") => {
+            ("GET", "/v1/runtime/me-pool-state") | ("GET", "/v1/runtime/me_pool_state") => {
                 let revision = current_revision(&shared.config_path).await?;
                 let data = build_runtime_me_pool_state_data(shared.as_ref()).await;
                 Ok(success_response(StatusCode::OK, data, revision))
             }
-            ("GET", "/v1/runtime/me_quality") => {
+            ("GET", "/v1/runtime/me-quality") | ("GET", "/v1/runtime/me_quality") => {
                 let revision = current_revision(&shared.config_path).await?;
                 let data = build_runtime_me_quality_data(shared.as_ref()).await;
                 Ok(success_response(StatusCode::OK, data, revision))
             }
-            ("GET", "/v1/runtime/upstream_quality") => {
+            ("GET", "/v1/runtime/upstream-quality") | ("GET", "/v1/runtime/upstream_quality") => {
                 let revision = current_revision(&shared.config_path).await?;
                 let data = build_runtime_upstream_quality_data(shared.as_ref()).await;
                 Ok(success_response(StatusCode::OK, data, revision))
             }
-            ("GET", "/v1/runtime/nat_stun") => {
+            ("GET", "/v1/runtime/nat-stun") | ("GET", "/v1/runtime/nat_stun") => {
                 let revision = current_revision(&shared.config_path).await?;
                 let data = build_runtime_nat_stun_data(shared.as_ref()).await;
                 Ok(success_response(StatusCode::OK, data, revision))
@@ -506,7 +563,7 @@ async fn handle(
                 .await;
                 Ok(success_response(StatusCode::OK, users, revision))
             }
-            ("GET", "/v1/users/quota") => {
+            ("GET", "/v1/stats/users/quota") => {
                 let revision = current_revision(&shared.config_path).await?;
                 let disk_cfg = load_config_from_disk(&shared.config_path).await?;
                 let data = build_user_quota_list(&disk_cfg, shared.stats.as_ref());
@@ -565,6 +622,16 @@ async fn handle(
                                 "read_only",
                                 "API runs in read-only mode",
                             ),
+                        ));
+                    }
+                    let expected_revision = parse_if_match(req.headers());
+                    let disk_cfg = load_config_from_disk(&shared.config_path).await?;
+                    ensure_expected_revision(&shared.config_path, expected_revision.as_deref())
+                        .await?;
+                    if !disk_cfg.access.users.contains_key(user) {
+                        return Ok(error_response(
+                            request_id,
+                            ApiFailure::new(StatusCode::NOT_FOUND, "not_found", "User not found"),
                         ));
                     }
                     let snapshot = match crate::quota_state::reset_user_quota(
@@ -761,16 +828,18 @@ async fn handle(
                     if method == Method::POST {
                         return Ok(error_response(
                             request_id,
-                            ApiFailure::new(StatusCode::NOT_FOUND, "not_found", "Route not found"),
+                            ApiFailure::method_not_allowed(ALLOW_GET_PATCH_DELETE),
                         ));
                     }
                     return Ok(error_response(
                         request_id,
-                        ApiFailure::new(
-                            StatusCode::METHOD_NOT_ALLOWED,
-                            "method_not_allowed",
-                            "Unsupported HTTP method for this route",
-                        ),
+                        ApiFailure::method_not_allowed(ALLOW_GET_PATCH_DELETE),
+                    ));
+                }
+                if let Some(allow) = allowed_methods_for_path(normalized_path) {
+                    return Ok(error_response(
+                        request_id,
+                        ApiFailure::method_not_allowed(allow),
                     ));
                 }
                 debug!(

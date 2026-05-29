@@ -58,6 +58,7 @@ fn emulated_server_hello_ignores_oversized_alpn_when_marker_would_not_fit() {
         true,
         true,
         ClientHelloTlsVersion::Tls13,
+        [0x13, 0x01],
         &rng,
         Some(oversized_alpn),
         0,
@@ -84,7 +85,7 @@ fn emulated_server_hello_ignores_oversized_alpn_when_marker_would_not_fit() {
 }
 
 #[test]
-fn emulated_server_hello_embeds_full_alpn_marker_when_body_can_fit() {
+fn emulated_server_hello_keeps_alpn_marker_out_of_appdata() {
     let cached = make_cached(None);
     let rng = SecureRandom::new();
 
@@ -96,6 +97,7 @@ fn emulated_server_hello_embeds_full_alpn_marker_when_body_can_fit() {
         true,
         true,
         ClientHelloTlsVersion::Tls13,
+        [0x13, 0x01],
         &rng,
         Some(b"h2".to_vec()),
         0,
@@ -104,8 +106,8 @@ fn emulated_server_hello_embeds_full_alpn_marker_when_body_can_fit() {
     let payload = first_app_data_payload(&response);
     let expected = [0x00u8, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, b'h', b'2'];
     assert!(
-        payload.starts_with(&expected),
-        "when body has enough capacity, emulated first application record must include full ALPN marker"
+        !payload.starts_with(&expected),
+        "emulated ApplicationData must not expose plaintext ALPN marker bytes"
     );
 }
 
@@ -126,6 +128,7 @@ fn emulated_server_hello_prefers_cert_payload_over_alpn_marker() {
         true,
         true,
         ClientHelloTlsVersion::Tls12,
+        [0x13, 0x01],
         &rng,
         Some(b"h2".to_vec()),
         0,
