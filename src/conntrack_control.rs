@@ -705,7 +705,7 @@ fn nofile_soft_limit() -> Option<u64> {
         if rc != 0 {
             return None;
         }
-        return Some(lim.rlim_cur);
+        return Some(lim.rlim_cur.into());
     }
     #[cfg(not(target_os = "linux"))]
     {
