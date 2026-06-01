@@ -2934,6 +2934,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | Key | Type | Default | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | [`users`](#users) | `Map<String, String>` | `{"default": "000…000"}` | `✔` |
+| [`user_enabled`](#user_enabled-1) | `Map<String, bool>` | `{}` | `✔` |
 | [`user_ad_tags`](#user_ad_tags) | `Map<String, String>` | `{}` | `✔` |
 | [`user_max_tcp_conns`](#user_max_tcp_conns) | `Map<String, usize>` | `{}` | `✔` |
 | [`user_max_tcp_conns_global_each`](#user_max_tcp_conns_global_each) | `usize` | `0` | `✔` |
@@ -2959,6 +2960,16 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     [access.users]
     alice = "00112233445566778899aabbccddeeff"
     bob   = "0123456789abcdef0123456789abcdef"
+    ```
+## user_enabled
+  - **Constraints / validation**: `Map<String, bool>`.
+  - **Description**: Optional per-user enable overrides. Missing users are enabled by default. A value of `false` disables new sessions for that user; setting the value to `true` is accepted but equivalent to removing the override. API enable operations remove the override, while disable operations write `false`.
+  - **Runtime behavior**: Hot reload applies this map immediately. Users disabled through API or config reload are rejected after successful authentication and active runtime sessions for that username are cancelled.
+  - **Example**:
+
+    ```toml
+    [access.user_enabled]
+    alice = false
     ```
 ## user_ad_tags
   - **Constraints / validation**: Each value must be **exactly 32 hex characters** (same format as `general.ad_tag`). An all-zero tag is allowed but logs a warning.
@@ -3120,6 +3131,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`scopes`](#scopes) | `String` | `""` | `✘` |
 | [`ipv4`](#ipv4-upstreams) | `bool` | — (auto) | `✘` |
 | [`ipv6`](#ipv6-upstreams) | `bool` | — (auto) | `✘` |
+| [`prefer`](#prefer-upstreams) | `4` or `6` | effective `[network].prefer` | `✘` |
 | [`interface`](#interface) | `String` | — | `✘` |
 | [`bind_addresses`](#bind_addresses) | `String[]` | — | `✘` |
 | [`bindtodevice`](#bindtodevice) | `String` | — | `✘` |
@@ -3191,13 +3203,25 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     ```
 ## ipv6 (upstreams)
   - **Constraints / validation**: `bool` (optional).
-  - **Description**: Allows IPv6 DC targets for this upstream. When omitted, Telemt auto-detects support from runtime connectivity state.
+  - **Description**: Allows IPv6 DC targets for this upstream. When omitted, Telemt auto-detects support from runtime connectivity state. Set this to `true` when the upstream proxy is reachable from the local host over IPv4 but the proxy itself can connect to Telegram DCs over IPv6.
   - **Example**:
 
     ```toml
     [[upstreams]]
     type = "direct"
     ipv6 = false
+    ```
+## prefer (upstreams)
+  - **Constraints / validation**: Optional integer. Must be `4` or `6`.
+  - **Description**: Overrides the IP family preference for Telegram DC targets selected through this upstream. When omitted, the upstream inherits the effective global `[network].prefer` decision. Use `prefer = 6` together with `ipv6 = true` for a SOCKS or Shadowsocks upstream that can egress over IPv6 even when the local Telemt host is IPv4-only.
+  - **Example**:
+
+    ```toml
+    [[upstreams]]
+    type = "socks5"
+    address = "192.0.2.10:1080"
+    ipv6 = true
+    prefer = 6
     ```
 ## interface
   - **Constraints / validation**: `String` (optional).

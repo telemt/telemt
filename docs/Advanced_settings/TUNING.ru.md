@@ -86,6 +86,9 @@
 | `[[upstreams]].weight` | все upstream | `u16` | нет | `1` | Базовый вес в weighted-random выборе. |
 | `[[upstreams]].enabled` | все upstream | `bool` | нет | `true` | Выключенные записи игнорируются на старте. |
 | `[[upstreams]].scopes` | все upstream | `String` | нет | `""` | Список scope-токенов через запятую для маршрутизации. |
+| `[[upstreams]].ipv4` | все upstream | `Option<bool>` | нет | `auto` | Разрешает IPv4 DC-targets для этого upstream. |
+| `[[upstreams]].ipv6` | все upstream | `Option<bool>` | нет | `auto` | Разрешает IPv6 DC-targets для этого upstream, включая proxy egress независимо от IPv6 на хосте. |
+| `[[upstreams]].prefer` | все upstream | `Option<4 \| 6>` | нет | эффективный `[network].prefer` | Предпочтительное семейство DC-target для конкретного upstream. |
 | `interface` | `direct` | `Option<String>` | нет | `null` | Имя интерфейса (например `eth0`) или literal локальный IP. |
 | `bind_addresses` | `direct` | `Option<Vec<IpAddr>>` | нет | `null` | Явные кандидаты source IP (имеют приоритет над `interface`). |
 | `address` | `socks4` | `String` | да | n/a | Адрес SOCKS4 сервера (`ip:port` или `host:port`). |

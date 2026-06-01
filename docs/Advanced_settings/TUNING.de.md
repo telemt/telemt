@@ -86,6 +86,9 @@ Die unten angegebenen `Default`-Werte sind Code-Defaults (bei fehlendem Schlüss
 | `[[upstreams]].weight` | alle Upstreams | `u16` | nein | `1` | Basisgewicht für weighted-random Auswahl. |
 | `[[upstreams]].enabled` | alle Upstreams | `bool` | nein | `true` | Deaktivierte Einträge werden beim Start ignoriert. |
 | `[[upstreams]].scopes` | alle Upstreams | `String` | nein | `""` | Komma-separierte Scope-Tags für Request-Routing. |
+| `[[upstreams]].ipv4` | alle Upstreams | `Option<bool>` | nein | `auto` | Erlaubt IPv4-DC-Ziele für diesen Upstream. |
+| `[[upstreams]].ipv6` | alle Upstreams | `Option<bool>` | nein | `auto` | Erlaubt IPv6-DC-Ziele für diesen Upstream, inklusive Proxy-Egress unabhängig vom Host-IPv6. |
+| `[[upstreams]].prefer` | alle Upstreams | `Option<4 \| 6>` | nein | effective `[network].prefer` | Pro-Upstream-Präferenz für die DC-Ziel-Adressfamilie. |
 | `interface` | `direct` | `Option<String>` | nein | `null` | Interface-Name (z. B. `eth0`) oder lokale Literal-IP. |
 | `bind_addresses` | `direct` | `Option<Vec<IpAddr>>` | nein | `null` | Explizite Source-IP-Kandidaten (strikter Vorrang vor `interface`). |
 | `address` | `socks4` | `String` | ja | n/a | SOCKS4-Server (`ip:port` oder `host:port`). |

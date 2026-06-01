@@ -3127,6 +3127,7 @@
 | [`scopes`](#scopes) | `String` | `""` | `✘` |
 | [`ipv4`](#ipv4-upstreams) | `bool` | — (auto) | `✘` |
 | [`ipv6`](#ipv6-upstreams) | `bool` | — (auto) | `✘` |
+| [`prefer`](#prefer-upstreams) | `4` или `6` | эффективный `[network].prefer` | `✘` |
 | [`interface`](#interface) | `String` | — | `✘` |
 | [`bind_addresses`](#bind_addresses) | `String[]` | — | `✘` |
 | [`bindtodevice`](#bindtodevice) | `String` | — | `✘` |
@@ -3198,13 +3199,25 @@
     ```
 ## ipv6 (upstreams)
   - **Ограничения / валидация**: `bool` (необязательный параметр).
-  - **Описание**: Разрешает IPv6 DC-targets для этого upstream. Если не задан, Telemt определяет поддержку автоматически по runtime-состоянию connectivity.
+  - **Описание**: Разрешает IPv6 DC-targets для этого upstream. Если не задан, Telemt определяет поддержку автоматически по runtime-состоянию connectivity. Установите `true`, если upstream proxy доступен с локального хоста по IPv4, но сам proxy умеет подключаться к Telegram DC по IPv6.
   - **Пример**:
 
     ```toml
     [[upstreams]]
     type = "direct"
     ipv6 = false
+    ```
+## prefer (upstreams)
+  - **Ограничения / валидация**: Необязательное число. Должно быть `4` или `6`.
+  - **Описание**: Переопределяет предпочтительное IP-семейство для Telegram DC-targets, выбранных через этот upstream. Если параметр не задан, upstream наследует эффективное глобальное решение `[network].prefer`. Используйте `prefer = 6` вместе с `ipv6 = true` для SOCKS или Shadowsocks upstream, который умеет выходить в IPv6, даже если локальный хост с Telemt работает только по IPv4.
+  - **Пример**:
+
+    ```toml
+    [[upstreams]]
+    type = "socks5"
+    address = "192.0.2.10:1080"
+    ipv6 = true
+    prefer = 6
     ```
 ## interface
   - **Ограничения / валидация**: `String` (необязательный параметр).

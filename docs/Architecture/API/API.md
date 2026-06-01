@@ -111,6 +111,8 @@ Notes:
 | `PATCH` | `/v1/users/{username}` | `PatchUserRequest` | `200` or `202` | `UserInfo` |
 | `DELETE` | `/v1/users/{username}` | none | `200` or `202` | `DeleteUserResponse` |
 | `POST` | `/v1/users/{username}/rotate-secret` | `RotateSecretRequest` or empty body | `200` or `202` | `CreateUserResponse` |
+| `POST` | `/v1/users/{username}/enable` | empty body | `200` or `202` | `UserInfo` |
+| `POST` | `/v1/users/{username}/disable` | empty body | `200` or `202` | `UserInfo` |
 | `POST` | `/v1/users/{username}/reset-quota` | empty body | `200` | `ResetUserQuotaResponse` |
 
 ## Endpoint Behavior
@@ -146,6 +148,8 @@ Notes:
 | `PATCH /v1/users/{username}` | Updates selected per-user fields with JSON Merge Patch semantics. |
 | `DELETE /v1/users/{username}` | Deletes one user and related per-user access-map entries. |
 | `POST /v1/users/{username}/rotate-secret` | Rotates one user's secret and returns the effective secret. |
+| `POST /v1/users/{username}/enable` | Enables one user, removing any disabled override from config. |
+| `POST /v1/users/{username}/disable` | Disables one user and closes active runtime sessions for that user. |
 | `POST /v1/users/{username}/reset-quota` | Resets one user's runtime quota counter and persists quota state. |
 
 ## Common Error Codes
@@ -175,6 +179,8 @@ Notes:
 | `PUT /v1/users/{username}` | `405 method_not_allowed`. |
 | `POST /v1/users/{username}` | `404 not_found`. |
 | `POST /v1/users/{username}/rotate-secret/` | Trailing slash is trimmed and the route matches `rotate-secret`. |
+| `POST /v1/users/{username}/enable/` | Trailing slash is trimmed and the route matches `enable`. |
+| `POST /v1/users/{username}/disable/` | Trailing slash is trimmed and the route matches `disable`. |
 | `POST /v1/users/{username}/reset-quota/` | Trailing slash is trimmed and the route matches `reset-quota`. |
 
 ## Body and JSON Semantics
@@ -208,6 +214,7 @@ Notes:
 | `rate_limit_up_bps` | `u64` | no | Per-user upload rate limit in bytes per second. |
 | `rate_limit_down_bps` | `u64` | no | Per-user download rate limit in bytes per second. |
 | `max_unique_ips` | `usize` | no | Per-user unique source IP limit. |
+| `enabled` | `bool` | no | User enable flag. Missing means enabled. `false` persists a disabled override. |
 
 ### `PatchUserRequest`
 | Field | Type | Required | Description |
@@ -220,6 +227,7 @@ Notes:
 | `rate_limit_up_bps` | `u64|null` | no | Per-user upload rate limit in bytes per second; `null` removes the upload direction limit. |
 | `rate_limit_down_bps` | `u64|null` | no | Per-user download rate limit in bytes per second; `null` removes the download direction limit. |
 | `max_unique_ips` | `usize|null` | no | Per-user unique source IP limit; `null` removes the per-user override. |
+| `enabled` | `bool|null` | no | `false` disables the user. `true` or `null` removes the disabled override, so the user is enabled. |
 
 ### `access.user_source_deny` via API
 - In current API surface, per-user deny-list is **not** exposed as a dedicated field in `CreateUserRequest` / `PatchUserRequest`.
@@ -1165,6 +1173,7 @@ An empty request body is accepted and generates a new secret automatically.
 | Field | Type | Description |
 | --- | --- | --- |
 | `username` | `string` | Username. |
+| `enabled` | `bool` | Effective user enable flag. Missing config entry is reported as `true`. |
 | `in_runtime` | `bool` | Whether current runtime config already contains this user. |
 | `user_ad_tag` | `string?` | Optional ad tag (32 hex chars). |
 | `max_tcp_conns` | `usize?` | Optional max concurrent TCP limit. |
@@ -1239,6 +1248,8 @@ Link generation uses active config and enabled modes:
 | `POST /v1/users` | Creates user, validates config, then atomically updates only affected `access.*` TOML tables (`access.users` always, plus optional per-user tables present in request). |
 | `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged; explicit `null` removes optional per-user entries. The write path updates only affected `access.*` TOML tables. |
 | `POST /v1/users/{username}/rotate-secret` | Replaces the user's secret with a provided valid 32-hex value or a generated value, then returns the effective secret in `CreateUserResponse`. |
+| `POST /v1/users/{username}/enable` | Enables the user idempotently by removing the `access.user_enabled[username]` override and updating the runtime admission state immediately. |
+| `POST /v1/users/{username}/disable` | Disables the user idempotently by writing `access.user_enabled[username] = false`, updating runtime admission immediately, and cancelling active sessions for that username. |
 | `POST /v1/users/{username}/reset-quota` | Resets the runtime quota counter for the route username, persists quota state to `general.quota_state_path`, and does not modify user config. |
 | `DELETE /v1/users/{username}` | Deletes only specified user, removes this user from related optional `access.user_*` maps, blocks last-user deletion, and atomically updates only related `access.*` TOML tables. |
 

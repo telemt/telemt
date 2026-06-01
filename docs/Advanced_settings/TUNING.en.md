@@ -86,6 +86,9 @@ Defaults below are code defaults (used when a key is omitted), not necessarily v
 | `[[upstreams]].weight` | all upstreams | `u16` | no | `1` | Base weight for weighted-random selection. |
 | `[[upstreams]].enabled` | all upstreams | `bool` | no | `true` | Disabled entries are ignored at startup. |
 | `[[upstreams]].scopes` | all upstreams | `String` | no | `""` | Comma-separated scope tags for request-level routing. |
+| `[[upstreams]].ipv4` | all upstreams | `Option<bool>` | no | `auto` | Allow IPv4 DC targets for this upstream. |
+| `[[upstreams]].ipv6` | all upstreams | `Option<bool>` | no | `auto` | Allow IPv6 DC targets for this upstream, including proxy egress independent of host IPv6. |
+| `[[upstreams]].prefer` | all upstreams | `Option<4 \| 6>` | no | effective `[network].prefer` | Per-upstream DC target family preference. |
 | `interface` | `direct` | `Option<String>` | no | `null` | Interface name (e.g. `eth0`) or literal local IP for bind selection. |
 | `bind_addresses` | `direct` | `Option<Vec<IpAddr>>` | no | `null` | Explicit local source IP candidates (strict priority over `interface`). |
 | `address` | `socks4` | `String` | yes | n/a | SOCKS4 server endpoint (`ip:port` or `host:port`). |
