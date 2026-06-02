@@ -12,6 +12,8 @@ const FEATURE_DISABLED_REASON: &str = "feature_disabled";
 const SOURCE_UNAVAILABLE_REASON: &str = "source_unavailable";
 const EVENTS_DEFAULT_LIMIT: usize = 50;
 const EVENTS_MAX_LIMIT: usize = 1000;
+const TLS_FINGERPRINTS_MAX_LIMIT: usize = 1000;
+const RUNTIME_EDGE_RETENTION_MAX_MINUTES: u64 = 24 * 60;
 
 #[derive(Clone, Serialize)]
 pub(super) struct RuntimeEdgeConnectionUserData {
@@ -90,6 +92,44 @@ pub(super) struct RuntimeEdgeEventsData {
     pub(super) data: Option<RuntimeEdgeEventsPayload>,
 }
 
+#[derive(Serialize)]
+pub(super) struct RuntimeEdgeTlsFingerprintRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) scope: Option<String>,
+    pub(super) ja3: String,
+    pub(super) ja3_raw: String,
+    pub(super) ja4: String,
+    pub(super) ja4_raw: String,
+    pub(super) total: u64,
+    pub(super) auth_success: u64,
+    pub(super) bad_or_probe: u64,
+    pub(super) first_seen_epoch_secs: u64,
+    pub(super) last_seen_epoch_secs: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeEdgeTlsFingerprintsPayload {
+    pub(super) limit: usize,
+    pub(super) retention_secs: u64,
+    pub(super) capacity: usize,
+    pub(super) dropped_total: u64,
+    pub(super) parse_error_total: u64,
+    pub(super) by_fingerprint: Vec<RuntimeEdgeTlsFingerprintRow>,
+    pub(super) by_ip: Vec<RuntimeEdgeTlsFingerprintRow>,
+    pub(super) by_cidr: Vec<RuntimeEdgeTlsFingerprintRow>,
+    pub(super) by_user: Vec<RuntimeEdgeTlsFingerprintRow>,
+}
+
+#[derive(Serialize)]
+pub(super) struct RuntimeEdgeTlsFingerprintsData {
+    pub(super) enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reason: Option<&'static str>,
+    pub(super) generated_at_epoch_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) data: Option<RuntimeEdgeTlsFingerprintsPayload>,
+}
+
 pub(super) async fn build_runtime_connections_summary_data(
     shared: &ApiShared,
     cfg: &ProxyConfig,
@@ -158,6 +198,65 @@ pub(super) fn build_runtime_events_recent_data(
             capacity: snapshot.capacity,
             dropped_total: snapshot.dropped_total,
             events: snapshot.events,
+        }),
+    }
+}
+
+pub(super) fn build_runtime_tls_fingerprints_data(
+    shared: &ApiShared,
+    cfg: &ProxyConfig,
+    query: Option<&str>,
+) -> RuntimeEdgeTlsFingerprintsData {
+    let now_epoch_secs = now_epoch_secs();
+    let api_cfg = &cfg.server.api;
+    if !api_cfg.runtime_edge_enabled {
+        return RuntimeEdgeTlsFingerprintsData {
+            enabled: false,
+            reason: Some(FEATURE_DISABLED_REASON),
+            generated_at_epoch_secs: now_epoch_secs,
+            data: None,
+        };
+    }
+
+    let limit = parse_recent_events_limit(
+        query,
+        api_cfg.runtime_edge_top_n.max(1),
+        TLS_FINGERPRINTS_MAX_LIMIT,
+    );
+    let snapshot = shared
+        .stats
+        .tls_fingerprint_snapshot(runtime_edge_retention(cfg), limit);
+
+    RuntimeEdgeTlsFingerprintsData {
+        enabled: true,
+        reason: None,
+        generated_at_epoch_secs: now_epoch_secs,
+        data: Some(RuntimeEdgeTlsFingerprintsPayload {
+            limit,
+            retention_secs: snapshot.retention_secs,
+            capacity: snapshot.capacity,
+            dropped_total: snapshot.dropped_total,
+            parse_error_total: snapshot.parse_error_total,
+            by_fingerprint: snapshot
+                .by_fingerprint
+                .into_iter()
+                .map(runtime_tls_fingerprint_row)
+                .collect(),
+            by_ip: snapshot
+                .by_ip
+                .into_iter()
+                .map(runtime_tls_fingerprint_row)
+                .collect(),
+            by_cidr: snapshot
+                .by_cidr
+                .into_iter()
+                .map(runtime_tls_fingerprint_row)
+                .collect(),
+            by_user: snapshot
+                .by_user
+                .into_iter()
+                .map(runtime_tls_fingerprint_row)
+                .collect(),
         }),
     }
 }
@@ -284,6 +383,35 @@ fn parse_recent_events_limit(query: Option<&str>, default_limit: usize, max_limi
         }
     }
     default_limit
+}
+
+fn runtime_edge_retention(cfg: &ProxyConfig) -> Duration {
+    let minutes = cfg
+        .general
+        .beobachten_minutes
+        .clamp(1, RUNTIME_EDGE_RETENTION_MAX_MINUTES);
+    Duration::from_secs(minutes.saturating_mul(60))
+}
+
+fn runtime_tls_fingerprint_row(
+    row: crate::stats::TlsFingerprintSnapshotRow,
+) -> RuntimeEdgeTlsFingerprintRow {
+    RuntimeEdgeTlsFingerprintRow {
+        scope: if row.scope_key.is_empty() {
+            None
+        } else {
+            Some(row.scope_key)
+        },
+        ja3: row.ja3,
+        ja3_raw: row.ja3_raw,
+        ja4: row.ja4,
+        ja4_raw: row.ja4_raw,
+        total: row.total,
+        auth_success: row.auth_success,
+        bad_or_probe: row.bad_or_probe,
+        first_seen_epoch_secs: row.first_seen_epoch_secs,
+        last_seen_epoch_secs: row.last_seen_epoch_secs,
+    }
 }
 
 fn now_epoch_secs() -> u64 {

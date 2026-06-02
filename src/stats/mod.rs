@@ -10,6 +10,7 @@ mod me_counters;
 mod me_getters;
 mod replay;
 pub mod telemetry;
+pub mod tls_fingerprints;
 mod users;
 mod writer_counters;
 
@@ -22,6 +23,7 @@ use std::time::Instant;
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
+pub use self::tls_fingerprints::TlsFingerprintSnapshotRow;
 use crate::config::MeWriterPickMode;
 
 #[derive(Clone, Copy)]
@@ -333,6 +335,7 @@ pub struct Stats {
     telemetry_user_enabled: AtomicBool,
     telemetry_me_level: AtomicU8,
     cached_epoch_secs: AtomicU64,
+    tls_fingerprints: tls_fingerprints::TlsFingerprintCollector,
     user_stats: DashMap<String, Arc<UserStats>>,
     user_stats_last_cleanup_epoch_secs: AtomicU64,
     start_time: parking_lot::RwLock<Option<Instant>>,

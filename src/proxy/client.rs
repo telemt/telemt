@@ -98,6 +98,7 @@ use crate::error::{HandshakeResult, ProxyError, Result, StreamError};
 use crate::ip_tracker::UserIpTracker;
 use crate::protocol::constants::*;
 use crate::protocol::tls;
+use crate::protocol::tls_fingerprint::{self, TlsClientFingerprint};
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
@@ -348,6 +349,60 @@ fn record_beobachten_class(
         return;
     }
     beobachten.record(class, peer_ip, beobachten_ttl(config));
+}
+
+fn tls_fingerprint_collection_enabled(config: &ProxyConfig) -> bool {
+    config.general.beobachten || config.server.api.runtime_edge_enabled
+}
+
+fn observe_tls_client_fingerprint(
+    stats: &Stats,
+    config: &ProxyConfig,
+    peer_ip: IpAddr,
+    handshake: &[u8],
+) -> Option<TlsClientFingerprint> {
+    if !tls_fingerprint_collection_enabled(config) {
+        return None;
+    }
+
+    match tls_fingerprint::fingerprint_client_hello(handshake) {
+        Some(fingerprint) => {
+            stats.record_tls_fingerprint_observed(&fingerprint, peer_ip, beobachten_ttl(config));
+            Some(fingerprint)
+        }
+        None => {
+            stats.increment_tls_fingerprint_parse_error();
+            None
+        }
+    }
+}
+
+fn record_tls_fingerprint_auth_success(
+    stats: &Stats,
+    config: &ProxyConfig,
+    peer_ip: IpAddr,
+    fingerprint: Option<&TlsClientFingerprint>,
+    user: &str,
+) {
+    if let Some(fingerprint) = fingerprint {
+        stats.record_tls_fingerprint_auth_success(
+            fingerprint,
+            peer_ip,
+            user,
+            beobachten_ttl(config),
+        );
+    }
+}
+
+fn record_tls_fingerprint_bad_or_probe(
+    stats: &Stats,
+    config: &ProxyConfig,
+    peer_ip: IpAddr,
+    fingerprint: Option<&TlsClientFingerprint>,
+) {
+    if let Some(fingerprint) = fingerprint {
+        stats.record_tls_fingerprint_bad_or_probe(fingerprint, peer_ip, beobachten_ttl(config));
+    }
 }
 
 fn classify_expected_64_got_0(kind: std::io::ErrorKind) -> Option<&'static str> {
@@ -705,6 +760,9 @@ where
                 ));
             }
 
+            let tls_fingerprint =
+                observe_tls_client_fingerprint(stats.as_ref(), &config, real_peer.ip(), &handshake);
+
             let (read_half, write_half) = tokio::io::split(stream);
 
             let (mut tls_reader, tls_writer, tls_user) = match handle_tls_handshake_with_shared(
@@ -715,6 +773,12 @@ where
                 HandshakeResult::Success(result) => result,
                 HandshakeResult::BadClient { reader, writer } => {
                     stats.increment_connects_bad_with_class("tls_handshake_bad_client");
+                    record_tls_fingerprint_bad_or_probe(
+                        stats.as_ref(),
+                        &config,
+                        real_peer.ip(),
+                        tls_fingerprint.as_ref(),
+                    );
                     return Ok(masking_outcome(
                         reader,
                         writer,
@@ -726,10 +790,23 @@ where
                     ));
                 }
                 HandshakeResult::Error(e) => {
+                    record_tls_fingerprint_bad_or_probe(
+                        stats.as_ref(),
+                        &config,
+                        real_peer.ip(),
+                        tls_fingerprint.as_ref(),
+                    );
                     increment_bad_on_unknown_tls_sni(stats.as_ref(), &e);
                     return Err(e);
                 }
             };
+            record_tls_fingerprint_auth_success(
+                stats.as_ref(),
+                &config,
+                real_peer.ip(),
+                tls_fingerprint.as_ref(),
+                tls_user.as_str(),
+            );
 
             debug!(peer = %peer, "Reading MTProto handshake through TLS");
             let mtproto_data = tls_reader.read_exact(HANDSHAKE_LEN).await?;
@@ -1295,6 +1372,13 @@ impl RunningClientHandler {
             ));
         }
 
+        let tls_fingerprint = observe_tls_client_fingerprint(
+            self.stats.as_ref(),
+            &self.config,
+            peer.ip(),
+            &handshake,
+        );
+
         let config = self.config.clone();
         let replay_checker = self.replay_checker.clone();
         let stats = self.stats.clone();
@@ -1318,6 +1402,12 @@ impl RunningClientHandler {
             HandshakeResult::Success(result) => result,
             HandshakeResult::BadClient { reader, writer } => {
                 stats.increment_connects_bad_with_class("tls_handshake_bad_client");
+                record_tls_fingerprint_bad_or_probe(
+                    stats.as_ref(),
+                    &config,
+                    peer.ip(),
+                    tls_fingerprint.as_ref(),
+                );
                 return Ok(masking_outcome(
                     reader,
                     writer,
@@ -1329,10 +1419,23 @@ impl RunningClientHandler {
                 ));
             }
             HandshakeResult::Error(e) => {
+                record_tls_fingerprint_bad_or_probe(
+                    stats.as_ref(),
+                    &config,
+                    peer.ip(),
+                    tls_fingerprint.as_ref(),
+                );
                 increment_bad_on_unknown_tls_sni(stats.as_ref(), &e);
                 return Err(e);
             }
         };
+        record_tls_fingerprint_auth_success(
+            stats.as_ref(),
+            &config,
+            peer.ip(),
+            tls_fingerprint.as_ref(),
+            tls_user.as_str(),
+        );
 
         debug!(peer = %peer, "Reading MTProto handshake through TLS");
         let mtproto_data = tls_reader.read_exact(HANDSHAKE_LEN).await?;

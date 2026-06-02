@@ -55,7 +55,7 @@ use model::{
 use patch::Patch;
 use runtime_edge::{
     EdgeConnectionsCacheEntry, build_runtime_connections_summary_data,
-    build_runtime_events_recent_data,
+    build_runtime_events_recent_data, build_runtime_tls_fingerprints_data,
 };
 use runtime_init::build_runtime_initialization_data;
 use runtime_min::{
@@ -169,6 +169,7 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         | "/v1/runtime/me-selftest"
         | "/v1/runtime/connections/summary"
         | "/v1/runtime/events/recent"
+        | "/v1/runtime/tls-fingerprints"
         | "/v1/stats/users/active-ips"
         | "/v1/stats/users/quota"
         | "/v1/stats/users" => Some(ALLOW_GET),
@@ -534,6 +535,15 @@ async fn handle(
             ("GET", "/v1/runtime/events/recent") => {
                 let revision = current_revision(&shared.config_path).await?;
                 let data = build_runtime_events_recent_data(
+                    shared.as_ref(),
+                    cfg.as_ref(),
+                    query.as_deref(),
+                );
+                Ok(success_response(StatusCode::OK, data, revision))
+            }
+            ("GET", "/v1/runtime/tls-fingerprints") => {
+                let revision = current_revision(&shared.config_path).await?;
+                let data = build_runtime_tls_fingerprints_data(
                     shared.as_ref(),
                     cfg.as_ref(),
                     query.as_deref(),

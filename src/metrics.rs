@@ -288,7 +288,7 @@ async fn handle<B>(
     }
 
     if req.uri().path() == "/beobachten" {
-        let body = render_beobachten(beobachten, config);
+        let body = render_beobachten(stats, beobachten, config);
         let resp = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain; charset=utf-8")
@@ -304,13 +304,22 @@ async fn handle<B>(
     Ok(resp)
 }
 
-fn render_beobachten(beobachten: &BeobachtenStore, config: &ProxyConfig) -> String {
+fn render_beobachten(stats: &Stats, beobachten: &BeobachtenStore, config: &ProxyConfig) -> String {
     if !config.general.beobachten {
         return "beobachten disabled\n".to_string();
     }
 
     let ttl = Duration::from_secs(config.general.beobachten_minutes.saturating_mul(60));
-    beobachten.snapshot_text(ttl)
+    let mut body = beobachten.snapshot_text(ttl);
+    let tls_text = stats.tls_fingerprint_snapshot_text(ttl, 20);
+    if !tls_text.is_empty() {
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push('\n');
+        body.push_str(&tls_text);
+    }
+    body
 }
 
 fn tls_front_domains(config: &ProxyConfig) -> Vec<String> {
