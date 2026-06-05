@@ -1,57 +1,52 @@
 # Telemt — MTProxy на Rust + Tokio
 
-[![Latest Release](https://img.shields.io/github/v/release/telemt/telemt?color=neon)](https://github.com/telemt/telemt/releases/latest) [![Stars](https://img.shields.io/github/stars/telemt/telemt?style=social)](https://github.com/telemt/telemt/stargazers) [![Forks](https://img.shields.io/github/forks/telemt/telemt?style=social)](https://github.com/telemt/telemt/network/members) [![Telegram](https://img.shields.io/badge/Telegram-Chat-24a1de?logo=telegram&logoColor=24a1de)](https://t.me/telemtrs)
-
-***Решает проблемы раньше, чем другие узнают об их существовании***
+[![Latest Release](https://img.shields.io/github/v/release/telemt/telemt?color=neon)](https://github.com/telemt/telemt/releases/latest) [![Stars](https://img.shields.io/github/stars/telemt/telemt?style=social)](https://github.com/telemt/telemt/stargazers) [![Forks](https://img.shields.io/github/forks/telemt/telemt?style=social)](https://github.com/telemt/telemt/network/members)
 
 > [!NOTE]
 >
-> Исправленный TLS ClientHello доступен в Telegram для настольных ПК, Android и iOS.
+> Клиенты Telegram подвергаются блокировке по JA3-отпечатку; мы ищем варианты решения этой проблемы
 > 
-> Пожалуйста, обновите клиентское приложение для работы с EE-MTProxy.
+> Вы можете попробовать собрать свой клиент с нашей Telegram Devlibrary — [tdlib-obf](https://github.com/telemt/tdlib-obf)
 
 <p align="center">
   <a href="https://t.me/telemtrs">
-    <img src="/docs/assets/telegram_button.svg" width="150"/>
+    <img src="https://github.com/user-attachments/assets/30b7e7b9-974a-4e3d-aab6-b58a85de4507" width="240"/>
   </a>
 </p>
 
-**Telemt** — это быстрый, безопасный и функциональный сервер, написанный на Rust. Он полностью реализует официальный алгоритм прокси Telegram и добавляет множество улучшений для продакшена:
+**Telemt** — это быстрый, безопасный и функциональный сервер, написанный на Rust: он полностью реализует официальный алгоритм Telegram прокси и добавляет множество различных улучшений
 
 ## Установка и обновление одной командой
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 ```
-
 - [Инструкция по быстрому запуску](docs/Quick_start/QUICK_START_GUIDE.ru.md)
-- [Quick Start Guide](docs/Quick_start/QUICK_START_GUIDE.en.md)
 
-Реализация **TLS-fronting** максимально приближена к поведению реального HTTPS-трафика (подробнее - [FAQ](docs/FAQ.ru.md#распознаваемость-для-dpi-и-сканеров)).
+## Функционал
+Наша реализация **TLS-fronting** одна из наиболее глубоко отлаженных, продвинутых и почти поведенчески неотличима от настоящего: мы уверены, что сделали это правильно - [см. доказательства в нашей проверке](docs/FAQ.ru.md#распознаваемость-для-dpi-и-сканеров).
 
-***Middle-End Pool*** оптимизирован для высокой производительности.
+Наша архитектура ***Middle-End Pool*** в стандартных сценариях самая производительная, по сравнению с другими реализациями подключения к Middle-End прокси: не кардинально, но достаточно
 
-- Поддержка всех режимов MTProto proxy:
+- Полная поддержа всех официальных режимов MTProto proxy:
   - Classic;
-  - Secure (префикс `dd`);
-  - Fake TLS (префикс `ee` + SNI fronting);
+  - Secure — с префиксом `dd`;
+  - Fake TLS — с префиксом `ee` + SNI fronting;
 - Защита от replay-атак;
-- Маскировка трафика (перенаправление неизвестных подключений на реальные сайты);
-- Настраиваемые keepalive, таймауты, IPv6 и «быстрый режим»;
+- Опциональная маскировка трафика: перенаправление неизвестных подключений на реальные сайты;
+- Настраиваемые keepalive, таймауты, IPv6 и "быстрый режим";
 - Корректное завершение работы (Ctrl+C);
-- Подробное логирование через `trace` и `debug`.
+- Подробное логирование через `trace` и `debug` с помощью `RUST_LOG`.
 
-# Подробнее о Telemt
-- [FAQ](#faq)
-- [Архитектура](docs/Architecture)
-- [Параметры конфигурационного файла](docs/Config_params)
-- [Сборка](#build)
-- [Установка на BSD](#%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0-%D0%BD%D0%B0-bsd)
-- [Почему Rust?](#why-rust)
+## ЧаВо
+- [Часто задаваемые вопросы](docs/FAQ.ru.md)
 
-## FAQ
-- [FAQ RU](docs/FAQ.ru.md)
-- [FAQ EN](docs/FAQ.en.md)
+# Узнайте больше о Telemt
+- [Наша архитектура](docs/Architecture)
+- [Все конфигурационные параметры](docs/Config_params)
+- [Как собрать Telemt самостоятельно?](#сборка)
+- [Установка на BSD](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md)
+- [Почему Rust?](#почему-rust)
 
 ## Сборка
 ```bash
@@ -63,7 +58,7 @@ cd telemt
 cargo build --release
 
 # В текущем release-профиле используется lto = "fat" для максимальной оптимизации (см. Cargo.toml).
-# На системах с малым объёмом RAM (~1 ГБ) можно переопределить это значение на "thin".
+# На системах с малым объёмом ОЗУ (~1 ГБ) можно переопределить это значение на "thin".
 
 # Перейдите в каталог /bin
 mv ./target/release/telemt /bin
@@ -73,24 +68,19 @@ chmod +x /bin/telemt
 telemt config.toml
 ```
 
-## Установка на BSD
-- Руководство по сборке и настройке на английском языке [OpenBSD Guide (EN)](docs/Quick_start/OPENBSD_QUICK_START_GUIDE.en.md);
-- Пример rc.d скрипта: [contrib/openbsd/telemt.rcd](contrib/openbsd/telemt.rcd);
-- Поддержка sandbox с `pledge(2)` и `unveil(2)` пока не реализована.
-
 ## Почему Rust?
-- Надёжность для долгоживущих процессов;
-- Детерминированное управление ресурсами (RAII);
+- Надёжность при длительной работе и идемпотентное поведение;
+- Детерминированное управление ресурсами — RAII;
 - Отсутствие сборщика мусора;
-- Безопасность памяти;
+- Безопасность памяти и меньше поверхность атаки;
 - Асинхронная архитектура Tokio.
 
 ## Поддержать Telemt
 
-Telemt — это бесплатное программное обеспечение с открытым исходным кодом, разработанное в свободное время.
+Telemt — это бесплатное программное обеспечение с открытым исходным кодом, разрабатываемое в свободное время.
 Если оно оказалось вам полезным, вы можете поддержать дальнейшую разработку.
 
-Принимаемые криптовалюты (BTC, ETH, USDT, 350+ и другие):
+Любая криптовалюта (BTC, ETH, USDT и 350+ других):
 
 <p align="center">
   <a href="https://nowpayments.io/donation?api_key=2bf1afd2-abc2-49f9-a012-f1e715b37223" target="_blank" rel="noreferrer noopener">
