@@ -3127,7 +3127,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 
 ## user_rate_limits
   - **Constraints / validation**: Table `username -> { up_bps, down_bps }`. At least one direction must be non-zero.
-  - **Description**: Per-user bandwidth caps in bytes/sec for upload (`up_bps`) and download (`down_bps`).
+  - **Description**: Per-user bandwidth caps in bits/sec for upload (`up_bps`) and download (`down_bps`).
   - **Example**:
 
     ```toml

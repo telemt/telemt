@@ -212,8 +212,8 @@ Notes:
 | `max_tcp_conns` | `usize` | no | Per-user concurrent TCP limit. |
 | `expiration_rfc3339` | `string` | no | RFC3339 expiration timestamp. |
 | `data_quota_bytes` | `u64` | no | Per-user traffic quota. |
-| `rate_limit_up_bps` | `u64` | no | Per-user upload rate limit in bytes per second. |
-| `rate_limit_down_bps` | `u64` | no | Per-user download rate limit in bytes per second. |
+| `rate_limit_up_bps` | `u64` | no | Per-user upload rate limit in bits per second. |
+| `rate_limit_down_bps` | `u64` | no | Per-user download rate limit in bits per second. |
 | `max_unique_ips` | `usize` | no | Per-user unique source IP limit. |
 | `enabled` | `bool` | no | User enable flag. Missing means enabled. `false` persists a disabled override. |
 
@@ -225,8 +225,8 @@ Notes:
 | `max_tcp_conns` | `usize|null` | no | Per-user concurrent TCP limit; `null` removes the per-user override. |
 | `expiration_rfc3339` | `string|null` | no | RFC3339 expiration timestamp; `null` removes the expiration. |
 | `data_quota_bytes` | `u64|null` | no | Per-user traffic quota; `null` removes the per-user quota. |
-| `rate_limit_up_bps` | `u64|null` | no | Per-user upload rate limit in bytes per second; `null` removes the upload direction limit. |
-| `rate_limit_down_bps` | `u64|null` | no | Per-user download rate limit in bytes per second; `null` removes the download direction limit. |
+| `rate_limit_up_bps` | `u64|null` | no | Per-user upload rate limit in bits per second; `null` removes the upload direction limit. |
+| `rate_limit_down_bps` | `u64|null` | no | Per-user download rate limit in bits per second; `null` removes the download direction limit. |
 | `max_unique_ips` | `usize|null` | no | Per-user unique source IP limit; `null` removes the per-user override. |
 | `enabled` | `bool|null` | no | `false` disables the user. `true` or `null` removes the disabled override, so the user is enabled. |
 
@@ -1217,8 +1217,8 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `max_tcp_conns` | `usize?` | Optional max concurrent TCP limit. |
 | `expiration_rfc3339` | `string?` | Optional expiration timestamp. |
 | `data_quota_bytes` | `u64?` | Optional data quota. |
-| `rate_limit_up_bps` | `u64?` | Optional upload rate limit in bytes per second. |
-| `rate_limit_down_bps` | `u64?` | Optional download rate limit in bytes per second. |
+| `rate_limit_up_bps` | `u64?` | Optional upload rate limit in bits per second. |
+| `rate_limit_down_bps` | `u64?` | Optional download rate limit in bits per second. |
 | `max_unique_ips` | `usize?` | Optional unique IP limit. |
 | `current_connections` | `u64` | Current live connections. |
 | `active_unique_ips` | `usize` | Current active unique source IPs. |
