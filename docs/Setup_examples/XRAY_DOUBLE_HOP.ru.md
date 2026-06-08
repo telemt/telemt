@@ -206,7 +206,7 @@ nano /usr/local/etc/xray/config.json
           "publicKey": "<SERVER_B_PUBLIC_KEY>",
           "shortId": "<SHORT_ID>",
           "spiderX": "/",
-          "fingerprint": "chrome"
+          "fingerprint": "firefox"
         },
         "xhttpSettings": {
           "path": "/<YOUR_RANDOM_PATH>"
