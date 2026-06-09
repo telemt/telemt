@@ -97,6 +97,81 @@ pub(super) async fn save_config_to_disk(
     Ok(compute_revision(&serialized))
 }
 
+/// Top-level config tables that may be edited via the config API.
+///
+/// Intentionally excluded (defense-in-depth, enforces the spec's per-node
+/// identity invariant at the Telemt layer too):
+///
+///   - `access`  : owned by the users API.
+///   - `server`  : carries per-node identity (`port`, `api`/`api_bind`, listeners).
+///   - `network` : carries per-node identity (`ipv4`/`ipv6`).
+///
+/// A future field-level allowlist can re-admit specific safe fields
+/// (e.g. `network.dns_overrides`) without opening the whole section.
+pub(super) const EDITABLE_SECTIONS: &[&str] = &[
+    "general",
+    "timeouts",
+    "censorship",
+    "upstreams",
+    "show_link",
+    "dc_overrides",
+];
+
+/// Re-render the given top-level tables from `cfg` and upsert each into the
+/// on-disk file, preserving every untouched section (and its comments).
+pub(super) async fn save_sections_to_disk(
+    config_path: &Path,
+    cfg: &ProxyConfig,
+    sections: &[&str],
+) -> Result<String, ApiFailure> {
+    let mut content = tokio::fs::read_to_string(config_path)
+        .await
+        .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
+
+    for section in sections {
+        let rendered = render_top_level_section(cfg, section)?;
+        content = upsert_toml_table(&content, section, &rendered);
+    }
+
+    write_atomic(config_path.to_path_buf(), content.clone()).await?;
+    Ok(compute_revision(&content))
+}
+
+/// Render one top-level table as `[section]\n...\n` (or `[[upstreams]]` array
+/// of tables) from the typed `cfg`. Serializes via the `toml` crate so the
+/// output matches the canonical format Telemt parses.
+fn render_top_level_section(cfg: &ProxyConfig, section: &str) -> Result<String, ApiFailure> {
+    let value = toml::Value::try_from(cfg)
+        .map_err(|e| ApiFailure::internal(format!("failed to serialize config: {}", e)))?;
+    let table = value
+        .get(section)
+        .ok_or_else(|| ApiFailure::internal(format!("unknown section: {}", section)))?;
+
+    // upstreams is an array-of-tables -> render as [[upstreams]] blocks.
+    if let toml::Value::Array(items) = table {
+        let mut out = String::new();
+        for item in items {
+            out.push_str(&format!("[[{}]]\n", section));
+            out.push_str(&toml::to_string(item).map_err(|e| {
+                ApiFailure::internal(format!("failed to serialize {}: {}", section, e))
+            })?);
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        return Ok(out);
+    }
+
+    let body = toml::to_string(table)
+        .map_err(|e| ApiFailure::internal(format!("failed to serialize {}: {}", section, e)))?;
+    let mut out = format!("[{}]\n", section);
+    out.push_str(&body);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 pub(super) async fn save_access_sections_to_disk(
     config_path: &Path,
     cfg: &ProxyConfig,
@@ -273,17 +348,20 @@ fn upsert_toml_table(source: &str, table_name: &str, replacement: &str) -> Strin
 }
 
 fn find_toml_table_bounds(source: &str, table_name: &str) -> Option<(usize, usize)> {
-    let target = format!("[{}]", table_name);
+    let single = format!("[{}]", table_name);
+    let array = format!("[[{}]]", table_name);
     let mut offset = 0usize;
     let mut start = None;
 
     for line in source.split_inclusive('\n') {
         let trimmed = line.trim();
         if let Some(start_offset) = start {
-            if trimmed.starts_with('[') {
+            let is_same_array = trimmed == array;
+            let is_new_header = trimmed.starts_with('[');
+            if is_new_header && !is_same_array {
                 return Some((start_offset, offset));
             }
-        } else if trimmed == target {
+        } else if trimmed == single || trimmed == array {
             start = Some(offset);
         }
         offset = offset.saturating_add(line.len());
@@ -335,6 +413,45 @@ fn write_atomic_sync(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn save_sections_preserves_other_tables_and_comments() {
+        let dir = std::env::temp_dir().join(format!("cfgtest-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# top comment\n[censorship]\ntls_domain = \"old.example\"\n\n[server]\nport = 443\n",
+        )
+        .unwrap();
+
+        let mut cfg = ProxyConfig::default();
+        cfg.censorship.tls_domain = "new.example".to_string();
+        cfg.server.port = 443;
+
+        let rev = save_sections_to_disk(&path, &cfg, &["censorship"])
+            .await
+            .unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("tls_domain = \"new.example\""));
+        assert!(written.contains("# top comment")); // untouched comment kept
+        assert!(written.contains("[server]\nport = 443")); // untouched table kept
+        assert_eq!(rev, compute_revision(&written));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_bounds_matches_array_of_tables() {
+        let src =
+            "[server]\nport = 1\n\n[[upstreams]]\nkind = \"a\"\n\n[[upstreams]]\nkind = \"b\"\n";
+        let bounds = find_toml_table_bounds(src, "upstreams");
+        assert!(bounds.is_some(), "should locate [[upstreams]] block start");
+        let (start, end) = bounds.unwrap();
+        let slice = &src[start..end];
+        assert!(slice.starts_with("[[upstreams]]"));
+        assert!(slice.contains("kind = \"b\"")); // spans through the last upstream block
+    }
 
     #[test]
     fn render_user_rate_limits_section() {
