@@ -649,9 +649,10 @@ fn build_server_hello_key_share_for_group(
             group,
             gen_fake_x25519mlkem768_server_key_share(rng),
         )),
-        TLS_NAMED_GROUP_X25519 => {
-            Some(ServerHelloKeyShare::new(group, gen_fake_x25519_key(rng).to_vec()))
-        }
+        TLS_NAMED_GROUP_X25519 => Some(ServerHelloKeyShare::new(
+            group,
+            gen_fake_x25519_key(rng).to_vec(),
+        )),
         _ => None,
     }
 }
