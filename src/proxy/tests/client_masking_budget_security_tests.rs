@@ -85,9 +85,17 @@ fn make_valid_tls_client_hello(secret: &[u8], timestamp: u32, tls_len: usize, fi
     extensions.extend_from_slice(&(key_share_extension.len() as u16).to_be_bytes());
     extensions.extend_from_slice(&key_share_extension);
 
-    let base_tls_len =
-        4 + 2 + 32 + 1 + session_id_len + 2 + TLS_AES_128_GCM_SHA256.len() + 1 + 1 + 2
-            + extensions.len();
+    let base_tls_len = 4
+        + 2
+        + 32
+        + 1
+        + session_id_len
+        + 2
+        + TLS_AES_128_GCM_SHA256.len()
+        + 1
+        + 1
+        + 2
+        + extensions.len();
     assert!(
         tls_len == base_tls_len || tls_len >= base_tls_len + 4,
         "TLS length must leave room for a complete padding extension"
