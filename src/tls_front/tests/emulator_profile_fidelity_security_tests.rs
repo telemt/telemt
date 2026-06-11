@@ -4,7 +4,9 @@ use crate::crypto::SecureRandom;
 use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
 };
-use crate::protocol::tls::{ClientHelloTlsVersion, TLS_NAMED_GROUP_X25519MLKEM768};
+use crate::protocol::tls::{
+    ClientHelloTlsVersion, ServerHelloKeyShare, TLS_NAMED_GROUP_X25519MLKEM768,
+};
 use crate::tls_front::emulator::build_emulated_server_hello;
 use crate::tls_front::types::{
     CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsProfileSource,
@@ -29,6 +31,7 @@ fn make_cached() -> CachedTlsData {
             app_data_record_sizes: vec![1200, 900],
             ticket_record_sizes: vec![220, 180],
             source: TlsProfileSource::Merged,
+            ..TlsBehaviorProfile::default()
         },
         fetched_at: SystemTime::now(),
         domain: "example.com".to_string(),
@@ -52,6 +55,10 @@ fn record_lengths_by_type(response: &[u8], wanted_type: u8) -> Vec<usize> {
     out
 }
 
+fn test_server_key_share() -> ServerHelloKeyShare {
+    ServerHelloKeyShare::new(TLS_NAMED_GROUP_X25519MLKEM768, vec![0x42; 1120])
+}
+
 #[test]
 fn emulated_server_hello_keeps_single_change_cipher_spec_for_client_compatibility() {
     let cached = make_cached();
@@ -66,7 +73,7 @@ fn emulated_server_hello_keeps_single_change_cipher_spec_for_client_compatibilit
         true,
         ClientHelloTlsVersion::Tls13,
         [0x13, 0x01],
-        TLS_NAMED_GROUP_X25519MLKEM768,
+        &test_server_key_share(),
         &rng,
         None,
         0,
@@ -92,14 +99,14 @@ fn emulated_server_hello_does_not_emit_profile_ticket_tail_when_disabled() {
         true,
         ClientHelloTlsVersion::Tls13,
         [0x13, 0x01],
-        TLS_NAMED_GROUP_X25519MLKEM768,
+        &test_server_key_share(),
         &rng,
         None,
         0,
     );
 
     let app_records = record_lengths_by_type(&response, TLS_RECORD_APPLICATION);
-    assert_eq!(app_records, vec![1200]);
+    assert_eq!(app_records, vec![1200, 900]);
 }
 
 #[test]
@@ -116,12 +123,12 @@ fn emulated_server_hello_uses_profile_ticket_lengths_when_enabled() {
         true,
         ClientHelloTlsVersion::Tls13,
         [0x13, 0x01],
-        TLS_NAMED_GROUP_X25519MLKEM768,
+        &test_server_key_share(),
         &rng,
         None,
         2,
     );
 
     let app_records = record_lengths_by_type(&response, TLS_RECORD_APPLICATION);
-    assert_eq!(app_records, vec![1200, 220, 180]);
+    assert_eq!(app_records, vec![1200, 900, 220, 180]);
 }

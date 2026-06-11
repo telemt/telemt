@@ -12,7 +12,8 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::tls_front::types::{
-    CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsFetchResult, TlsProfileSource,
+    CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsFetchResult, TlsProfileQuality,
+    TlsProfileSource,
 };
 
 const FULL_CERT_SENT_SWEEP_INTERVAL_SECS: u64 = 30;
@@ -47,10 +48,14 @@ pub struct TlsFrontCache {
 pub(crate) struct TlsFrontProfileHealth {
     pub(crate) domain: String,
     pub(crate) source: &'static str,
+    pub(crate) quality: &'static str,
+    pub(crate) key_share_group: &'static str,
     pub(crate) age_seconds: u64,
     pub(crate) is_default: bool,
     pub(crate) has_cert_info: bool,
     pub(crate) has_cert_payload: bool,
+    pub(crate) server_hello_record_len: usize,
+    pub(crate) server_hello_extensions: usize,
     pub(crate) app_data_records: usize,
     pub(crate) ticket_records: usize,
     pub(crate) change_cipher_spec_count: u8,
@@ -63,6 +68,23 @@ fn profile_source_label(source: TlsProfileSource) -> &'static str {
         TlsProfileSource::Raw => "raw",
         TlsProfileSource::Rustls => "rustls",
         TlsProfileSource::Merged => "merged",
+    }
+}
+
+fn profile_quality_label(quality: TlsProfileQuality) -> &'static str {
+    match quality {
+        TlsProfileQuality::Fallback => "fallback",
+        TlsProfileQuality::RawPartial => "raw_partial",
+        TlsProfileQuality::RawStrict => "raw_strict",
+    }
+}
+
+fn key_share_group_label(group: Option<u16>) -> &'static str {
+    match group {
+        Some(0x001d) => "x25519",
+        Some(0x11ec) => "x25519mlkem768",
+        Some(_) => "other",
+        None => "none",
     }
 }
 
@@ -137,7 +159,8 @@ impl TlsFrontCache {
                 .get(domain)
                 .cloned()
                 .unwrap_or_else(|| self.default.clone());
-            let behavior = &cached.behavior_profile;
+            let mut behavior = cached.behavior_profile.clone();
+            behavior.refresh_server_hello_summary(&cached.server_hello_template);
             let age_seconds = now
                 .duration_since(cached.fetched_at)
                 .map(|duration| duration.as_secs())
@@ -146,10 +169,14 @@ impl TlsFrontCache {
             snapshot.push(TlsFrontProfileHealth {
                 domain: domain.clone(),
                 source: profile_source_label(behavior.source),
+                quality: profile_quality_label(behavior.quality),
+                key_share_group: key_share_group_label(behavior.server_hello_key_share_group),
                 age_seconds,
                 is_default: cached.domain == "default",
                 has_cert_info: cached.cert_info.is_some(),
                 has_cert_payload: cached.cert_payload.is_some(),
+                server_hello_record_len: behavior.server_hello_record_len,
+                server_hello_extensions: behavior.server_hello_extension_types.len(),
                 app_data_records: cached
                     .app_data_records_sizes
                     .len()
@@ -337,6 +364,9 @@ impl TlsFrontCache {
                             warn!(domain = %cached.domain, "Skipping stale TLS cache entry (>72h)");
                             continue;
                         }
+                        cached
+                            .behavior_profile
+                            .refresh_server_hello_summary(&cached.server_hello_template);
                         let domain = cached.domain.clone();
                         self.set(&domain, cached).await;
                         loaded += 1;
@@ -378,20 +408,39 @@ impl TlsFrontCache {
 
     /// Replace cached entry from a fetch result.
     pub async fn update_from_fetch(&self, domain: &str, fetched: TlsFetchResult) {
+        let TlsFetchResult {
+            server_hello_parsed,
+            app_data_records_sizes,
+            total_app_data_len,
+            mut behavior_profile,
+            cert_info,
+            cert_payload,
+        } = fetched;
+        behavior_profile.refresh_server_hello_summary(&server_hello_parsed);
+        let quality = behavior_profile.quality;
         let data = CachedTlsData {
-            server_hello_template: fetched.server_hello_parsed,
-            cert_info: fetched.cert_info,
-            cert_payload: fetched.cert_payload,
-            app_data_records_sizes: fetched.app_data_records_sizes.clone(),
-            total_app_data_len: fetched.total_app_data_len,
-            behavior_profile: fetched.behavior_profile,
+            server_hello_template: server_hello_parsed,
+            cert_info,
+            cert_payload,
+            app_data_records_sizes: app_data_records_sizes.clone(),
+            total_app_data_len,
+            behavior_profile,
             fetched_at: SystemTime::now(),
             domain: domain.to_string(),
         };
 
         self.set(domain, data.clone()).await;
         self.persist(domain, &data).await;
-        debug!(domain = %domain, len = fetched.total_app_data_len, "TLS cache updated");
+        if quality == TlsProfileQuality::RawStrict {
+            debug!(domain = %domain, len = total_app_data_len, "TLS cache updated");
+        } else {
+            warn!(
+                domain = %domain,
+                quality = profile_quality_label(quality),
+                len = total_app_data_len,
+                "TLS cache updated with non-strict front profile"
+            );
+        }
     }
 
     pub fn default_entry(&self) -> Arc<CachedTlsData> {

@@ -383,9 +383,30 @@ async fn render_tls_front_profile_health(
     let _ = writeln!(out, "# TYPE telemt_tls_front_profile_info gauge");
     let _ = writeln!(
         out,
+        "# HELP telemt_tls_front_profile_quality_info TLS front profile quality and key-share group per configured domain"
+    );
+    let _ = writeln!(out, "# TYPE telemt_tls_front_profile_quality_info gauge");
+    let _ = writeln!(
+        out,
         "# HELP telemt_tls_front_profile_age_seconds Age of cached TLS front profile data per configured domain"
     );
     let _ = writeln!(out, "# TYPE telemt_tls_front_profile_age_seconds gauge");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_tls_front_profile_server_hello_bytes TLS front cached ServerHello record body bytes per configured domain"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_tls_front_profile_server_hello_bytes gauge"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_tls_front_profile_server_hello_extensions TLS front cached visible ServerHello extension count per configured domain"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_tls_front_profile_server_hello_extensions gauge"
+    );
     let _ = writeln!(
         out,
         "# HELP telemt_tls_front_profile_app_data_records TLS front cached app-data record count per configured domain"
@@ -422,8 +443,23 @@ async fn render_tls_front_profile_health(
         );
         let _ = writeln!(
             out,
+            "telemt_tls_front_profile_quality_info{{domain=\"{}\",quality=\"{}\",key_share_group=\"{}\"}} 1",
+            domain, item.quality, item.key_share_group
+        );
+        let _ = writeln!(
+            out,
             "telemt_tls_front_profile_age_seconds{{domain=\"{}\"}} {}",
             domain, item.age_seconds
+        );
+        let _ = writeln!(
+            out,
+            "telemt_tls_front_profile_server_hello_bytes{{domain=\"{}\"}} {}",
+            domain, item.server_hello_record_len
+        );
+        let _ = writeln!(
+            out,
+            "telemt_tls_front_profile_server_hello_extensions{{domain=\"{}\"}} {}",
+            domain, item.server_hello_extensions
         );
         let _ = writeln!(
             out,
@@ -3901,7 +3937,20 @@ mod tests {
                         session_id: Vec::new(),
                         cipher_suite: [0x13, 0x01],
                         compression: 0,
-                        extensions: Vec::new(),
+                        extensions: {
+                            let mut key_share = vec![0x00, 0x1d, 0x00, 0x20];
+                            key_share.resize(36, 0x42);
+                            vec![
+                                crate::tls_front::types::TlsExtension {
+                                    ext_type: 0x002b,
+                                    data: vec![0x03, 0x04],
+                                },
+                                crate::tls_front::types::TlsExtension {
+                                    ext_type: 0x0033,
+                                    data: key_share,
+                                },
+                            ]
+                        },
                     },
                     cert_info: None,
                     cert_payload: Some(TlsCertPayload {
@@ -3915,6 +3964,7 @@ mod tests {
                         app_data_record_sizes: vec![1024, 512],
                         ticket_record_sizes: vec![69],
                         source: TlsProfileSource::Merged,
+                        ..TlsBehaviorProfile::default()
                     },
                     fetched_at: SystemTime::now(),
                     domain: "primary.example".to_string(),
@@ -3932,6 +3982,22 @@ mod tests {
         );
         assert!(
             output.contains("telemt_tls_front_profile_info{domain=\"fallback.example\",source=\"default\",is_default=\"true\",has_cert_info=\"false\",has_cert_payload=\"false\"} 1")
+        );
+        assert!(
+            output.contains("telemt_tls_front_profile_quality_info{domain=\"primary.example\",quality=\"raw_strict\",key_share_group=\"x25519\"} 1")
+        );
+        assert!(
+            output.contains("telemt_tls_front_profile_quality_info{domain=\"fallback.example\",quality=\"fallback\",key_share_group=\"none\"} 1")
+        );
+        assert!(
+            output.contains(
+                "telemt_tls_front_profile_server_hello_bytes{domain=\"primary.example\"} 90"
+            )
+        );
+        assert!(
+            output.contains(
+                "telemt_tls_front_profile_server_hello_extensions{domain=\"primary.example\"} 2"
+            )
         );
         assert!(
             output.contains(
@@ -4045,7 +4111,10 @@ mod tests {
         );
         assert!(output.contains("# TYPE telemt_tls_front_profile_domains gauge"));
         assert!(output.contains("# TYPE telemt_tls_front_profile_info gauge"));
+        assert!(output.contains("# TYPE telemt_tls_front_profile_quality_info gauge"));
         assert!(output.contains("# TYPE telemt_tls_front_profile_age_seconds gauge"));
+        assert!(output.contains("# TYPE telemt_tls_front_profile_server_hello_bytes gauge"));
+        assert!(output.contains("# TYPE telemt_tls_front_profile_server_hello_extensions gauge"));
         assert!(output.contains("# TYPE telemt_tls_front_profile_app_data_records gauge"));
         assert!(output.contains("# TYPE telemt_tls_front_profile_ticket_records gauge"));
         assert!(

@@ -1473,14 +1473,60 @@ where
         return HandshakeResult::BadClient { reader, writer };
     }
 
-    let cached = if config.censorship.tls_emulation {
+    let cached_entry = if config.censorship.tls_emulation {
         if let Some(cache) = tls_cache.as_ref() {
             let selected_domain =
                 matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
             let cached_entry = cache.get(selected_domain).await;
-            let use_full_cert_payload = if config.censorship.serverhello_compact
-                && matches!(client_tls_version, tls::ClientHelloTlsVersion::Tls12)
-            {
+            Some(cached_entry)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let preferred_key_share_group = cached_entry
+        .as_ref()
+        .and_then(|cached_entry| emulator::profiled_server_hello_key_share_group(cached_entry));
+    let Some(server_key_share) =
+        tls::build_server_hello_key_share(handshake, preferred_key_share_group, rng)
+    else {
+        auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
+        maybe_apply_server_hello_delay(config).await;
+        debug!(
+            peer = %peer,
+            "TLS handshake rejected: ClientHello did not offer a usable TLS 1.3 key_share"
+        );
+        return HandshakeResult::BadClient { reader, writer };
+    };
+
+    let preferred_cipher_suite = if let Some(cached_entry) = cached_entry.as_ref() {
+        if cached_entry.server_hello_template.cipher_suite == [0, 0] {
+            [0x13, 0x01]
+        } else {
+            cached_entry.server_hello_template.cipher_suite
+        }
+    } else {
+        [0x13, 0x01]
+    };
+    let Some(selected_cipher_suite) =
+        tls::select_server_hello_cipher_suite(handshake, preferred_cipher_suite)
+    else {
+        auth_probe_record_failure_in(shared, peer.ip(), Instant::now());
+        maybe_apply_server_hello_delay(config).await;
+        debug!(
+            peer = %peer,
+            "TLS handshake rejected: ClientHello did not offer a supported TLS 1.3 cipher suite"
+        );
+        return HandshakeResult::BadClient { reader, writer };
+    };
+
+    let cached = if let Some(cached_entry) = cached_entry {
+        let use_full_cert_payload = if config.censorship.serverhello_compact
+            && matches!(client_tls_version, tls::ClientHelloTlsVersion::Tls12)
+        {
+            if let Some(cache) = tls_cache.as_ref() {
                 cache
                     .take_full_cert_budget_for_ip(
                         peer.ip(),
@@ -1489,11 +1535,11 @@ where
                     .await
             } else {
                 true
-            };
-            Some((cached_entry, use_full_cert_payload))
+            }
         } else {
-            None
-        }
+            true
+        };
+        Some((cached_entry, use_full_cert_payload))
     } else {
         None
     };
@@ -1502,16 +1548,8 @@ where
     replay_checker.add_tls_digest(digest_half);
 
     let validation_session_id_slice = &validation_session_id[..validation_session_id_len];
-    let selected_key_share_group = tls::select_server_hello_key_share_group(handshake);
 
     let response = if let Some((cached_entry, use_full_cert_payload)) = cached {
-        let preferred_cipher_suite = if cached_entry.server_hello_template.cipher_suite == [0, 0] {
-            [0x13, 0x01]
-        } else {
-            cached_entry.server_hello_template.cipher_suite
-        };
-        let selected_cipher_suite =
-            tls::select_server_hello_cipher_suite(handshake, preferred_cipher_suite);
         emulator::build_emulated_server_hello(
             &validated_secret,
             &validation_digest,
@@ -1521,13 +1559,12 @@ where
             config.censorship.serverhello_compact,
             client_tls_version,
             selected_cipher_suite,
-            selected_key_share_group,
+            &server_key_share,
             rng,
             selected_alpn.clone(),
             config.censorship.tls_new_session_tickets,
         )
     } else {
-        let selected_cipher_suite = tls::select_server_hello_cipher_suite(handshake, [0x13, 0x01]);
         tls::build_server_hello_with_cipher(
             &validated_secret,
             &validation_digest,
@@ -1535,7 +1572,7 @@ where
             config.censorship.fake_cert_len,
             rng,
             selected_cipher_suite,
-            selected_key_share_group,
+            &server_key_share,
             selected_alpn.clone(),
             config.censorship.tls_new_session_tickets,
         )
