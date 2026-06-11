@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::watch;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::config::{ProxyConfig, SynLimitMode};
 
@@ -19,8 +19,8 @@ const NFT_SET_V6: &str = "telemt_synlimit_v6";
 
 #[derive(Default)]
 struct SynLimitTargets {
-    iptables_v4: Vec<(Option<IpAddr>, u16)>,
-    iptables_v6: Vec<(Option<IpAddr>, u16)>,
+    iptables_v4: Vec<(Option<IpAddr>, u16, u32, u32)>,
+    iptables_v6: Vec<(Option<IpAddr>, u16, u32, u32)>,
     nft_v4: Vec<(Option<IpAddr>, u16)>,
     nft_v6: Vec<(Option<IpAddr>, u16)>,
 }
@@ -43,14 +43,6 @@ struct NftApplyPlan<'a> {
     family: NftFamily,
     v4_targets: &'a [(Option<IpAddr>, u16)],
     v6_targets: &'a [(Option<IpAddr>, u16)],
-}
-
-struct SynLimitRuleGuard;
-
-impl Drop for SynLimitRuleGuard {
-    fn drop(&mut self) {
-        clear_synlimit_rules_all_backends_sync();
-    }
 }
 
 impl SynLimitTargets {
@@ -89,7 +81,6 @@ pub(crate) fn spawn_synlimit_controller(config_rx: watch::Receiver<Arc<ProxyConf
     }
 
     tokio::spawn(async move {
-        let _guard = SynLimitRuleGuard;
         wait_for_config_channel_close(config_rx).await;
         clear_synlimit_rules_all_backends().await;
     });
@@ -153,13 +144,15 @@ fn synlimit_targets(cfg: &ProxyConfig) -> SynLimitTargets {
         }
         let port = listener.port.unwrap_or(cfg.server.port);
         let ip = (!listener.ip.is_unspecified()).then_some(listener.ip);
+        let seconds = listener.synlimit_seconds;
+        let hitcount = listener.synlimit_hitcount;
 
         match (backend, listener.ip.is_ipv4()) {
             (SynLimitMode::Iptables, true) => {
-                iptables_v4.insert((ip, port));
+                iptables_v4.insert((ip, port, seconds, hitcount));
             }
             (SynLimitMode::Iptables, false) => {
-                iptables_v6.insert((ip, port));
+                iptables_v6.insert((ip, port, seconds, hitcount));
             }
             (SynLimitMode::Nftables, true) => {
                 nft_v4.insert((ip, port));
@@ -186,7 +179,7 @@ async fn apply_iptables_synlimit_rules(targets: &SynLimitTargets) -> Result<(), 
 
 async fn apply_iptables_synlimit_rules_for_binary(
     binary: &str,
-    targets: &[(Option<IpAddr>, u16)],
+    targets: &[(Option<IpAddr>, u16, u32, u32)],
 ) -> Result<(), String> {
     if targets.is_empty() {
         return Ok(());
@@ -213,9 +206,11 @@ async fn apply_iptables_synlimit_rules_for_binary(
         .await?;
     }
 
-    for (ip, port) in targets {
-        let drop_args = iptables_synlimit_rule_args(ip, *port, "--rcheck", "DROP");
-        let accept_args = iptables_synlimit_rule_args(ip, *port, "--set", "ACCEPT");
+    for (ip, port, seconds, hitcount) in targets {
+        let drop_args =
+            iptables_synlimit_rule_args(ip, *port, *seconds, *hitcount, "--rcheck", "DROP");
+        let accept_args =
+            iptables_synlimit_rule_args(ip, *port, *seconds, *hitcount, "--set", "ACCEPT");
         let drop_refs: Vec<&str> = drop_args.iter().map(String::as_str).collect();
         let accept_refs: Vec<&str> = accept_args.iter().map(String::as_str).collect();
         run_command(binary, &drop_refs, None).await?;
@@ -228,6 +223,8 @@ async fn apply_iptables_synlimit_rules_for_binary(
 fn iptables_synlimit_rule_args(
     ip: &Option<IpAddr>,
     port: u16,
+    seconds: u32,
+    hitcount: u32,
     recent_op: &str,
     verdict: &str,
 ) -> Vec<String> {
@@ -254,7 +251,12 @@ fn iptables_synlimit_rule_args(
         recent_op.to_string(),
     ]);
     if recent_op == "--rcheck" {
-        args.extend(["--seconds".to_string(), "1".to_string()]);
+        args.extend([
+            "--seconds".to_string(),
+            seconds.to_string(),
+            "--hitcount".to_string(),
+            hitcount.to_string(),
+        ]);
     }
     args.extend(["-j".to_string(), verdict.to_string()]);
     args
@@ -505,47 +507,5 @@ fn has_cap_net_admin() -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         false
-    }
-}
-
-fn clear_synlimit_rules_all_backends_sync() {
-    run_command_sync("nft", &["delete", "table", "inet", NFT_TABLE]);
-    run_command_sync("nft", &["delete", "table", "ip", NFT_TABLE]);
-    run_command_sync("nft", &["delete", "table", "ip6", NFT_TABLE]);
-    clear_iptables_synlimit_rules_for_binary_sync("iptables");
-    clear_iptables_synlimit_rules_for_binary_sync("ip6tables");
-}
-
-fn clear_iptables_synlimit_rules_for_binary_sync(binary: &str) {
-    if !command_exists(binary) {
-        return;
-    }
-    for _ in 0..8 {
-        if !run_command_sync(
-            binary,
-            &["-t", "filter", "-D", "INPUT", "-j", IPTABLES_CHAIN],
-        ) {
-            break;
-        }
-    }
-    run_command_sync(binary, &["-t", "filter", "-F", IPTABLES_CHAIN]);
-    run_command_sync(binary, &["-t", "filter", "-X", IPTABLES_CHAIN]);
-}
-
-fn run_command_sync(binary: &str, args: &[&str]) -> bool {
-    if !command_exists(binary) {
-        return false;
-    }
-    match std::process::Command::new(binary)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(status) => status.success(),
-        Err(error) => {
-            debug!(binary, error = %error, "SYN limiter cleanup command failed to spawn");
-            false
-        }
     }
 }
