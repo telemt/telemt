@@ -73,7 +73,7 @@ RUN set -eux; \
 WORKDIR /app
 
 COPY --from=minimal /telemt /app/telemt
-COPY config.toml /app/config.toml
+COPY ./config/config.toml /app/config.toml
 
 EXPOSE 443 9090 9091
 
@@ -99,7 +99,7 @@ RUN set -eux; \
 WORKDIR /app
 
 COPY --from=minimal /telemt /app/telemt
-COPY config.toml /app/config.toml
+COPY ./config/config.toml /app/config.toml
 
 EXPOSE 443 9090 9091
 
@@ -116,7 +116,7 @@ FROM gcr.io/distroless/static-debian12 AS prod
 WORKDIR /app
 
 COPY --from=minimal /telemt /app/telemt
-COPY config.toml /app/config.toml
+COPY ./config/config.toml /app/config.toml
 
 USER nonroot:nonroot
 
