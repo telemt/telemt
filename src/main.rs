@@ -30,6 +30,7 @@ mod service;
 mod startup;
 mod stats;
 mod stream;
+mod synlimit_control;
 mod tls_front;
 mod transport;
 mod util;

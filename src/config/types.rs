@@ -1369,6 +1369,77 @@ impl ConntrackPressureProfile {
     }
 }
 
+/// Per-listener SYN limiter mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SynLimitMode {
+    /// Disable SYN limiting for this listener.
+    #[default]
+    Off,
+    /// Use iptables/ip6tables filter rules with the hashlimit match.
+    Iptables,
+    /// Use nftables rules with per-source token-bucket meters.
+    Nftables,
+}
+
+impl Serialize for SynLimitMode {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Off => serializer.serialize_bool(false),
+            Self::Iptables => serializer.serialize_str("iptables"),
+            Self::Nftables => serializer.serialize_str("nftables"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SynLimitMode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SynLimitModeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SynLimitModeVisitor {
+            type Value = SynLimitMode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("false, iptables, or nftables")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value {
+                    Err(E::custom(
+                        "synlimit=true is ambiguous; use \"iptables\" or \"nftables\"",
+                    ))
+                } else {
+                    Ok(SynLimitMode::Off)
+                }
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "false" | "off" | "disabled" | "none" => Ok(SynLimitMode::Off),
+                    "iptables" => Ok(SynLimitMode::Iptables),
+                    "nftables" => Ok(SynLimitMode::Nftables),
+                    _ => Err(E::custom(
+                        "synlimit must be false, \"iptables\", or \"nftables\"",
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(SynLimitModeVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConntrackControlConfig {
     /// Enables runtime conntrack-control worker for pressure mitigation.
@@ -2102,6 +2173,18 @@ pub struct ListenerConfig {
     /// Empty string disables MSS shaping for this listener.
     #[serde(default)]
     pub client_mss: Option<String>,
+    /// Per-listener SYN limiter mode.
+    #[serde(default)]
+    pub synlimit: SynLimitMode,
+    /// Token-bucket rate interval for the per-listener SYN limiter.
+    #[serde(default = "default_synlimit_seconds")]
+    pub synlimit_seconds: u32,
+    /// Token-bucket rate amount for the per-listener SYN limiter.
+    #[serde(default = "default_synlimit_hitcount")]
+    pub synlimit_hitcount: u32,
+    /// Token-bucket burst size for the per-listener SYN limiter.
+    #[serde(default = "default_synlimit_burst")]
+    pub synlimit_burst: u32,
     /// IP address or hostname to announce in proxy links.
     /// Takes precedence over `announce_ip` if both are set.
     #[serde(default)]

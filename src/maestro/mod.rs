@@ -45,6 +45,7 @@ use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{ReplayChecker, Stats};
 use crate::stream::BufferPool;
+use crate::synlimit_control;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 use helpers::{
@@ -905,6 +906,9 @@ async fn run_telemt_core(
         error!("No listeners. Exiting.");
         std::process::exit(1);
     }
+
+    synlimit_control::reconcile_synlimit_rules(&config).await;
+    synlimit_control::spawn_synlimit_controller(config_rx.clone());
 
     // On Unix, caller supplies privilege drop after bind (may require root for port < 1024).
     drop_after_bind();

@@ -638,15 +638,21 @@ fn build_server_hello_key_share_for_group(
     group: u16,
     rng: &SecureRandom,
 ) -> Option<ServerHelloKeyShare> {
+    let expected_key_exchange_len = client_hello_key_share_group_len(group)?;
+    client_hello_key_share_group_entry(handshake, group, expected_key_exchange_len)?;
+
+    // FakeTLS clients validate ServerHello shape and digest, not TLS traffic
+    // secrets, so the response must mirror the offered group without binding to
+    // the camouflage key bytes embedded in ClientHello.
     match group {
-        TLS_NAMED_GROUP_X25519MLKEM768 => {
-            let key_exchange = build_x25519mlkem768_server_key_share(handshake, rng)?;
-            Some(ServerHelloKeyShare::new(group, key_exchange))
-        }
-        TLS_NAMED_GROUP_X25519 => {
-            let key_exchange = build_x25519_server_key_share(handshake, rng)?;
-            Some(ServerHelloKeyShare::new(group, key_exchange))
-        }
+        TLS_NAMED_GROUP_X25519MLKEM768 => Some(ServerHelloKeyShare::new(
+            group,
+            gen_fake_x25519mlkem768_server_key_share(rng),
+        )),
+        TLS_NAMED_GROUP_X25519 => Some(ServerHelloKeyShare::new(
+            group,
+            gen_fake_x25519_key(rng).to_vec(),
+        )),
         _ => None,
     }
 }

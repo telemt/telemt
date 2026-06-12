@@ -19,6 +19,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 
 use crate::stats::Stats;
+use crate::synlimit_control;
 use crate::transport::middle_proxy::MePool;
 
 use super::helpers::{format_uptime, unit_label};
@@ -101,6 +102,8 @@ async fn perform_shutdown(
     info!("Shutting down...");
     let uptime_secs = process_started_at.elapsed().as_secs();
     info!("Uptime: {}", format_uptime(uptime_secs));
+
+    synlimit_control::clear_synlimit_rules_all_backends().await;
 
     // Graceful ME pool shutdown
     if let Some(pool) = &me_pool {

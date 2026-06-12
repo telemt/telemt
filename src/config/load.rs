@@ -346,6 +346,10 @@ const LISTENER_CONFIG_KEYS: &[&str] = &[
     "ip",
     "port",
     "client_mss",
+    "synlimit",
+    "synlimit_seconds",
+    "synlimit_hitcount",
+    "synlimit_burst",
     "announce",
     "announce_ip",
     "proxy_protocol",
@@ -1948,6 +1952,21 @@ impl ProxyConfig {
                         ProxyError::Config(format!("server.listeners[{idx}].client_mss {error}"))
                     })?;
             }
+            if listener.synlimit_seconds == 0 {
+                return Err(ProxyError::Config(format!(
+                    "server.listeners[{idx}].synlimit_seconds must be > 0"
+                )));
+            }
+            if listener.synlimit_hitcount == 0 {
+                return Err(ProxyError::Config(format!(
+                    "server.listeners[{idx}].synlimit_hitcount must be > 0"
+                )));
+            }
+            if listener.synlimit_burst == 0 {
+                return Err(ProxyError::Config(format!(
+                    "server.listeners[{idx}].synlimit_burst must be > 0"
+                )));
+            }
         }
 
         if config.server.accept_permit_timeout_ms > 60_000 {
@@ -2186,6 +2205,10 @@ impl ProxyConfig {
                     ip: ipv4,
                     port: Some(config.server.port),
                     client_mss: None,
+                    synlimit: SynLimitMode::default(),
+                    synlimit_seconds: default_synlimit_seconds(),
+                    synlimit_hitcount: default_synlimit_hitcount(),
+                    synlimit_burst: default_synlimit_burst(),
                     announce: None,
                     announce_ip: None,
                     proxy_protocol: None,
@@ -2199,6 +2222,10 @@ impl ProxyConfig {
                     ip: ipv6,
                     port: Some(config.server.port),
                     client_mss: None,
+                    synlimit: SynLimitMode::default(),
+                    synlimit_seconds: default_synlimit_seconds(),
+                    synlimit_hitcount: default_synlimit_hitcount(),
+                    synlimit_burst: default_synlimit_burst(),
                     announce: None,
                     announce_ip: None,
                     proxy_protocol: None,

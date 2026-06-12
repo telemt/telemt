@@ -2225,6 +2225,10 @@
 | [`ip`](#ip) | `IpAddr` | — | `✘` |
 | [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`client_mss`](#client_mss-serverlisteners) | `String` | `[server].client_mss` | `✘` |
+| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"` или `"nftables"` | `false` | `✘` |
+| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `1` | `✘` |
+| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `1` | `✘` |
+| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `3` | `✘` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2259,6 +2263,58 @@
     ip = "0.0.0.0"
     port = 443
     client_mss = "256"
+    ```
+## synlimit (server.listeners)
+  - **Ограничения / валидация**: `false`, `"iptables"` или `"nftables"`. Если параметр не задан или задан как `false`, SYN limiter для этого listener’а выключен.
+  - **Описание**: Устанавливает per-listener Linux netfilter SYN limiter rules для порта listener’а. `"iptables"` использует `iptables`/`ip6tables` filter rules с `hashlimit` match как per-source token bucket. `"nftables"` использует per-source `meter` rules с `limit rate over` и автоматически определяет, какие table families уже используются на хосте (`inet`, `ip`, `ip6`), перед созданием Telemt-owned tables. Token-bucket rate равен `synlimit_hitcount / synlimit_seconds`; `synlimit_burst` управляет burst size. Rules reconciled at runtime и удаляются при graceful shutdown Telemt; `SIGKILL` процессом не очищается. Требует CAP_NET_ADMIN и restart/rebind listener’а для изменений конфигурации.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+
+    [[server.listeners]]
+    ip = "::"
+    port = 443
+    synlimit = "nftables"
+    ```
+## synlimit_seconds (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
+  - **Описание**: Token-bucket interval для обоих SYN limiter backends. Rate равен `synlimit_hitcount / synlimit_seconds` и рендерится в native netfilter rate units (`second`, `minute`, `hour` или `day`).
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_seconds = 1
+    ```
+## synlimit_hitcount (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
+  - **Описание**: Token-bucket rate amount для обоих SYN limiter backends. Вместе с `synlimit_seconds` задает разрешенный source-IP SYN rate до того, как excess SYN packets начнут drop’аться.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_hitcount = 1
+    ```
+## synlimit_burst (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `3`.
+  - **Описание**: Token-bucket burst size для обоих SYN limiter backends. Более высокие значения разрешают short connection bursts с одного source IP перед применением steady-state rate `synlimit_hitcount / synlimit_seconds`.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_burst = 3
     ```
 ## announce
   - **Ограничения / валидация**: `String` (необязательный параметр). Не должен быть пустым, если задан.

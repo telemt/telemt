@@ -54,6 +54,9 @@ const DEFAULT_CONNTRACK_CONTROL_ENABLED: bool = true;
 const DEFAULT_CONNTRACK_PRESSURE_HIGH_WATERMARK_PCT: u8 = 85;
 const DEFAULT_CONNTRACK_PRESSURE_LOW_WATERMARK_PCT: u8 = 70;
 const DEFAULT_CONNTRACK_DELETE_BUDGET_PER_SEC: u64 = 4096;
+const DEFAULT_SYNLIMIT_SECONDS: u32 = 1;
+const DEFAULT_SYNLIMIT_HITCOUNT: u32 = 1;
+const DEFAULT_SYNLIMIT_BURST: u32 = 3;
 const DEFAULT_UPSTREAM_CONNECT_RETRY_ATTEMPTS: u32 = 2;
 const DEFAULT_UPSTREAM_UNHEALTHY_FAIL_THRESHOLD: u32 = 5;
 const DEFAULT_UPSTREAM_CONNECT_BUDGET_MS: u64 = 3000;
@@ -241,6 +244,18 @@ pub(crate) fn default_conntrack_pressure_low_watermark_pct() -> u8 {
 
 pub(crate) fn default_conntrack_delete_budget_per_sec() -> u64 {
     DEFAULT_CONNTRACK_DELETE_BUDGET_PER_SEC
+}
+
+pub(crate) fn default_synlimit_seconds() -> u32 {
+    DEFAULT_SYNLIMIT_SECONDS
+}
+
+pub(crate) fn default_synlimit_hitcount() -> u32 {
+    DEFAULT_SYNLIMIT_HITCOUNT
+}
+
+pub(crate) fn default_synlimit_burst() -> u32 {
+    DEFAULT_SYNLIMIT_BURST
 }
 
 pub(crate) fn default_prefer_4() -> u8 {
