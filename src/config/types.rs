@@ -1527,6 +1527,15 @@ pub struct ServerConfig {
     #[serde(default)]
     pub client_mss: Option<String>,
 
+    /// Client-facing TCP MSS to switch to AFTER the TLS handshake (ServerHello)
+    /// is sent. Lets `client_mss` fragment ONLY the handshake (the DPI-inspected
+    /// part) while the bulk transfer uses normal-size packets — avoids the ~10x
+    /// packets-per-second blowup that triggers anti-DDoS abuse blocks on
+    /// pps-policing hosts. Empty/omitted = keep the handshake MSS for the whole
+    /// connection (previous behavior). Same preset/int grammar as `client_mss`.
+    #[serde(default)]
+    pub client_mss_bulk: Option<String>,
+
     /// Accept HAProxy PROXY protocol headers on incoming connections.
     /// When enabled, real client IPs are extracted from PROXY v1/v2 headers.
     #[serde(default)]
@@ -1594,6 +1603,7 @@ impl Default for ServerConfig {
             listen_unix_sock_perm: None,
             listen_tcp: None,
             client_mss: None,
+            client_mss_bulk: None,
             proxy_protocol: false,
             proxy_protocol_header_timeout_ms: default_proxy_protocol_header_timeout_ms(),
             proxy_protocol_trusted_cidrs: default_proxy_protocol_trusted_cidrs(),
@@ -2217,6 +2227,11 @@ impl ServerConfig {
     /// Resolves the global client-facing TCP MSS setting.
     pub fn client_mss_value(&self) -> std::result::Result<Option<u16>, String> {
         parse_client_mss(self.client_mss.as_deref())
+    }
+
+    /// Resolves the post-handshake (bulk transfer) client MSS, if configured.
+    pub fn client_mss_bulk_value(&self) -> std::result::Result<Option<u16>, String> {
+        parse_client_mss(self.client_mss_bulk.as_deref())
     }
 }
 

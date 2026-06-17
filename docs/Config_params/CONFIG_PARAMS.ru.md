@@ -1808,6 +1808,7 @@
 | [`listen_unix_sock_perm`](#listen_unix_sock_perm) | `String` | — | `✘` |
 | [`listen_tcp`](#listen_tcp) | `bool` | — (auto) | `✘` |
 | [`client_mss`](#client_mss) | `String` | `""` | `✘` |
+| [`client_mss_bulk`](#client_mss_bulk) | `String` | `""` | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | `false` | `✘` |
 | [`proxy_protocol_header_timeout_ms`](#proxy_protocol_header_timeout_ms) | `u64` | `500` | `✘` |
 | [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `[]` | `✘` |
@@ -1899,6 +1900,16 @@
     ```toml
     [server]
     client_mss = "tspu"
+    ```
+## client_mss_bulk
+  - **Ограничения / валидация**: `String`. Грамматика та же, что у [`client_mss`](#client_mss) (пусто/не задано, пресеты `"extreme-low"`/`"tspu"`/`"2in8"` либо десятичное число в диапазоне `88..=4096`).
+  - **Описание**: Необязательный MSS для bulk-фазы. Если задан, низкий `client_mss` применяется только на время TLS-handshake (включая инспектируемый DPI ServerHello); как только соединение переходит в фазу relay, MSS клиентского сокета поднимается до `client_mss_bulk` для передачи полезной нагрузки. Так сохраняется anti-DPI фрагментация handshake, но для данных возвращаются пакеты нормального размера — это снижает исходящий packets-per-second примерно во столько раз, каков segment multiplier у `client_mss` (например, ~10x для `"tspu"`). Полезно на хостингах, где abuse-детекция считает packets-per-second, а не полосу. Если пусто/не задано — MSS handshake сохраняется на всё соединение (прежнее поведение). Только Linux; на прочих платформах — no-op.
+  - **Пример**:
+
+    ```toml
+    [server]
+    client_mss = "tspu"
+    client_mss_bulk = "1400"
     ```
 ## proxy_protocol
   - **Ограничения / валидация**: `bool`.

@@ -1806,6 +1806,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`listen_unix_sock_perm`](#listen_unix_sock_perm) | `String` | — | `✘` |
 | [`listen_tcp`](#listen_tcp) | `bool` | — (auto) | `✘` |
 | [`client_mss`](#client_mss) | `String` | `""` | `✘` |
+| [`client_mss_bulk`](#client_mss_bulk) | `String` | `""` | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | `false` | `✘` |
 | [`proxy_protocol_header_timeout_ms`](#proxy_protocol_header_timeout_ms) | `u64` | `500` | `✘` |
 | [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `[]` | `✘` |
@@ -1897,6 +1898,16 @@ This document lists all configuration keys accepted by `config.toml`.
     ```toml
     [server]
     client_mss = "tspu"
+    ```
+## client_mss_bulk
+  - **Constraints / validation**: `String`. Same grammar as [`client_mss`](#client_mss) (empty/omitted, presets `"extreme-low"`/`"tspu"`/`"2in8"`, or a decimal in `88..=4096`).
+  - **Description**: Optional bulk-phase MSS. When set, the low `client_mss` is applied only while the TLS handshake (including the DPI-inspected ServerHello) is sent; once the connection transitions to relaying, the client socket MSS is raised to `client_mss_bulk` for the bulk data phase. This keeps the anti-DPI handshake fragmentation but restores normal-size packets for payload, cutting outgoing packets-per-second by roughly the `client_mss` segment multiplier (e.g. ~10x with `"tspu"`). Useful on hosts whose abuse detection counts packets-per-second rather than bandwidth. When empty/omitted, the handshake MSS is kept for the whole connection (previous behavior). Linux only; a no-op elsewhere.
+  - **Example**:
+
+    ```toml
+    [server]
+    client_mss = "tspu"
+    client_mss_bulk = "1400"
     ```
 ## proxy_protocol
   - **Constraints / validation**: `bool`.

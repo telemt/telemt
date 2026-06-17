@@ -125,6 +125,39 @@ pub fn clear_linger_fd(fd: std::os::unix::io::RawFd) -> Result<()> {
     Ok(())
 }
 
+/// Raise the TCP MSS on an already-accepted connection's fd. Used to fragment
+/// ONLY the TLS handshake (via a low listener MSS) and then restore a normal MSS
+/// for the bulk (post-handshake) data phase — cuts packets-per-second ~10x without losing the
+/// DPI evasion that the fragmented ServerHello provides. No-op safe: errors are
+/// returned to the caller, which logs and continues with the handshake MSS.
+#[cfg(target_os = "linux")]
+pub fn set_tcp_mss_fd(fd: std::os::unix::io::RawFd, mss: u32) -> Result<()> {
+    use std::io::Error;
+    let mss = i32::try_from(mss)
+        .map_err(|_| Error::new(std::io::ErrorKind::InvalidInput, "bulk MSS out of range"))?;
+    // Direct setsockopt(TCP_MAXSEG) — same pattern as the TCP_USER_TIMEOUT call
+    // above; avoids socket2 method-name drift across versions.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_MAXSEG,
+            &mss as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Non-Linux stub: MSS shaping only on Linux (TCP_MAXSEG).
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn set_tcp_mss_fd(_fd: std::os::unix::io::RawFd, _mss: u32) -> Result<()> {
+    Ok(())
+}
+
 /// Create a new TCP socket for outgoing connections
 #[allow(dead_code)]
 pub fn create_outgoing_socket(addr: SocketAddr) -> Result<Socket> {
