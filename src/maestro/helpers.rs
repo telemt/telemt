@@ -180,6 +180,12 @@ pub(crate) fn parse_cli() -> CliArgs {
             s if s.starts_with("--log-level=") => {
                 log_level = Some(s.trim_start_matches("--log-level=").to_string());
             }
+            "--log-file" | "--log-file-daily" => {
+                i += 1;
+            }
+            s if s.starts_with("--log-file=") || s.starts_with("--log-file-daily=") => {}
+            #[cfg(unix)]
+            "--syslog" => {}
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
