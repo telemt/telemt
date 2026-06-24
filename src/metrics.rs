@@ -80,11 +80,12 @@ pub async fn serve(
         return;
     }
 
-    // Fallback: keep metrics local unless an explicit metrics_listen is configured.
+    // Fallback: keep `metrics_port` reachable through Docker published ports and
+    // existing non-container deployments. Use `metrics_listen` for a local-only bind.
     let mut listener_v4 = None;
     let mut listener_v6 = None;
 
-    let addr_v4 = SocketAddr::from(([127, 0, 0, 1], port));
+    let (addr_v4, addr_v6) = metrics_port_fallback_addrs(port);
     match bind_metrics_listener(addr_v4, false, listen_backlog) {
         Ok(listener) => {
             info!(
@@ -98,11 +99,10 @@ pub async fn serve(
         }
     }
 
-    let addr_v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port));
     match bind_metrics_listener(addr_v6, true, listen_backlog) {
         Ok(listener) => {
             info!(
-                "Metrics endpoint: http://[::1]:{}/metrics and /beobachten",
+                "Metrics endpoint: http://[::]:{}/metrics and /beobachten",
                 port
             );
             listener_v6 = Some(listener);
@@ -163,6 +163,13 @@ pub async fn serve(
             .await;
         }
     }
+}
+
+fn metrics_port_fallback_addrs(port: u16) -> (SocketAddr, SocketAddr) {
+    (
+        SocketAddr::from(([0, 0, 0, 0], port)),
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], port)),
+    )
 }
 
 fn bind_metrics_listener(
@@ -3776,6 +3783,17 @@ mod tests {
     use crate::tls_front::types::{
         CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsProfileSource,
     };
+
+    #[test]
+    fn metrics_port_fallback_binds_all_interfaces() {
+        let (addr_v4, addr_v6) = metrics_port_fallback_addrs(9090);
+
+        assert_eq!(addr_v4, std::net::SocketAddr::from(([0, 0, 0, 0], 9090)));
+        assert_eq!(
+            addr_v6,
+            std::net::SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 9090))
+        );
+    }
 
     #[tokio::test]
     async fn test_render_metrics_format() {
