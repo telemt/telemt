@@ -44,6 +44,7 @@ shadowsocks = { version = "1.24.0", features = ["aead-cipher-2022"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 toml = "1.1"
+figment = { version = "0.10.19", features = ["toml", "env"] }
 x509-parser = "0.18.1"
 
 # Utils

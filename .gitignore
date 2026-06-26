@@ -22,3 +22,9 @@ target
 
 proxy-secret
 coverage-html/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/

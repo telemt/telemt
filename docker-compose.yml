@@ -14,15 +14,22 @@ services:
     # Config is mounted as a directory (not a single file) so the API can
     # atomically update config.toml via write-temp → rename within the same FS.
     working_dir: /run/telemt
-    command: ["/etc/telemt/config.toml"]
-    volumes:
-      - ./config:/etc/telemt:rw
+    # Optional: Mount config directory if you want to use the API to mutate config.toml
+    # In ENV-driven mode, the config is read from /app/config.toml and ENV vars
+    # override config values. To use file-based/API-edit mode instead, uncomment
+    # the volume below AND change the command to ["/etc/telemt/config.toml"].
+    command: ["/app/config.toml"]
+    # volumes:
+    #   - ./config:/etc/telemt:rw
     tmpfs:
       - /run/telemt:rw,mode=1777,size=4m
     environment:
       - RUST_LOG=info
+      # ENV variables can be used to override config values:
+      # - TELEMT_GENERAL__PORT=443
+      # - TELEMT_GENERAL__AD_TAG=1234567890abcdef1234567890abcdef
     healthcheck:
-      test: [ "CMD", "/app/telemt", "healthcheck", "/etc/telemt/config.toml", "--mode", "liveness" ]
+      test: [ "CMD", "/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness" ]
       interval: 30s
       timeout: 5s
       retries: 3
