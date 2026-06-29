@@ -393,6 +393,7 @@ const CENSORSHIP_CONFIG_KEYS: &[&str] = &[
     "tls_full_cert_ttl_secs",
     "alpn_enforce",
     "mask_proxy_protocol",
+    "http_mask",
     "mask_shape_hardening",
     "mask_shape_hardening_aggressive_mode",
     "mask_shape_bucket_floor_bytes",
@@ -406,6 +407,14 @@ const CENSORSHIP_CONFIG_KEYS: &[&str] = &[
     "mask_timing_normalization_enabled",
     "mask_timing_normalization_floor_ms",
     "mask_timing_normalization_ceiling_ms",
+];
+
+const HTTP_MASK_CONFIG_KEYS: &[&str] = &[
+    "enabled",
+    "cert_file",
+    "key_file",
+    "upstream",
+    "alpn",
 ];
 
 const TLS_FETCH_CONFIG_KEYS: &[&str] = &[
@@ -503,6 +512,7 @@ fn known_config_keys_for_suggestion() -> Vec<&'static str> {
         TIMEOUTS_CONFIG_KEYS,
         CENSORSHIP_CONFIG_KEYS,
         TLS_FETCH_CONFIG_KEYS,
+        HTTP_MASK_CONFIG_KEYS,
         ACCESS_CONFIG_KEYS,
         RATE_LIMIT_BPS_CONFIG_KEYS,
         UPSTREAM_CONFIG_KEYS,
@@ -705,6 +715,13 @@ fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<UnknownConfigKe
         &known_for_suggestion,
         &["censorship", "tls_fetch"],
         TLS_FETCH_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["censorship", "http_mask"],
+        HTTP_MASK_CONFIG_KEYS,
     );
     check_known_table(
         parsed_toml,
@@ -1475,6 +1492,40 @@ impl ProxyConfig {
             return Err(ProxyError::Config(
                 "censorship.mask_classifier_prefetch_timeout_ms must be within [5, 50]".to_string(),
             ));
+        }
+
+        if config.censorship.http_mask.enabled {
+            let http_mask = &config.censorship.http_mask;
+            if http_mask.cert_file.as_deref().unwrap_or_default().trim().is_empty() {
+                return Err(ProxyError::Config(
+                    "censorship.http_mask.cert_file must be set when censorship.http_mask.enabled = true"
+                        .to_string(),
+                ));
+            }
+            if http_mask.key_file.as_deref().unwrap_or_default().trim().is_empty() {
+                return Err(ProxyError::Config(
+                    "censorship.http_mask.key_file must be set when censorship.http_mask.enabled = true"
+                        .to_string(),
+                ));
+            }
+            let upstream = http_mask.upstream.as_deref().unwrap_or_default().trim();
+            if upstream.is_empty() {
+                return Err(ProxyError::Config(
+                    "censorship.http_mask.upstream must be set when censorship.http_mask.enabled = true"
+                        .to_string(),
+                ));
+            }
+            if !(upstream.starts_with("http://") || !upstream.contains("://")) {
+                return Err(ProxyError::Config(
+                    "censorship.http_mask.upstream must be a plain HTTP upstream, for example http://chat:3000"
+                        .to_string(),
+                ));
+            }
+            if http_mask.alpn.iter().any(|alpn| alpn.trim().is_empty()) {
+                return Err(ProxyError::Config(
+                    "censorship.http_mask.alpn entries must not be empty".to_string(),
+                ));
+            }
         }
 
         if config.censorship.mask_timing_normalization_ceiling_ms

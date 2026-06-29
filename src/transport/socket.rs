@@ -355,8 +355,11 @@ pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Sock
         socket.set_only_v6(true)?;
     }
 
+    #[cfg(target_os = "linux")]
     if let Some(client_mss) = options.client_mss {
-        if let Err(error) = socket.set_tcp_mss(u32::from(client_mss)) {
+        use std::os::unix::io::AsRawFd;
+
+        if let Err(error) = set_tcp_mss_fd(socket.as_raw_fd(), u32::from(client_mss)) {
             warn!(
                 addr = %addr,
                 client_mss,
@@ -366,6 +369,15 @@ pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Sock
         } else {
             debug!(addr = %addr, client_mss, "Applied listener client MSS");
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if let Some(client_mss) = options.client_mss {
+        debug!(
+            addr = %addr,
+            client_mss,
+            "Listener client MSS is only supported on Linux; using kernel default"
+        );
     }
 
     socket.set_nonblocking(true)?;
