@@ -614,6 +614,7 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     if cfg.rebuild_runtime_user_auth().is_err() {
         cfg.runtime_user_auth = None;
     }
+    cfg.rebuild_runtime_ad_tags();
 
     cfg
 }

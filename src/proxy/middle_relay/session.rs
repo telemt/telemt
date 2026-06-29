@@ -78,25 +78,11 @@ where
         return Err(ProxyError::RouteSwitched);
     }
 
-    // Per-user ad_tag from access.user_ad_tags; fallback to general.ad_tag (hot-reloadable)
-    let user_tag: Option<Vec<u8>> = config
-        .access
-        .user_ad_tags
-        .get(&user)
-        .and_then(|s| hex::decode(s).ok())
-        .filter(|v| v.len() == 16);
-    let global_tag: Option<Vec<u8>> = config
-        .general
-        .ad_tag
-        .as_ref()
-        .and_then(|s| hex::decode(s).ok())
-        .filter(|v| v.len() == 16);
-    let effective_tag = user_tag.or(global_tag);
-
-    let proto_flags = proto_flags_for_tag(proto_tag, effective_tag.is_some());
-    let effective_tag_array = effective_tag
-        .as_deref()
-        .and_then(|tag| <[u8; 16]>::try_from(tag).ok());
+    // Per-user ad_tag from access.user_ad_tags with fallback to general.ad_tag.
+    // Decoded once at config load / hot-reload (see ProxyConfig::effective_ad_tag),
+    // so this is a cache lookup rather than a per-session hex decode + allocation.
+    let effective_tag_array = config.effective_ad_tag(&user);
+    let proto_flags = proto_flags_for_tag(proto_tag, effective_tag_array.is_some());
     debug!(
         trace_id = format_args!("0x{:016x}", trace_id),
         user = %user,
