@@ -1,68 +1,73 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 
-ARG TELEMT_REPOSITORY=telemt/telemt
-ARG TELEMT_VERSION=latest
+ARG RUST_VERSION=1.88
+ARG DEBIAN_VERSION=bookworm
 
 # ==========================
-# Minimal Image
+# Build TeleMT from current sources
 # ==========================
-FROM debian:12-slim AS minimal
+FROM --platform=$TARGETPLATFORM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS build
 
 ARG TARGETARCH
-ARG TELEMT_REPOSITORY
-ARG TELEMT_VERSION
+ARG PROFILE=release
+ARG CARGO_FEATURES=""
+ARG CARGO_EXTRA_ARGS=""
+
+WORKDIR /src
 
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        binutils \
         ca-certificates \
-        curl \
-        tar; \
-    rm -rf /var/lib/apt/lists/*
+        pkg-config \
+        build-essential \
+        musl-tools \
+        clang \
+        lld \
+        binutils; \
+    rm -rf /var/lib/apt/lists/*; \
+    case "${TARGETARCH}" in \
+        amd64) RUST_TARGET="x86_64-unknown-linux-musl" ;; \
+        arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    rustup target add "${RUST_TARGET}"
+
+COPY . .
 
 RUN set -eux; \
     case "${TARGETARCH}" in \
-        amd64) ASSET="telemt-x86_64-linux-musl.tar.gz" ;; \
-        arm64) ASSET="telemt-aarch64-linux-musl.tar.gz" ;; \
+        amd64) RUST_TARGET="x86_64-unknown-linux-musl" ;; \
+        arm64) RUST_TARGET="aarch64-unknown-linux-musl" ;; \
         *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    VERSION="${TELEMT_VERSION#refs/tags/}"; \
-    if [ -z "${VERSION}" ] || [ "${VERSION}" = "latest" ]; then \
-        BASE_URL="https://github.com/${TELEMT_REPOSITORY}/releases/latest/download"; \
+    if [ -n "${CARGO_FEATURES}" ]; then \
+        cargo build --locked --profile "${PROFILE}" --target "${RUST_TARGET}" --features "${CARGO_FEATURES}" ${CARGO_EXTRA_ARGS}; \
     else \
-        BASE_URL="https://github.com/${TELEMT_REPOSITORY}/releases/download/${VERSION}"; \
+        cargo build --locked --profile "${PROFILE}" --target "${RUST_TARGET}" ${CARGO_EXTRA_ARGS}; \
     fi; \
-    curl -fL \
-        --retry 5 \
-        --retry-delay 3 \
-        --connect-timeout 10 \
-        --max-time 120 \
-        -o "/tmp/${ASSET}" \
-        "${BASE_URL}/${ASSET}"; \
-    curl -fL \
-        --retry 5 \
-        --retry-delay 3 \
-        --connect-timeout 10 \
-        --max-time 120 \
-        -o "/tmp/${ASSET}.sha256" \
-        "${BASE_URL}/${ASSET}.sha256"; \
-    cd /tmp; \
-    sha256sum -c "${ASSET}.sha256"; \
-    tar -xzf "${ASSET}" -C /tmp; \
-    test -f /tmp/telemt; \
-    install -m 0755 /tmp/telemt /telemt; \
+    BIN_PATH="target/${RUST_TARGET}/${PROFILE}/telemt"; \
+    test -f "${BIN_PATH}"; \
+    install -m 0755 "${BIN_PATH}" /telemt; \
     strip --strip-unneeded /telemt || true; \
-    rm -f "/tmp/${ASSET}" "/tmp/${ASSET}.sha256" /tmp/telemt
+    /telemt --help >/dev/null || true
 
-RUN --mount=type=bind,target=/tmp \
-    mkdir -p /app && \
-    if [ -f /tmp/config.toml ]; then \
-        cp /tmp/config.toml /app/config.toml; \
-    elif [ -f /tmp/config/config.toml ]; then \
-        cp /tmp/config/config.toml /app/config.toml; \
+# ==========================
+# Config stage
+# ==========================
+FROM debian:12-slim AS config
+
+WORKDIR /app
+
+RUN --mount=type=bind,target=/tmp/context,source=. \
+    set -eux; \
+    if [ -f /tmp/context/config.toml ]; then \
+        cp /tmp/context/config.toml /app/config.toml; \
+    elif [ -f /tmp/context/config/config.toml ]; then \
+        cp /tmp/context/config/config.toml /app/config.toml; \
     else \
-        echo "Config file not found" && exit 1; \
+        echo "Config file not found: expected ./config.toml or ./config/config.toml" >&2; \
+        exit 1; \
     fi
 
 # ==========================
@@ -82,12 +87,13 @@ RUN set -eux; \
 
 WORKDIR /app
 
-COPY --from=minimal /telemt /app/telemt
-COPY ./config/config.toml /app/config.toml
+COPY --from=build /telemt /app/telemt
+COPY --from=config /app/config.toml /app/config.toml
 
-EXPOSE 443 9090 9091
+EXPOSE 443 9090 9091 9092
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
 
 ENTRYPOINT ["/app/telemt"]
 CMD ["config.toml"]
@@ -108,12 +114,13 @@ RUN set -eux; \
 
 WORKDIR /app
 
-COPY --from=minimal /telemt /app/telemt
-COPY --from=minimal /app/config.toml /app/config.toml
+COPY --from=build /telemt /app/telemt
+COPY --from=config /app/config.toml /app/config.toml
 
-EXPOSE 443 9090 9091
+EXPOSE 443 9090 9091 9092
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
 
 ENTRYPOINT ["/app/telemt"]
 CMD ["config.toml"]
@@ -125,14 +132,15 @@ FROM gcr.io/distroless/static-debian12 AS prod
 
 WORKDIR /app
 
-COPY --from=minimal /telemt /app/telemt
-COPY --from=minimal /app/config.toml /app/config.toml
+COPY --from=build /telemt /app/telemt
+COPY --from=config /app/config.toml /app/config.toml
 
 USER nonroot:nonroot
 
-EXPOSE 443 9090 9091
+EXPOSE 443 9090 9091 9092
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
 
 ENTRYPOINT ["/app/telemt"]
 CMD ["config.toml"]
