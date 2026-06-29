@@ -55,8 +55,8 @@ pub(super) fn classify_me_d2c_flush_reason(
     MeD2cFlushReason::QueueDrain
 }
 
-pub(super) fn me_d2c_flush_reason_requires_client_flush(reason: MeD2cFlushReason) -> bool {
-    !matches!(reason, MeD2cFlushReason::QueueDrain)
+pub(super) fn me_d2c_flush_reason_requires_client_flush(_reason: MeD2cFlushReason) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -64,8 +64,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn queue_drain_is_not_a_physical_flush_trigger() {
-        assert!(!me_d2c_flush_reason_requires_client_flush(
+    fn all_flush_reasons_trigger_physical_flush() {
+        assert!(me_d2c_flush_reason_requires_client_flush(
             MeD2cFlushReason::QueueDrain
         ));
         assert!(me_d2c_flush_reason_requires_client_flush(
