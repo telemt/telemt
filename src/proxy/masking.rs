@@ -3,6 +3,7 @@
 use crate::config::ProxyConfig;
 use crate::network::dns_overrides::resolve_socket_addr;
 use crate::protocol::tls;
+use crate::proxy::http_mask::handle_http_mask_client;
 use crate::proxy::shared_state::ProxySharedState;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::transport::proxy_protocol::{ProxyProtocolV1Builder, ProxyProtocolV2Builder};
@@ -1030,6 +1031,11 @@ pub(crate) async fn handle_bad_client_with_shared<R, W>(
         wait_mask_outcome_budget(outcome_started, config).await;
         return;
     };
+
+    if config.censorship.http_mask.enabled {
+        handle_http_mask_client(reader, writer, initial_data, peer, config).await;
+        return;
+    }
 
     let client_sni = tls::extract_sni_from_client_hello(initial_data);
     let exclusive_tcp_target = client_sni

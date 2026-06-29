@@ -1862,6 +1862,53 @@ pub struct ExclusiveMaskTarget {
     pub port: u16,
 }
 
+
+/// HTTPS fallback terminator for unauthenticated TLS clients.
+///
+/// When enabled, bad/non-TeleMT TLS clients are not TCP-forwarded to an HTTPS
+/// mask target. TeleMT terminates their TLS connection with this certificate and
+/// relays the decrypted HTTP stream to `upstream`, which is expected to be a
+/// plain HTTP endpoint, for example `http://chat:3000` inside Docker Compose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpMaskConfig {
+    /// Enable TLS-terminating HTTP mask mode.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// PEM fullchain/certificate file used for browser clients.
+    #[serde(default)]
+    pub cert_file: Option<String>,
+
+    /// PEM private key file used for browser clients.
+    #[serde(default)]
+    pub key_file: Option<String>,
+
+    /// Plain HTTP upstream, for example `http://chat:3000`.
+    #[serde(default)]
+    pub upstream: Option<String>,
+
+    /// ALPN protocols advertised to browsers. The initial implementation is a
+    /// raw decrypted stream relay, so HTTP/1.1 is the safe default.
+    #[serde(default = "default_http_mask_alpn")]
+    pub alpn: Vec<String>,
+}
+
+impl Default for HttpMaskConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert_file: None,
+            key_file: None,
+            upstream: None,
+            alpn: default_http_mask_alpn(),
+        }
+    }
+}
+
+fn default_http_mask_alpn() -> Vec<String> {
+    vec!["http/1.1".to_string()]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntiCensorshipConfig {
     #[serde(default = "default_tls_domain")]
@@ -1954,6 +2001,10 @@ pub struct AntiCensorshipConfig {
     #[serde(default)]
     pub mask_proxy_protocol: u8,
 
+    /// Optional TLS-terminating HTTP fallback for bad TLS clients.
+    #[serde(default)]
+    pub http_mask: HttpMaskConfig,
+
     /// Enable shape-channel hardening on mask backend path by padding
     /// client->mask stream tail to configured buckets on stream end.
     #[serde(default = "default_mask_shape_hardening")]
@@ -2042,6 +2093,7 @@ impl Default for AntiCensorshipConfig {
             tls_full_cert_ttl_secs: default_tls_full_cert_ttl_secs(),
             alpn_enforce: default_alpn_enforce(),
             mask_proxy_protocol: 0,
+            http_mask: HttpMaskConfig::default(),
             mask_shape_hardening: default_mask_shape_hardening(),
             mask_shape_hardening_aggressive_mode: default_mask_shape_hardening_aggressive_mode(),
             mask_shape_bucket_floor_bytes: default_mask_shape_bucket_floor_bytes(),
