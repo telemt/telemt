@@ -958,6 +958,10 @@ impl ProxyConfig {
             .server
             .client_mss_value()
             .map_err(|error| ProxyError::Config(format!("server.client_mss {error}")))?;
+        config
+            .server
+            .client_mss_bulk_value()
+            .map_err(|error| ProxyError::Config(format!("server.client_mss_bulk {error}")))?;
         for (idx, listener) in config.server.listeners.iter().enumerate() {
             if listener.client_mss.is_some() {
                 listener

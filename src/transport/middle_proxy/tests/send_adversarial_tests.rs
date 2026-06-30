@@ -368,3 +368,63 @@ async fn send_proxy_req_uses_writer_source_ip_when_advertised_our_addr_differs()
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 31)), our_addr.port())
     );
 }
+
+#[tokio::test]
+async fn send_proxy_req_blocking_fallback_uses_writer_source_ip() {
+    let (pool, _rng) = make_pool().await;
+    pool.rr.store(0, Ordering::Relaxed);
+
+    let (conn_id, _rx) = pool.registry.register().await;
+    let mut live_rx = insert_writer(
+        &pool,
+        32,
+        2,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 2, 32)), 443),
+        true,
+    )
+    .await;
+    let source_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 32));
+
+    let tx = {
+        let mut writers = pool.writers.write().await;
+        let writer = writers
+            .iter_mut()
+            .find(|writer| writer.id == 32)
+            .expect("test writer must exist");
+        writer.source_ip = source_ip;
+        writer.tx.clone()
+    };
+    for _ in 0..8 {
+        tx.try_send(WriterCommand::Close)
+            .expect("test writer channel must accept preload");
+    }
+
+    let our_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 8)), 9443);
+    let pool_for_send = pool.clone();
+    let send_task = tokio::spawn(async move {
+        pool_for_send
+            .send_proxy_req(
+                conn_id,
+                2,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 30003),
+                our_addr,
+                b"blocking",
+                0,
+                None,
+            )
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(matches!(live_rx.recv().await, Some(WriterCommand::Close)));
+
+    let result = send_task.await.expect("send task must not panic");
+    assert!(result.is_ok());
+    let payload = recv_first_data_payload(&mut live_rx, Duration::from_millis(50))
+        .await
+        .expect("writer must receive blocking fallback payload");
+    assert_eq!(
+        proxy_req_our_addr_from_payload(&payload),
+        SocketAddr::new(source_ip, our_addr.port())
+    );
+}

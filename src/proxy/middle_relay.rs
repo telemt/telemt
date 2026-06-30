@@ -69,7 +69,9 @@ use self::quota::{
 #[cfg(test)]
 use self::c2me::enqueue_c2me_command;
 #[cfg(test)]
-use self::d2c::{compute_intermediate_secure_wire_len, process_me_writer_response};
+use self::d2c::{
+    compute_intermediate_secure_wire_len, process_me_writer_response, write_client_payload,
+};
 #[cfg(test)]
 pub(crate) use self::desync::{
     clear_desync_dedup_for_testing_in_shared, desync_dedup_get_for_testing,
@@ -166,3 +168,7 @@ mod middle_relay_atomic_quota_invariant_tests;
 #[cfg(test)]
 #[path = "tests/middle_relay_baseline_invariant_tests.rs"]
 mod middle_relay_baseline_invariant_tests;
+
+#[cfg(test)]
+#[path = "tests/middle_relay_d2c_flush_padding_security_tests.rs"]
+mod middle_relay_d2c_flush_padding_security_tests;

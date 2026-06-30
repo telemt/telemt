@@ -1652,6 +1652,7 @@ fn client_mss_custom_value_is_accepted() {
     let toml = r#"
         [server]
         client_mss = "4096"
+        client_mss_bulk = "1400"
 
         [censorship]
         tls_domain = "example.com"
@@ -1665,6 +1666,7 @@ fn client_mss_custom_value_is_accepted() {
     let cfg = ProxyConfig::load(&path).unwrap();
 
     assert_eq!(cfg.server.client_mss_value(), Ok(Some(4096)));
+    assert_eq!(cfg.server.client_mss_bulk_value(), Ok(Some(1400)));
     let _ = std::fs::remove_file(path);
 }
 
@@ -1689,6 +1691,31 @@ fn client_mss_out_of_range_is_rejected() {
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
 
         assert!(err.contains("server.client_mss custom value must be within [88, 4096]"));
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
+fn client_mss_bulk_out_of_range_is_rejected() {
+    for value in ["87", "4097"] {
+        let toml = format!(
+            r#"
+            [server]
+            client_mss_bulk = "{value}"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("telemt_client_mss_bulk_out_of_range_{value}_test.toml"));
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains("server.client_mss_bulk custom value must be within [88, 4096]"));
         let _ = std::fs::remove_file(path);
     }
 }

@@ -292,6 +292,10 @@ mod tests {
             .any(|pair| pair[0].as_str() == key && pair[1].as_str() == value)
     }
 
+    fn has_key(args: &[String], key: &str) -> bool {
+        args.iter().any(|arg| arg == key)
+    }
+
     #[test]
     fn iptables_rules_use_synfix_order_and_rejects() {
         let target = test_rule(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))), 443);
@@ -319,5 +323,35 @@ mod tests {
         assert!(has_pair(&rules[0], "--length", "84"));
         assert!(has_pair(&rules[0], "--hl-lt", "65"));
         assert!(has_pair(&rules[0], "-d", "::1"));
+    }
+
+    #[test]
+    fn iptables_missing_rule_errors_are_cleanup_benign() {
+        assert!(is_missing_command_or_iptables_rule(
+            "iptables is not available"
+        ));
+        assert!(is_missing_command_or_iptables_rule(
+            "iptables: No chain/target/match by that name."
+        ));
+        assert!(is_missing_command_or_iptables_rule(
+            "iptables: Chain TELEMT_SYNLIMIT does not exist."
+        ));
+        assert!(is_missing_command_or_iptables_rule(
+            "Couldn't load target `TELEMT_SYNLIMIT': No such file or directory"
+        ));
+        assert!(!is_missing_command_or_iptables_rule(
+            "iptables: Permission denied"
+        ));
+    }
+
+    #[test]
+    fn iptables_wildcard_rule_omits_destination_match() {
+        let target = test_rule(None, 443);
+        let rules = iptables_synfix_rule_args(&target, 0, IpTablesFamily::V4);
+
+        for rule in rules {
+            assert!(!has_key(&rule, "-d"));
+            assert!(has_pair(&rule, "--dport", "443"));
+        }
     }
 }

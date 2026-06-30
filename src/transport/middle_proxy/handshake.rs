@@ -675,7 +675,116 @@ fn hex_dump(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+    use std::net::{Ipv4Addr, Ipv6Addr};
     use tokio::net::{TcpListener, TcpStream};
+
+    fn upstream_egress(
+        route_kind: UpstreamRouteKind,
+        socks_bound_addr: Option<SocketAddr>,
+    ) -> UpstreamEgressInfo {
+        UpstreamEgressInfo {
+            upstream_id: 7,
+            route_kind,
+            local_addr: None,
+            direct_bind_ip: None,
+            socks_bound_addr,
+            socks_proxy_addr: None,
+        }
+    }
+
+    #[test]
+    fn socks_bound_addr_is_used_only_for_public_same_family_tuple() {
+        let v4_bound = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443);
+        let v6_bound = SocketAddr::new(
+            IpAddr::V6(
+                "2606:4700:4700::1111"
+                    .parse::<Ipv6Addr>()
+                    .expect("test IPv6 address must parse"),
+            ),
+            443,
+        );
+
+        assert_eq!(
+            MePool::select_socks_bound_addr(
+                IpFamily::V4,
+                Some(upstream_egress(UpstreamRouteKind::Socks5, Some(v4_bound)))
+            ),
+            Some(v4_bound)
+        );
+        assert_eq!(
+            MePool::select_socks_bound_addr(
+                IpFamily::V6,
+                Some(upstream_egress(UpstreamRouteKind::Socks5, Some(v6_bound)))
+            ),
+            Some(v6_bound)
+        );
+    }
+
+    #[test]
+    fn socks_bound_addr_rejects_bogon_unspecified_wrong_family_and_non_socks_routes() {
+        let bogon_bound = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 443);
+        let unspecified_bound = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 443);
+        let public_v4_bound = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443);
+
+        assert_eq!(
+            MePool::select_socks_bound_addr(
+                IpFamily::V4,
+                Some(upstream_egress(UpstreamRouteKind::Socks5, Some(bogon_bound)))
+            ),
+            None
+        );
+        assert_eq!(
+            MePool::select_socks_bound_addr(
+                IpFamily::V4,
+                Some(upstream_egress(
+                    UpstreamRouteKind::Socks5,
+                    Some(unspecified_bound)
+                ))
+            ),
+            None
+        );
+        assert_eq!(
+            MePool::select_socks_bound_addr(
+                IpFamily::V6,
+                Some(upstream_egress(
+                    UpstreamRouteKind::Socks5,
+                    Some(public_v4_bound)
+                ))
+            ),
+            None
+        );
+        assert_eq!(
+            MePool::select_socks_bound_addr(
+                IpFamily::V4,
+                Some(upstream_egress(
+                    UpstreamRouteKind::Direct,
+                    Some(public_v4_bound)
+                ))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kdf_client_port_source_tracks_only_valid_socks_bound_port() {
+        let bound = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443);
+        let zero_port_bound = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 0);
+
+        assert_eq!(
+            KdfClientPortSource::from_socks_bound_port(Some(bound.port())),
+            KdfClientPortSource::SocksBound
+        );
+        assert_eq!(
+            KdfClientPortSource::from_socks_bound_port(
+                Some(zero_port_bound).filter(|addr| addr.port() != 0).map(|addr| addr.port())
+            ),
+            KdfClientPortSource::LocalSocket
+        );
+        assert_eq!(
+            KdfClientPortSource::from_socks_bound_port(None),
+            KdfClientPortSource::LocalSocket
+        );
+    }
 
     #[tokio::test]
     async fn test_configure_keepalive_loopback() {

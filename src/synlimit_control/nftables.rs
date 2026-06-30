@@ -259,4 +259,37 @@ mod tests {
         assert!(script.contains("ip6 saddr limit rate over 12/second burst 24 packets"));
         assert!(script.contains("ip6 saddr limit rate over 48/minute burst 1 packets"));
     }
+
+    #[test]
+    fn nft_missing_table_errors_are_cleanup_benign() {
+        assert!(is_missing_command_or_nft_table("nft is not available"));
+        assert!(is_missing_command_or_nft_table(
+            "Error: No such file or directory"
+        ));
+        assert!(!is_missing_command_or_nft_table(
+            "Error: Operation not permitted"
+        ));
+    }
+
+    #[test]
+    fn nft_apply_plan_keeps_dual_stack_rules_in_inet_table() {
+        let v4_rule = test_rule(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))), 443);
+        let v6_rule = test_rule(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), 443);
+        let v4_rules = [v4_rule];
+        let v6_rules = [v6_rule];
+        let plans = nft_apply_plan(
+            NftTableFamilies {
+                inet: false,
+                ip: false,
+                ip6: false,
+            },
+            &v4_rules,
+            &v6_rules,
+        );
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].family.as_str(), "inet");
+        assert_eq!(plans[0].v4_targets, v4_rules.as_slice());
+        assert_eq!(plans[0].v6_targets, v6_rules.as_slice());
+    }
 }

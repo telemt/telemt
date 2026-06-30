@@ -124,3 +124,111 @@ pub(super) fn test_rule(ip: Option<IpAddr>, port: u16) -> SynLimitRule {
         hashlimit_size: 32_768,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use super::*;
+    use crate::config::ListenerConfig;
+
+    fn listener(ip: IpAddr, port: Option<u16>, synlimit: SynLimitMode) -> ListenerConfig {
+        ListenerConfig {
+            ip,
+            port,
+            client_mss: None,
+            synlimit,
+            synlimit_seconds: 60,
+            synlimit_hitcount: 48,
+            synlimit_burst: 1,
+            synlimit_ios_seconds: 1,
+            synlimit_ios_hitcount: 12,
+            synlimit_ios_burst: 24,
+            synlimit_hashlimit_expire_ms: 60_000,
+            synlimit_hashlimit_size: 32_768,
+            announce: None,
+            announce_ip: None,
+            proxy_protocol: None,
+            reuse_allow: false,
+        }
+    }
+
+    #[test]
+    fn synlimit_targets_deduplicate_and_use_legacy_port_fallback() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.port = 9443;
+        cfg.server.listeners = vec![
+            listener(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                None,
+                SynLimitMode::Iptables,
+            ),
+            listener(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                None,
+                SynLimitMode::Iptables,
+            ),
+        ];
+
+        let targets = synlimit_targets(&cfg);
+
+        assert_eq!(targets.iptables_v4.len(), 1);
+        assert_eq!(targets.iptables_v4[0].ip, None);
+        assert_eq!(targets.iptables_v4[0].port, 9443);
+        assert!(targets.iptables_v6.is_empty());
+        assert!(targets.nft_v4.is_empty());
+        assert!(targets.nft_v6.is_empty());
+    }
+
+    #[test]
+    fn synlimit_targets_separate_backends_and_ip_families() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.listeners = vec![
+            listener(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+                Some(443),
+                SynLimitMode::Iptables,
+            ),
+            listener(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                Some(443),
+                SynLimitMode::Iptables,
+            ),
+            listener(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)),
+                Some(444),
+                SynLimitMode::Nftables,
+            ),
+            listener(
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                Some(444),
+                SynLimitMode::Nftables,
+            ),
+        ];
+
+        let targets = synlimit_targets(&cfg);
+
+        assert_eq!(targets.iptables_v4.len(), 1);
+        assert_eq!(targets.iptables_v6.len(), 1);
+        assert_eq!(targets.nft_v4.len(), 1);
+        assert_eq!(targets.nft_v6.len(), 1);
+        assert_eq!(
+            targets.iptables_v4[0].ip,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)))
+        );
+        assert_eq!(targets.iptables_v6[0].ip, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert_eq!(
+            targets.nft_v4[0].ip,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)))
+        );
+        assert_eq!(targets.nft_v6[0].ip, None);
+    }
+
+    #[test]
+    fn synlimit_rate_arg_uses_native_units_without_fractional_rates() {
+        assert_eq!(synlimit_rate_arg(1, 12), "12/second");
+        assert_eq!(synlimit_rate_arg(60, 48), "48/minute");
+        assert_eq!(synlimit_rate_arg(3600, 121), "121/hour");
+        assert_eq!(synlimit_rate_arg(86400, 241), "241/day");
+    }
+}
