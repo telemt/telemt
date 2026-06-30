@@ -4,7 +4,7 @@ services:
       context: .
       target: prod-netfilter
     network_mode: host
-    ports: []
+    ports: !reset []
     cap_add:
       - NET_BIND_SERVICE
       - NET_ADMIN
