@@ -1,18 +1,20 @@
 # Issues
-## Warnung
+### Warnung
+
 Before opening Issue, if it is more question than problem or bug - ask about that [in our chat](https://t.me/telemtrs)
 
-## What it is not
-- NOT Question and Answer
-- NOT Helpdesk
-
 ***Each of your Issues triggers attempts to reproduce problems and analyze them, which are done manually by people***
+
+Issues is **NOT** about:
+- Question and Answer
+- Helpdesk
+- Configuration or Intergraion Support
 
 ---
 
 # Pull Requests
 
-## General
+### General
 - ONLY signed and verified commits
 - ONLY from your name
 - DO NOT commit with `codex`, `claude`, or other AI tools as author/committer
@@ -20,7 +22,7 @@ Before opening Issue, if it is more question than problem or bug - ask about tha
 
 ---
 
-## Definition of Ready (MANDATORY)
+### Definition of Ready (MANDATORY)
 
 A Pull Request WILL be ignored or closed if:
 
@@ -32,14 +34,14 @@ A Pull Request WILL be ignored or closed if:
 
 ---
 
-## Blessed Principles
+### Blessed Principles
 - PR must build
 - PR must pass tests
 - PR must be understood by author
 
 ---
 
-## AI Usage Policy
+### AI Usage Policy
 
 AI tools (Claude, ChatGPT, Codex, DeepSeek, etc.) are allowed as **assistants**, NOT as decision-makers.
 
@@ -60,7 +62,7 @@ PRs that look like unverified AI dumps WILL be closed
 
 ---
 
-## Maintainer Policy
+### Maintainer Policy
 
 Maintainers reserve the right to:
 
@@ -72,7 +74,7 @@ Respect the reviewers time
 
 ---
 
-## Enforcement
+### Enforcement
 
 Pull Requests that violate project standards may be closed without review.
 
