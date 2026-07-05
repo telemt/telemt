@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::CidrRateLimitKey;
 
 const TEST_SHADOWSOCKS_URL: &str =
     "ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=@127.0.0.1:8388";
@@ -317,6 +318,68 @@ fn logging_config_is_loaded_from_strict_config() {
     assert_eq!(cfg.logging.max_size_bytes, 1024);
     assert_eq!(cfg.logging.max_files, 3);
     assert_eq!(cfg.logging.max_age_secs, 60);
+}
+
+#[test]
+fn cidr_rate_limits_accept_auto_templates_in_strict_config() {
+    let cfg = load_config_from_temp_toml(
+        r#"
+            [general]
+            config_strict = true
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.cidr_rate_limits]
+            "*/24" = { up_bps = 1024, down_bps = 0 }
+            "*4/30" = { up_bps = 0, down_bps = 2048 }
+            "*6/64" = { up_bps = 4096, down_bps = 0 }
+        "#,
+    );
+
+    assert!(cfg.access.cidr_rate_limits.contains_key(&CidrRateLimitKey::AutoDual(24)));
+    assert!(cfg.access.cidr_rate_limits.contains_key(&CidrRateLimitKey::AutoV4(30)));
+    assert!(cfg.access.cidr_rate_limits.contains_key(&CidrRateLimitKey::AutoV6(64)));
+}
+
+#[test]
+fn cidr_rate_limits_reject_invalid_auto_template_prefix() {
+    let error = load_config_error_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.cidr_rate_limits]
+            "*4/33" = { up_bps = 1024, down_bps = 0 }
+        "#,
+    );
+
+    assert!(error.contains("prefix must be within 0..=32"));
+}
+
+#[test]
+fn cidr_rate_limits_reject_duplicate_normalized_auto_templates() {
+    let error = load_config_error_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.cidr_rate_limits]
+            "*/32" = { up_bps = 1024, down_bps = 0 }
+            "*6/128" = { up_bps = 2048, down_bps = 0 }
+        "#,
+    );
+
+    assert!(error.contains("duplicates normalized auto-template *6/128"));
 }
 
 #[test]
