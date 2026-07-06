@@ -1862,7 +1862,6 @@ pub struct ExclusiveMaskTarget {
     pub port: u16,
 }
 
-
 /// HTTPS fallback terminator for unauthenticated TLS clients.
 ///
 /// When enabled, bad/non-TeleMT TLS clients are not TCP-forwarded to an HTTPS

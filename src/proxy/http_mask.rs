@@ -101,7 +101,9 @@ where
     }
 }
 
-fn build_tls_server_config(http_mask: &HttpMaskConfig) -> std::io::Result<Arc<rustls::ServerConfig>> {
+fn build_tls_server_config(
+    http_mask: &HttpMaskConfig,
+) -> std::io::Result<Arc<rustls::ServerConfig>> {
     let cert_file = required_setting(http_mask.cert_file.as_deref(), "cert_file")?;
     let key_file = required_setting(http_mask.key_file.as_deref(), "key_file")?;
     let certs = load_certs(cert_file)?;
@@ -185,7 +187,9 @@ fn load_private_key(path: &str) -> std::io::Result<PrivateKeyDer<'static>> {
 }
 
 fn looks_like_pem(bytes: &[u8]) -> bool {
-    bytes.windows(b"-----BEGIN ".len()).any(|window| window == b"-----BEGIN ")
+    bytes
+        .windows(b"-----BEGIN ".len())
+        .any(|window| window == b"-----BEGIN ")
 }
 
 fn pem_blocks(bytes: &[u8], label: &str) -> std::io::Result<Vec<Vec<u8>>> {
@@ -383,10 +387,7 @@ where
         Pin::new(&mut self.writer).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.writer).poll_shutdown(cx)
     }
 }

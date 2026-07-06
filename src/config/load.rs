@@ -409,13 +409,7 @@ const CENSORSHIP_CONFIG_KEYS: &[&str] = &[
     "mask_timing_normalization_ceiling_ms",
 ];
 
-const HTTP_MASK_CONFIG_KEYS: &[&str] = &[
-    "enabled",
-    "cert_file",
-    "key_file",
-    "upstream",
-    "alpn",
-];
+const HTTP_MASK_CONFIG_KEYS: &[&str] = &["enabled", "cert_file", "key_file", "upstream", "alpn"];
 
 const TLS_FETCH_CONFIG_KEYS: &[&str] = &[
     "profiles",
@@ -1496,13 +1490,25 @@ impl ProxyConfig {
 
         if config.censorship.http_mask.enabled {
             let http_mask = &config.censorship.http_mask;
-            if http_mask.cert_file.as_deref().unwrap_or_default().trim().is_empty() {
+            if http_mask
+                .cert_file
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
                 return Err(ProxyError::Config(
                     "censorship.http_mask.cert_file must be set when censorship.http_mask.enabled = true"
                         .to_string(),
                 ));
             }
-            if http_mask.key_file.as_deref().unwrap_or_default().trim().is_empty() {
+            if http_mask
+                .key_file
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
                 return Err(ProxyError::Config(
                     "censorship.http_mask.key_file must be set when censorship.http_mask.enabled = true"
                         .to_string(),
