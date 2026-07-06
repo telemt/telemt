@@ -340,9 +340,21 @@ fn cidr_rate_limits_accept_auto_templates_in_strict_config() {
         "#,
     );
 
-    assert!(cfg.access.cidr_rate_limits.contains_key(&CidrRateLimitKey::AutoDual(24)));
-    assert!(cfg.access.cidr_rate_limits.contains_key(&CidrRateLimitKey::AutoV4(30)));
-    assert!(cfg.access.cidr_rate_limits.contains_key(&CidrRateLimitKey::AutoV6(64)));
+    assert!(
+        cfg.access
+            .cidr_rate_limits
+            .contains_key(&CidrRateLimitKey::AutoDual(24))
+    );
+    assert!(
+        cfg.access
+            .cidr_rate_limits
+            .contains_key(&CidrRateLimitKey::AutoV4(30))
+    );
+    assert!(
+        cfg.access
+            .cidr_rate_limits
+            .contains_key(&CidrRateLimitKey::AutoV6(64))
+    );
 }
 
 #[test]
@@ -1774,7 +1786,9 @@ fn client_mss_bulk_out_of_range_is_rejected() {
         "#
         );
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("telemt_client_mss_bulk_out_of_range_{value}_test.toml"));
+        let path = dir.join(format!(
+            "telemt_client_mss_bulk_out_of_range_{value}_test.toml"
+        ));
         std::fs::write(&path, toml).unwrap();
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
 

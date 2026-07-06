@@ -453,9 +453,7 @@ impl PolicySnapshot {
     fn match_auto_cidr(&self, ip: IpAddr) -> Option<CidrPolicyMatch<'_>> {
         let rule = match ip {
             IpAddr::V4(_) => self.cidr_auto_rules_v4.first()?,
-            IpAddr::V6(_) => self
-                .cidr_auto_rules_v6
-                .first()?,
+            IpAddr::V6(_) => self.cidr_auto_rules_v6.first()?,
         };
         let key = auto_cidr_bucket_key(ip, rule.prefix_len)?;
         Some(CidrPolicyMatch::Auto {

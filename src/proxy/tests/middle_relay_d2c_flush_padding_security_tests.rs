@@ -101,9 +101,11 @@ async fn write_secure_payload(payload_len: usize) -> (MeD2cWriteMode, Vec<u8>) {
 fn assert_secure_payload_with_tail_padding(cleartext: &[u8], payload_len: usize) {
     let wire_len = secure_wire_len(cleartext);
     assert_eq!(cleartext.len(), 4 + wire_len);
-    assert!(cleartext[4..4 + payload_len]
-        .iter()
-        .all(|byte| *byte == 0xa5));
+    assert!(
+        cleartext[4..4 + payload_len]
+            .iter()
+            .all(|byte| *byte == 0xa5)
+    );
 
     let padding_len = wire_len
         .checked_sub(payload_len)

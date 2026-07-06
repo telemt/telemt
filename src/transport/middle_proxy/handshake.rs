@@ -729,7 +729,10 @@ mod tests {
         assert_eq!(
             MePool::select_socks_bound_addr(
                 IpFamily::V4,
-                Some(upstream_egress(UpstreamRouteKind::Socks5, Some(bogon_bound)))
+                Some(upstream_egress(
+                    UpstreamRouteKind::Socks5,
+                    Some(bogon_bound)
+                ))
             ),
             None
         );
@@ -776,7 +779,9 @@ mod tests {
         );
         assert_eq!(
             KdfClientPortSource::from_socks_bound_port(
-                Some(zero_port_bound).filter(|addr| addr.port() != 0).map(|addr| addr.port())
+                Some(zero_port_bound)
+                    .filter(|addr| addr.port() != 0)
+                    .map(|addr| addr.port())
             ),
             KdfClientPortSource::LocalSocket
         );

@@ -97,9 +97,7 @@ pub(crate) async fn clear_synlimit_rules_all_backends() -> Result<bool, String> 
     clear_synlimit_rules_for_namespace(&namespace).await
 }
 
-async fn clear_synlimit_rules_for_namespace(
-    namespace: &SynLimitNamespace,
-) -> Result<bool, String> {
+async fn clear_synlimit_rules_for_namespace(namespace: &SynLimitNamespace) -> Result<bool, String> {
     if !has_cap_net_admin() {
         return Ok(false);
     }

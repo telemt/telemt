@@ -68,13 +68,9 @@ async fn apply_rules_for_binary(
     let chain = namespace.iptables_chain.as_str();
     let _ = run_command(binary, &["-t", "filter", "-N", chain], None).await;
     run_command(binary, &["-t", "filter", "-F", chain], None).await?;
-    if run_command(
-        binary,
-        &["-t", "filter", "-C", "INPUT", "-j", chain],
-        None,
-    )
-    .await
-    .is_err()
+    if run_command(binary, &["-t", "filter", "-C", "INPUT", "-j", chain], None)
+        .await
+        .is_err()
     {
         run_command(
             binary,
@@ -260,13 +256,7 @@ pub(super) async fn clear_rules_for_binary(
     let mut removed = false;
     let chain = namespace.iptables_chain.as_str();
     for _ in 0..8 {
-        match run_command(
-            binary,
-            &["-t", "filter", "-D", "INPUT", "-j", chain],
-            None,
-        )
-        .await
-        {
+        match run_command(binary, &["-t", "filter", "-D", "INPUT", "-j", chain], None).await {
             Ok(()) => {
                 removed = true;
             }

@@ -319,7 +319,10 @@ mod tests {
             targets.iptables_v4[0].ip,
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)))
         );
-        assert_eq!(targets.iptables_v6[0].ip, Some(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert_eq!(
+            targets.iptables_v6[0].ip,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
         assert_eq!(
             targets.nft_v4[0].ip,
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)))

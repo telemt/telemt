@@ -199,8 +199,7 @@ pub(super) async fn clear_rules_all_families(
     let mut removed = false;
     let table = namespace.nft_table.as_str();
     for family in [NftFamily::Inet, NftFamily::Ip, NftFamily::Ip6] {
-        match run_command("nft", &["delete", "table", family.as_str(), table], None).await
-        {
+        match run_command("nft", &["delete", "table", family.as_str(), table], None).await {
             Ok(()) => {
                 removed = true;
             }
