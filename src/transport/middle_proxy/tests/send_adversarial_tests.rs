@@ -323,7 +323,7 @@ async fn send_proxy_req_prunes_iterative_stale_bind_failures_without_data_replay
 }
 
 #[tokio::test]
-async fn send_proxy_req_preserves_client_facing_our_addr_when_writer_source_ip_differs() {
+async fn send_proxy_req_uses_writer_source_ip_when_advertised_our_addr_differs() {
     let (pool, _rng) = make_pool().await;
     pool.rr.store(0, Ordering::Relaxed);
 
@@ -363,5 +363,8 @@ async fn send_proxy_req_preserves_client_facing_our_addr_when_writer_source_ip_d
     let payload = recv_first_data_payload(&mut live_rx, Duration::from_millis(50))
         .await
         .expect("writer must receive routed payload");
-    assert_eq!(proxy_req_our_addr_from_payload(&payload), our_addr);
+    assert_eq!(
+        proxy_req_our_addr_from_payload(&payload),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 31)), our_addr.port())
+    );
 }

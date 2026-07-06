@@ -8,8 +8,8 @@ pub(crate) const INTERMEDIATE_QUICKACK_FLAG: u32 = 0x8000_0000;
 /// Payload length mask used by Intermediate and Secure Intermediate headers.
 pub(crate) const INTERMEDIATE_WIRE_LEN_MASK: u32 = 0x7fff_ffff;
 
-/// Maximum random tail length used by Telegram Desktop VersionD packets.
-pub(crate) const SECURE_VERSION_D_PADDING_MAX: usize = 15;
+/// Maximum outbound Secure tail length that keeps wire lengths non-aligned.
+pub(crate) const SECURE_VERSION_D_PADDING_MAX: usize = 3;
 
 /// Parsed Intermediate/Secure Intermediate length header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,9 +51,9 @@ pub(crate) fn secure_version_d_body_len_from_wire_len(wire_len: usize) -> Option
     Some(wire_len - (wire_len % 4))
 }
 
-/// Generate Telegram Desktop-compatible VersionD random tail length.
+/// Generate outbound Secure tail length without ambiguous full-word padding.
 pub(crate) fn secure_version_d_padding_len(rng: &SecureRandom) -> usize {
-    rng.range(SECURE_VERSION_D_PADDING_MAX + 1)
+    rng.range(SECURE_VERSION_D_PADDING_MAX) + 1
 }
 
 #[cfg(test)]

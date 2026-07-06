@@ -246,7 +246,7 @@ pub fn secure_payload_len_from_wire_len(wire_len: usize) -> Option<usize> {
 }
 
 /// Generate padding length for Secure Intermediate protocol.
-/// Telegram Desktop uses a 4-bit random padding length for VersionD packets.
+/// Outbound padding is 1..=3 so a receiver can strip it by 4-byte alignment.
 pub fn secure_padding_len(data_len: usize, rng: &SecureRandom) -> usize {
     debug_assert!(
         is_valid_secure_payload_len(data_len),
@@ -425,14 +425,20 @@ mod tests {
     }
 
     #[test]
-    fn secure_padding_matches_tdesktop_range() {
+    fn secure_padding_never_produces_aligned_total() {
         let rng = SecureRandom::new();
         for data_len in (0..1000).step_by(4) {
             for _ in 0..100 {
                 let padding = secure_padding_len(data_len, &rng);
                 assert!(
-                    padding <= 15,
+                    (1..=3).contains(&padding),
                     "padding out of range: data_len={data_len}, padding={padding}"
+                );
+                assert_ne!(
+                    (data_len + padding) % 4,
+                    0,
+                    "invariant violated: data_len={data_len}, padding={padding}, total={}",
+                    data_len + padding
                 );
             }
         }

@@ -367,7 +367,7 @@ impl<W: AsyncWrite + Unpin> SecureIntermediateFrameWriter<W> {
             ));
         }
 
-        // Telegram Desktop VersionD uses a 4-bit random padding length.
+        // Outbound Secure padding avoids full-word tails that readers cannot strip.
         let padding_len = secure_padding_len(data.len(), &self.rng);
         let padding = self.rng.bytes(padding_len);
 
@@ -633,13 +633,7 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     fn assert_secure_decoded_payload(decoded: &[u8], original: &[u8]) {
-        assert!(decoded.starts_with(original));
-        assert!(
-            (original.len()..=original.len() + 12).contains(&decoded.len()),
-            "Secure decoded payload may retain up to 12 bytes of full-word padding, got {}",
-            decoded.len()
-        );
-        assert_eq!(decoded.len() % 4, 0);
+        assert_eq!(decoded, original);
     }
 
     #[tokio::test]

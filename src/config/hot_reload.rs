@@ -145,6 +145,11 @@ pub struct ListenerSynLimitHotFields {
     pub synlimit_seconds: u32,
     pub synlimit_hitcount: u32,
     pub synlimit_burst: u32,
+    pub synlimit_ios_seconds: u32,
+    pub synlimit_ios_hitcount: u32,
+    pub synlimit_ios_burst: u32,
+    pub synlimit_hashlimit_expire_ms: u32,
+    pub synlimit_hashlimit_size: u32,
 }
 
 impl HotFields {
@@ -293,6 +298,11 @@ impl ListenerSynLimitHotFields {
             synlimit_seconds: listener.synlimit_seconds,
             synlimit_hitcount: listener.synlimit_hitcount,
             synlimit_burst: listener.synlimit_burst,
+            synlimit_ios_seconds: listener.synlimit_ios_seconds,
+            synlimit_ios_hitcount: listener.synlimit_ios_hitcount,
+            synlimit_ios_burst: listener.synlimit_ios_burst,
+            synlimit_hashlimit_expire_ms: listener.synlimit_hashlimit_expire_ms,
+            synlimit_hashlimit_size: listener.synlimit_hashlimit_size,
         }
     }
 }
@@ -620,6 +630,11 @@ fn overlay_listener_synlimit_fields(old: &mut [ListenerConfig], new: &[ListenerC
         old_listener.synlimit_seconds = new_listener.synlimit_seconds;
         old_listener.synlimit_hitcount = new_listener.synlimit_hitcount;
         old_listener.synlimit_burst = new_listener.synlimit_burst;
+        old_listener.synlimit_ios_seconds = new_listener.synlimit_ios_seconds;
+        old_listener.synlimit_ios_hitcount = new_listener.synlimit_ios_hitcount;
+        old_listener.synlimit_ios_burst = new_listener.synlimit_ios_burst;
+        old_listener.synlimit_hashlimit_expire_ms = new_listener.synlimit_hashlimit_expire_ms;
+        old_listener.synlimit_hashlimit_size = new_listener.synlimit_hashlimit_size;
     }
 }
 
@@ -1709,6 +1724,51 @@ mod tests {
             old.general.use_middle_proxy
         );
         assert!(!config_equal(&applied, &new));
+    }
+
+    #[test]
+    fn listener_synlimit_extended_fields_are_hot() {
+        let mut old = sample_config();
+        old.server.listeners.push(ListenerConfig {
+            ip: "0.0.0.0".parse().unwrap(),
+            port: Some(443),
+            client_mss: None,
+            synlimit: SynLimitMode::Iptables,
+            synlimit_seconds: 60,
+            synlimit_hitcount: 48,
+            synlimit_burst: 1,
+            synlimit_ios_seconds: 1,
+            synlimit_ios_hitcount: 12,
+            synlimit_ios_burst: 24,
+            synlimit_hashlimit_expire_ms: 60_000,
+            synlimit_hashlimit_size: 32_768,
+            announce: None,
+            announce_ip: None,
+            proxy_protocol: None,
+            reuse_allow: false,
+        });
+        let mut new = old.clone();
+        new.server.port = 8443;
+        new.server.listeners[0].synlimit_seconds = 120;
+        new.server.listeners[0].synlimit_hitcount = 96;
+        new.server.listeners[0].synlimit_burst = 2;
+        new.server.listeners[0].synlimit_ios_seconds = 2;
+        new.server.listeners[0].synlimit_ios_hitcount = 18;
+        new.server.listeners[0].synlimit_ios_burst = 36;
+        new.server.listeners[0].synlimit_hashlimit_expire_ms = 90_000;
+        new.server.listeners[0].synlimit_hashlimit_size = 65_536;
+
+        let applied = overlay_hot_fields(&old, &new);
+        let listener = &applied.server.listeners[0];
+        assert_eq!(applied.server.port, old.server.port);
+        assert_eq!(listener.synlimit_seconds, 120);
+        assert_eq!(listener.synlimit_hitcount, 96);
+        assert_eq!(listener.synlimit_burst, 2);
+        assert_eq!(listener.synlimit_ios_seconds, 2);
+        assert_eq!(listener.synlimit_ios_hitcount, 18);
+        assert_eq!(listener.synlimit_ios_burst, 36);
+        assert_eq!(listener.synlimit_hashlimit_expire_ms, 90_000);
+        assert_eq!(listener.synlimit_hashlimit_size, 65_536);
     }
 
     #[test]

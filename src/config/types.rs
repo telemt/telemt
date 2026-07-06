@@ -1455,9 +1455,9 @@ pub enum SynLimitMode {
     /// Disable SYN limiting for this listener.
     #[default]
     Off,
-    /// Use iptables/ip6tables filter rules with the hashlimit match.
+    /// Use iptables/ip6tables two-tier SYN-fix rules with the hashlimit match.
     Iptables,
-    /// Use nftables rules with per-source token-bucket meters.
+    /// Use nftables two-tier SYN-fix rules with per-source token-bucket meters.
     Nftables,
 }
 
@@ -2317,15 +2317,30 @@ pub struct ListenerConfig {
     /// Per-listener SYN limiter mode.
     #[serde(default)]
     pub synlimit: SynLimitMode,
-    /// Token-bucket rate interval for the per-listener SYN limiter.
+    /// Generic SYN-fix token-bucket rate interval.
     #[serde(default = "default_synlimit_seconds")]
     pub synlimit_seconds: u32,
-    /// Token-bucket rate amount for the per-listener SYN limiter.
+    /// Generic SYN-fix token-bucket rate amount.
     #[serde(default = "default_synlimit_hitcount")]
     pub synlimit_hitcount: u32,
-    /// Token-bucket burst size for the per-listener SYN limiter.
+    /// Generic SYN-fix token-bucket burst size.
     #[serde(default = "default_synlimit_burst")]
     pub synlimit_burst: u32,
+    /// iOS-like SYN-fix token-bucket rate interval.
+    #[serde(default = "default_synlimit_ios_seconds")]
+    pub synlimit_ios_seconds: u32,
+    /// iOS-like SYN-fix token-bucket rate amount.
+    #[serde(default = "default_synlimit_ios_hitcount")]
+    pub synlimit_ios_hitcount: u32,
+    /// iOS-like SYN-fix token-bucket burst size.
+    #[serde(default = "default_synlimit_ios_burst")]
+    pub synlimit_ios_burst: u32,
+    /// Hashlimit entry expiration in milliseconds for iptables/ip6tables rules.
+    #[serde(default = "default_synlimit_hashlimit_expire_ms")]
+    pub synlimit_hashlimit_expire_ms: u32,
+    /// Hashlimit table size for iptables/ip6tables rules.
+    #[serde(default = "default_synlimit_hashlimit_size")]
+    pub synlimit_hashlimit_size: u32,
     /// IP address or hostname to announce in proxy links.
     /// Takes precedence over `announce_ip` if both are set.
     #[serde(default)]

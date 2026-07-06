@@ -312,7 +312,7 @@ fn encode_secure(frame: &Frame, dst: &mut BytesMut, rng: &SecureRandom) -> io::R
         ));
     }
 
-    // Telegram Desktop VersionD uses a 4-bit random padding length.
+    // Outbound Secure padding avoids full-word tails that readers cannot strip.
     let padding_len = secure_padding_len(data.len(), rng);
 
     let total_len = data.len() + padding_len;
@@ -521,13 +521,7 @@ mod tests {
     use tokio_util::codec::{FramedRead, FramedWrite};
 
     fn assert_secure_decoded_payload(decoded: &[u8], original: &[u8]) {
-        assert!(decoded.starts_with(original));
-        assert!(
-            (original.len()..=original.len() + 12).contains(&decoded.len()),
-            "Secure decoded payload may retain up to 12 bytes of full-word padding, got {}",
-            decoded.len()
-        );
-        assert_eq!(decoded.len() % 4, 0);
+        assert_eq!(decoded, original);
     }
 
     #[tokio::test]
@@ -653,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn secure_codec_uses_tdesktop_padding_range_and_jitters_wire_length() {
+    fn secure_codec_uses_non_aligned_padding_and_jitters_wire_length() {
         let codec = SecureCodec::new(Arc::new(SecureRandom::new()));
         let payload = Bytes::from_static(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let mut wire_lens = HashSet::new();
@@ -666,9 +660,10 @@ mod tests {
             let wire_len = u32::from_le_bytes([out[0], out[1], out[2], out[3]]) as usize;
             assert_eq!(out.len(), 4 + wire_len);
             assert!(
-                (payload.len()..=payload.len() + 15).contains(&wire_len),
-                "Secure wire length must be payload+0..15, got {wire_len}"
+                (payload.len() + 1..=payload.len() + 3).contains(&wire_len),
+                "Secure wire length must be payload+1..3, got {wire_len}"
             );
+            assert_ne!(wire_len % 4, 0);
             wire_lens.insert(wire_len);
         }
 

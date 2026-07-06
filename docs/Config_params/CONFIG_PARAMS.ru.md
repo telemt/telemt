@@ -1894,6 +1894,7 @@
 ## client_mss
   - **Ограничения / валидация**: `String`. Пустое значение или отсутствие параметра означает, что Telemt не изменяет MSS, выбранный ядром. Поддерживаемые presets: `"extreme-low"` = `88`, `"tspu"` = `92`, `"2in8"` = `256`. Пользовательское десятичное значение должно быть строкой в диапазоне `88..=4096`.
   - **Описание**: MSS для входящих TCP-соединений клиентов. Значение применяется к TCP listener-сокетам до `listen(2)`, чтобы Linux мог объявить его в SYN/ACK. Параметр влияет только на proxy client TCP listeners и не применяется к API, metrics, Unix sockets, Telegram upstreams, ME sockets или mask backend connections. Изменение требует restart/rebind listener’ов.
+  - **Operator note**: Two-tier `synlimit` profile больше не требует автоматического отключения MSS внутри Telemt. Оператор должен сам решить, оставлять MSS shaping для handshake fragmentation или отключать его ради более высокой скорости media.
   - **Performance note**: Низкий MSS предсказуемо увеличивает количество TCP-сегментов. Приблизительный multiplier: `ceil(1460 / client_mss)`.
   - **Пример**:
 
@@ -2237,9 +2238,14 @@
 | [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`client_mss`](#client_mss-serverlisteners) | `String` | `[server].client_mss` | `✘` |
 | [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"` или `"nftables"` | `false` | `✔` |
-| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `2` | `✔` |
+| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✔` |
+| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✔` |
+| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `1` | `✔` |
+| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✔` |
+| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✔` |
+| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✔` |
+| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✔` |
+| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✔` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2277,7 +2283,8 @@
     ```
 ## synlimit (server.listeners)
   - **Ограничения / валидация**: `false`, `"iptables"` или `"nftables"`. Если параметр не задан или задан как `false`, SYN limiter для этого listener’а выключен.
-  - **Описание**: Устанавливает per-listener Linux netfilter SYN limiter rules для порта listener’а. `"iptables"` использует `iptables`/`ip6tables` filter rules с `hashlimit` match как per-source token bucket. `"nftables"` использует per-source `meter` rules с `limit rate over` и автоматически определяет, какие table families уже используются на хосте (`inet`, `ip`, `ip6`), перед созданием Telemt-owned tables. Token-bucket rate равен `synlimit_hitcount / synlimit_seconds`; `synlimit_burst` управляет burst size. Rules reconciled at runtime и удаляются при graceful shutdown Telemt; `SIGKILL` процессом не очищается. Требует CAP_NET_ADMIN. Изменения `synlimit*` hot-reload’ятся для существующих listener endpoints; изменение listener `ip` или `port` по-прежнему требует restart/rebind.
+  - **Описание**: Устанавливает per-listener Linux netfilter two-tier SYN-fix rules для порта listener’а. `"iptables"` использует `iptables`/`ip6tables` filter rules с `hashlimit`, `length` и TTL/hop-limit matches. `"nftables"` использует Telemt-owned tables с per-source `meter` rules и эквивалентными IPv4/IPv6 classifiers. Rules вставляются рано в `INPUT`, принимают under-limit SYN packets и отвечают TCP RST на over-limit SYN packets, чтобы клиент быстро переподключался вместо ожидания silent DROP timeout. Generic bucket управляется `synlimit_seconds`, `synlimit_hitcount` и `synlimit_burst`; iOS-like TTL/length bucket управляется `synlimit_ios_*`. Rules reconciled at runtime и удаляются при graceful shutdown Telemt; `SIGKILL` процессом не очищается. Требует CAP_NET_ADMIN. Изменения `synlimit*` hot-reload’ятся для существующих listener endpoints; изменение listener `ip` или `port` по-прежнему требует restart/rebind.
+  - **Operator note**: Telemt не сохраняет rules через `iptables-persistent`, не пишет `/etc/sysctl.d`, не меняет systemd limits и не модифицирует `client_mss`. Host-level tuning применяется оператором вручную.
   - **Пример**:
 
     ```toml
@@ -2292,8 +2299,8 @@
     synlimit = "nftables"
     ```
 ## synlimit_seconds (server.listeners)
-  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
-  - **Описание**: Token-bucket interval для обоих SYN limiter backends. Rate равен `synlimit_hitcount / synlimit_seconds` и рендерится в native netfilter rate units (`second`, `minute`, `hour` или `day`).
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `60`.
+  - **Описание**: Generic SYN-fix token-bucket interval. Rate равен `synlimit_hitcount / synlimit_seconds` и рендерится в native netfilter rate units (`second`, `minute`, `hour` или `day`). Этот bucket обрабатывает SYN packets, которые не совпали с iOS-like TTL/length classifier.
   - **Пример**:
 
     ```toml
@@ -2301,11 +2308,11 @@
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_seconds = 1
+    synlimit_seconds = 60
     ```
 ## synlimit_hitcount (server.listeners)
-  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
-  - **Описание**: Token-bucket rate amount для обоих SYN limiter backends. Вместе с `synlimit_seconds` задает разрешенный source-IP SYN rate до того, как excess SYN packets начнут drop’аться.
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `48`.
+  - **Описание**: Generic SYN-fix token-bucket rate amount. Вместе с `synlimit_seconds` задает разрешенный source-IP SYN rate до того, как excess SYN packets получат TCP RST.
   - **Пример**:
 
     ```toml
@@ -2313,11 +2320,11 @@
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_hitcount = 1
+    synlimit_hitcount = 48
     ```
 ## synlimit_burst (server.listeners)
-  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `2`.
-  - **Описание**: Token-bucket burst size для обоих SYN limiter backends. Более высокие значения разрешают short connection bursts с одного source IP перед применением steady-state rate `synlimit_hitcount / synlimit_seconds`.
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
+  - **Описание**: Generic SYN-fix token-bucket burst size. Более высокие значения разрешают short connection bursts с одного source IP перед применением steady-state rate `synlimit_hitcount / synlimit_seconds`.
   - **Пример**:
 
     ```toml
@@ -2325,7 +2332,67 @@
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_burst = 2
+    synlimit_burst = 1
+    ```
+## synlimit_ios_seconds (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
+  - **Описание**: Token-bucket interval для SYN packets, совпавших с iOS-like classifier. IPv4 match: packet length `64` и TTL `< 65`; IPv6 match: packet length `84` и hop limit `< 65`.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_ios_seconds = 1
+    ```
+## synlimit_ios_hitcount (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `12`.
+  - **Описание**: Token-bucket rate amount для iOS-like SYN classifier.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_ios_hitcount = 12
+    ```
+## synlimit_ios_burst (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `24`.
+  - **Описание**: Token-bucket burst size для iOS-like SYN classifier.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_ios_burst = 24
+    ```
+## synlimit_hashlimit_expire_ms (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `60000`.
+  - **Описание**: Entry expiration в миллисекундах для iptables/ip6tables hashlimit buckets. nftables meters используют kernel-managed state и не имеют точного аналога этого knob.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_hashlimit_expire_ms = 60000
+    ```
+## synlimit_hashlimit_size (server.listeners)
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `32768`.
+  - **Описание**: Hash table size для iptables/ip6tables hashlimit buckets. nftables meters используют kernel-managed state и не имеют точного аналога этого knob.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_hashlimit_size = 32768
     ```
 ## announce
   - **Ограничения / валидация**: `String` (необязательный параметр). Не должен быть пустым, если задан.

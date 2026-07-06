@@ -1972,6 +1972,7 @@ This document lists all configuration keys accepted by `config.toml`.
 ## client_mss
   - **Constraints / validation**: `String`. Empty or omitted means do not change kernel MSS. Presets: `"extreme-low"` = `88`, `"tspu"` = `92`, `"2in8"` = `256`. Custom decimal strings must be within `88..=4096`.
   - **Description**: Client-facing TCP MSS applied to TCP listener sockets before `listen(2)`, so Linux can announce it in SYN/ACK. This affects only proxy client TCP listeners, not API, metrics, Unix sockets, Telegram upstreams, ME sockets, or mask backend connections. Changes require listener restart/rebind.
+  - **Operator note**: The two-tier `synlimit` profile does not require Telemt to disable MSS automatically. Operators that follow external host-tuning recipes should decide explicitly whether to leave MSS shaping enabled for handshake fragmentation or disable it for higher media throughput.
   - **Performance note**: Low MSS increases packet count predictably. Approximate segment multiplier is `ceil(1460 / client_mss)`.
   - **Example**:
 
@@ -2311,9 +2312,14 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`client_mss`](#client_mss-serverlisteners) | `String` | `[server].client_mss` | `✘` |
 | [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"`, or `"nftables"` | `false` | `✔` |
-| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `2` | `✔` |
+| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✔` |
+| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✔` |
+| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `1` | `✔` |
+| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✔` |
+| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✔` |
+| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✔` |
+| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✔` |
+| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✔` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2351,7 +2357,8 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 ## synlimit (server.listeners)
   - **Constraints / validation**: `false`, `"iptables"`, or `"nftables"`. Omitted or `false` disables SYN limiting for this listener.
-  - **Description**: Installs per-listener Linux netfilter SYN limiter rules for the listener port. `"iptables"` uses `iptables`/`ip6tables` filter rules with the `hashlimit` match as a per-source token bucket. `"nftables"` uses per-source `meter` rules with `limit rate over` and auto-detects whether the host already uses `inet`, `ip`, or `ip6` table families before creating Telemt-owned tables. The token-bucket rate is `synlimit_hitcount / synlimit_seconds`; `synlimit_burst` controls the burst size. Rules are reconciled at runtime and removed during graceful Telemt shutdown; `SIGKILL` cannot be cleaned up by the process. Requires CAP_NET_ADMIN. `synlimit*` changes hot-reload for existing listener endpoints; changing listener `ip` or `port` still requires restart/rebind.
+  - **Description**: Installs per-listener Linux netfilter two-tier SYN-fix rules for the listener port. `"iptables"` uses `iptables`/`ip6tables` filter rules with the `hashlimit`, `length`, and TTL/hop-limit matches. `"nftables"` uses Telemt-owned tables with per-source `meter` rules and equivalent IPv4/IPv6 classifiers. Rules are inserted early in `INPUT`, accept under-limit SYN packets, and reject over-limit SYN packets with TCP RST so clients retry promptly instead of waiting for a silent DROP timeout. The generic bucket is controlled by `synlimit_seconds`, `synlimit_hitcount`, and `synlimit_burst`; the iOS-like TTL/length bucket is controlled by `synlimit_ios_*`. Rules are reconciled at runtime and removed during graceful Telemt shutdown; `SIGKILL` cannot be cleaned up by the process. Requires CAP_NET_ADMIN. `synlimit*` changes hot-reload for existing listener endpoints; changing listener `ip` or `port` still requires restart/rebind.
+  - **Operator note**: Telemt does not persist rules with `iptables-persistent`, write `/etc/sysctl.d`, edit systemd limits, or modify `client_mss`. Apply host-level tuning manually if your deployment policy requires it.
   - **Example**:
 
     ```toml
@@ -2366,8 +2373,8 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     synlimit = "nftables"
     ```
 ## synlimit_seconds (server.listeners)
-  - **Constraints / validation**: `u32`, must be `> 0`. Default is `1`.
-  - **Description**: Token-bucket interval for both SYN limiter backends. The rate is `synlimit_hitcount / synlimit_seconds` and is rendered to native netfilter rate units (`second`, `minute`, `hour`, or `day`).
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `60`.
+  - **Description**: Generic SYN-fix token-bucket interval. The rate is `synlimit_hitcount / synlimit_seconds` and is rendered to native netfilter rate units (`second`, `minute`, `hour`, or `day`). This bucket handles SYN packets that do not match the iOS-like TTL/length classifier.
   - **Example**:
 
     ```toml
@@ -2375,11 +2382,11 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_seconds = 1
+    synlimit_seconds = 60
     ```
 ## synlimit_hitcount (server.listeners)
-  - **Constraints / validation**: `u32`, must be `> 0`. Default is `1`.
-  - **Description**: Token-bucket rate amount for both SYN limiter backends. Together with `synlimit_seconds`, it defines the allowed source-IP SYN rate before excess SYN packets are dropped.
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `48`.
+  - **Description**: Generic SYN-fix token-bucket rate amount. Together with `synlimit_seconds`, it defines the allowed source-IP SYN rate before excess SYN packets receive TCP RST.
   - **Example**:
 
     ```toml
@@ -2387,11 +2394,11 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_hitcount = 1
+    synlimit_hitcount = 48
     ```
 ## synlimit_burst (server.listeners)
-  - **Constraints / validation**: `u32`, must be `> 0`. Default is `2`.
-  - **Description**: Token-bucket burst size for both SYN limiter backends. Higher values allow short connection bursts from the same source IP before the steady-state `synlimit_hitcount / synlimit_seconds` rate is enforced.
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `1`.
+  - **Description**: Generic SYN-fix token-bucket burst size. Higher values allow short connection bursts from the same source IP before the steady-state `synlimit_hitcount / synlimit_seconds` rate is enforced.
   - **Example**:
 
     ```toml
@@ -2399,7 +2406,67 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_burst = 2
+    synlimit_burst = 1
+    ```
+## synlimit_ios_seconds (server.listeners)
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `1`.
+  - **Description**: Token-bucket interval for SYN packets matching the iOS-like classifier. IPv4 matches packet length `64` and TTL `< 65`; IPv6 matches packet length `84` and hop limit `< 65`.
+  - **Example**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_ios_seconds = 1
+    ```
+## synlimit_ios_hitcount (server.listeners)
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `12`.
+  - **Description**: Token-bucket rate amount for the iOS-like SYN classifier.
+  - **Example**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_ios_hitcount = 12
+    ```
+## synlimit_ios_burst (server.listeners)
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `24`.
+  - **Description**: Token-bucket burst size for the iOS-like SYN classifier.
+  - **Example**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_ios_burst = 24
+    ```
+## synlimit_hashlimit_expire_ms (server.listeners)
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `60000`.
+  - **Description**: Entry expiration in milliseconds for iptables/ip6tables hashlimit buckets. nftables meters use kernel-managed state and do not expose this exact knob.
+  - **Example**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_hashlimit_expire_ms = 60000
+    ```
+## synlimit_hashlimit_size (server.listeners)
+  - **Constraints / validation**: `u32`, must be `> 0`. Default is `32768`.
+  - **Description**: Hash table size for iptables/ip6tables hashlimit buckets. nftables meters use kernel-managed state and do not expose this exact knob.
+  - **Example**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "iptables"
+    synlimit_hashlimit_size = 32768
     ```
 ## announce
   - **Constraints / validation**: `String` (optional). Must not be empty when set.
