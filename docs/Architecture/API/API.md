@@ -157,6 +157,24 @@ Notes:
 | `POST /v1/users/{username}/disable` | Disables one user and closes active runtime sessions for that user. |
 | `POST /v1/users/{username}/reset-quota` | Resets one user's runtime quota counter and persists quota state. |
 
+## Split Configs and `include` Directives
+
+The config file may pull in other TOML files with `include = "path.toml"`
+(expanded before parsing; see the config parameters reference). The config and
+users APIs are include-aware:
+
+- **Reads** (`GET /v1/config`, the `GET /v1/users` family) expand includes
+  before parsing, so a split config is served correctly.
+- **Writes** (`PATCH /v1/config`, the `POST/PATCH/DELETE /v1/users` family)
+  update the file that actually defines the edited section. An `[access.users]`
+  table placed in an included `users.toml` is edited in place there — it is not
+  appended to the main config, which would otherwise create a duplicate table
+  and make the expanded config unparseable.
+- **Revision** used for `If-Match` optimistic concurrency is computed over the
+  fully expanded config, so editing an included file changes the revision.
+- A section defined in more than one file is reported as `internal_error`
+  rather than edited (the config is already duplicate-corrupted).
+
 ## Common Error Codes
 
 | HTTP | `error.code` | Trigger |
