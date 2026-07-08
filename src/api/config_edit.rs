@@ -94,7 +94,22 @@ pub(super) async fn apply_patch_to_path(
     let original = tokio::fs::read_to_string(config_path)
         .await
         .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
-    let original_toml: Toml = toml::from_str(&original)
+    // Expand `include = "..."` directives before handing the text to the TOML
+    // parser. Without this step the parser sees duplicate `include` keys and
+    // fails with "duplicate key". The save path (save_sections_to_disk) operates
+    // on the raw on-disk file so include directives are preserved after a patch.
+    let base_dir = config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let processed = {
+        let raw = original.clone();
+        tokio::task::spawn_blocking(move || crate::config::expand_config_includes(&raw, &base_dir))
+            .await
+            .map_err(|e| ApiFailure::internal(format!("failed to join include expander: {}", e)))?
+            .map_err(|e| ApiFailure::internal(format!("failed to expand config includes: {}", e)))?
+    };
+    let original_toml: Toml = toml::from_str(&processed)
         .map_err(|e| ApiFailure::internal(format!("failed to parse config: {}", e)))?;
     let old_cfg: ProxyConfig = original_toml
         .clone()
@@ -130,7 +145,18 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
     let original = tokio::fs::read_to_string(config_path)
         .await
         .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
-    let parsed: Toml = toml::from_str(&original)
+    let base_dir = config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let processed = {
+        let raw = original.clone();
+        tokio::task::spawn_blocking(move || crate::config::expand_config_includes(&raw, &base_dir))
+            .await
+            .map_err(|e| ApiFailure::internal(format!("failed to join include expander: {}", e)))?
+            .map_err(|e| ApiFailure::internal(format!("failed to expand config includes: {}", e)))?
+    };
+    let parsed: Toml = toml::from_str(&processed)
         .map_err(|e| ApiFailure::internal(format!("failed to parse config: {}", e)))?;
 
     let parsed_table = parsed
@@ -147,7 +173,9 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
         }
     }
 
-    let revision = compute_revision(&original);
+    // Revision is computed over the include-expanded snapshot (`processed`),
+    // matching `current_revision`, so a later PATCH's If-Match check lines up.
+    let revision = compute_revision(&processed);
     Ok((Toml::Table(table), revision))
 }
 

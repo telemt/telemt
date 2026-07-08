@@ -7,7 +7,9 @@ use hyper::header::IF_MATCH;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::config::{ProxyConfig, RateLimitBps};
+use crate::config::{
+    ProxyConfig, RateLimitBps, expand_config_includes, expand_config_includes_with_sources,
+};
 
 use super::model::ApiFailure;
 
@@ -66,10 +68,89 @@ pub(super) async fn ensure_expected_revision(
 }
 
 pub(super) async fn current_revision(config_path: &Path) -> Result<String, ApiFailure> {
-    let content = tokio::fs::read_to_string(config_path)
+    expanded_revision(config_path).await
+}
+
+/// Compute the revision over the fully include-expanded config snapshot.
+///
+/// A split config's editable sections may live in included files, so the
+/// revision must reflect the expanded content: otherwise a write into an
+/// included file would not change the revision and optimistic concurrency
+/// (`If-Match`) would silently break.
+pub(super) async fn expanded_revision(config_path: &Path) -> Result<String, ApiFailure> {
+    let raw = tokio::fs::read_to_string(config_path)
         .await
         .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
-    Ok(compute_revision(&content))
+    let base_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let processed = tokio::task::spawn_blocking(move || expand_config_includes(&raw, &base_dir))
+        .await
+        .map_err(|e| ApiFailure::internal(format!("failed to join include expander: {}", e)))?
+        .map_err(|e| ApiFailure::internal(format!("failed to expand config includes: {}", e)))?;
+    Ok(compute_revision(&processed))
+}
+
+/// Resolve which on-disk file defines `table_name`, following `include`
+/// directives. Config writes must target the file that actually holds the
+/// section so an included section (e.g. `[access.users]` in `users.toml`) is
+/// updated in place instead of being duplicated into the main config.
+///
+/// Resolution: the main config is checked first, then every included file. If
+/// exactly one file owns the section, that file is returned. If none owns it,
+/// the main config is returned (safe: nothing to duplicate, the section is
+/// appended). If more than one file defines it, the config is already
+/// duplicate-corrupted and editing cannot proceed safely.
+async fn owning_file_for_table(
+    config_path: &Path,
+    table_name: &str,
+) -> Result<PathBuf, ApiFailure> {
+    let main = config_path.to_path_buf();
+    let raw = tokio::fs::read_to_string(config_path)
+        .await
+        .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
+    let base_dir = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let included = {
+        let raw = raw.clone();
+        tokio::task::spawn_blocking(move || expand_config_includes_with_sources(&raw, &base_dir))
+            .await
+            .map_err(|e| ApiFailure::internal(format!("failed to join include expander: {}", e)))?
+            .map_err(|e| ApiFailure::internal(format!("failed to expand config includes: {}", e)))?
+            .1
+    };
+
+    let mut owners = Vec::new();
+    if find_toml_table_bounds(&raw, table_name).is_some() {
+        owners.push(main.clone());
+    }
+    for path in included {
+        if path == main {
+            continue;
+        }
+        let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
+            ApiFailure::internal(format!(
+                "failed to read included config {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        if find_toml_table_bounds(&content, table_name).is_some() {
+            owners.push(path);
+        }
+    }
+
+    match owners.len() {
+        0 => Ok(main),
+        1 => Ok(owners.into_iter().next().unwrap()),
+        _ => Err(ApiFailure::internal(format!(
+            "section {} is defined in multiple config files; cannot safely edit",
+            table_name
+        ))),
+    }
 }
 
 pub(super) fn compute_revision(content: &str) -> String {
@@ -128,17 +209,19 @@ pub(super) async fn save_sections_to_disk(
     cfg: &ProxyConfig,
     sections: &[&str],
 ) -> Result<String, ApiFailure> {
-    let mut content = tokio::fs::read_to_string(config_path)
-        .await
-        .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
-
     for section in sections {
+        // Write each section into the file that actually defines it so a
+        // section carried by an included file is updated in place.
+        let target = owning_file_for_table(config_path, section).await?;
         let rendered = render_top_level_section(cfg, section)?;
-        content = upsert_toml_table(&content, section, &rendered);
+        let content = tokio::fs::read_to_string(&target)
+            .await
+            .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
+        let updated = upsert_toml_table(&content, section, &rendered);
+        write_atomic(target, updated).await?;
     }
 
-    write_atomic(config_path.to_path_buf(), content.clone()).await?;
-    Ok(compute_revision(&content))
+    expanded_revision(config_path).await
 }
 
 /// Render one top-level table as `[section]\n...\n` (or `[[upstreams]]` array
@@ -186,15 +269,17 @@ pub(super) async fn save_access_sections_to_disk(
     cfg: &ProxyConfig,
     sections: &[AccessSection],
 ) -> Result<String, ApiFailure> {
-    let mut content = tokio::fs::read_to_string(config_path)
-        .await
-        .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
-
     let mut applied = Vec::new();
     for section in sections {
         if applied.contains(section) {
             continue;
         }
+        // Route the write to the file that owns this access sub-table so an
+        // included `[access.*]` section is edited in place, not duplicated.
+        let target = owning_file_for_table(config_path, section.table_name()).await?;
+        let content = tokio::fs::read_to_string(&target)
+            .await
+            .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?;
         if find_toml_table_bounds(&content, section.table_name()).is_none()
             && access_section_is_empty(cfg, *section)
         {
@@ -202,12 +287,12 @@ pub(super) async fn save_access_sections_to_disk(
             continue;
         }
         let rendered = render_access_section(cfg, *section)?;
-        content = upsert_toml_table(&content, section.table_name(), &rendered);
+        let updated = upsert_toml_table(&content, section.table_name(), &rendered);
+        write_atomic(target, updated).await?;
         applied.push(*section);
     }
 
-    write_atomic(config_path.to_path_buf(), content.clone()).await?;
-    Ok(compute_revision(&content))
+    expanded_revision(config_path).await
 }
 
 fn render_access_section(cfg: &ProxyConfig, section: AccessSection) -> Result<String, ApiFailure> {
@@ -668,5 +753,122 @@ mod tests {
 
         assert!(rendered.starts_with("[access.user_rate_limits]\n"));
         assert!(rendered.contains("alice = { up_bps = 1024, down_bps = 2048 }"));
+    }
+
+    // A split config where `[access.users]` lives in an included file must be
+    // edited in the included file, not by appending a duplicate `[access.users]`
+    // block to the main config (which would make the include-expanded config
+    // unparseable on the next load).
+    #[tokio::test]
+    async fn save_access_users_writes_to_owning_include_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("config.toml");
+        let users = dir.path().join("users.toml");
+        tokio::fs::write(
+            &users,
+            "[access.users]\ntestuser = \"deadbeefdeadbeefdeadbeefdeadbeef\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &main,
+            "include = \"users.toml\"\n[censorship]\ntls_domain = \"a.com\"\n",
+        )
+        .await
+        .unwrap();
+
+        let mut cfg = ProxyConfig::default();
+        cfg.access.users.insert(
+            "testuser".to_string(),
+            "deadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+        );
+        cfg.access.users.insert(
+            "newuser".to_string(),
+            "cafebabecafebabecafebabecafebabe".to_string(),
+        );
+
+        save_access_sections_to_disk(&main, &cfg, &[AccessSection::Users])
+            .await
+            .unwrap();
+
+        let users_written = tokio::fs::read_to_string(&users).await.unwrap();
+        assert!(
+            users_written.contains("newuser"),
+            "new user must land in the owning include file:\n{users_written}"
+        );
+
+        let main_written = tokio::fs::read_to_string(&main).await.unwrap();
+        assert!(
+            !main_written.contains("[access.users]"),
+            "main config must not gain a duplicate access.users block:\n{main_written}"
+        );
+
+        // The include-expanded config must still parse (a duplicate table would
+        // error here).
+        let loaded = ProxyConfig::load(&main).expect("config must still load after edit");
+        assert!(loaded.access.users.contains_key("newuser"));
+        assert!(loaded.access.users.contains_key("testuser"));
+    }
+
+    // A brand-new section that no file defines yet is appended to the main file
+    // (safe: no include provides it, so no duplicate can form).
+    #[tokio::test]
+    async fn save_access_users_appends_to_main_when_no_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("config.toml");
+        tokio::fs::write(&main, "[censorship]\ntls_domain = \"a.com\"\n")
+            .await
+            .unwrap();
+
+        let mut cfg = ProxyConfig::default();
+        cfg.access.users.insert(
+            "solo".to_string(),
+            "deadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+        );
+
+        save_access_sections_to_disk(&main, &cfg, &[AccessSection::Users])
+            .await
+            .unwrap();
+
+        let main_written = tokio::fs::read_to_string(&main).await.unwrap();
+        assert!(main_written.contains("[access.users]"));
+        assert!(main_written.contains("solo"));
+        ProxyConfig::load(&main).expect("config must load");
+    }
+
+    // The revision must be computed over the include-expanded snapshot so that
+    // editing an included file changes the revision (optimistic concurrency).
+    #[tokio::test]
+    async fn current_revision_reflects_included_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("config.toml");
+        let users = dir.path().join("users.toml");
+        tokio::fs::write(
+            &users,
+            "[access.users]\na = \"deadbeefdeadbeefdeadbeefdeadbeef\"\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &main,
+            "include = \"users.toml\"\n[censorship]\ntls_domain = \"a.com\"\n",
+        )
+        .await
+        .unwrap();
+
+        let rev1 = current_revision(&main).await.unwrap();
+        tokio::fs::write(
+            &users,
+            "[access.users]\na = \"deadbeefdeadbeefdeadbeefdeadbeef\"\n\
+             b = \"cafebabecafebabecafebabecafebabe\"\n",
+        )
+        .await
+        .unwrap();
+        let rev2 = current_revision(&main).await.unwrap();
+
+        assert_ne!(
+            rev1, rev2,
+            "revision must change when an included file changes"
+        );
     }
 }
