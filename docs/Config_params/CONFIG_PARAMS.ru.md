@@ -3112,7 +3112,7 @@
 | [`replay_window_secs`](#replay_window_secs) | `u64` | `120` | `✘` |
 | [`ignore_time_skew`](#ignore_time_skew) | `bool` | `false` | `✘` |
 | [`user_rate_limits`](#user_rate_limits) | `Map<String, RateLimitBps>` | `{}` | `✔` |
-| [`cidr_rate_limits`](#cidr_rate_limits) | `Map<IpNetwork, RateLimitBps>` | `{}` | `✔` |
+| [`cidr_rate_limits`](#cidr_rate_limits) | `Map<CidrRateLimitKey, RateLimitBps>` | `{}` | `✔` |
 
 ## users
   - **Ограничения / валидация**: Не должно быть пустым (должен существовать хотя бы один пользователь). Каждое значение должно состоять **ровно из 32 шестнадцатеричных символов**.
@@ -3265,13 +3265,15 @@
     alice = { up_bps = 1048576, down_bps = 2097152 }
     ```
 ## cidr_rate_limits
-  - **Ограничения / валидация**: Таблица `CIDR -> { up_bps, down_bps }`. CIDR должен корректно разбираться как `IpNetwork`; хотя бы одно направление должно быть ненулевым.
-  - **Описание**: Лимиты скорости для подсетей источников, применяются поверх пользовательских ограничений.
+  - **Ограничения / валидация**: Таблица `CIDR или auto-template -> { up_bps, down_bps }`. Explicit CIDR-ключи должны корректно разбираться как `IpNetwork`; auto-template ключи должны иметь вид `*4/N` (`N=0..32`), `*6/N` (`N=0..128`) или `*/N` (`N=0..32`). Хотя бы одно направление должно быть ненулевым. Дублирующиеся нормализованные auto-template отклоняются.
+  - **Описание**: Лимиты скорости для подсетей источников, применяются поверх пользовательских ограничений. Explicit CIDR-правила используют longest-prefix-wins и имеют приоритет над auto-template. Auto-template создают bucket’ы лениво по matched source subnet: `*4/N` для IPv4, `*6/N` для IPv6, а `*/N` является dual-stack shorthand, где IPv4 использует `/N`, а IPv6 — `/(N * 4)`.
   - **Example**:
 
     ```toml
     [access.cidr_rate_limits]
     "203.0.113.0/24" = { up_bps = 0, down_bps = 1048576 }
+    "*4/32" = { up_bps = 262144, down_bps = 1048576 }
+    "*6/64" = { up_bps = 262144, down_bps = 1048576 }
     ```
 # [[upstreams]]
 
