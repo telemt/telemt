@@ -1,10 +1,8 @@
 use std::net::IpAddr;
 
 use super::command::run_command;
-use super::model::{SynLimitRule, SynLimitTargets, synlimit_rate_arg};
+use super::model::{SynLimitNamespace, SynLimitRule, SynLimitTargets, synlimit_rate_arg};
 
-const IPTABLES_CHAIN: &str = "TELEMT_SYNLIMIT";
-const IPTABLES_HASHLIMIT_PREFIX: &str = "TMT-SYN";
 const IPV4_IOS_PACKET_LENGTH: u16 = 64;
 const IPV6_IOS_PACKET_LENGTH: u16 = 84;
 const IOS_TTL_LIMIT: u8 = 65;
@@ -38,49 +36,57 @@ impl IpTablesFamily {
     }
 }
 
-pub(super) async fn apply_synlimit_rules(targets: &SynLimitTargets) -> Result<(), String> {
-    apply_rules_for_binary("iptables", &targets.iptables_v4, IpTablesFamily::V4).await?;
-    apply_rules_for_binary("ip6tables", &targets.iptables_v6, IpTablesFamily::V6).await
+pub(super) async fn apply_synlimit_rules(
+    targets: &SynLimitTargets,
+    namespace: &SynLimitNamespace,
+) -> Result<(), String> {
+    apply_rules_for_binary(
+        "iptables",
+        &targets.iptables_v4,
+        IpTablesFamily::V4,
+        namespace,
+    )
+    .await?;
+    apply_rules_for_binary(
+        "ip6tables",
+        &targets.iptables_v6,
+        IpTablesFamily::V6,
+        namespace,
+    )
+    .await
 }
 
 async fn apply_rules_for_binary(
     binary: &str,
     targets: &[SynLimitRule],
     family: IpTablesFamily,
+    namespace: &SynLimitNamespace,
 ) -> Result<(), String> {
     if targets.is_empty() {
         return Ok(());
     }
-    let _ = run_command(binary, &["-t", "filter", "-N", IPTABLES_CHAIN], None).await;
-    run_command(binary, &["-t", "filter", "-F", IPTABLES_CHAIN], None).await?;
-    if run_command(
-        binary,
-        &["-t", "filter", "-C", "INPUT", "-j", IPTABLES_CHAIN],
-        None,
-    )
-    .await
-    .is_err()
+    let chain = namespace.iptables_chain.as_str();
+    let _ = run_command(binary, &["-t", "filter", "-N", chain], None).await;
+    run_command(binary, &["-t", "filter", "-F", chain], None).await?;
+    if run_command(binary, &["-t", "filter", "-C", "INPUT", "-j", chain], None)
+        .await
+        .is_err()
     {
         run_command(
             binary,
-            &["-t", "filter", "-I", "INPUT", "1", "-j", IPTABLES_CHAIN],
+            &["-t", "filter", "-I", "INPUT", "1", "-j", chain],
             None,
         )
         .await?;
     }
 
     for (idx, target) in targets.iter().enumerate() {
-        for rule in iptables_synfix_rule_args(target, idx, family) {
+        for rule in iptables_synfix_rule_args(target, idx, family, namespace) {
             let refs: Vec<&str> = rule.iter().map(String::as_str).collect();
             run_command(binary, &refs, None).await?;
         }
     }
-    run_command(
-        binary,
-        &["-t", "filter", "-A", IPTABLES_CHAIN, "-j", "RETURN"],
-        None,
-    )
-    .await?;
+    run_command(binary, &["-t", "filter", "-A", chain, "-j", "RETURN"], None).await?;
 
     Ok(())
 }
@@ -89,12 +95,13 @@ fn iptables_synfix_rule_args(
     target: &SynLimitRule,
     idx: usize,
     family: IpTablesFamily,
+    namespace: &SynLimitNamespace,
 ) -> Vec<Vec<String>> {
     vec![
-        iptables_ios_accept_rule_args(target, idx, family),
-        iptables_ios_reject_rule_args(target, family),
-        iptables_generic_accept_rule_args(target, idx, family),
-        iptables_generic_reject_rule_args(target),
+        iptables_ios_accept_rule_args(target, idx, family, namespace),
+        iptables_ios_reject_rule_args(target, family, namespace),
+        iptables_generic_accept_rule_args(target, idx, family, namespace),
+        iptables_generic_reject_rule_args(target, namespace),
     ]
 }
 
@@ -102,12 +109,15 @@ fn iptables_ios_accept_rule_args(
     target: &SynLimitRule,
     idx: usize,
     family: IpTablesFamily,
+    namespace: &SynLimitNamespace,
 ) -> Vec<String> {
     let hashlimit_name = format!(
-        "{IPTABLES_HASHLIMIT_PREFIX}-I{}-{idx}",
+        "{}-I{}-{idx}",
+        namespace.iptables_hashlimit_prefix,
         family.hashlimit_tag()
     );
-    let mut args = iptables_base_rule_args(target.ip, target.port);
+    let mut args =
+        iptables_base_rule_args(namespace.iptables_chain.as_str(), target.ip, target.port);
     args.extend(iptables_ios_match_args(family));
     args.extend(iptables_hashlimit_args(
         &hashlimit_name,
@@ -121,8 +131,13 @@ fn iptables_ios_accept_rule_args(
     args
 }
 
-fn iptables_ios_reject_rule_args(target: &SynLimitRule, family: IpTablesFamily) -> Vec<String> {
-    let mut args = iptables_base_rule_args(target.ip, target.port);
+fn iptables_ios_reject_rule_args(
+    target: &SynLimitRule,
+    family: IpTablesFamily,
+    namespace: &SynLimitNamespace,
+) -> Vec<String> {
+    let mut args =
+        iptables_base_rule_args(namespace.iptables_chain.as_str(), target.ip, target.port);
     args.extend(iptables_ios_match_args(family));
     args.extend(iptables_reject_args());
     args
@@ -132,12 +147,15 @@ fn iptables_generic_accept_rule_args(
     target: &SynLimitRule,
     idx: usize,
     family: IpTablesFamily,
+    namespace: &SynLimitNamespace,
 ) -> Vec<String> {
     let hashlimit_name = format!(
-        "{IPTABLES_HASHLIMIT_PREFIX}-G{}-{idx}",
+        "{}-G{}-{idx}",
+        namespace.iptables_hashlimit_prefix,
         family.hashlimit_tag()
     );
-    let mut args = iptables_base_rule_args(target.ip, target.port);
+    let mut args =
+        iptables_base_rule_args(namespace.iptables_chain.as_str(), target.ip, target.port);
     args.extend(iptables_hashlimit_args(
         &hashlimit_name,
         target.generic_seconds,
@@ -150,18 +168,22 @@ fn iptables_generic_accept_rule_args(
     args
 }
 
-fn iptables_generic_reject_rule_args(target: &SynLimitRule) -> Vec<String> {
-    let mut args = iptables_base_rule_args(target.ip, target.port);
+fn iptables_generic_reject_rule_args(
+    target: &SynLimitRule,
+    namespace: &SynLimitNamespace,
+) -> Vec<String> {
+    let mut args =
+        iptables_base_rule_args(namespace.iptables_chain.as_str(), target.ip, target.port);
     args.extend(iptables_reject_args());
     args
 }
 
-fn iptables_base_rule_args(ip: Option<IpAddr>, port: u16) -> Vec<String> {
+fn iptables_base_rule_args(chain: &str, ip: Option<IpAddr>, port: u16) -> Vec<String> {
     let mut args = vec![
         "-t".to_string(),
         "filter".to_string(),
         "-A".to_string(),
-        IPTABLES_CHAIN.to_string(),
+        chain.to_string(),
         "-p".to_string(),
         "tcp".to_string(),
         "--syn".to_string(),
@@ -226,17 +248,15 @@ fn iptables_reject_args() -> Vec<String> {
     ]
 }
 
-pub(super) async fn clear_rules_for_binary(binary: &str) -> Result<bool, String> {
+pub(super) async fn clear_rules_for_binary(
+    binary: &str,
+    namespace: &SynLimitNamespace,
+) -> Result<bool, String> {
     let mut errors = Vec::new();
     let mut removed = false;
+    let chain = namespace.iptables_chain.as_str();
     for _ in 0..8 {
-        match run_command(
-            binary,
-            &["-t", "filter", "-D", "INPUT", "-j", IPTABLES_CHAIN],
-            None,
-        )
-        .await
-        {
+        match run_command(binary, &["-t", "filter", "-D", "INPUT", "-j", chain], None).await {
             Ok(()) => {
                 removed = true;
             }
@@ -247,7 +267,7 @@ pub(super) async fn clear_rules_for_binary(binary: &str) -> Result<bool, String>
             }
         }
     }
-    match run_command(binary, &["-t", "filter", "-F", IPTABLES_CHAIN], None).await {
+    match run_command(binary, &["-t", "filter", "-F", chain], None).await {
         Ok(()) => {
             removed = true;
         }
@@ -256,7 +276,7 @@ pub(super) async fn clear_rules_for_binary(binary: &str) -> Result<bool, String>
             errors.push(format!("{binary} flush chain failed: {error}"));
         }
     }
-    match run_command(binary, &["-t", "filter", "-X", IPTABLES_CHAIN], None).await {
+    match run_command(binary, &["-t", "filter", "-X", chain], None).await {
         Ok(()) => {
             removed = true;
         }
@@ -292,12 +312,26 @@ mod tests {
             .any(|pair| pair[0].as_str() == key && pair[1].as_str() == value)
     }
 
+    fn has_key(args: &[String], key: &str) -> bool {
+        args.iter().any(|arg| arg == key)
+    }
+
+    fn test_namespace() -> SynLimitNamespace {
+        SynLimitNamespace {
+            nft_table: "telemt_synlimit_test".to_string(),
+            iptables_chain: "TMT_SYN_TEST".to_string(),
+            iptables_hashlimit_prefix: "TMTTEST".to_string(),
+        }
+    }
+
     #[test]
     fn iptables_rules_use_synfix_order_and_rejects() {
         let target = test_rule(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))), 443);
-        let rules = iptables_synfix_rule_args(&target, 0, IpTablesFamily::V4);
+        let namespace = test_namespace();
+        let rules = iptables_synfix_rule_args(&target, 0, IpTablesFamily::V4, &namespace);
 
         assert_eq!(rules.len(), 4);
+        assert!(has_pair(&rules[0], "-A", "TMT_SYN_TEST"));
         assert!(has_pair(&rules[0], "--length", "64"));
         assert!(has_pair(&rules[0], "--ttl-lt", "65"));
         assert!(has_pair(&rules[0], "--hashlimit-upto", "12/second"));
@@ -314,10 +348,42 @@ mod tests {
     #[test]
     fn ip6tables_rules_use_ipv6_hoplimit_classifier() {
         let target = test_rule(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), 443);
-        let rules = iptables_synfix_rule_args(&target, 0, IpTablesFamily::V6);
+        let namespace = test_namespace();
+        let rules = iptables_synfix_rule_args(&target, 0, IpTablesFamily::V6, &namespace);
 
         assert!(has_pair(&rules[0], "--length", "84"));
         assert!(has_pair(&rules[0], "--hl-lt", "65"));
         assert!(has_pair(&rules[0], "-d", "::1"));
+    }
+
+    #[test]
+    fn iptables_missing_rule_errors_are_cleanup_benign() {
+        assert!(is_missing_command_or_iptables_rule(
+            "iptables is not available"
+        ));
+        assert!(is_missing_command_or_iptables_rule(
+            "iptables: No chain/target/match by that name."
+        ));
+        assert!(is_missing_command_or_iptables_rule(
+            "iptables: Chain TELEMT_SYNLIMIT does not exist."
+        ));
+        assert!(is_missing_command_or_iptables_rule(
+            "Couldn't load target `TELEMT_SYNLIMIT': No such file or directory"
+        ));
+        assert!(!is_missing_command_or_iptables_rule(
+            "iptables: Permission denied"
+        ));
+    }
+
+    #[test]
+    fn iptables_wildcard_rule_omits_destination_match() {
+        let target = test_rule(None, 443);
+        let namespace = test_namespace();
+        let rules = iptables_synfix_rule_args(&target, 0, IpTablesFamily::V4, &namespace);
+
+        for rule in rules {
+            assert!(!has_key(&rule, "-d"));
+            assert!(has_pair(&rule, "--dport", "443"));
+        }
     }
 }

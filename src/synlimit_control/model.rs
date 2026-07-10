@@ -17,6 +17,13 @@ pub(super) struct SynLimitRule {
     pub(super) hashlimit_size: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SynLimitNamespace {
+    pub(super) nft_table: String,
+    pub(super) iptables_chain: String,
+    pub(super) iptables_hashlimit_prefix: String,
+}
+
 #[derive(Default)]
 pub(super) struct SynLimitTargets {
     pub(super) iptables_v4: Vec<SynLimitRule>,
@@ -39,6 +46,44 @@ impl SynLimitTargets {
 
     pub(super) fn has_nft_targets(&self) -> bool {
         !self.nft_v4.is_empty() || !self.nft_v6.is_empty()
+    }
+}
+
+struct SynLimitNamespaceHasher {
+    value: u64,
+}
+
+impl SynLimitNamespaceHasher {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self {
+            value: Self::OFFSET,
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.value ^= u64::from(*byte);
+            self.value = self.value.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write(&[value]);
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn finish(self) -> u64 {
+        self.value
     }
 }
 
@@ -91,6 +136,64 @@ pub(super) fn synlimit_targets(cfg: &ProxyConfig) -> SynLimitTargets {
     }
 }
 
+pub(super) fn synlimit_namespace(targets: &SynLimitTargets) -> Option<SynLimitNamespace> {
+    if targets.is_empty() {
+        return None;
+    }
+
+    let mut hasher = SynLimitNamespaceHasher::new();
+    write_namespace_rule_group(&mut hasher, b"iptables-v4", &targets.iptables_v4);
+    write_namespace_rule_group(&mut hasher, b"iptables-v6", &targets.iptables_v6);
+    write_namespace_rule_group(&mut hasher, b"nft-v4", &targets.nft_v4);
+    write_namespace_rule_group(&mut hasher, b"nft-v6", &targets.nft_v6);
+
+    let suffix = format!("{:016x}", hasher.finish());
+    let iptables_suffix = &suffix[..12];
+    let hashlimit_suffix = &suffix[..10];
+    Some(SynLimitNamespace {
+        nft_table: format!("telemt_synlimit_{suffix}"),
+        iptables_chain: format!("TMT_SYN_{iptables_suffix}"),
+        iptables_hashlimit_prefix: format!("TMT{hashlimit_suffix}"),
+    })
+}
+
+fn write_namespace_rule_group(
+    hasher: &mut SynLimitNamespaceHasher,
+    group: &[u8],
+    rules: &[SynLimitRule],
+) {
+    hasher.write(group);
+    hasher.write_u32(rules.len() as u32);
+    for rule in rules {
+        write_namespace_rule(hasher, rule);
+    }
+}
+
+fn write_namespace_rule(hasher: &mut SynLimitNamespaceHasher, rule: &SynLimitRule) {
+    match rule.ip {
+        Some(IpAddr::V4(ip)) => {
+            hasher.write_u8(4);
+            hasher.write(&ip.octets());
+        }
+        Some(IpAddr::V6(ip)) => {
+            hasher.write_u8(6);
+            hasher.write(&ip.octets());
+        }
+        None => {
+            hasher.write_u8(0);
+        }
+    }
+    hasher.write_u16(rule.port);
+    hasher.write_u32(rule.generic_seconds);
+    hasher.write_u32(rule.generic_hitcount);
+    hasher.write_u32(rule.generic_burst);
+    hasher.write_u32(rule.ios_seconds);
+    hasher.write_u32(rule.ios_hitcount);
+    hasher.write_u32(rule.ios_burst);
+    hasher.write_u32(rule.hashlimit_expire_ms);
+    hasher.write_u32(rule.hashlimit_size);
+}
+
 pub(super) fn synlimit_rate_arg(seconds: u32, hitcount: u32) -> String {
     let seconds = u64::from(seconds.max(1));
     let hitcount = u64::from(hitcount.max(1));
@@ -122,5 +225,141 @@ pub(super) fn test_rule(ip: Option<IpAddr>, port: u16) -> SynLimitRule {
         ios_burst: 24,
         hashlimit_expire_ms: 60_000,
         hashlimit_size: 32_768,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use super::*;
+    use crate::config::ListenerConfig;
+
+    fn listener(ip: IpAddr, port: Option<u16>, synlimit: SynLimitMode) -> ListenerConfig {
+        ListenerConfig {
+            ip,
+            port,
+            client_mss: None,
+            synlimit,
+            synlimit_seconds: 60,
+            synlimit_hitcount: 48,
+            synlimit_burst: 1,
+            synlimit_ios_seconds: 1,
+            synlimit_ios_hitcount: 12,
+            synlimit_ios_burst: 24,
+            synlimit_hashlimit_expire_ms: 60_000,
+            synlimit_hashlimit_size: 32_768,
+            announce: None,
+            announce_ip: None,
+            proxy_protocol: None,
+            reuse_allow: false,
+        }
+    }
+
+    #[test]
+    fn synlimit_targets_deduplicate_and_use_legacy_port_fallback() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.port = 9443;
+        cfg.server.listeners = vec![
+            listener(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                None,
+                SynLimitMode::Iptables,
+            ),
+            listener(
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                None,
+                SynLimitMode::Iptables,
+            ),
+        ];
+
+        let targets = synlimit_targets(&cfg);
+
+        assert_eq!(targets.iptables_v4.len(), 1);
+        assert_eq!(targets.iptables_v4[0].ip, None);
+        assert_eq!(targets.iptables_v4[0].port, 9443);
+        assert!(targets.iptables_v6.is_empty());
+        assert!(targets.nft_v4.is_empty());
+        assert!(targets.nft_v6.is_empty());
+    }
+
+    #[test]
+    fn synlimit_targets_separate_backends_and_ip_families() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.listeners = vec![
+            listener(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+                Some(443),
+                SynLimitMode::Iptables,
+            ),
+            listener(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                Some(443),
+                SynLimitMode::Iptables,
+            ),
+            listener(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)),
+                Some(444),
+                SynLimitMode::Nftables,
+            ),
+            listener(
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                Some(444),
+                SynLimitMode::Nftables,
+            ),
+        ];
+
+        let targets = synlimit_targets(&cfg);
+
+        assert_eq!(targets.iptables_v4.len(), 1);
+        assert_eq!(targets.iptables_v6.len(), 1);
+        assert_eq!(targets.nft_v4.len(), 1);
+        assert_eq!(targets.nft_v6.len(), 1);
+        assert_eq!(
+            targets.iptables_v4[0].ip,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)))
+        );
+        assert_eq!(
+            targets.iptables_v6[0].ip,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+        assert_eq!(
+            targets.nft_v4[0].ip,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)))
+        );
+        assert_eq!(targets.nft_v6[0].ip, None);
+    }
+
+    #[test]
+    fn synlimit_namespace_is_stable_and_changes_by_targets() {
+        let mut cfg = ProxyConfig::default();
+        cfg.server.listeners = vec![listener(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            Some(443),
+            SynLimitMode::Nftables,
+        )];
+        let first = synlimit_namespace(&synlimit_targets(&cfg))
+            .expect("configured targets must have a namespace");
+        let second = synlimit_namespace(&synlimit_targets(&cfg))
+            .expect("configured targets must have a namespace");
+
+        cfg.server.listeners[0].port = Some(444);
+        let changed = synlimit_namespace(&synlimit_targets(&cfg))
+            .expect("configured targets must have a namespace");
+
+        assert_eq!(first, second);
+        assert_ne!(first, changed);
+        assert!(first.nft_table.starts_with("telemt_synlimit_"));
+        assert!(first.iptables_chain.starts_with("TMT_SYN_"));
+        assert!(first.iptables_chain.len() <= 28);
+        assert!(first.iptables_hashlimit_prefix.starts_with("TMT"));
+    }
+
+    #[test]
+    fn synlimit_rate_arg_uses_native_units_without_fractional_rates() {
+        assert_eq!(synlimit_rate_arg(1, 12), "12/second");
+        assert_eq!(synlimit_rate_arg(60, 48), "48/minute");
+        assert_eq!(synlimit_rate_arg(3600, 121), "121/hour");
+        assert_eq!(synlimit_rate_arg(86400, 241), "241/day");
     }
 }

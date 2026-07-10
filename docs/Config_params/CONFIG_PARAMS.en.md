@@ -3186,7 +3186,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`replay_window_secs`](#replay_window_secs) | `u64` | `120` | `✘` |
 | [`ignore_time_skew`](#ignore_time_skew) | `bool` | `false` | `✘` |
 | [`user_rate_limits`](#user_rate_limits) | `Map<String, RateLimitBps>` | `{}` | `✔` |
-| [`cidr_rate_limits`](#cidr_rate_limits) | `Map<IpNetwork, RateLimitBps>` | `{}` | `✔` |
+| [`cidr_rate_limits`](#cidr_rate_limits) | `Map<CidrRateLimitKey, RateLimitBps>` | `{}` | `✔` |
 
 ## users
   - **Constraints / validation**: Must not be empty (at least one user must exist). Each value must be **exactly 32 hex characters**.
@@ -3349,13 +3349,15 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     alice = { up_bps = 1048576, down_bps = 2097152 }
     ```
 ## cidr_rate_limits
-  - **Constraints / validation**: Table `CIDR -> { up_bps, down_bps }`. CIDR must parse as `IpNetwork`; at least one direction must be non-zero.
-  - **Description**: Source-subnet bandwidth caps applied alongside per-user limits.
+  - **Constraints / validation**: Table `CIDR or auto-template -> { up_bps, down_bps }`. Explicit CIDR keys must parse as `IpNetwork`; auto-template keys must be `*4/N` (`N=0..32`), `*6/N` (`N=0..128`), or `*/N` (`N=0..32`). At least one direction must be non-zero. Duplicate normalized auto-templates are rejected.
+  - **Description**: Source-subnet bandwidth caps applied alongside per-user limits. Explicit CIDR rules use longest-prefix-wins and take priority over auto-templates. Auto-templates create buckets lazily per matched source subnet: `*4/N` for IPv4, `*6/N` for IPv6, and `*/N` as a dual-stack shorthand where IPv4 uses `/N` and IPv6 uses `/(N * 4)`.
   - **Example**:
 
     ```toml
     [access.cidr_rate_limits]
     "203.0.113.0/24" = { up_bps = 0, down_bps = 1048576 }
+    "*4/32" = { up_bps = 262144, down_bps = 1048576 }
+    "*6/64" = { up_bps = 262144, down_bps = 1048576 }
     ```
 # [[upstreams]]
 

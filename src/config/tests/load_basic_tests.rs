@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::CidrRateLimitKey;
 
 const TEST_SHADOWSOCKS_URL: &str =
     "ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=@127.0.0.1:8388";
@@ -317,6 +318,80 @@ fn logging_config_is_loaded_from_strict_config() {
     assert_eq!(cfg.logging.max_size_bytes, 1024);
     assert_eq!(cfg.logging.max_files, 3);
     assert_eq!(cfg.logging.max_age_secs, 60);
+}
+
+#[test]
+fn cidr_rate_limits_accept_auto_templates_in_strict_config() {
+    let cfg = load_config_from_temp_toml(
+        r#"
+            [general]
+            config_strict = true
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.cidr_rate_limits]
+            "*/24" = { up_bps = 1024, down_bps = 0 }
+            "*4/30" = { up_bps = 0, down_bps = 2048 }
+            "*6/64" = { up_bps = 4096, down_bps = 0 }
+        "#,
+    );
+
+    assert!(
+        cfg.access
+            .cidr_rate_limits
+            .contains_key(&CidrRateLimitKey::AutoDual(24))
+    );
+    assert!(
+        cfg.access
+            .cidr_rate_limits
+            .contains_key(&CidrRateLimitKey::AutoV4(30))
+    );
+    assert!(
+        cfg.access
+            .cidr_rate_limits
+            .contains_key(&CidrRateLimitKey::AutoV6(64))
+    );
+}
+
+#[test]
+fn cidr_rate_limits_reject_invalid_auto_template_prefix() {
+    let error = load_config_error_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.cidr_rate_limits]
+            "*4/33" = { up_bps = 1024, down_bps = 0 }
+        "#,
+    );
+
+    assert!(error.contains("prefix must be within 0..=32"));
+}
+
+#[test]
+fn cidr_rate_limits_reject_duplicate_normalized_auto_templates() {
+    let error = load_config_error_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [access.cidr_rate_limits]
+            "*/32" = { up_bps = 1024, down_bps = 0 }
+            "*6/128" = { up_bps = 2048, down_bps = 0 }
+        "#,
+    );
+
+    assert!(error.contains("duplicates normalized auto-template *6/128"));
 }
 
 #[test]
@@ -1652,6 +1727,7 @@ fn client_mss_custom_value_is_accepted() {
     let toml = r#"
         [server]
         client_mss = "4096"
+        client_mss_bulk = "1400"
 
         [censorship]
         tls_domain = "example.com"
@@ -1665,6 +1741,7 @@ fn client_mss_custom_value_is_accepted() {
     let cfg = ProxyConfig::load(&path).unwrap();
 
     assert_eq!(cfg.server.client_mss_value(), Ok(Some(4096)));
+    assert_eq!(cfg.server.client_mss_bulk_value(), Ok(Some(1400)));
     let _ = std::fs::remove_file(path);
 }
 
@@ -1689,6 +1766,33 @@ fn client_mss_out_of_range_is_rejected() {
         let err = ProxyConfig::load(&path).unwrap_err().to_string();
 
         assert!(err.contains("server.client_mss custom value must be within [88, 4096]"));
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
+fn client_mss_bulk_out_of_range_is_rejected() {
+    for value in ["87", "4097"] {
+        let toml = format!(
+            r#"
+            [server]
+            client_mss_bulk = "{value}"
+
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+        "#
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "telemt_client_mss_bulk_out_of_range_{value}_test.toml"
+        ));
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains("server.client_mss_bulk custom value must be within [88, 4096]"));
         let _ = std::fs::remove_file(path);
     }
 }

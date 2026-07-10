@@ -10,7 +10,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use ipnetwork::IpNetwork;
 
-use crate::config::RateLimitBps;
+use crate::config::{CidrRateLimitKey, RateLimitBps};
 
 const REGISTRY_SHARDS: usize = 64;
 const FAIR_EPOCH_MS: u64 = 20;
@@ -413,16 +413,29 @@ struct CidrRule {
     prefix_len: u8,
 }
 
+#[derive(Clone, Copy)]
+struct CidrAutoRule {
+    prefix_len: u8,
+    limits: RateLimitBps,
+}
+
+enum CidrPolicyMatch<'a> {
+    Explicit(&'a CidrRule),
+    Auto { key: String, limits: RateLimitBps },
+}
+
 #[derive(Default)]
 struct PolicySnapshot {
     user_limits: HashMap<String, RateLimitBps>,
     cidr_rules_v4: Vec<CidrRule>,
     cidr_rules_v6: Vec<CidrRule>,
+    cidr_auto_rules_v4: Vec<CidrAutoRule>,
+    cidr_auto_rules_v6: Vec<CidrAutoRule>,
     cidr_rule_keys: HashSet<String>,
 }
 
 impl PolicySnapshot {
-    fn match_cidr(&self, ip: IpAddr) -> Option<&CidrRule> {
+    fn match_cidr(&self, ip: IpAddr) -> Option<CidrPolicyMatch<'_>> {
         match ip {
             IpAddr::V4(_) => self
                 .cidr_rules_v4
@@ -433,6 +446,20 @@ impl PolicySnapshot {
                 .iter()
                 .find(|rule| rule.cidr.contains(ip)),
         }
+        .map(CidrPolicyMatch::Explicit)
+        .or_else(|| self.match_auto_cidr(ip))
+    }
+
+    fn match_auto_cidr(&self, ip: IpAddr) -> Option<CidrPolicyMatch<'_>> {
+        let rule = match ip {
+            IpAddr::V4(_) => self.cidr_auto_rules_v4.first()?,
+            IpAddr::V6(_) => self.cidr_auto_rules_v6.first()?,
+        };
+        let key = auto_cidr_bucket_key(ip, rule.prefix_len)?;
+        Some(CidrPolicyMatch::Auto {
+            key,
+            limits: rule.limits,
+        })
     }
 }
 
@@ -633,7 +660,7 @@ impl TrafficLimiter {
     pub fn apply_policy(
         &self,
         user_limits: HashMap<String, RateLimitBps>,
-        cidr_limits: HashMap<IpNetwork, RateLimitBps>,
+        cidr_limits: HashMap<CidrRateLimitKey, RateLimitBps>,
     ) {
         let filtered_users = user_limits
             .into_iter()
@@ -642,39 +669,64 @@ impl TrafficLimiter {
 
         let mut cidr_rules_v4 = Vec::new();
         let mut cidr_rules_v6 = Vec::new();
+        let mut cidr_auto_rules_v4 = Vec::new();
+        let mut cidr_auto_rules_v6 = Vec::new();
         let mut cidr_rule_keys = HashSet::new();
-        for (cidr, limits) in cidr_limits {
+        for (key, limits) in cidr_limits {
             if limits.up_bps == 0 && limits.down_bps == 0 {
                 continue;
             }
-            let key = cidr.to_string();
-            let rule = CidrRule {
-                key: key.clone(),
-                cidr,
-                limits,
-                prefix_len: cidr.prefix(),
-            };
-            cidr_rule_keys.insert(key);
-            match rule.cidr {
-                IpNetwork::V4(_) => cidr_rules_v4.push(rule),
-                IpNetwork::V6(_) => cidr_rules_v6.push(rule),
+            match key {
+                CidrRateLimitKey::Network(cidr) => {
+                    let key = cidr.to_string();
+                    let rule = CidrRule {
+                        key: key.clone(),
+                        cidr,
+                        limits,
+                        prefix_len: cidr.prefix(),
+                    };
+                    cidr_rule_keys.insert(key);
+                    match rule.cidr {
+                        IpNetwork::V4(_) => cidr_rules_v4.push(rule),
+                        IpNetwork::V6(_) => cidr_rules_v6.push(rule),
+                    }
+                }
+                CidrRateLimitKey::AutoV4(prefix_len) => {
+                    cidr_auto_rules_v4.push(CidrAutoRule { prefix_len, limits });
+                }
+                CidrRateLimitKey::AutoV6(prefix_len) => {
+                    cidr_auto_rules_v6.push(CidrAutoRule { prefix_len, limits });
+                }
+                CidrRateLimitKey::AutoDual(prefix_len) => {
+                    cidr_auto_rules_v4.push(CidrAutoRule { prefix_len, limits });
+                    cidr_auto_rules_v6.push(CidrAutoRule {
+                        prefix_len: prefix_len.saturating_mul(4),
+                        limits,
+                    });
+                }
             }
         }
 
         cidr_rules_v4.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
         cidr_rules_v6.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        cidr_auto_rules_v4.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        cidr_auto_rules_v6.sort_by(|a, b| b.prefix_len.cmp(&a.prefix_len));
+        let cidr_policy_entries =
+            cidr_rule_keys.len() + cidr_auto_rules_v4.len() + cidr_auto_rules_v6.len();
 
         self.user_scope
             .policy_entries
             .store(filtered_users.len() as u64, Ordering::Relaxed);
         self.cidr_scope
             .policy_entries
-            .store(cidr_rule_keys.len() as u64, Ordering::Relaxed);
+            .store(cidr_policy_entries as u64, Ordering::Relaxed);
 
         self.policy.store(Arc::new(PolicySnapshot {
             user_limits: filtered_users,
             cidr_rules_v4,
             cidr_rules_v6,
+            cidr_auto_rules_v4,
+            cidr_auto_rules_v6,
             cidr_rule_keys,
         }));
 
@@ -703,11 +755,15 @@ impl TrafficLimiter {
         let mut cidr_bucket = None;
         let mut cidr_user_key = None;
         let mut cidr_user_share = None;
-        if let Some(rule) = policy.match_cidr(client_ip) {
+        if let Some(rule_match) = policy.match_cidr(client_ip) {
+            let (key, limits) = match &rule_match {
+                CidrPolicyMatch::Explicit(rule) => (rule.key.as_str(), rule.limits),
+                CidrPolicyMatch::Auto { key, limits } => (key.as_str(), *limits),
+            };
             let bucket = self
                 .cidr_buckets
-                .get_or_insert_with(rule.key.as_str(), || CidrBucket::new(rule.limits));
-            bucket.set_rates(rule.limits);
+                .get_or_insert_with(key, || CidrBucket::new(limits));
+            bucket.set_rates(limits);
             bucket.active_leases.fetch_add(1, Ordering::Relaxed);
             self.cidr_scope
                 .active_leases
@@ -841,6 +897,16 @@ fn bytes_per_epoch(bps: u64) -> u64 {
     bytes.max(1)
 }
 
+fn auto_cidr_bucket_key(ip: IpAddr, prefix_len: u8) -> Option<String> {
+    let cidr = IpNetwork::new(ip, prefix_len).ok()?;
+    let network = IpNetwork::new(cidr.network(), prefix_len).ok()?;
+    let family = match network {
+        IpNetwork::V4(_) => "4",
+        IpNetwork::V6(_) => "6",
+    };
+    Some(format!("auto:{family}:{network}"))
+}
+
 fn current_epoch() -> u64 {
     let start = limiter_epoch_start();
     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -850,4 +916,83 @@ fn current_epoch() -> u64 {
 fn limiter_epoch_start() -> &'static Instant {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rate(up_bps: u64, down_bps: u64) -> RateLimitBps {
+        RateLimitBps { up_bps, down_bps }
+    }
+
+    #[test]
+    fn explicit_cidr_rule_wins_over_auto_template() {
+        let limiter = TrafficLimiter::new();
+        let mut cidr_limits = HashMap::new();
+        cidr_limits.insert(CidrRateLimitKey::AutoV4(24), rate(1_000, 0));
+        cidr_limits.insert(
+            CidrRateLimitKey::Network("203.0.113.7/32".parse().unwrap()),
+            rate(2_000, 0),
+        );
+
+        limiter.apply_policy(HashMap::new(), cidr_limits);
+        let policy = limiter.policy.load_full();
+        let matched = policy.match_cidr("203.0.113.7".parse().unwrap()).unwrap();
+
+        match matched {
+            CidrPolicyMatch::Explicit(rule) => assert_eq!(rule.key.as_str(), "203.0.113.7/32"),
+            CidrPolicyMatch::Auto { .. } => panic!("explicit CIDR must have priority"),
+        }
+    }
+
+    #[test]
+    fn auto_template_uses_longest_prefix() {
+        let limiter = TrafficLimiter::new();
+        let mut cidr_limits = HashMap::new();
+        cidr_limits.insert(CidrRateLimitKey::AutoV4(24), rate(1_000, 0));
+        cidr_limits.insert(CidrRateLimitKey::AutoV4(32), rate(2_000, 0));
+
+        limiter.apply_policy(HashMap::new(), cidr_limits);
+        let policy = limiter.policy.load_full();
+        let matched = policy.match_cidr("203.0.113.129".parse().unwrap()).unwrap();
+
+        match matched {
+            CidrPolicyMatch::Auto { key, limits } => {
+                assert_eq!(key, "auto:4:203.0.113.129/32");
+                assert_eq!(limits.up_bps, 2_000);
+            }
+            CidrPolicyMatch::Explicit(_) => panic!("auto-template match expected"),
+        }
+    }
+
+    #[test]
+    fn dual_auto_template_maps_v6_prefix_by_four() {
+        let limiter = TrafficLimiter::new();
+        let mut cidr_limits = HashMap::new();
+        cidr_limits.insert(CidrRateLimitKey::AutoDual(32), rate(1_000, 0));
+
+        limiter.apply_policy(HashMap::new(), cidr_limits);
+        let policy = limiter.policy.load_full();
+        let matched = policy.match_cidr("2001:db8::1".parse().unwrap()).unwrap();
+
+        match matched {
+            CidrPolicyMatch::Auto { key, .. } => {
+                assert_eq!(key, "auto:6:2001:db8::1/128");
+            }
+            CidrPolicyMatch::Explicit(_) => panic!("auto-template match expected"),
+        }
+    }
+
+    #[test]
+    fn auto_cidr_bucket_key_canonicalizes_network_address() {
+        assert_eq!(
+            auto_cidr_bucket_key("203.0.113.129".parse().unwrap(), 24).unwrap(),
+            "auto:4:203.0.113.0/24"
+        );
+        assert_eq!(
+            auto_cidr_bucket_key("2001:db8::abcd".parse().unwrap(), 64).unwrap(),
+            "auto:6:2001:db8::/64"
+        );
+    }
 }
