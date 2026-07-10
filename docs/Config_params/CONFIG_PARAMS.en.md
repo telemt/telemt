@@ -1971,7 +1971,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## client_mss
   - **Constraints / validation**: `String`. Empty or omitted means do not change kernel MSS. Presets: `"extreme-low"` = `88`, `"tspu"` = `92`, `"2in8"` = `256`. Custom decimal strings must be within `88..=4096`.
-  - **Description**: Client-facing TCP MSS applied to TCP listener sockets before `listen(2)`, so Linux can announce it in SYN/ACK. This affects only proxy client TCP listeners, not API, metrics, Unix sockets, Telegram upstreams, ME sockets, or mask backend connections. Changes require listener restart/rebind.
+  - **Description**: Controls the segment size used for client connections. By default, this value is applied to the TCP listener and remains active for the whole connection. When `client_mss_bulk` is also set on Linux, `client_mss` is used only as the maximum chunk size for the initial authenticated FakeTLS response (`ServerHello`). This setting does not affect API, metrics, Unix sockets, Telegram upstreams, ME sockets, or mask backend connections. Changes require a listener restart/rebind.
   - **Operator note**: The two-tier `synlimit` profile does not require Telemt to disable MSS automatically. Operators that follow external host-tuning recipes should decide explicitly whether to leave MSS shaping enabled for handshake fragmentation or disable it for higher media throughput.
   - **Performance note**: Low MSS increases packet count predictably. Approximate segment multiplier is `ceil(1460 / client_mss)`.
   - **Example**:
@@ -1982,7 +1982,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## client_mss_bulk
   - **Constraints / validation**: `String`. Same grammar as [`client_mss`](#client_mss) (empty/omitted, presets `"extreme-low"`/`"tspu"`/`"2in8"`, or a decimal in `88..=4096`).
-  - **Description**: Optional bulk-phase MSS. When set, the low `client_mss` is applied only while the TLS handshake (including the DPI-inspected ServerHello) is sent; once the connection transitions to relaying, the client socket MSS is raised to `client_mss_bulk` for the bulk data phase. This keeps the anti-DPI handshake fragmentation but restores normal-size packets for payload, cutting outgoing packets-per-second by roughly the `client_mss` segment multiplier (e.g. ~10x with `"tspu"`). Useful on hosts whose abuse detection counts packets-per-second rather than bandwidth. When empty/omitted, the handshake MSS is kept for the whole connection (previous behavior). Linux only; a no-op elsewhere.
+  - **Description**: Enables separated MSS handling for `ServerHello` and for all other packets. The listener uses `client_mss_bulk` from the start of the connection, including when the client sends `ClientHello`. Telemt sends the initial authenticated FakeTLS response (`ServerHello`) in chunks no larger than `client_mss`. Normal MTProto traffic then continues with `client_mss_bulk`, without changing MSS on an established connection. This keeps the smaller `ServerHello` chunks while avoiding small segments for all later traffic. When this option is empty or omitted, `client_mss` applies to the whole connection. **Linux-only**.
   - **Example**:
 
     ```toml

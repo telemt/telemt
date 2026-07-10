@@ -125,36 +125,96 @@ pub fn clear_linger_fd(fd: std::os::unix::io::RawFd) -> Result<()> {
     Ok(())
 }
 
-/// Raise the TCP MSS on an already-accepted connection's fd. Used to fragment
-/// ONLY the TLS handshake (via a low listener MSS) and then restore a normal MSS
-/// for the bulk (post-handshake) data phase — cuts packets-per-second ~10x without losing the
-/// DPI evasion that the fragmented ServerHello provides. No-op safe: errors are
-/// returned to the caller, which logs and continues with the handshake MSS.
 #[cfg(target_os = "linux")]
-pub fn set_tcp_mss_fd(fd: std::os::unix::io::RawFd, mss: u32) -> Result<()> {
-    use std::io::Error;
-    let mss = i32::try_from(mss)
-        .map_err(|_| Error::new(std::io::ErrorKind::InvalidInput, "bulk MSS out of range"))?;
-    // Direct setsockopt(TCP_MAXSEG) — same pattern as the TCP_USER_TIMEOUT call
-    // above; avoids socket2 method-name drift across versions.
+fn force_tcp_push(fd: std::os::unix::io::RawFd) -> Result<()> {
+    let enabled: libc::c_int = 1;
     let rc = unsafe {
         libc::setsockopt(
             fd,
             libc::IPPROTO_TCP,
-            libc::TCP_MAXSEG,
-            &mss as *const libc::c_int as *const libc::c_void,
+            libc::TCP_NODELAY,
+            &enabled as *const libc::c_int as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
     if rc != 0 {
-        return Err(Error::last_os_error());
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
 
-/// Non-Linux stub: MSS shaping only on Linux (TCP_MAXSEG).
-#[cfg(all(unix, not(target_os = "linux")))]
-pub fn set_tcp_mss_fd(_fd: std::os::unix::io::RawFd, _mss: u32) -> Result<()> {
+/// Sends an initial TCP response in collapse-resistant segments on Linux.
+///
+/// `fd` must refer to a connected, nonblocking TCP socket and remain valid for
+/// the duration of this call. The caller retains ownership of the original fd.
+/// Each successful `send(2)` is marked with `MSG_EOR`; Linux preserves that mark
+/// when deciding whether adjacent SKBs may be collapsed, including retransmits.
+/// Re-applying `TCP_NODELAY` forces each marked SKB out despite auto-corking.
+#[cfg(target_os = "linux")]
+pub(crate) async fn send_tcp_fragmented_fd(
+    fd: std::os::unix::io::RawFd,
+    data: &[u8],
+    fragment_size: usize,
+) -> Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::os::fd::{AsRawFd, BorrowedFd};
+    use tokio::io::Interest;
+    use tokio::io::unix::AsyncFd;
+
+    if fragment_size == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "TCP fragment size must be greater than zero",
+        ));
+    }
+    if data.is_empty() {
+        return Ok(());
+    }
+    if fd < 0 {
+        return Err(Error::from_raw_os_error(libc::EBADF));
+    }
+
+    // SAFETY: the caller guarantees that fd remains open for this call.
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    let duplicated_fd = borrowed_fd.try_clone_to_owned()?;
+    let async_fd = AsyncFd::with_interest(duplicated_fd, Interest::WRITABLE)?;
+
+    for fragment in data.chunks(fragment_size) {
+        let mut offset = 0;
+        while offset < fragment.len() {
+            let mut writable = async_fd.writable().await?;
+            let sent = match writable.try_io(|inner| {
+                let remaining = &fragment[offset..];
+                let sent = unsafe {
+                    libc::send(
+                        inner.get_ref().as_raw_fd(),
+                        remaining.as_ptr().cast::<libc::c_void>(),
+                        remaining.len(),
+                        libc::MSG_DONTWAIT | libc::MSG_EOR | libc::MSG_NOSIGNAL,
+                    )
+                };
+                if sent < 0 {
+                    Err(Error::last_os_error())
+                } else if sent == 0 {
+                    Err(Error::new(
+                        ErrorKind::WriteZero,
+                        "fragmented TCP send returned zero",
+                    ))
+                } else {
+                    Ok(sent as usize)
+                }
+            }) {
+                Ok(Ok(sent)) => sent,
+                Ok(Err(error)) if error.kind() == ErrorKind::Interrupted => continue,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => continue,
+            };
+
+            offset += sent;
+            force_tcp_push(async_fd.get_ref().as_raw_fd())?;
+        }
+    }
+
     Ok(())
 }
 
@@ -709,5 +769,73 @@ mod tests {
             Err(e) => panic!("tcp_mss failed: {e}"),
         };
         assert_eq!(mss, 256);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_chunked_send_preserves_stream_and_configured_mss() {
+        use std::os::fd::AsRawFd;
+
+        let options = ListenOptions {
+            reuse_port: false,
+            client_mss: Some(1400),
+            ..Default::default()
+        };
+        let socket = match create_listener("127.0.0.1:0".parse().unwrap(), &options) {
+            Ok(socket) => socket,
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("create_listener failed: {e}"),
+        };
+        let listener = TcpListener::from_std(socket.into()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+
+        let initial_response: Vec<u8> = (0..4096).map(|value| (value % 251) as u8).collect();
+        let bulk_payload = vec![0xA5; 8192];
+        let expected_len = initial_response.len() + bulk_payload.len();
+        let reader = tokio::spawn(async move {
+            let mut client = client;
+            let mut received = vec![0; expected_len];
+            client.read_exact(&mut received).await.unwrap();
+            received
+        });
+
+        let mss_before = socket2::SockRef::from(&server).tcp_mss().unwrap();
+        send_tcp_fragmented_fd(server.as_raw_fd(), &initial_response, 92)
+            .await
+            .unwrap();
+        server.write_all(&bulk_payload).await.unwrap();
+        let mss_after = socket2::SockRef::from(&server).tcp_mss().unwrap();
+
+        let mut expected = initial_response;
+        expected.extend_from_slice(&bulk_payload);
+        assert_eq!(
+            reader.await.unwrap(),
+            expected,
+            "chunked send must preserve the byte stream"
+        );
+        assert_eq!(
+            mss_after, mss_before,
+            "chunked send must not change the configured socket MSS"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_chunked_send_rejects_zero_fragment_size() {
+        let error = send_tcp_fragmented_fd(-1, b"response", 0)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_chunked_send_rejects_invalid_fd() {
+        let error = send_tcp_fragmented_fd(-1, b"response", 92)
+            .await
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
     }
 }

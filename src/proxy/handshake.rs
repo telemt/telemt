@@ -59,6 +59,26 @@ const OVERLOAD_CANDIDATE_BUDGET_UNHINTED: usize = 8;
 const EXPENSIVE_INVALID_SCAN_SATURATION_THRESHOLD: usize = 64;
 const RECENT_USER_RING_SCAN_LIMIT: usize = 32;
 
+/// Controls how the authenticated FakeTLS response is written to a client.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct TlsResponseWriteOptions {
+    #[cfg(target_os = "linux")]
+    socket_fd: Option<std::os::unix::io::RawFd>,
+    #[cfg(target_os = "linux")]
+    fragment_size: Option<u16>,
+}
+
+impl TlsResponseWriteOptions {
+    /// Creates Linux TCP response fragmentation options for an accepted socket.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn tcp(fd: std::os::unix::io::RawFd, fragment_size: Option<u16>) -> Self {
+        Self {
+            socket_fd: fragment_size.map(|_| fd),
+            fragment_size,
+        }
+    }
+}
+
 #[cfg(test)]
 const AUTH_PROBE_BACKOFF_BASE_MS: u64 = 1;
 #[cfg(not(test))]
@@ -925,6 +945,7 @@ where
         rng,
         tls_cache,
         shared.as_ref(),
+        TlsResponseWriteOptions::default(),
     )
     .await
 }
@@ -954,6 +975,39 @@ where
         rng,
         tls_cache,
         shared,
+        TlsResponseWriteOptions::default(),
+    )
+    .await
+}
+
+/// Handles FakeTLS with optional initial-response fragmentation on a TCP socket.
+pub(crate) async fn handle_tls_handshake_with_shared_and_options<R, W>(
+    handshake: &[u8],
+    reader: R,
+    writer: W,
+    peer: SocketAddr,
+    config: &ProxyConfig,
+    replay_checker: &ReplayChecker,
+    rng: &SecureRandom,
+    tls_cache: Option<Arc<TlsFrontCache>>,
+    shared: &ProxySharedState,
+    response_write_options: TlsResponseWriteOptions,
+) -> HandshakeResult<(FakeTlsReader<R>, FakeTlsWriter<W>, String), R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    handle_tls_handshake_impl(
+        handshake,
+        reader,
+        writer,
+        peer,
+        config,
+        replay_checker,
+        rng,
+        tls_cache,
+        shared,
+        response_write_options,
     )
     .await
 }
@@ -968,6 +1022,7 @@ async fn handle_tls_handshake_impl<R, W>(
     rng: &SecureRandom,
     tls_cache: Option<Arc<TlsFrontCache>>,
     shared: &ProxySharedState,
+    response_write_options: TlsResponseWriteOptions,
 ) -> HandshakeResult<(FakeTlsReader<R>, FakeTlsWriter<W>, String), R, W>
 where
     R: AsyncRead + Unpin,
@@ -1468,13 +1523,8 @@ where
 
     debug!(peer = %peer, response_len = response.len(), "Sending TLS ServerHello");
 
-    if let Err(e) = writer.write_all(&response).await {
+    if let Err(e) = write_tls_response(&mut writer, &response, response_write_options).await {
         warn!(peer = %peer, error = %e, "Failed to write TLS ServerHello");
-        return HandshakeResult::Error(ProxyError::Io(e));
-    }
-
-    if let Err(e) = writer.flush().await {
-        warn!(peer = %peer, error = %e, "Failed to flush TLS ServerHello");
         return HandshakeResult::Error(ProxyError::Io(e));
     }
 
@@ -1496,6 +1546,26 @@ where
         FakeTlsWriter::new(writer),
         validated_user,
     ))
+}
+
+async fn write_tls_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    response: &[u8],
+    options: TlsResponseWriteOptions,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let (Some(fd), Some(fragment_size)) = (options.socket_fd, options.fragment_size) {
+        return crate::transport::socket::send_tcp_fragmented_fd(
+            fd,
+            response,
+            usize::from(fragment_size),
+        )
+        .await;
+    }
+
+    let _ = options;
+    writer.write_all(response).await?;
+    writer.flush().await
 }
 
 /// Handle MTProto obfuscation handshake
