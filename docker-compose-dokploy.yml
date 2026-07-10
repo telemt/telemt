@@ -1,0 +1,71 @@
+# Dokploy-ready compose file.
+#
+# MTProto is not HTTP, so Traefik (HTTP reverse proxy) cannot route it.
+# Dokploy's Traefik is configured with HTTP TLS termination on port 443,
+# which conflicts with MTProto's TLS passthrough requirement.
+#
+# Solution: publish a dedicated port (8443) directly from the container,
+# bypassing Traefik entirely for MTProto traffic. Port 443 stays with
+# Traefik for other HTTP services on the server.
+#
+# Set TELEMT_GENERAL__LINKS__PUBLIC_PORT=8443 in your Dokploy env vars
+# so generated share links use the correct public port.
+#
+# Metrics and API endpoints remain internal (expose only, no public ports).
+# To access them, use `docker exec` or uncomment the ports below.
+#
+# All env vars are documented in .env.example. Set them in the Dokploy UI
+# environment section, not in this file.
+
+services:
+  telemt:
+    image: ghcr.io/telemt/telemt:latest
+    build:
+      context: .
+      target: prod
+    restart: unless-stopped
+    ports:
+      - "${PROXY_PUBLIC_PORT:-8443}:443"
+    expose:
+      - "9090"
+      - "9091"
+    working_dir: /run/telemt
+    command: ["/app/config.toml"]
+    # volumes:
+    #   - ./config:/etc/telemt:rw
+    tmpfs:
+      - /run/telemt:rw,mode=1777,size=4m
+    # env_file passes all vars from Dokploy's .env (TELEMT_*, RUST_LOG, etc.)
+    # to the container. environment below provides defaults for RUST_LOG.
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    healthcheck:
+      test: [ "CMD", "/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 262144
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true

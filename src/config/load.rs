@@ -5,6 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use figment::providers::Format;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -44,6 +45,118 @@ const MAX_ME_C2ME_CHANNEL_CAPACITY: usize = 8_192;
 const MIN_MAX_CLIENT_FRAME_BYTES: usize = 4 * 1024;
 const MAX_MAX_CLIENT_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_API_REQUEST_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+
+// Applies TELEMT_-prefixed environment variables to the parsed TOML config.
+// Figment's Env provider creates uppercase keys that don't match lowercase
+// TOML keys when extracting to toml::Value, so we override manually.
+fn apply_telemt_env_overrides(toml: &mut toml::Value) {
+    for (key, value) in std::env::vars() {
+        let Some(rest) = key.strip_prefix("TELEMT_") else {
+            continue;
+        };
+        let segments: Vec<&str> = rest.split("__").collect();
+        if segments.is_empty() {
+            continue;
+        }
+        let path: Vec<String> = segments
+            .iter()
+            .enumerate()
+            .map(|(i, seg)| {
+                if is_map_key_position(&segments[..i]) {
+                    seg.to_string()
+                } else {
+                    seg.to_lowercase()
+                }
+            })
+            .collect();
+        set_nested_toml_value(toml, &path, &value);
+    }
+}
+
+fn is_map_key_position(prefix: &[&str]) -> bool {
+    match prefix {
+        [a, b] => {
+            a.eq_ignore_ascii_case("access")
+                && (b.eq_ignore_ascii_case("users")
+                    || b.eq_ignore_ascii_case("user_ad_tags"))
+        }
+        _ => false,
+    }
+}
+
+// Recursively sets a value in a nested TOML table, inferring the type from
+// the existing value when present (bool, integer, or string fallback).
+fn set_nested_toml_value(root: &mut toml::Value, path: &[String], raw_value: &str) {
+    if path.is_empty() || !root.is_table() {
+        return;
+    }
+    let table = root.as_table_mut().unwrap();
+    if path.len() == 1 {
+        let coerced = match table.get(&path[0]) {
+            Some(toml::Value::Boolean(_)) => match raw_value.parse::<bool>() {
+                Ok(b) => toml::Value::Boolean(b),
+                Err(_) => toml::Value::String(raw_value.to_string()),
+            },
+            Some(toml::Value::Integer(_)) => match raw_value.parse::<i64>() {
+                Ok(i) => toml::Value::Integer(i),
+                Err(_) => toml::Value::String(raw_value.to_string()),
+            },
+            Some(toml::Value::Float(_)) => match raw_value.parse::<f64>() {
+                Ok(f) => toml::Value::Float(f),
+                Err(_) => toml::Value::String(raw_value.to_string()),
+            },
+            None => {
+                if let Ok(i) = raw_value.parse::<i64>() {
+                    toml::Value::Integer(i)
+                } else if let Ok(b) = raw_value.parse::<bool>() {
+                    toml::Value::Boolean(b)
+                } else {
+                    toml::Value::String(raw_value.to_string())
+                }
+            }
+            _ => toml::Value::String(raw_value.to_string()),
+        };
+        table.insert(path[0].clone(), coerced);
+    } else {
+        let entry = table
+            .entry(path[0].clone())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        set_nested_toml_value(entry, &path[1..], raw_value);
+    }
+}
+
+/// Precomputed per-user and global ad_tag bytes for the middle-proxy hot path.
+///
+/// Decoding happens once at config load and on hot-reload via
+/// [`ProxyConfig::rebuild_runtime_ad_tags`], so per-session relay setup performs
+/// a cache lookup instead of repeated `hex::decode` allocations.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AdTagCache {
+    global: Option<[u8; 16]>,
+    per_user: HashMap<String, [u8; 16]>,
+}
+
+impl AdTagCache {
+    fn decode_tag(tag: &str) -> Option<[u8; 16]> {
+        let bytes = hex::decode(tag).ok()?;
+        <[u8; 16]>::try_from(bytes.as_slice()).ok()
+    }
+
+    fn build(global_ad_tag: &Option<String>, user_ad_tags: &HashMap<String, String>) -> Self {
+        let global = global_ad_tag.as_deref().and_then(Self::decode_tag);
+        let mut per_user = HashMap::with_capacity(user_ad_tags.len());
+        for (user, tag) in user_ad_tags {
+            if let Some(decoded) = Self::decode_tag(tag) {
+                per_user.insert(user.clone(), decoded);
+            }
+        }
+        Self { global, per_user }
+    }
+
+    pub(crate) fn effective(&self, user: &str) -> Option<[u8; 16]> {
+        self.per_user.get(user).copied().or(self.global)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoadedConfig {
@@ -109,6 +222,10 @@ pub struct ProxyConfig {
     /// Precomputed authentication snapshot for handshake hot paths.
     #[serde(skip)]
     pub(crate) runtime_user_auth: Option<Arc<UserAuthSnapshot>>,
+
+    /// Precomputed ad_tag cache for middle-relay hot paths.
+    #[serde(skip)]
+    pub(crate) runtime_ad_tags: Option<Arc<AdTagCache>>,
 }
 
 impl ProxyConfig {
@@ -126,8 +243,11 @@ impl ProxyConfig {
         source_files.insert(normalize_config_path(path));
         let processed = preprocess_includes(&content, base_dir, 0, &mut source_files)?;
 
-        let parsed_toml: toml::Value =
-            toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
+        let mut parsed_toml: toml::Value = figment::Figment::new()
+            .merge(figment::providers::Toml::string(&processed))
+            .extract()
+            .map_err(|e| ProxyError::Config(e.to_string()))?;
+        apply_telemt_env_overrides(&mut parsed_toml);
         handle_unknown_config_keys(&parsed_toml)?;
         let general_table = parsed_toml
             .get("general")
@@ -1345,6 +1465,7 @@ impl ProxyConfig {
 
         validate_logging_config(&config.logging)?;
         validate_upstreams(&config)?;
+        config.rebuild_runtime_ad_tags();
         config.rebuild_runtime_user_auth()?;
 
         Ok(LoadedConfig {
@@ -1362,6 +1483,28 @@ impl ProxyConfig {
 
     pub(crate) fn runtime_user_auth(&self) -> Option<&UserAuthSnapshot> {
         self.runtime_user_auth.as_deref()
+    }
+
+    /// Rebuilds the precomputed ad_tag cache from the current `general.ad_tag`
+    /// and `access.user_ad_tags`. Invoked at load and on hot-reload.
+    pub(crate) fn rebuild_runtime_ad_tags(&mut self) {
+        let cache = AdTagCache::build(&self.general.ad_tag, &self.access.user_ad_tags);
+        self.runtime_ad_tags = Some(Arc::new(cache));
+    }
+
+    /// Returns the effective ad_tag bytes for `user` from the precomputed cache.
+    ///
+    /// Falls back to decoding on demand if the runtime cache is absent (e.g. in tests).
+    pub(crate) fn effective_ad_tag(&self, user: &str) -> Option<[u8; 16]> {
+        match self.runtime_ad_tags.as_deref() {
+            Some(cache) => cache.effective(user),
+            None => self
+                .access
+                .user_ad_tags
+                .get(user)
+                .and_then(|tag| AdTagCache::decode_tag(tag))
+                .or_else(|| self.general.ad_tag.as_deref().and_then(AdTagCache::decode_tag)),
+        }
     }
 
     /// Validates cross-field configuration invariants after deserialization.
