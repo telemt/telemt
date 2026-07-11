@@ -4,12 +4,12 @@
 //!
 //! ## Zeroize policy
 //!
-//! - `AesCbc` stores raw key/IV bytes and zeroizes them on drop.
-//! - `AesCtr` wraps an opaque `Aes256Ctr` cipher from the `ctr` crate.
-//!   The expanded key schedule lives inside that type and cannot be
-//!   zeroized from outside. Callers that hold raw key material (e.g.
-//!   `HandshakeSuccess`, `ObfuscationParams`) are responsible for
-//!   zeroizing their own copies.
+//! - `AesCbc` stores raw key/IV bytes and zeroizes them on drop. Temporary
+//!   expanded key schedules are also zeroized by the RustCrypto backend.
+//! - `AesCtr` uses the RustCrypto `zeroize` contract to clear its expanded
+//!   key schedule, counter, and buffered keystream on drop.
+//! - Callers that hold raw key material (e.g. `HandshakeSuccess`,
+//!   `ObfuscationParams`) remain responsible for zeroizing their own copies.
 
 #![allow(dead_code)]
 
@@ -19,9 +19,12 @@ use ctr::{
     Ctr128BE,
     cipher::{KeyIvInit, StreamCipher},
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type Aes256Ctr = Ctr128BE<Aes256>;
+
+static_assertions::assert_impl_all!(Aes256: ZeroizeOnDrop);
+static_assertions::assert_impl_all!(Aes256Ctr: ZeroizeOnDrop);
 
 // ============= AES-256-CTR =============
 
@@ -29,13 +32,14 @@ type Aes256Ctr = Ctr128BE<Aes256>;
 ///
 /// CTR mode is symmetric — encryption and decryption are the same operation.
 ///
-/// **Zeroize note:** The inner `Aes256Ctr` cipher state (expanded key schedule
-///     + counter) is opaque and cannot be zeroized. If you need to protect key
-///     material, zeroize the `[u8; 32]` key and `u128` IV at the call site
-///     before dropping them.
+/// **Zeroize note:** The inner `Aes256Ctr` zeroizes its expanded key schedule,
+/// counter, and buffered keystream on drop. Callers remain responsible for
+/// zeroizing their own raw key and IV copies.
 pub struct AesCtr {
     cipher: Aes256Ctr,
 }
+
+impl ZeroizeOnDrop for AesCtr {}
 
 impl AesCtr {
     /// Create new AES-CTR cipher with key and IV
@@ -92,7 +96,7 @@ impl AesCtr {
 /// are different operations. This implementation handles CBC chaining
 /// correctly across multiple blocks.
 ///
-/// Key and IV are zeroized on drop.
+/// Key, IV, and temporary expanded key schedules are zeroized on drop.
 pub struct AesCbc {
     key: [u8; 32],
     iv: [u8; 16],
@@ -104,6 +108,8 @@ impl Drop for AesCbc {
         self.iv.zeroize();
     }
 }
+
+impl ZeroizeOnDrop for AesCbc {}
 
 impl AesCbc {
     /// AES block size
