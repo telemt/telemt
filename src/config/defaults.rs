@@ -39,6 +39,8 @@ const DEFAULT_ME_QUOTA_SOFT_OVERSHOOT_BYTES: u64 = 64 * 1024;
 const DEFAULT_ME_D2C_FRAME_BUF_SHRINK_THRESHOLD_BYTES: usize = 256 * 1024;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_C2S_BYTES: usize = 64 * 1024;
 const DEFAULT_DIRECT_RELAY_COPY_BUF_S2C_BYTES: usize = 256 * 1024;
+pub(crate) const DIRECT_RELAY_BUFFER_BUDGET_UNIT_BYTES: usize = 4 * 1024;
+const DEFAULT_DIRECT_RELAY_BUFFER_BUDGET_MAX_BYTES: usize = 0;
 const DEFAULT_ME_WRITER_PICK_SAMPLE_SIZE: u8 = 3;
 const DEFAULT_ME_HEALTH_INTERVAL_MS_UNHEALTHY: u64 = 1000;
 const DEFAULT_ME_HEALTH_INTERVAL_MS_HEALTHY: u64 = 3000;
@@ -513,6 +515,10 @@ pub(crate) fn default_direct_relay_copy_buf_c2s_bytes() -> usize {
 
 pub(crate) fn default_direct_relay_copy_buf_s2c_bytes() -> usize {
     DEFAULT_DIRECT_RELAY_COPY_BUF_S2C_BYTES
+}
+
+pub(crate) fn default_direct_relay_buffer_budget_max_bytes() -> usize {
+    DEFAULT_DIRECT_RELAY_BUFFER_BUDGET_MAX_BYTES
 }
 
 pub(crate) fn default_me_writer_pick_sample_size() -> u8 {

@@ -596,6 +596,74 @@ async fn render_metrics(
         stats.get_buffer_pool_in_use_gauge()
     );
 
+    let direct_budget = shared_state.direct_buffer_budget.snapshot();
+    let _ = writeln!(
+        out,
+        "# HELP telemt_direct_relay_buffer_budget_bytes Direct relay copy-buffer budget and memory inputs"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_direct_relay_buffer_budget_bytes gauge"
+    );
+    for (kind, value) in [
+        ("hard_limit", direct_budget.hard_limit_bytes),
+        ("target", direct_budget.target_bytes),
+        ("reserved", direct_budget.reserved_bytes),
+        ("memory_total", direct_budget.memory_total_bytes),
+        ("memory_available", direct_budget.memory_available_bytes),
+        ("process_rss", direct_budget.process_rss_bytes),
+    ] {
+        let _ = writeln!(
+            out,
+            "telemt_direct_relay_buffer_budget_bytes{{kind=\"{}\"}} {}",
+            kind, value
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP telemt_direct_relay_buffer_budget_events_total Direct relay buffer-budget lifecycle events"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_direct_relay_buffer_budget_events_total counter"
+    );
+    for (result, value) in [
+        ("promotion", direct_budget.promotion_total),
+        ("promotion_denied", direct_budget.promotion_denied_total),
+        ("minimum_fallback", direct_budget.minimum_fallback_total),
+        ("admission_rejected", direct_budget.admission_rejected_total),
+        ("quiet_demotion", direct_budget.quiet_demotion_total),
+        (
+            "write_pressure_demotion",
+            direct_budget.write_pressure_demotion_total,
+        ),
+        (
+            "global_pressure_demotion",
+            direct_budget.global_pressure_demotion_total,
+        ),
+    ] {
+        let _ = writeln!(
+            out,
+            "telemt_direct_relay_buffer_budget_events_total{{result=\"{}\"}} {}",
+            result, value
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP telemt_direct_relay_buffer_sessions Current Direct relay sessions by adaptive tier"
+    );
+    let _ = writeln!(out, "# TYPE telemt_direct_relay_buffer_sessions gauge");
+    for (tier, value) in ["base", "tier1", "tier2", "tier3"]
+        .into_iter()
+        .zip(direct_budget.tier_sessions)
+    {
+        let _ = writeln!(
+            out,
+            "telemt_direct_relay_buffer_sessions{{tier=\"{}\"}} {}",
+            tier, value
+        );
+    }
+
     let _ = writeln!(
         out,
         "# HELP telemt_tls_fetch_profile_cache_entries Current adaptive TLS fetch profile-cache entries"

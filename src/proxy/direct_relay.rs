@@ -345,21 +345,21 @@ where
     } else {
         Duration::from_secs(1800)
     };
-    let relay_result =
-        crate::proxy::relay::relay_bidirectional_with_activity_timeout_lease_and_cancel(
+    let relay_result = crate::proxy::relay::relay_direct_adaptive(
             client_reader,
             client_writer,
             tg_reader,
             tg_writer,
             config.general.direct_relay_copy_buf_c2s_bytes,
             config.general.direct_relay_copy_buf_s2c_bytes,
+            config.server.max_connections,
             user,
             Arc::clone(&stats),
             config.access.user_data_quota.get(user).copied(),
-            buffer_pool,
             traffic_lease,
             relay_activity_timeout,
             session_cancel.clone(),
+            Arc::clone(&shared.direct_buffer_budget),
         );
     tokio::pin!(relay_result);
     let relay_result = loop {

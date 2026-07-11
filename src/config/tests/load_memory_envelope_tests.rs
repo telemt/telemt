@@ -157,6 +157,42 @@ me_writer_byte_budget_bytes = 268451840
 }
 
 #[test]
+fn load_rejects_unaligned_direct_relay_buffer_budget() {
+    let path = write_temp_config(
+        r#"
+[general]
+direct_relay_buffer_budget_max_bytes = 16777217
+"#,
+    );
+
+    let err = ProxyConfig::load(&path)
+        .expect_err("unaligned direct relay buffer budget must fail");
+    assert!(
+        err.to_string().contains(
+            "general.direct_relay_buffer_budget_max_bytes must be 0 or a multiple of 4096"
+        )
+    );
+    remove_temp_config(&path);
+}
+
+#[test]
+fn load_rejects_direct_relay_buffer_budget_above_hard_cap() {
+    let path = write_temp_config(
+        r#"
+[general]
+direct_relay_buffer_budget_max_bytes = 2147487744
+"#,
+    );
+
+    let err = ProxyConfig::load(&path)
+        .expect_err("direct relay buffer budget above hard cap must fail");
+    assert!(err.to_string().contains(
+        "general.direct_relay_buffer_budget_max_bytes must be 0 or within [16777216, 2147483648]"
+    ));
+    remove_temp_config(&path);
+}
+
+#[test]
 fn load_rejects_listen_backlog_above_i32_upper_bound() {
     let path = write_temp_config(
         r#"
@@ -203,6 +239,7 @@ me_writer_cmd_channel_capacity = 16384
 me_writer_byte_budget_bytes = 268435456
 me_route_channel_capacity = 8192
 me_c2me_channel_capacity = 8192
+direct_relay_buffer_budget_max_bytes = 2147483648
 max_client_frame = 16777216
 "#,
     );
@@ -212,6 +249,10 @@ max_client_frame = 16777216
     assert_eq!(cfg.general.me_writer_byte_budget_bytes, 256 * 1024 * 1024);
     assert_eq!(cfg.general.me_route_channel_capacity, 8192);
     assert_eq!(cfg.general.me_c2me_channel_capacity, 8192);
+    assert_eq!(
+        cfg.general.direct_relay_buffer_budget_max_bytes,
+        2 * 1024 * 1024 * 1024
+    );
     assert_eq!(cfg.general.max_client_frame, 16 * 1024 * 1024);
 
     remove_temp_config(&path);

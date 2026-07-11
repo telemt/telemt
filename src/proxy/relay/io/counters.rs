@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -20,6 +20,12 @@ pub(in crate::proxy::relay) struct SharedCounters {
     pub(in crate::proxy::relay) c2s_ops: AtomicU64,
     /// Number of poll_write completions (≈ S→C chunks)
     pub(in crate::proxy::relay) s2c_ops: AtomicU64,
+    /// Bytes presented to client writes, including retried pending writes.
+    pub(in crate::proxy::relay) s2c_requested_bytes: AtomicU64,
+    /// Successful client writes that consumed only part of the offered slice.
+    pub(in crate::proxy::relay) s2c_partial_writes: AtomicU64,
+    /// Consecutive pending client writes observed by the active copy loop.
+    pub(in crate::proxy::relay) s2c_consecutive_pending_writes: AtomicU32,
     /// Milliseconds since relay epoch of last I/O activity
     last_activity_ms: AtomicU64,
 }
@@ -31,6 +37,9 @@ impl SharedCounters {
             s2c_bytes: AtomicU64::new(0),
             c2s_ops: AtomicU64::new(0),
             s2c_ops: AtomicU64::new(0),
+            s2c_requested_bytes: AtomicU64::new(0),
+            s2c_partial_writes: AtomicU64::new(0),
+            s2c_consecutive_pending_writes: AtomicU32::new(0),
             last_activity_ms: AtomicU64::new(0),
         }
     }

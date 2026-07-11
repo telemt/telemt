@@ -10,6 +10,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::proxy::handshake::{AuthProbeSaturationState, AuthProbeState};
+use crate::proxy::direct_buffer_budget::{
+    DirectBufferBudget, fallback_direct_buffer_hard_limit,
+};
 use crate::proxy::middle_relay::{DesyncDedupRotationState, RelayIdleCandidateRegistry};
 use crate::proxy::traffic_limiter::TrafficLimiter;
 
@@ -69,6 +72,7 @@ pub(crate) struct ProxySharedState {
     pub(crate) handshake: HandshakeSharedState,
     pub(crate) middle_relay: MiddleRelaySharedState,
     pub(crate) traffic_limiter: Arc<TrafficLimiter>,
+    pub(crate) direct_buffer_budget: Arc<DirectBufferBudget>,
     disabled_users: DashMap<String, ()>,
     active_user_sessions: DashMap<(String, u64), CancellationToken>,
     pub(crate) conntrack_pressure_active: AtomicBool,
@@ -101,6 +105,15 @@ impl Drop for UserSessionGuard {
 
 impl ProxySharedState {
     pub(crate) fn new() -> Arc<Self> {
+        Self::new_with_direct_buffer_budget(DirectBufferBudget::new(
+            fallback_direct_buffer_hard_limit(),
+        ))
+    }
+
+    /// Creates process state with the startup-resolved Direct buffer envelope.
+    pub(crate) fn new_with_direct_buffer_budget(
+        direct_buffer_budget: Arc<DirectBufferBudget>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             handshake: HandshakeSharedState {
                 auth_probe: DashMap::new(),
@@ -129,6 +142,7 @@ impl ProxySharedState {
                 relay_idle_mark_seq: AtomicU64::new(0),
             },
             traffic_limiter: TrafficLimiter::new(),
+            direct_buffer_budget,
             disabled_users: DashMap::new(),
             active_user_sessions: DashMap::new(),
             conntrack_pressure_active: AtomicBool::new(false),

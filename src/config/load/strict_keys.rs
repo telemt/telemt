@@ -65,6 +65,7 @@ const GENERAL_CONFIG_KEYS: &[&str] = &[
     "me_d2c_frame_buf_shrink_threshold_bytes",
     "direct_relay_copy_buf_c2s_bytes",
     "direct_relay_copy_buf_s2c_bytes",
+    "direct_relay_buffer_budget_max_bytes",
     "crypto_pending_buffer",
     "max_client_frame",
     "desync_all_full",

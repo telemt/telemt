@@ -42,6 +42,8 @@ const MAX_ME_WRITER_CMD_CHANNEL_CAPACITY: usize = 16_384;
 const MAX_ME_WRITER_BYTE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ME_ROUTE_CHANNEL_CAPACITY: usize = 8_192;
 const MAX_ME_C2ME_CHANNEL_CAPACITY: usize = 8_192;
+const MIN_DIRECT_RELAY_BUFFER_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DIRECT_RELAY_BUFFER_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MIN_MAX_CLIENT_FRAME_BYTES: usize = 4 * 1024;
 const MAX_MAX_CLIENT_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_API_REQUEST_BODY_LIMIT_BYTES: usize = 1024 * 1024;
@@ -614,6 +616,24 @@ impl ProxyConfig {
                 "general.direct_relay_copy_buf_s2c_bytes must be within [8192, 2097152]"
                     .to_string(),
             ));
+        }
+
+        if config.general.direct_relay_buffer_budget_max_bytes != 0 {
+            if config.general.direct_relay_buffer_budget_max_bytes
+                % DIRECT_RELAY_BUFFER_BUDGET_UNIT_BYTES
+                != 0
+            {
+                return Err(ProxyError::Config(format!(
+                    "general.direct_relay_buffer_budget_max_bytes must be 0 or a multiple of {DIRECT_RELAY_BUFFER_BUDGET_UNIT_BYTES}"
+                )));
+            }
+            if !(MIN_DIRECT_RELAY_BUFFER_BUDGET_BYTES..=MAX_DIRECT_RELAY_BUFFER_BUDGET_BYTES)
+                .contains(&config.general.direct_relay_buffer_budget_max_bytes)
+            {
+                return Err(ProxyError::Config(format!(
+                    "general.direct_relay_buffer_budget_max_bytes must be 0 or within [{MIN_DIRECT_RELAY_BUFFER_BUDGET_BYTES}, {MAX_DIRECT_RELAY_BUFFER_BUDGET_BYTES}]"
+                )));
+            }
         }
 
         if config.general.me_health_interval_ms_unhealthy == 0 {
