@@ -204,6 +204,12 @@ impl Stats {
         self.buffer_pool_in_use_gauge.load(Ordering::Relaxed)
     }
 
+    /// Returns the count of non-standard buffers replaced before pooling.
+    pub fn get_buffer_pool_replaced_nonstandard_total(&self) -> u64 {
+        self.buffer_pool_replaced_nonstandard_total
+            .load(Ordering::Relaxed)
+    }
+
     pub fn get_me_c2me_send_full_total(&self) -> u64 {
         self.me_c2me_send_full_total.load(Ordering::Relaxed)
     }

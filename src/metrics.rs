@@ -595,6 +595,16 @@ async fn render_metrics(
         "telemt_buffer_pool_buffers_total{{kind=\"in_use\"}} {}",
         stats.get_buffer_pool_in_use_gauge()
     );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_buffer_pool_events_total Buffer-pool allocation lifecycle events"
+    );
+    let _ = writeln!(out, "# TYPE telemt_buffer_pool_events_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_buffer_pool_events_total{{event=\"replaced_nonstandard\"}} {}",
+        stats.get_buffer_pool_replaced_nonstandard_total()
+    );
 
     let direct_budget = shared_state.direct_buffer_budget.snapshot();
     let _ = writeln!(

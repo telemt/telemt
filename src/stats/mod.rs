@@ -274,6 +274,7 @@ pub struct Stats {
     buffer_pool_pooled_gauge: AtomicU64,
     buffer_pool_allocated_gauge: AtomicU64,
     buffer_pool_in_use_gauge: AtomicU64,
+    buffer_pool_replaced_nonstandard_total: AtomicU64,
     // C2ME enqueue observability
     me_c2me_send_full_total: AtomicU64,
     me_c2me_send_high_water_total: AtomicU64,

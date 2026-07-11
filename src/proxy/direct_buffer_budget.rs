@@ -5,6 +5,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::stats::Stats;
+use crate::stream::BufferPool;
 
 use super::shared_state::ProxySharedState;
 
@@ -21,6 +22,8 @@ const AUTO_HARD_FALLBACK_BYTES: usize = 512 * 1024 * 1024;
 const TARGET_FLOOR_MIN_BYTES: usize = 16 * 1024 * 1024;
 const CONTROL_INTERVAL: Duration = Duration::from_secs(1);
 const HEALTHY_RECOVERY_SAMPLES: u8 = 30;
+const BUFFER_POOL_TRIM_LOW_WATERMARK: usize = 64;
+const BUFFER_POOL_TRIM_HIGH_WATERMARK: usize = 128;
 
 #[derive(Debug, Clone, Copy, Default)]
 /// Lock-free observability snapshot of the Direct copy-buffer envelope.
@@ -337,9 +340,10 @@ pub(crate) async fn resolve_direct_buffer_hard_limit(configured: usize) -> usize
     align_down(derived as usize).max(DIRECT_BUFFER_UNIT_BYTES)
 }
 
-/// Starts the single control-plane task that adjusts the runtime target.
+/// Starts the single control-plane task for Direct budget and shared pool pressure.
 pub(crate) fn spawn_direct_buffer_budget_controller(
     budget: Arc<DirectBufferBudget>,
+    buffer_pool: Arc<BufferPool>,
     stats: Arc<Stats>,
     shared: Arc<ProxySharedState>,
     max_connections: u32,
@@ -351,6 +355,13 @@ pub(crate) fn spawn_direct_buffer_budget_controller(
         let mut previous_denied = 0u64;
         let mut previous_fallback = 0u64;
         let mut previous_rejected = 0u64;
+        let pool_trim_low = buffer_pool
+            .max_buffers()
+            .min(BUFFER_POOL_TRIM_LOW_WATERMARK);
+        let pool_trim_high = buffer_pool
+            .max_buffers()
+            .min(BUFFER_POOL_TRIM_HIGH_WATERMARK);
+        let mut pool_trim_armed = true;
 
         loop {
             interval.tick().await;
@@ -379,6 +390,23 @@ pub(crate) fn spawn_direct_buffer_budget_controller(
                 || denied_delta > 0
                 || fallback_delta > 0
                 || rejected_delta > 0;
+
+            if !pressure {
+                pool_trim_armed = true;
+            } else if pool_trim_armed && buffer_pool.pooled() > pool_trim_high {
+                buffer_pool.trim_to(pool_trim_low);
+                pool_trim_armed = false;
+            }
+
+            let pool_snapshot = buffer_pool.stats();
+            stats.set_buffer_pool_gauges(
+                pool_snapshot.pooled,
+                pool_snapshot.allocated,
+                pool_snapshot.allocated.saturating_sub(pool_snapshot.pooled),
+            );
+            stats.set_buffer_pool_replaced_nonstandard_total(
+                pool_snapshot.replaced_nonstandard,
+            );
 
             let headroom_target = if sample.total_bytes == 0 {
                 snapshot.hard_limit_bytes

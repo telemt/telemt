@@ -552,6 +552,14 @@ impl Stats {
         }
     }
 
+    /// Publishes the cumulative count of non-standard pool buffer replacements.
+    pub fn set_buffer_pool_replaced_nonstandard_total(&self, value: usize) {
+        if self.telemetry_me_allows_normal() {
+            self.buffer_pool_replaced_nonstandard_total
+                .store(value as u64, Ordering::Relaxed);
+        }
+    }
+
     pub fn increment_me_c2me_send_full_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_c2me_send_full_total.fetch_add(1, Ordering::Relaxed);

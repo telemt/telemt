@@ -899,6 +899,7 @@ async fn run_telemt_core(
     );
     spawn_direct_buffer_budget_controller(
         direct_buffer_budget,
+        buffer_pool.clone(),
         stats.clone(),
         shared_state.clone(),
         config.server.max_connections,
