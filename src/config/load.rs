@@ -39,6 +39,7 @@ use self::validation::{
 };
 
 const MAX_ME_WRITER_CMD_CHANNEL_CAPACITY: usize = 16_384;
+const MAX_ME_WRITER_BYTE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ME_ROUTE_CHANNEL_CAPACITY: usize = 8_192;
 const MAX_ME_C2ME_CHANNEL_CAPACITY: usize = 8_192;
 const MIN_MAX_CLIENT_FRAME_BYTES: usize = 4 * 1024;
@@ -537,6 +538,22 @@ impl ProxyConfig {
         {
             return Err(ProxyError::Config(format!(
                 "general.max_client_frame must be within [{MIN_MAX_CLIENT_FRAME_BYTES}, {MAX_MAX_CLIENT_FRAME_BYTES}]"
+            )));
+        }
+
+        let min_writer_byte_budget =
+            minimum_me_writer_byte_budget_bytes(config.general.max_client_frame);
+        if config.general.me_writer_byte_budget_bytes % ME_WRITER_BYTE_PERMIT_UNIT_BYTES != 0 {
+            return Err(ProxyError::Config(format!(
+                "general.me_writer_byte_budget_bytes must be a multiple of {ME_WRITER_BYTE_PERMIT_UNIT_BYTES}"
+            )));
+        }
+        if !(min_writer_byte_budget..=MAX_ME_WRITER_BYTE_BUDGET_BYTES)
+            .contains(&config.general.me_writer_byte_budget_bytes)
+        {
+            return Err(ProxyError::Config(format!(
+                "general.me_writer_byte_budget_bytes must be within [{min_writer_byte_budget}, {MAX_ME_WRITER_BYTE_BUDGET_BYTES}] for general.max_client_frame={}",
+                config.general.max_client_frame
             )));
         }
 

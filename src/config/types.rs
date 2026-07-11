@@ -579,6 +579,10 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_writer_cmd_channel_capacity")]
     pub me_writer_cmd_channel_capacity: usize,
 
+    /// Resident-memory budget in bytes for each ME writer data queue.
+    #[serde(default = "default_me_writer_byte_budget_bytes")]
+    pub me_writer_byte_budget_bytes: usize,
+
     /// Capacity of per-connection ME response route channel.
     #[serde(default = "default_me_route_channel_capacity")]
     pub me_route_channel_capacity: usize,
@@ -1103,6 +1107,7 @@ impl Default for GeneralConfig {
             me_keepalive_payload_random: default_true(),
             rpc_proxy_req_every: default_rpc_proxy_req_every(),
             me_writer_cmd_channel_capacity: default_me_writer_cmd_channel_capacity(),
+            me_writer_byte_budget_bytes: default_me_writer_byte_budget_bytes(),
             me_route_channel_capacity: default_me_route_channel_capacity(),
             me_c2me_channel_capacity: default_me_c2me_channel_capacity(),
             me_c2me_send_timeout_ms: default_me_c2me_send_timeout_ms(),

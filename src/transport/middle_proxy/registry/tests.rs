@@ -1,9 +1,15 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
 use bytes::Bytes;
+use tokio::sync::Semaphore;
 
 use super::{ConnMeta, ConnRegistry, RouteResult};
 use crate::transport::middle_proxy::MeResponse;
+
+fn writer_byte_budget() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(2049))
+}
 
 #[tokio::test]
 async fn writer_activity_snapshot_tracks_writer_and_dc_load() {
@@ -14,8 +20,12 @@ async fn writer_activity_snapshot_tracks_writer_and_dc_load() {
     let (conn_c, _rx_c) = registry.register().await;
     let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
     let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
-    registry.register_writer(10, writer_tx_a.clone()).await;
-    registry.register_writer(20, writer_tx_b.clone()).await;
+    registry
+        .register_writer(10, writer_tx_a.clone(), writer_byte_budget())
+        .await;
+    registry
+        .register_writer(20, writer_tx_b.clone(), writer_byte_budget())
+        .await;
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
     assert!(
@@ -124,8 +134,12 @@ async fn bind_writer_rebinds_conn_atomically() {
     let (conn_id, _rx) = registry.register().await;
     let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
     let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
-    registry.register_writer(10, writer_tx_a).await;
-    registry.register_writer(20, writer_tx_b).await;
+    registry
+        .register_writer(10, writer_tx_a, writer_byte_budget())
+        .await;
+    registry
+        .register_writer(20, writer_tx_b, writer_byte_budget())
+        .await;
 
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
     let first_our_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
@@ -184,8 +198,12 @@ async fn writer_lost_does_not_drop_rebound_conn() {
     let (conn_id, _rx) = registry.register().await;
     let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
     let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
-    registry.register_writer(10, writer_tx_a).await;
-    registry.register_writer(20, writer_tx_b).await;
+    registry
+        .register_writer(10, writer_tx_a, writer_byte_budget())
+        .await;
+    registry
+        .register_writer(20, writer_tx_b, writer_byte_budget())
+        .await;
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
     assert!(
@@ -262,8 +280,12 @@ async fn non_empty_writer_ids_returns_only_writers_with_bound_clients() {
     let (conn_id, _rx) = registry.register().await;
     let (writer_tx_a, _writer_rx_a) = tokio::sync::mpsc::channel(8);
     let (writer_tx_b, _writer_rx_b) = tokio::sync::mpsc::channel(8);
-    registry.register_writer(10, writer_tx_a).await;
-    registry.register_writer(20, writer_tx_b).await;
+    registry
+        .register_writer(10, writer_tx_a, writer_byte_budget())
+        .await;
+    registry
+        .register_writer(20, writer_tx_b, writer_byte_budget())
+        .await;
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
     assert!(

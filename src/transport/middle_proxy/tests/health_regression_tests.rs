@@ -98,6 +98,7 @@ async fn make_pool(me_pool_drain_threshold: u64) -> Arc<MePool> {
         general.me_writer_pick_sample_size,
         MeSocksKdfPolicy::default(),
         general.me_writer_cmd_channel_capacity,
+        general.me_writer_byte_budget_bytes,
         general.me_route_channel_capacity,
         general.me_route_backpressure_enabled,
         general.me_route_fairshare_enabled,
@@ -126,6 +127,7 @@ async fn insert_draining_writer(
 ) -> Vec<u64> {
     let mut conn_ids = Vec::with_capacity(bound_clients);
     let (tx, _writer_rx) = mpsc::channel::<WriterCommand>(8);
+    let byte_budget = pool.new_writer_byte_budget();
     let writer = MeWriter {
         id: writer_id,
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4500 + writer_id as u16),
@@ -135,6 +137,7 @@ async fn insert_draining_writer(
         contour: Arc::new(AtomicU8::new(WriterContour::Draining.as_u8())),
         created_at: Instant::now() - Duration::from_secs(writer_id),
         tx: tx.clone(),
+        byte_budget: byte_budget.clone(),
         cancel: CancellationToken::new(),
         degraded: Arc::new(AtomicBool::new(false)),
         rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
@@ -144,7 +147,9 @@ async fn insert_draining_writer(
         allow_drain_fallback: Arc::new(AtomicBool::new(false)),
     };
     pool.writers.write().await.push(writer);
-    pool.registry.register_writer(writer_id, tx).await;
+    pool.registry
+        .register_writer(writer_id, tx, byte_budget)
+        .await;
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
     for idx in 0..bound_clients {
         let (conn_id, _rx) = pool.registry.register().await;

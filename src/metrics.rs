@@ -2437,6 +2437,85 @@ async fn render_metrics(
 
     let _ = writeln!(
         out,
+        "# HELP telemt_me_writer_byte_budget_limit_bytes Configured resident-memory budget per ME writer"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_byte_budget_limit_bytes gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_limit_bytes {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_limit_bytes_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_byte_budget_reserved_bytes Aggregate ME writer memory reservations by lifecycle state"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_byte_budget_reserved_bytes gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_reserved_bytes{{state=\"queued\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_queued_bytes_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_reserved_bytes{{state=\"inflight\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_inflight_bytes_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_byte_budget_events_total ME writer byte-budget outcomes"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_byte_budget_events_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_events_total{{result=\"wait\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_wait_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_events_total{{result=\"timeout\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_timeout_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_events_total{{result=\"oversize\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_oversize_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
         "# HELP telemt_me_writer_pick_total ME writer-pick outcomes by mode and result"
     );
     let _ = writeln!(out, "# TYPE telemt_me_writer_pick_total counter");

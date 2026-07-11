@@ -88,6 +88,56 @@ impl Stats {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+    /// Publishes the configured resident-memory limit applied to each ME writer.
+    pub fn set_me_writer_byte_budget_limit_bytes(&self, bytes: usize) {
+        self.me_writer_byte_budget_limit_bytes_gauge
+            .store(bytes as u64, Ordering::Relaxed);
+    }
+    pub(crate) fn add_me_writer_byte_budget_queued_bytes(&self, bytes: u64) {
+        self.me_writer_byte_budget_queued_bytes_gauge
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+    pub(crate) fn move_me_writer_byte_budget_to_inflight(&self, bytes: u64) {
+        let _ = self.me_writer_byte_budget_queued_bytes_gauge.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(bytes)),
+        );
+        self.me_writer_byte_budget_inflight_bytes_gauge
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+    pub(crate) fn release_me_writer_byte_budget_queued_bytes(&self, bytes: u64) {
+        let _ = self.me_writer_byte_budget_queued_bytes_gauge.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(bytes)),
+        );
+    }
+    pub(crate) fn release_me_writer_byte_budget_inflight_bytes(&self, bytes: u64) {
+        let _ = self.me_writer_byte_budget_inflight_bytes_gauge.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(bytes)),
+        );
+    }
+    pub(crate) fn increment_me_writer_byte_budget_wait_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_byte_budget_wait_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn increment_me_writer_byte_budget_timeout_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_byte_budget_timeout_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn increment_me_writer_byte_budget_oversize_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_writer_byte_budget_oversize_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_socks_kdf_strict_reject(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_socks_kdf_strict_reject

@@ -52,6 +52,7 @@ const GENERAL_CONFIG_KEYS: &[&str] = &[
     "me_keepalive_payload_random",
     "rpc_proxy_req_every",
     "me_writer_cmd_channel_capacity",
+    "me_writer_byte_budget_bytes",
     "me_route_channel_capacity",
     "me_c2me_channel_capacity",
     "me_c2me_send_timeout_ms",

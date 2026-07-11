@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -56,7 +57,13 @@ impl ConnRegistry {
         }
     }
 
-    pub async fn register_writer(&self, writer_id: u64, tx: mpsc::Sender<WriterCommand>) {
+    /// Registers one writer command route and its matching memory budget atomically.
+    pub async fn register_writer(
+        &self,
+        writer_id: u64,
+        tx: mpsc::Sender<WriterCommand>,
+        byte_budget: Arc<tokio::sync::Semaphore>,
+    ) {
         let mut binding = self.binding.inner.lock().await;
         binding
             .conns_for_writer
@@ -70,7 +77,13 @@ impl ConnRegistry {
             .writer_idle_since_epoch_secs
             .entry(writer_id)
             .or_insert_with(Self::now_epoch_secs);
-        self.writers.map.insert(writer_id, tx);
+        self.writers.map.insert(
+            writer_id,
+            super::WriterRoute {
+                tx,
+                byte_budget,
+            },
+        );
     }
 
     /// Unregister connection, returning associated writer_id if any.
@@ -417,7 +430,8 @@ impl ConnRegistry {
             .map(|entry| entry.value().clone())?;
         Some(ConnWriter {
             writer_id,
-            tx: writer,
+            tx: writer.tx,
+            byte_budget: writer.byte_budget,
         })
     }
 
@@ -438,7 +452,8 @@ impl ConnRegistry {
         Some((
             ConnWriter {
                 writer_id,
-                tx: writer,
+                tx: writer.tx,
+                byte_budget: writer.byte_budget,
             },
             meta,
         ))

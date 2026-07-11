@@ -48,6 +48,8 @@ pub struct BoundConn {
 pub struct ConnWriter {
     pub writer_id: u64,
     pub tx: mpsc::Sender<WriterCommand>,
+    /// Writer-local memory budget used by the hot bound-client route.
+    pub byte_budget: Arc<Semaphore>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -62,7 +64,13 @@ struct RoutingTable {
 }
 
 struct WriterTable {
-    map: DashMap<u64, mpsc::Sender<WriterCommand>>,
+    map: DashMap<u64, WriterRoute>,
+}
+
+#[derive(Clone)]
+struct WriterRoute {
+    tx: mpsc::Sender<WriterCommand>,
+    byte_budget: Arc<Semaphore>,
 }
 
 #[derive(Clone)]

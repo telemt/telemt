@@ -96,6 +96,67 @@ max_client_frame = 16777217
 }
 
 #[test]
+fn load_rejects_writer_byte_budget_below_frame_residency_minimum() {
+    let path = write_temp_config(
+        r#"
+[general]
+max_client_frame = 16777216
+me_writer_byte_budget_bytes = 33554432
+"#,
+    );
+
+    let err = ProxyConfig::load(&path)
+        .expect_err("writer byte budget below frame residency minimum must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("general.me_writer_byte_budget_bytes must be within [33570816, 268435456]"),
+        "error must explain writer byte budget minimum, got: {msg}"
+    );
+
+    remove_temp_config(&path);
+}
+
+#[test]
+fn load_rejects_unaligned_writer_byte_budget() {
+    let path = write_temp_config(
+        r#"
+[general]
+me_writer_byte_budget_bytes = 33570817
+"#,
+    );
+
+    let err = ProxyConfig::load(&path)
+        .expect_err("writer byte budget outside permit granularity must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("general.me_writer_byte_budget_bytes must be a multiple of 16384"),
+        "error must explain writer byte budget alignment, got: {msg}"
+    );
+
+    remove_temp_config(&path);
+}
+
+#[test]
+fn load_rejects_writer_byte_budget_above_hard_cap() {
+    let path = write_temp_config(
+        r#"
+[general]
+me_writer_byte_budget_bytes = 268451840
+"#,
+    );
+
+    let err =
+        ProxyConfig::load(&path).expect_err("writer byte budget above hard cap must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("general.me_writer_byte_budget_bytes must be within [33570816, 268435456]"),
+        "error must explain writer byte budget hard cap, got: {msg}"
+    );
+
+    remove_temp_config(&path);
+}
+
+#[test]
 fn load_rejects_listen_backlog_above_i32_upper_bound() {
     let path = write_temp_config(
         r#"
@@ -139,6 +200,7 @@ fn load_accepts_memory_limits_at_hard_upper_bounds() {
         r#"
 [general]
 me_writer_cmd_channel_capacity = 16384
+me_writer_byte_budget_bytes = 268435456
 me_route_channel_capacity = 8192
 me_c2me_channel_capacity = 8192
 max_client_frame = 16777216
@@ -147,6 +209,7 @@ max_client_frame = 16777216
 
     let cfg = ProxyConfig::load(&path).expect("hard upper bound values must be accepted");
     assert_eq!(cfg.general.me_writer_cmd_channel_capacity, 16384);
+    assert_eq!(cfg.general.me_writer_byte_budget_bytes, 256 * 1024 * 1024);
     assert_eq!(cfg.general.me_route_channel_capacity, 8192);
     assert_eq!(cfg.general.me_c2me_channel_capacity, 8192);
     assert_eq!(cfg.general.max_client_frame, 16 * 1024 * 1024);
