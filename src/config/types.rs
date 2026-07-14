@@ -579,6 +579,10 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_writer_cmd_channel_capacity")]
     pub me_writer_cmd_channel_capacity: usize,
 
+    /// Resident-memory budget in bytes for each ME writer data queue.
+    #[serde(default = "default_me_writer_byte_budget_bytes")]
+    pub me_writer_byte_budget_bytes: usize,
+
     /// Capacity of per-connection ME response route channel.
     #[serde(default = "default_me_route_channel_capacity")]
     pub me_route_channel_capacity: usize,
@@ -622,7 +626,7 @@ pub struct GeneralConfig {
     #[serde(default = "default_me_d2c_frame_buf_shrink_threshold_bytes")]
     pub me_d2c_frame_buf_shrink_threshold_bytes: usize,
 
-    /// Copy buffer size for client->DC direction in direct relay.
+    /// Copy buffer ceiling for client->DC direction in direct relay.
     ///
     /// This is also the upper bound for one amortized upload rate-limit burst:
     /// upload debt is settled before the next relay read instead of blocking
@@ -630,12 +634,17 @@ pub struct GeneralConfig {
     #[serde(default = "default_direct_relay_copy_buf_c2s_bytes")]
     pub direct_relay_copy_buf_c2s_bytes: usize,
 
-    /// Copy buffer size for DC->client direction in direct relay.
+    /// Copy buffer ceiling for DC->client direction in direct relay.
     ///
     /// This bounds one direct download rate-limit grant because writes are
     /// clipped to the currently available shaper budget.
     #[serde(default = "default_direct_relay_copy_buf_s2c_bytes")]
     pub direct_relay_copy_buf_s2c_bytes: usize,
+
+    /// Process-wide hard ceiling for Direct relay copy buffers.
+    /// `0` derives the ceiling from host and cgroup memory limits.
+    #[serde(default = "default_direct_relay_buffer_budget_max_bytes")]
+    pub direct_relay_buffer_budget_max_bytes: usize,
 
     /// Max pending ciphertext buffer per client writer (bytes).
     /// Controls FakeTLS backpressure vs throughput.
@@ -1103,6 +1112,7 @@ impl Default for GeneralConfig {
             me_keepalive_payload_random: default_true(),
             rpc_proxy_req_every: default_rpc_proxy_req_every(),
             me_writer_cmd_channel_capacity: default_me_writer_cmd_channel_capacity(),
+            me_writer_byte_budget_bytes: default_me_writer_byte_budget_bytes(),
             me_route_channel_capacity: default_me_route_channel_capacity(),
             me_c2me_channel_capacity: default_me_c2me_channel_capacity(),
             me_c2me_send_timeout_ms: default_me_c2me_send_timeout_ms(),
@@ -1116,6 +1126,7 @@ impl Default for GeneralConfig {
                 default_me_d2c_frame_buf_shrink_threshold_bytes(),
             direct_relay_copy_buf_c2s_bytes: default_direct_relay_copy_buf_c2s_bytes(),
             direct_relay_copy_buf_s2c_bytes: default_direct_relay_copy_buf_s2c_bytes(),
+            direct_relay_buffer_budget_max_bytes: default_direct_relay_buffer_budget_max_bytes(),
             me_warmup_stagger_enabled: default_true(),
             me_warmup_step_delay_ms: default_warmup_step_delay_ms(),
             me_warmup_step_jitter_ms: default_warmup_step_jitter_ms(),

@@ -149,6 +149,7 @@ where
                             peer,
                             translated_local_addr,
                             payload,
+                            _permit,
                             flags,
                             effective_tag_array,
                         )
@@ -822,7 +823,6 @@ where
 
     clear_relay_idle_candidate_in(shared.as_ref(), conn_id);
     me_pool.registry().unregister(conn_id).await;
-    buffer_pool.trim_to(buffer_pool.max_buffers().min(64));
     let pool_snapshot = buffer_pool.stats();
     stats.set_buffer_pool_gauges(
         pool_snapshot.pooled,

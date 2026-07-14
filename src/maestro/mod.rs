@@ -33,6 +33,9 @@ use crate::conntrack_control;
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
+use crate::proxy::direct_buffer_budget::{
+    DirectBufferBudget, resolve_direct_buffer_hard_limit, spawn_direct_buffer_budget_controller,
+};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
 use crate::startup::{
@@ -473,7 +476,16 @@ async fn run_telemt_core(
             config.network.dns_overrides.len()
         );
     }
-    let shared_state = ProxySharedState::new();
+    let direct_buffer_hard_limit =
+        resolve_direct_buffer_hard_limit(config.general.direct_relay_buffer_budget_max_bytes).await;
+    let direct_buffer_budget = DirectBufferBudget::new(direct_buffer_hard_limit);
+    info!(
+        hard_limit_bytes = direct_buffer_hard_limit,
+        configured_override_bytes = config.general.direct_relay_buffer_budget_max_bytes,
+        "Direct relay buffer budget initialized"
+    );
+    let shared_state =
+        ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone());
     shared_state.apply_user_enabled_config(&config.access.user_enabled);
     shared_state.traffic_limiter.apply_policy(
         config.access.user_rate_limits.clone(),
@@ -881,6 +893,13 @@ async fn run_telemt_core(
         config_rx.clone(),
         stats.clone(),
         shared_state.clone(),
+    );
+    spawn_direct_buffer_budget_controller(
+        direct_buffer_budget,
+        buffer_pool.clone(),
+        stats.clone(),
+        shared_state.clone(),
+        config.server.max_connections,
     );
 
     let bound = listeners::bind_listeners(

@@ -21,6 +21,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -2899,7 +2900,7 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "telemt"
-version = "3.4.23"
+version = "3.4.24"
 dependencies = [
  "aes",
  "anyhow",

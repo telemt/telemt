@@ -10,7 +10,7 @@ use std::sync::atomic::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
-use tokio::sync::{Mutex, RwLock, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{
@@ -48,6 +48,8 @@ pub struct MeWriter {
     pub contour: Arc<AtomicU8>,
     pub created_at: Instant,
     pub tx: mpsc::Sender<WriterCommand>,
+    /// Aggregate resident-memory budget shared by all data commands for this writer.
+    pub byte_budget: Arc<Semaphore>,
     pub cancel: CancellationToken,
     pub degraded: Arc<AtomicBool>,
     pub rtt_ema_ms_x10: Arc<AtomicU32>,
@@ -277,6 +279,7 @@ pub(super) struct WriterLifecycleCore {
     pub(super) me_keepalive_payload_random: bool,
     pub(super) rpc_proxy_req_every_secs: AtomicU64,
     pub(super) writer_cmd_channel_capacity: usize,
+    pub(super) writer_byte_budget_permits: usize,
 }
 
 pub(super) struct RouteRuntimeCore {
@@ -553,6 +556,7 @@ impl MePool {
         me_writer_pick_sample_size: u8,
         me_socks_kdf_policy: MeSocksKdfPolicy,
         me_writer_cmd_channel_capacity: usize,
+        me_writer_byte_budget_bytes: usize,
         me_route_channel_capacity: usize,
         me_route_backpressure_enabled: bool,
         me_route_fairshare_enabled: bool,
@@ -583,6 +587,7 @@ impl MePool {
         );
         let (writer_epoch, _) = watch::channel(0u64);
         let now_epoch_secs = Self::now_epoch_secs();
+        stats.set_me_writer_byte_budget_limit_bytes(me_writer_byte_budget_bytes);
         Arc::new(Self {
             routing: Arc::new(RoutingCore {
                 registry,
@@ -615,6 +620,9 @@ impl MePool {
                 me_keepalive_payload_random,
                 rpc_proxy_req_every_secs: AtomicU64::new(rpc_proxy_req_every_secs),
                 writer_cmd_channel_capacity: me_writer_cmd_channel_capacity.max(1),
+                writer_byte_budget_permits: me_writer_byte_budget_bytes
+                    .div_ceil(crate::config::defaults::ME_WRITER_BYTE_PERMIT_UNIT_BYTES)
+                    .max(1),
             }),
             route_runtime: Arc::new(RouteRuntimeCore {
                 me_route_no_writer_mode: AtomicU8::new(me_route_no_writer_mode.as_u8()),
@@ -831,6 +839,13 @@ impl MePool {
             kdf_material_fingerprint: Arc::new(RwLock::new(HashMap::new())),
             runtime_ready: AtomicBool::new(false),
         })
+    }
+
+    /// Creates the immutable byte semaphore assigned to one ME writer generation.
+    pub(crate) fn new_writer_byte_budget(&self) -> Arc<Semaphore> {
+        Arc::new(Semaphore::new(
+            self.writer_lifecycle.writer_byte_budget_permits,
+        ))
     }
 
     pub fn current_generation(&self) -> u64 {

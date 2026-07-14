@@ -68,8 +68,8 @@ use crate::crypto::AesCtr;
 /// Actual limit is supplied at runtime from configuration.
 const DEFAULT_MAX_PENDING_WRITE: usize = 64 * 1024;
 
-/// Default read buffer capacity (reader mostly decrypts in-place into caller buffer).
-const DEFAULT_READ_CAPACITY: usize = 16 * 1024;
+/// Maximum scratch capacity retained after a completed write.
+const MAX_RETAINED_SCRATCH_CAPACITY: usize = 32 * 1024;
 
 // ============= CryptoReader State =============
 
@@ -110,10 +110,6 @@ pub struct CryptoReader<R> {
     upstream: R,
     decryptor: AesCtr,
     state: CryptoReaderState,
-
-    /// Reserved for future coalescing optimizations.
-    #[allow(dead_code)]
-    read_buf: BytesMut,
 }
 
 impl<R> CryptoReader<R> {
@@ -122,7 +118,6 @@ impl<R> CryptoReader<R> {
             upstream,
             decryptor,
             state: CryptoReaderState::Idle,
-            read_buf: BytesMut::with_capacity(DEFAULT_READ_CAPACITY),
         }
     }
 
@@ -321,7 +316,7 @@ struct PendingCiphertext {
 impl PendingCiphertext {
     fn new(max_len: usize) -> Self {
         Self {
-            buf: BytesMut::with_capacity(16 * 1024),
+            buf: BytesMut::new(),
             pos: 0,
             max_len,
         }
@@ -372,15 +367,12 @@ impl PendingCiphertext {
         }
     }
 
-    /// Replace the entire pending ciphertext by moving `src` in (swap, no copy).
-    fn replace_with(&mut self, mut src: BytesMut) {
+    /// Replace the entire pending ciphertext by moving `src` in without copying.
+    fn replace_with(&mut self, src: BytesMut) {
         debug_assert!(src.len() <= self.max_len);
 
-        self.buf.clear();
+        self.buf = src;
         self.pos = 0;
-
-        // Swap: keep allocations hot and avoid copying bytes.
-        std::mem::swap(&mut self.buf, &mut src);
     }
 
     /// Append plaintext and encrypt appended range in-place.
@@ -465,7 +457,7 @@ impl<W> CryptoWriter<W> {
             upstream,
             encryptor,
             state: CryptoWriterState::Idle,
-            scratch: BytesMut::with_capacity(16 * 1024),
+            scratch: BytesMut::new(),
             max_pending_write: max_pending.max(4 * 1024),
         }
     }
@@ -502,6 +494,7 @@ impl<W> CryptoWriter<W> {
     }
 
     fn poison(&mut self, error: io::Error) {
+        self.scratch = BytesMut::new();
         self.state = CryptoWriterState::Poisoned { error: Some(error) };
     }
 
@@ -551,6 +544,15 @@ impl<W> CryptoWriter<W> {
         scratch.reserve(plaintext.len());
         scratch.extend_from_slice(plaintext);
         encryptor.apply(&mut scratch[..]);
+    }
+
+    /// Clear reusable scratch while releasing allocations inflated by large writes.
+    fn recycle_scratch(scratch: &mut BytesMut) {
+        if scratch.capacity() > MAX_RETAINED_SCRATCH_CAPACITY {
+            *scratch = BytesMut::new();
+        } else {
+            scratch.clear();
+        }
     }
 }
 
@@ -698,13 +700,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for CryptoWriter<W> {
 
             Poll::Ready(Ok(n)) => {
                 if n == this.scratch.len() {
-                    this.scratch.clear();
+                    Self::recycle_scratch(&mut this.scratch);
                     return Poll::Ready(Ok(to_accept));
                 }
 
                 // Partial upstream write of ciphertext
-                let remainder = this.scratch.split_off(n);
-                this.scratch.clear();
+                let mut remainder = std::mem::take(&mut this.scratch);
+                let _ = remainder.split_to(n);
 
                 let pending = Self::ensure_pending(&mut this.state, this.max_pending_write);
                 pending.replace_with(remainder);

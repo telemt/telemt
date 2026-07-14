@@ -279,6 +279,7 @@ pub(crate) async fn initialize_me_pool(
                     config.general.me_writer_pick_sample_size,
                     config.general.me_socks_kdf_policy,
                     config.general.me_writer_cmd_channel_capacity,
+                    config.general.me_writer_byte_budget_bytes,
                     config.general.me_route_channel_capacity,
                     config.general.me_route_backpressure_enabled,
                     config.general.me_route_fairshare_enabled,

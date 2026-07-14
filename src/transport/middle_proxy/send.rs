@@ -6,16 +6,18 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc};
 use tracing::{debug, warn};
 
 use super::MePool;
-use super::codec::{ProxyReqCommand, WriterCommand};
+use super::codec::{ProxyReqCommand, WriterBytePermit, WriterCommand};
 use super::registry::ConnMeta;
-use super::wire::build_proxy_req_payload;
+use super::wire::{build_proxy_req_payload, proxy_req_payload_len};
+use crate::config::defaults::ME_WRITER_BYTE_PERMIT_UNIT_BYTES;
 use crate::config::{MeRouteNoWriterMode, MeWriterPickMode};
 use crate::error::{ProxyError, Result};
+use crate::stats::Stats;
 use crate::stream::PooledBuffer;
 use rand::seq::SliceRandom;
 
@@ -29,6 +31,8 @@ const PICK_PENALTY_WARM: u64 = 200;
 const PICK_PENALTY_DRAINING: u64 = 600;
 const PICK_PENALTY_STALE: u64 = 300;
 const PICK_PENALTY_DEGRADED: u64 = 250;
+const RPC_WRITER_FRAME_CAPACITY_OVERHEAD_BYTES: usize = 27;
+const LEGACY_PROXY_REQ_SOURCE_CAPACITY_OVERHEAD_BYTES: usize = 128;
 
 mod close;
 mod recovery;
@@ -39,34 +43,133 @@ enum WriterCommandReserveError {
     TimedOut,
 }
 
+enum WriterByteReserveError {
+    Closed,
+    TimedOut,
+}
+
 fn proxy_tag_array(tag: Option<&[u8]>) -> Option<[u8; 16]> {
     tag.and_then(|tag| <[u8; 16]>::try_from(tag).ok())
 }
 
-fn proxy_req_payload_from_command(cmd: WriterCommand) -> Option<PooledBuffer> {
+fn proxy_req_payload_from_command(
+    cmd: WriterCommand,
+) -> Option<(PooledBuffer, OwnedSemaphorePermit)> {
     match cmd {
-        WriterCommand::ProxyReq(command) => Some(command.payload),
+        WriterCommand::ProxyReq(command) => Some((command.payload, command._permit)),
+        _ => None,
+    }
+}
+
+fn payload_permit_from_data_command(cmd: WriterCommand) -> Option<OwnedSemaphorePermit> {
+    match cmd {
+        WriterCommand::Data { _permit, .. } => _permit,
         _ => None,
     }
 }
 
 async fn reserve_writer_command_slot(
     tx: &mpsc::Sender<WriterCommand>,
-    wait: Option<Duration>,
+    deadline: Option<Instant>,
 ) -> std::result::Result<mpsc::OwnedPermit<WriterCommand>, WriterCommandReserveError> {
     let reserve = tx.clone().reserve_owned();
-    match wait {
-        Some(wait) => match tokio::time::timeout(wait, reserve).await {
-            Ok(Ok(permit)) => Ok(permit),
-            Ok(Err(_)) => Err(WriterCommandReserveError::Closed),
-            Err(_) => Err(WriterCommandReserveError::TimedOut),
-        },
+    match deadline {
+        Some(deadline) => {
+            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), reserve)
+                .await
+            {
+                Ok(Ok(permit)) => Ok(permit),
+                Ok(Err(_)) => Err(WriterCommandReserveError::Closed),
+                Err(_) => Err(WriterCommandReserveError::TimedOut),
+            }
+        }
         None => reserve.await.map_err(|_| WriterCommandReserveError::Closed),
+    }
+}
+
+fn writer_send_deadline(wait: Option<Duration>) -> Option<Instant> {
+    wait.map(|wait| Instant::now() + wait)
+}
+
+fn writer_resident_permits(
+    source_capacity: usize,
+    encoded_payload_len: usize,
+) -> Option<(u32, usize)> {
+    let resident_bytes = source_capacity
+        .checked_add(encoded_payload_len)?
+        .checked_add(RPC_WRITER_FRAME_CAPACITY_OVERHEAD_BYTES)?;
+    let permits = resident_bytes.div_ceil(ME_WRITER_BYTE_PERMIT_UNIT_BYTES);
+    let permits = u32::try_from(permits).ok()?;
+    let reserved_bytes = (permits as usize).checked_mul(ME_WRITER_BYTE_PERMIT_UNIT_BYTES)?;
+    Some((
+        permits.max(1),
+        reserved_bytes.max(ME_WRITER_BYTE_PERMIT_UNIT_BYTES),
+    ))
+}
+
+fn proxy_req_resident_permits(
+    source_capacity: usize,
+    data_len: usize,
+    proxy_tag: Option<&[u8]>,
+    proto_flags: u32,
+) -> Option<(u32, usize)> {
+    writer_resident_permits(
+        source_capacity,
+        proxy_req_payload_len(data_len, proxy_tag, proto_flags),
+    )
+}
+
+fn try_reserve_writer_bytes(
+    byte_budget: &Arc<Semaphore>,
+    permits: u32,
+    reserved_bytes: usize,
+    stats: &Arc<Stats>,
+) -> std::result::Result<WriterBytePermit, TryAcquireError> {
+    byte_budget
+        .clone()
+        .try_acquire_many_owned(permits)
+        .map(|permit| WriterBytePermit::new(permit, reserved_bytes, stats.clone()))
+}
+
+async fn reserve_writer_bytes(
+    byte_budget: &Arc<Semaphore>,
+    permits: u32,
+    reserved_bytes: usize,
+    deadline: Option<Instant>,
+    stats: &Arc<Stats>,
+) -> std::result::Result<WriterBytePermit, WriterByteReserveError> {
+    match try_reserve_writer_bytes(byte_budget, permits, reserved_bytes, stats) {
+        Ok(permit) => return Ok(permit),
+        Err(TryAcquireError::Closed) => return Err(WriterByteReserveError::Closed),
+        Err(TryAcquireError::NoPermits) => {
+            stats.increment_me_writer_byte_budget_wait_total();
+        }
+    }
+
+    let acquire = byte_budget.clone().acquire_many_owned(permits);
+    match deadline {
+        Some(deadline) => {
+            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), acquire)
+                .await
+            {
+                Ok(Ok(permit)) => Ok(WriterBytePermit::new(permit, reserved_bytes, stats.clone())),
+                Ok(Err(_)) => Err(WriterByteReserveError::Closed),
+                Err(_) => {
+                    stats.increment_me_writer_byte_budget_timeout_total();
+                    Err(WriterByteReserveError::TimedOut)
+                }
+            }
+        }
+        None => acquire
+            .await
+            .map(|permit| WriterBytePermit::new(permit, reserved_bytes, stats.clone()))
+            .map_err(|_| WriterByteReserveError::Closed),
     }
 }
 
 impl MePool {
     /// Send RPC_PROXY_REQ. `tag_override`: per-user ad_tag (from access.user_ad_tags); if None, uses pool default.
+    /// `payload_permit` keeps optional client byte accounting alive until the writer consumes the command.
     pub async fn send_proxy_req(
         self: &Arc<Self>,
         conn_id: u64,
@@ -76,8 +179,32 @@ impl MePool {
         data: &[u8],
         proto_flags: u32,
         tag_override: Option<&[u8]>,
+        mut payload_permit: Option<OwnedSemaphorePermit>,
     ) -> Result<()> {
         let tag = tag_override.or(self.proxy_tag.as_deref());
+        let Some(source_capacity) = data
+            .len()
+            .checked_add(LEGACY_PROXY_REQ_SOURCE_CAPACITY_OVERHEAD_BYTES)
+        else {
+            self.stats.increment_me_writer_byte_budget_oversize_total();
+            return Err(ProxyError::Proxy(
+                "ME writer payload residency calculation overflow".into(),
+            ));
+        };
+        let Some((writer_byte_permits, writer_reserved_bytes)) =
+            proxy_req_resident_permits(source_capacity, data.len(), tag, proto_flags)
+        else {
+            self.stats.increment_me_writer_byte_budget_oversize_total();
+            return Err(ProxyError::Proxy(
+                "ME writer payload residency calculation overflow".into(),
+            ));
+        };
+        if writer_byte_permits as usize > self.writer_lifecycle.writer_byte_budget_permits {
+            self.stats.increment_me_writer_byte_budget_oversize_total();
+            return Err(ProxyError::Proxy(
+                "ME writer payload exceeds configured byte budget".into(),
+            ));
+        }
         let build_routed_payload = |effective_our_addr: SocketAddr| {
             (
                 build_proxy_req_payload(
@@ -118,19 +245,48 @@ impl MePool {
         loop {
             if let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await
             {
+                let deadline =
+                    writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
+                let writer_permit = match reserve_writer_bytes(
+                    &current.byte_budget,
+                    writer_byte_permits,
+                    writer_reserved_bytes,
+                    deadline,
+                    &self.stats,
+                )
+                .await
+                {
+                    Ok(permit) => permit,
+                    Err(WriterByteReserveError::TimedOut) => {
+                        self.stats
+                            .increment_me_writer_pick_full_total(self.writer_pick_mode());
+                        return Err(ProxyError::Proxy(
+                            "ME writer byte budget full within blocking send timeout".into(),
+                        ));
+                    }
+                    Err(WriterByteReserveError::Closed) => {
+                        warn!(
+                            writer_id = current.writer_id,
+                            "ME writer byte budget closed"
+                        );
+                        self.remove_writer_and_close_clients(current.writer_id)
+                            .await;
+                        continue;
+                    }
+                };
                 let (current_payload, _) = build_routed_payload(current_meta.our_addr);
-                match current.tx.try_send(WriterCommand::Data(current_payload)) {
+                let command = WriterCommand::Data {
+                    payload: current_payload,
+                    _permit: payload_permit.take(),
+                    writer_permit,
+                };
+                match current.tx.try_send(command) {
                     Ok(()) => {
                         self.note_hybrid_route_success();
                         return Ok(());
                     }
                     Err(TrySendError::Full(cmd)) => {
-                        match reserve_writer_command_slot(
-                            &current.tx,
-                            self.route_runtime.me_route_blocking_send_timeout,
-                        )
-                        .await
-                        {
+                        match reserve_writer_command_slot(&current.tx, deadline).await {
                             Ok(permit) => {
                                 permit.send(cmd);
                                 self.note_hybrid_route_success();
@@ -143,14 +299,17 @@ impl MePool {
                                     "ME writer channel full within blocking send timeout".into(),
                                 ));
                             }
-                            Err(WriterCommandReserveError::Closed) => {}
+                            Err(WriterCommandReserveError::Closed) => {
+                                payload_permit = payload_permit_from_data_command(cmd);
+                            }
                         }
                         warn!(writer_id = current.writer_id, "ME writer channel closed");
                         self.remove_writer_and_close_clients(current.writer_id)
                             .await;
                         continue;
                     }
-                    Err(TrySendError::Closed(_)) => {
+                    Err(TrySendError::Closed(cmd)) => {
+                        payload_permit = payload_permit_from_data_command(cmd);
                         warn!(writer_id = current.writer_id, "ME writer channel closed");
                         self.remove_writer_and_close_clients(current.writer_id)
                             .await;
@@ -464,11 +623,31 @@ impl MePool {
                 if !self.writer_accepts_new_binding(w) {
                     continue;
                 }
-                // Keep the advertised proxy IP aligned with the selected ME writer source.
-                let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
-                let (payload, meta) = build_routed_payload(effective_our_addr);
+                let writer_permit = match try_reserve_writer_bytes(
+                    &w.byte_budget,
+                    writer_byte_permits,
+                    writer_reserved_bytes,
+                    &self.stats,
+                ) {
+                    Ok(permit) => permit,
+                    Err(TryAcquireError::NoPermits) => {
+                        if fallback_blocking_idx.is_none() {
+                            fallback_blocking_idx = Some(idx);
+                        }
+                        continue;
+                    }
+                    Err(TryAcquireError::Closed) => {
+                        self.stats.increment_me_writer_pick_closed_total(pick_mode);
+                        warn!(writer_id = w.id, "ME writer byte budget closed");
+                        self.remove_writer_and_close_clients(w.id).await;
+                        continue;
+                    }
+                };
                 match w.tx.clone().try_reserve_owned() {
                     Ok(permit) => {
+                        // Keep the advertised proxy IP aligned with the selected ME writer source.
+                        let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
+                        let (payload, meta) = build_routed_payload(effective_our_addr);
                         if !self.registry.bind_writer(conn_id, w.id, meta).await {
                             debug!(
                                 conn_id,
@@ -479,7 +658,11 @@ impl MePool {
                             self.remove_writer_and_close_clients(w.id).await;
                             continue;
                         }
-                        permit.send(WriterCommand::Data(payload));
+                        permit.send(WriterCommand::Data {
+                            payload,
+                            _permit: payload_permit.take(),
+                            writer_permit,
+                        });
                         self.stats
                             .increment_me_writer_pick_success_try_total(pick_mode);
                         if w.generation < self.current_generation() {
@@ -521,52 +704,71 @@ impl MePool {
             }
             self.stats
                 .increment_me_writer_pick_blocking_fallback_total();
-            // Keep the advertised proxy IP aligned with the selected ME writer source.
-            let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
-            let (payload, meta) = build_routed_payload(effective_our_addr);
-            let reserve_result =
-                if let Some(timeout) = self.route_runtime.me_route_blocking_send_timeout {
-                    match tokio::time::timeout(timeout, w.tx.clone().reserve_owned()).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            self.stats.increment_me_writer_pick_full_total(pick_mode);
-                            continue;
-                        }
-                    }
-                } else {
-                    w.tx.clone().reserve_owned().await
-                };
-            match reserve_result {
-                Ok(permit) => {
-                    if !self.registry.bind_writer(conn_id, w.id, meta).await {
-                        debug!(
-                            conn_id,
-                            writer_id = w.id,
-                            "ME writer disappeared before fallback bind commit, pruning stale writer"
-                        );
-                        drop(permit);
-                        self.remove_writer_and_close_clients(w.id).await;
-                        continue;
-                    }
-                    permit.send(WriterCommand::Data(payload));
-                    self.stats
-                        .increment_me_writer_pick_success_fallback_total(pick_mode);
-                    if w.generation < self.current_generation() {
-                        self.stats.increment_pool_stale_pick_total();
-                    }
-                    self.note_hybrid_route_success();
-                    return Ok(());
+            let deadline = writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
+            let writer_permit = match reserve_writer_bytes(
+                &w.byte_budget,
+                writer_byte_permits,
+                writer_reserved_bytes,
+                deadline,
+                &self.stats,
+            )
+            .await
+            {
+                Ok(permit) => permit,
+                Err(WriterByteReserveError::TimedOut) => {
+                    self.stats.increment_me_writer_pick_full_total(pick_mode);
+                    continue;
                 }
-                Err(_) => {
+                Err(WriterByteReserveError::Closed) => {
+                    self.stats.increment_me_writer_pick_closed_total(pick_mode);
+                    warn!(writer_id = w.id, "ME writer byte budget closed (blocking)");
+                    self.remove_writer_and_close_clients(w.id).await;
+                    continue;
+                }
+            };
+            let permit = match reserve_writer_command_slot(&w.tx, deadline).await {
+                Ok(permit) => permit,
+                Err(WriterCommandReserveError::TimedOut) => {
+                    self.stats.increment_me_writer_pick_full_total(pick_mode);
+                    continue;
+                }
+                Err(WriterCommandReserveError::Closed) => {
                     self.stats.increment_me_writer_pick_closed_total(pick_mode);
                     warn!(writer_id = w.id, "ME writer channel closed (blocking)");
                     self.remove_writer_and_close_clients(w.id).await;
+                    continue;
                 }
+            };
+            // Keep the advertised proxy IP aligned with the selected ME writer source.
+            let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
+            let (payload, meta) = build_routed_payload(effective_our_addr);
+            if !self.registry.bind_writer(conn_id, w.id, meta).await {
+                debug!(
+                    conn_id,
+                    writer_id = w.id,
+                    "ME writer disappeared before fallback bind commit, pruning stale writer"
+                );
+                drop(permit);
+                self.remove_writer_and_close_clients(w.id).await;
+                continue;
             }
+            permit.send(WriterCommand::Data {
+                payload,
+                _permit: payload_permit.take(),
+                writer_permit,
+            });
+            self.stats
+                .increment_me_writer_pick_success_fallback_total(pick_mode);
+            if w.generation < self.current_generation() {
+                self.stats.increment_pool_stale_pick_total();
+            }
+            self.note_hybrid_route_success();
+            return Ok(());
         }
     }
 
     /// Send RPC_PROXY_REQ while keeping the first bound-writer path allocation-light.
+    /// The client byte permit follows the payload until writer completion or command drop.
     pub async fn send_proxy_req_pooled(
         self: &Arc<Self>,
         conn_id: u64,
@@ -574,12 +776,69 @@ impl MePool {
         client_addr: SocketAddr,
         our_addr: SocketAddr,
         payload: PooledBuffer,
+        _permit: OwnedSemaphorePermit,
         proto_flags: u32,
         tag_override: Option<[u8; 16]>,
     ) -> Result<()> {
         let tag = tag_override.or_else(|| proxy_tag_array(self.proxy_tag.as_deref()));
+        let Some((writer_byte_permits, writer_reserved_bytes)) = proxy_req_resident_permits(
+            payload.capacity(),
+            payload.len(),
+            tag.as_ref().map(|tag| tag.as_slice()),
+            proto_flags,
+        ) else {
+            self.stats.increment_me_writer_byte_budget_oversize_total();
+            return Err(ProxyError::Proxy(
+                "ME writer payload residency calculation overflow".into(),
+            ));
+        };
+        if writer_byte_permits as usize > self.writer_lifecycle.writer_byte_budget_permits {
+            self.stats.increment_me_writer_byte_budget_oversize_total();
+            return Err(ProxyError::Proxy(
+                "ME writer payload exceeds configured byte budget".into(),
+            ));
+        }
 
         if let Some((current, current_meta)) = self.registry.get_writer_with_meta(conn_id).await {
+            let deadline = writer_send_deadline(self.route_runtime.me_route_blocking_send_timeout);
+            let writer_permit = match reserve_writer_bytes(
+                &current.byte_budget,
+                writer_byte_permits,
+                writer_reserved_bytes,
+                deadline,
+                &self.stats,
+            )
+            .await
+            {
+                Ok(permit) => permit,
+                Err(WriterByteReserveError::TimedOut) => {
+                    self.stats
+                        .increment_me_writer_pick_full_total(self.writer_pick_mode());
+                    return Err(ProxyError::Proxy(
+                        "ME writer byte budget full within blocking send timeout".into(),
+                    ));
+                }
+                Err(WriterByteReserveError::Closed) => {
+                    warn!(
+                        writer_id = current.writer_id,
+                        "ME writer byte budget closed"
+                    );
+                    self.remove_writer_and_close_clients(current.writer_id)
+                        .await;
+                    return self
+                        .send_proxy_req(
+                            conn_id,
+                            target_dc,
+                            client_addr,
+                            our_addr,
+                            payload.as_ref(),
+                            proto_flags,
+                            tag.as_ref().map(|tag| tag.as_slice()),
+                            Some(_permit),
+                        )
+                        .await;
+                }
+            };
             let command = WriterCommand::ProxyReq(ProxyReqCommand {
                 conn_id,
                 client_addr,
@@ -587,6 +846,8 @@ impl MePool {
                 proto_flags,
                 proxy_tag: tag,
                 payload,
+                _permit,
+                writer_permit,
             });
             match current.tx.try_send(command) {
                 Ok(()) => {
@@ -594,12 +855,7 @@ impl MePool {
                     return Ok(());
                 }
                 Err(TrySendError::Full(cmd)) => {
-                    match reserve_writer_command_slot(
-                        &current.tx,
-                        self.route_runtime.me_route_blocking_send_timeout,
-                    )
-                    .await
-                    {
+                    match reserve_writer_command_slot(&current.tx, deadline).await {
                         Ok(permit) => {
                             permit.send(cmd);
                             self.note_hybrid_route_success();
@@ -613,7 +869,8 @@ impl MePool {
                             ));
                         }
                         Err(WriterCommandReserveError::Closed) => {
-                            let Some(payload) = proxy_req_payload_from_command(cmd) else {
+                            let Some((payload, _permit)) = proxy_req_payload_from_command(cmd)
+                            else {
                                 return Err(ProxyError::Proxy(
                                     "ME writer rejected unexpected command type".into(),
                                 ));
@@ -630,13 +887,14 @@ impl MePool {
                                     payload.as_ref(),
                                     proto_flags,
                                     tag.as_ref().map(|tag| tag.as_slice()),
+                                    Some(_permit),
                                 )
                                 .await;
                         }
                     }
                 }
                 Err(TrySendError::Closed(cmd)) => {
-                    let Some(payload) = proxy_req_payload_from_command(cmd) else {
+                    let Some((payload, _permit)) = proxy_req_payload_from_command(cmd) else {
                         return Err(ProxyError::Proxy(
                             "ME writer rejected unexpected command type".into(),
                         ));
@@ -653,6 +911,7 @@ impl MePool {
                             payload.as_ref(),
                             proto_flags,
                             tag.as_ref().map(|tag| tag.as_slice()),
+                            Some(_permit),
                         )
                         .await;
                 }
@@ -667,6 +926,7 @@ impl MePool {
             payload.as_ref(),
             proto_flags,
             tag.as_ref().map(|tag| tag.as_slice()),
+            Some(_permit),
         )
         .await
     }

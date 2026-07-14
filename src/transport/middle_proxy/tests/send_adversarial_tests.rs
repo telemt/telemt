@@ -98,6 +98,7 @@ async fn make_pool() -> (Arc<MePool>, Arc<SecureRandom>) {
         general.me_writer_pick_sample_size,
         MeSocksKdfPolicy::default(),
         general.me_writer_cmd_channel_capacity,
+        general.me_writer_byte_budget_bytes,
         general.me_route_channel_capacity,
         general.me_route_backpressure_enabled,
         general.me_route_fairshare_enabled,
@@ -127,6 +128,7 @@ async fn insert_writer(
     register_in_registry: bool,
 ) -> mpsc::Receiver<WriterCommand> {
     let (tx, rx) = mpsc::channel::<WriterCommand>(8);
+    let byte_budget = pool.new_writer_byte_budget();
     let writer = MeWriter {
         id: writer_id,
         addr,
@@ -136,6 +138,7 @@ async fn insert_writer(
         contour: Arc::new(AtomicU8::new(WriterContour::Active.as_u8())),
         created_at: Instant::now(),
         tx: tx.clone(),
+        byte_budget: byte_budget.clone(),
         cancel: CancellationToken::new(),
         degraded: Arc::new(AtomicBool::new(false)),
         rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
@@ -154,7 +157,9 @@ async fn insert_writer(
     }
     pool.rebuild_endpoint_dc_map().await;
     if register_in_registry {
-        pool.registry.register_writer(writer_id, tx).await;
+        pool.registry
+            .register_writer(writer_id, tx, byte_budget)
+            .await;
     }
     rx
 }
@@ -165,7 +170,7 @@ async fn recv_data_count(rx: &mut mpsc::Receiver<WriterCommand>, budget: Duratio
     while Instant::now().duration_since(start) < budget {
         let remaining = budget.saturating_sub(Instant::now().duration_since(start));
         match tokio::time::timeout(remaining.min(Duration::from_millis(10)), rx.recv()).await {
-            Ok(Some(WriterCommand::Data(_))) => data_count += 1,
+            Ok(Some(WriterCommand::Data { .. })) => data_count += 1,
             Ok(Some(WriterCommand::DataAndFlush(_))) => data_count += 1,
             Ok(Some(WriterCommand::ProxyReq(_))) => data_count += 1,
             Ok(Some(WriterCommand::ControlAndFlush(_))) => data_count += 1,
@@ -185,7 +190,7 @@ async fn recv_first_data_payload(
     while Instant::now().duration_since(start) < budget {
         let remaining = budget.saturating_sub(Instant::now().duration_since(start));
         match tokio::time::timeout(remaining.min(Duration::from_millis(10)), rx.recv()).await {
-            Ok(Some(WriterCommand::Data(payload))) => return Some(payload.to_vec()),
+            Ok(Some(WriterCommand::Data { payload, .. })) => return Some(payload.to_vec()),
             Ok(Some(WriterCommand::DataAndFlush(payload))) => return Some(payload.to_vec()),
             Ok(Some(_)) => {}
             Ok(None) => break,
@@ -239,6 +244,7 @@ async fn send_proxy_req_does_not_replay_when_first_bind_commit_fails() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
             b"hello",
             0,
+            None,
             None,
         )
         .await;
@@ -299,6 +305,7 @@ async fn send_proxy_req_prunes_iterative_stale_bind_failures_without_data_replay
             b"storm",
             0,
             None,
+            None,
         )
         .await;
 
@@ -356,6 +363,7 @@ async fn send_proxy_req_uses_writer_source_ip_when_advertised_our_addr_differs()
             b"route",
             0,
             None,
+            None,
         )
         .await;
 
@@ -410,6 +418,7 @@ async fn send_proxy_req_blocking_fallback_uses_writer_source_ip() {
                 our_addr,
                 b"blocking",
                 0,
+                None,
                 None,
             )
             .await

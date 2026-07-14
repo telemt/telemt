@@ -10,7 +10,7 @@ use crate::protocol::constants::{RPC_CLOSE_CONN_U32, RPC_CLOSE_EXT_U32};
 
 use super::super::MePool;
 use super::super::codec::{WriterCommand, build_control_payload};
-use super::{WriterCommandReserveError, reserve_writer_command_slot};
+use super::{WriterCommandReserveError, reserve_writer_command_slot, writer_send_deadline};
 
 const ME_CLOSE_SIGNAL_SEND_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -22,8 +22,11 @@ impl MePool {
             match w.tx.try_send(WriterCommand::ControlAndFlush(payload)) {
                 Ok(()) => {}
                 Err(TrySendError::Full(cmd)) => {
-                    match reserve_writer_command_slot(&w.tx, Some(ME_CLOSE_SIGNAL_SEND_TIMEOUT))
-                        .await
+                    match reserve_writer_command_slot(
+                        &w.tx,
+                        writer_send_deadline(Some(ME_CLOSE_SIGNAL_SEND_TIMEOUT)),
+                    )
+                    .await
                     {
                         Ok(permit) => {
                             permit.send(cmd);
@@ -63,9 +66,12 @@ impl MePool {
             match w.tx.try_send(WriterCommand::ControlAndFlush(payload)) {
                 Ok(()) => {}
                 Err(TrySendError::Full(cmd)) => {
-                    let _ = reserve_writer_command_slot(&w.tx, Some(ME_CLOSE_SIGNAL_SEND_TIMEOUT))
-                        .await
-                        .map(|permit| permit.send(cmd));
+                    let _ = reserve_writer_command_slot(
+                        &w.tx,
+                        writer_send_deadline(Some(ME_CLOSE_SIGNAL_SEND_TIMEOUT)),
+                    )
+                    .await
+                    .map(|permit| permit.send(cmd));
                 }
                 Err(TrySendError::Closed(_)) => {
                     debug!(conn_id, "ME close_conn skipped: writer channel closed");

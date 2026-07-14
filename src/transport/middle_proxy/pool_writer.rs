@@ -63,13 +63,19 @@ async fn writer_command_loop(
             _ = cancel.cancelled() => return Ok(()),
             cmd = rx.recv() => {
                 match cmd {
-                    Some(WriterCommand::Data(payload)) => {
+                    Some(WriterCommand::Data {
+                        payload,
+                        _permit,
+                        mut writer_permit,
+                    }) => {
+                        writer_permit.mark_inflight();
                         rpc_writer.send(&payload).await?;
                     }
                     Some(WriterCommand::DataAndFlush(payload)) => {
                         rpc_writer.send_and_flush(&payload).await?;
                     }
-                    Some(WriterCommand::ProxyReq(command)) => {
+                    Some(WriterCommand::ProxyReq(mut command)) => {
+                        command.writer_permit.mark_inflight();
                         rpc_writer.send_proxy_req(&command).await?;
                     }
                     Some(WriterCommand::ControlAndFlush(payload)) => {
@@ -419,6 +425,7 @@ impl MePool {
         let draining_started_at_epoch_secs = Arc::new(AtomicU64::new(0));
         let drain_deadline_epoch_secs = Arc::new(AtomicU64::new(0));
         let allow_drain_fallback = Arc::new(AtomicBool::new(false));
+        let byte_budget = self.new_writer_byte_budget();
         let (tx, rx) =
             mpsc::channel::<WriterCommand>(self.writer_lifecycle.writer_cmd_channel_capacity);
         let rpc_writer = RpcWriter {
@@ -438,6 +445,7 @@ impl MePool {
             contour: contour.clone(),
             created_at: Instant::now(),
             tx: tx.clone(),
+            byte_budget: byte_budget.clone(),
             cancel: cancel.clone(),
             degraded: degraded.clone(),
             rtt_ema_ms_x10: rtt_ema_ms_x10.clone(),
@@ -449,7 +457,9 @@ impl MePool {
         self.writers
             .update(|writers| writers.push(writer.clone()))
             .await;
-        self.registry.register_writer(writer_id, tx.clone()).await;
+        self.registry
+            .register_writer(writer_id, tx.clone(), byte_budget)
+            .await;
         self.registry.mark_writer_idle(writer_id).await;
         self.conn_count.fetch_add(1, Ordering::Relaxed);
         self.notify_writer_epoch();

@@ -204,6 +204,12 @@ impl Stats {
         self.buffer_pool_in_use_gauge.load(Ordering::Relaxed)
     }
 
+    /// Returns the count of non-standard buffers replaced before pooling.
+    pub fn get_buffer_pool_replaced_nonstandard_total(&self) -> u64 {
+        self.buffer_pool_replaced_nonstandard_total
+            .load(Ordering::Relaxed)
+    }
+
     pub fn get_me_c2me_send_full_total(&self) -> u64 {
         self.me_c2me_send_full_total.load(Ordering::Relaxed)
     }
@@ -267,6 +273,36 @@ impl Stats {
     }
     pub fn get_me_writer_pick_mode_switch_total(&self) -> u64 {
         self.me_writer_pick_mode_switch_total
+            .load(Ordering::Relaxed)
+    }
+    /// Returns the configured resident-memory limit per ME writer.
+    pub fn get_me_writer_byte_budget_limit_bytes_gauge(&self) -> u64 {
+        self.me_writer_byte_budget_limit_bytes_gauge
+            .load(Ordering::Relaxed)
+    }
+    /// Returns aggregate queued or enqueueing writer memory reservations.
+    pub fn get_me_writer_byte_budget_queued_bytes_gauge(&self) -> u64 {
+        self.me_writer_byte_budget_queued_bytes_gauge
+            .load(Ordering::Relaxed)
+    }
+    /// Returns aggregate writer reservations currently owned by socket writes.
+    pub fn get_me_writer_byte_budget_inflight_bytes_gauge(&self) -> u64 {
+        self.me_writer_byte_budget_inflight_bytes_gauge
+            .load(Ordering::Relaxed)
+    }
+    /// Returns the count of blocking writer byte-budget waits.
+    pub fn get_me_writer_byte_budget_wait_total(&self) -> u64 {
+        self.me_writer_byte_budget_wait_total
+            .load(Ordering::Relaxed)
+    }
+    /// Returns the count of writer byte-budget wait timeouts.
+    pub fn get_me_writer_byte_budget_timeout_total(&self) -> u64 {
+        self.me_writer_byte_budget_timeout_total
+            .load(Ordering::Relaxed)
+    }
+    /// Returns the count of payloads that cannot fit the configured writer budget.
+    pub fn get_me_writer_byte_budget_oversize_total(&self) -> u64 {
+        self.me_writer_byte_budget_oversize_total
             .load(Ordering::Relaxed)
     }
     pub fn get_me_socks_kdf_strict_reject(&self) -> u64 {

@@ -595,6 +595,81 @@ async fn render_metrics(
         "telemt_buffer_pool_buffers_total{{kind=\"in_use\"}} {}",
         stats.get_buffer_pool_in_use_gauge()
     );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_buffer_pool_events_total Buffer-pool allocation lifecycle events"
+    );
+    let _ = writeln!(out, "# TYPE telemt_buffer_pool_events_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_buffer_pool_events_total{{event=\"replaced_nonstandard\"}} {}",
+        stats.get_buffer_pool_replaced_nonstandard_total()
+    );
+
+    let direct_budget = shared_state.direct_buffer_budget.snapshot();
+    let _ = writeln!(
+        out,
+        "# HELP telemt_direct_relay_buffer_budget_bytes Direct relay copy-buffer budget and memory inputs"
+    );
+    let _ = writeln!(out, "# TYPE telemt_direct_relay_buffer_budget_bytes gauge");
+    for (kind, value) in [
+        ("hard_limit", direct_budget.hard_limit_bytes),
+        ("target", direct_budget.target_bytes),
+        ("reserved", direct_budget.reserved_bytes),
+        ("memory_total", direct_budget.memory_total_bytes),
+        ("memory_available", direct_budget.memory_available_bytes),
+        ("process_rss", direct_budget.process_rss_bytes),
+    ] {
+        let _ = writeln!(
+            out,
+            "telemt_direct_relay_buffer_budget_bytes{{kind=\"{}\"}} {}",
+            kind, value
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP telemt_direct_relay_buffer_budget_events_total Direct relay buffer-budget lifecycle events"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_direct_relay_buffer_budget_events_total counter"
+    );
+    for (result, value) in [
+        ("promotion", direct_budget.promotion_total),
+        ("promotion_denied", direct_budget.promotion_denied_total),
+        ("minimum_fallback", direct_budget.minimum_fallback_total),
+        ("admission_rejected", direct_budget.admission_rejected_total),
+        ("quiet_demotion", direct_budget.quiet_demotion_total),
+        (
+            "write_pressure_demotion",
+            direct_budget.write_pressure_demotion_total,
+        ),
+        (
+            "global_pressure_demotion",
+            direct_budget.global_pressure_demotion_total,
+        ),
+    ] {
+        let _ = writeln!(
+            out,
+            "telemt_direct_relay_buffer_budget_events_total{{result=\"{}\"}} {}",
+            result, value
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP telemt_direct_relay_buffer_sessions Current Direct relay sessions by adaptive tier"
+    );
+    let _ = writeln!(out, "# TYPE telemt_direct_relay_buffer_sessions gauge");
+    for (tier, value) in ["base", "tier1", "tier2", "tier3"]
+        .into_iter()
+        .zip(direct_budget.tier_sessions)
+    {
+        let _ = writeln!(
+            out,
+            "telemt_direct_relay_buffer_sessions{{tier=\"{}\"}} {}",
+            tier, value
+        );
+    }
 
     let _ = writeln!(
         out,
@@ -2430,6 +2505,82 @@ async fn render_metrics(
         "telemt_me_d2c_batch_timeout_fired_total {}",
         if me_allows_debug {
             stats.get_me_d2c_batch_timeout_fired_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_byte_budget_limit_bytes Configured resident-memory budget per ME writer"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_writer_byte_budget_limit_bytes gauge");
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_limit_bytes {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_limit_bytes_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_byte_budget_reserved_bytes Aggregate ME writer memory reservations by lifecycle state"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_byte_budget_reserved_bytes gauge"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_reserved_bytes{{state=\"queued\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_queued_bytes_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_reserved_bytes{{state=\"inflight\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_inflight_bytes_gauge()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "# HELP telemt_me_writer_byte_budget_events_total ME writer byte-budget outcomes"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_me_writer_byte_budget_events_total counter"
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_events_total{{result=\"wait\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_wait_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_events_total{{result=\"timeout\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_timeout_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
+        "telemt_me_writer_byte_budget_events_total{{result=\"oversize\"}} {}",
+        if me_allows_normal {
+            stats.get_me_writer_byte_budget_oversize_total()
         } else {
             0
         }

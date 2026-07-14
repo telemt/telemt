@@ -345,22 +345,22 @@ where
     } else {
         Duration::from_secs(1800)
     };
-    let relay_result =
-        crate::proxy::relay::relay_bidirectional_with_activity_timeout_lease_and_cancel(
-            client_reader,
-            client_writer,
-            tg_reader,
-            tg_writer,
-            config.general.direct_relay_copy_buf_c2s_bytes,
-            config.general.direct_relay_copy_buf_s2c_bytes,
-            user,
-            Arc::clone(&stats),
-            config.access.user_data_quota.get(user).copied(),
-            buffer_pool,
-            traffic_lease,
-            relay_activity_timeout,
-            session_cancel.clone(),
-        );
+    let relay_result = crate::proxy::relay::relay_direct_adaptive(
+        client_reader,
+        client_writer,
+        tg_reader,
+        tg_writer,
+        config.general.direct_relay_copy_buf_c2s_bytes,
+        config.general.direct_relay_copy_buf_s2c_bytes,
+        config.server.max_connections,
+        user,
+        Arc::clone(&stats),
+        config.access.user_data_quota.get(user).copied(),
+        traffic_lease,
+        relay_activity_timeout,
+        session_cancel.clone(),
+        Arc::clone(&shared.direct_buffer_budget),
+    );
     tokio::pin!(relay_result);
     let relay_result = loop {
         if let Some(cutover) =
@@ -400,7 +400,6 @@ where
         Err(e) => debug!(user = %user, error = %e, "Direct relay ended with error"),
     }
 
-    buffer_pool_trim.trim_to(buffer_pool_trim.max_buffers().min(64));
     let pool_snapshot = buffer_pool_trim.stats();
     stats.set_buffer_pool_gauges(
         pool_snapshot.pooled,

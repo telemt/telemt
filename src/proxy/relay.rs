@@ -84,7 +84,10 @@ fn watchdog_delta(current: u64, previous: u64) -> u64 {
     current.saturating_sub(previous)
 }
 
+mod adaptive_copy;
 mod io;
+
+pub(crate) use self::adaptive_copy::relay_direct_adaptive;
 
 use self::io::{CombinedStream, SharedCounters, StatsIo, is_quota_io_error};
 #[cfg(test)]
@@ -217,6 +220,7 @@ where
     .await
 }
 
+#[allow(dead_code)]
 pub async fn relay_bidirectional_with_activity_timeout_lease_and_cancel<CR, CW, SR, SW>(
     client_reader: CR,
     client_writer: CW,

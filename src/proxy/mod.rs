@@ -60,6 +60,8 @@
 
 pub mod adaptive_buffers;
 pub mod client;
+// Process-wide Direct relay copy-buffer ownership and pressure policy.
+pub(crate) mod direct_buffer_budget;
 pub mod direct_relay;
 pub mod handshake;
 pub mod masking;

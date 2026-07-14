@@ -92,6 +92,7 @@ async fn make_pool() -> Arc<MePool> {
         general.me_writer_pick_sample_size,
         MeSocksKdfPolicy::default(),
         general.me_writer_cmd_channel_capacity,
+        general.me_writer_byte_budget_bytes,
         general.me_route_channel_capacity,
         general.me_route_backpressure_enabled,
         general.me_route_fairshare_enabled,
@@ -120,6 +121,7 @@ async fn insert_writer(
     created_at: Instant,
 ) {
     let (tx, _rx) = mpsc::channel::<WriterCommand>(8);
+    let byte_budget = pool.new_writer_byte_budget();
     let contour = if draining {
         WriterContour::Draining
     } else {
@@ -134,6 +136,7 @@ async fn insert_writer(
         contour: Arc::new(AtomicU8::new(contour.as_u8())),
         created_at,
         tx: tx.clone(),
+        byte_budget: byte_budget.clone(),
         cancel: CancellationToken::new(),
         degraded: Arc::new(AtomicBool::new(false)),
         rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
@@ -144,7 +147,9 @@ async fn insert_writer(
     };
 
     pool.writers.write().await.push(writer);
-    pool.registry.register_writer(writer_id, tx).await;
+    pool.registry
+        .register_writer(writer_id, tx, byte_budget)
+        .await;
     pool.conn_count.fetch_add(1, Ordering::Relaxed);
 }
 

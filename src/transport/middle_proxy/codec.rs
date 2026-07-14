@@ -1,9 +1,12 @@
 use bytes::Bytes;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::crypto::{AesCbc, crc32, crc32c};
 use crate::error::{ProxyError, Result};
 use crate::protocol::constants::*;
+use crate::stats::Stats;
 use crate::stream::PooledBuffer;
 
 use super::wire::{append_proxy_req_payload_into, proxy_req_payload_len};
@@ -11,9 +14,66 @@ use super::wire::{append_proxy_req_payload_into, proxy_req_payload_len};
 const RPC_WRITER_FRAME_BUF_SHRINK_THRESHOLD: usize = 256 * 1024;
 const RPC_WRITER_FRAME_BUF_RETAIN: usize = 64 * 1024;
 
+enum WriterBytePermitState {
+    Queued,
+    Inflight,
+}
+
+/// Holds one writer memory reservation through queueing and socket write completion.
+pub(crate) struct WriterBytePermit {
+    _permit: OwnedSemaphorePermit,
+    reserved_bytes: u64,
+    stats: Arc<Stats>,
+    state: WriterBytePermitState,
+}
+
+impl WriterBytePermit {
+    /// Creates a queued reservation and publishes its rounded resident-byte cost.
+    pub(crate) fn new(
+        permit: OwnedSemaphorePermit,
+        reserved_bytes: usize,
+        stats: Arc<Stats>,
+    ) -> Self {
+        let reserved_bytes = reserved_bytes as u64;
+        stats.add_me_writer_byte_budget_queued_bytes(reserved_bytes);
+        Self {
+            _permit: permit,
+            reserved_bytes,
+            stats,
+            state: WriterBytePermitState::Queued,
+        }
+    }
+
+    /// Moves the reservation from queued to in-flight accounting exactly once.
+    pub(crate) fn mark_inflight(&mut self) {
+        if matches!(self.state, WriterBytePermitState::Queued) {
+            self.stats
+                .move_me_writer_byte_budget_to_inflight(self.reserved_bytes);
+            self.state = WriterBytePermitState::Inflight;
+        }
+    }
+}
+
+impl Drop for WriterBytePermit {
+    fn drop(&mut self) {
+        match self.state {
+            WriterBytePermitState::Queued => self
+                .stats
+                .release_me_writer_byte_budget_queued_bytes(self.reserved_bytes),
+            WriterBytePermitState::Inflight => self
+                .stats
+                .release_me_writer_byte_budget_inflight_bytes(self.reserved_bytes),
+        }
+    }
+}
+
 /// Commands sent to dedicated writer tasks to avoid mutex contention on TCP writes.
 pub(crate) enum WriterCommand {
-    Data(Bytes),
+    Data {
+        payload: Bytes,
+        _permit: Option<OwnedSemaphorePermit>,
+        writer_permit: WriterBytePermit,
+    },
     DataAndFlush(Bytes),
     ProxyReq(ProxyReqCommand),
     ControlAndFlush([u8; 12]),
@@ -28,6 +88,8 @@ pub(crate) struct ProxyReqCommand {
     pub(crate) proto_flags: u32,
     pub(crate) proxy_tag: Option<[u8; 16]>,
     pub(crate) payload: PooledBuffer,
+    pub(crate) _permit: OwnedSemaphorePermit,
+    pub(crate) writer_permit: WriterBytePermit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +144,7 @@ fn build_rpc_frame_into(
 ) {
     let total_len = 4 + 4 + payload.len() + 4;
     frame.clear();
-    frame.reserve(total_len + 15);
+    frame.reserve_exact(total_len + 15);
     let total_len = total_len as u32;
     frame.extend_from_slice(&total_len.to_le_bytes());
     frame.extend_from_slice(&seq_no.to_le_bytes());
@@ -274,7 +336,7 @@ impl RpcWriter {
         );
         let total_len = 4 + 4 + payload_len + 4;
         self.frame_buf.clear();
-        self.frame_buf.reserve(total_len + 15);
+        self.frame_buf.reserve_exact(total_len + 15);
         self.frame_buf
             .extend_from_slice(&(total_len as u32).to_le_bytes());
         self.frame_buf.extend_from_slice(&self.seq_no.to_le_bytes());
@@ -320,5 +382,40 @@ impl RpcWriter {
     pub(crate) async fn send_and_flush(&mut self, payload: &[u8]) -> Result<()> {
         self.send(payload).await?;
         self.writer.flush().await.map_err(ProxyError::Io)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn writer_byte_permit_tracks_queued_and_inflight_lifecycle() {
+        let stats = Arc::new(Stats::default());
+        let semaphore = Arc::new(Semaphore::new(2));
+        let permit = semaphore
+            .clone()
+            .try_acquire_many_owned(2)
+            .expect("writer byte permits must be available");
+        let mut writer_permit = WriterBytePermit::new(permit, 32 * 1024, stats.clone());
+
+        assert_eq!(
+            stats.get_me_writer_byte_budget_queued_bytes_gauge(),
+            32 * 1024
+        );
+        assert_eq!(stats.get_me_writer_byte_budget_inflight_bytes_gauge(), 0);
+
+        writer_permit.mark_inflight();
+        assert_eq!(stats.get_me_writer_byte_budget_queued_bytes_gauge(), 0);
+        assert_eq!(
+            stats.get_me_writer_byte_budget_inflight_bytes_gauge(),
+            32 * 1024
+        );
+
+        drop(writer_permit);
+        assert_eq!(stats.get_me_writer_byte_budget_queued_bytes_gauge(), 0);
+        assert_eq!(stats.get_me_writer_byte_budget_inflight_bytes_gauge(), 0);
+        assert_eq!(semaphore.available_permits(), 2);
     }
 }

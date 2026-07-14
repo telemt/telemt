@@ -87,6 +87,7 @@ async fn make_pool() -> Arc<MePool> {
         general.me_writer_pick_sample_size,
         MeSocksKdfPolicy::default(),
         general.me_writer_cmd_channel_capacity,
+        general.me_writer_byte_budget_bytes,
         general.me_route_channel_capacity,
         general.me_route_backpressure_enabled,
         general.me_route_fairshare_enabled,

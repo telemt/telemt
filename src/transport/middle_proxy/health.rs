@@ -1795,6 +1795,7 @@ mod tests {
             general.me_writer_pick_sample_size,
             MeSocksKdfPolicy::default(),
             general.me_writer_cmd_channel_capacity,
+            general.me_writer_byte_budget_bytes,
             general.me_route_channel_capacity,
             general.me_route_backpressure_enabled,
             general.me_route_fairshare_enabled,
@@ -1821,6 +1822,7 @@ mod tests {
     ) -> u64 {
         let (conn_id, _rx) = pool.registry.register().await;
         let (tx, _writer_rx) = mpsc::channel::<WriterCommand>(8);
+        let byte_budget = pool.new_writer_byte_budget();
         let writer = MeWriter {
             id: writer_id,
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4000 + writer_id as u16),
@@ -1830,6 +1832,7 @@ mod tests {
             contour: Arc::new(AtomicU8::new(WriterContour::Draining.as_u8())),
             created_at: Instant::now() - Duration::from_secs(writer_id),
             tx: tx.clone(),
+            byte_budget: byte_budget.clone(),
             cancel: CancellationToken::new(),
             degraded: Arc::new(AtomicBool::new(false)),
             rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
@@ -1839,7 +1842,9 @@ mod tests {
             allow_drain_fallback: Arc::new(AtomicBool::new(false)),
         };
         pool.writers.write().await.push(writer);
-        pool.registry.register_writer(writer_id, tx).await;
+        pool.registry
+            .register_writer(writer_id, tx, byte_budget)
+            .await;
         pool.conn_count.fetch_add(1, Ordering::Relaxed);
         assert!(
             pool.registry
@@ -1860,6 +1865,7 @@ mod tests {
 
     async fn insert_live_writer(pool: &Arc<MePool>, writer_id: u64, writer_dc: i32) {
         let (tx, _writer_rx) = mpsc::channel::<WriterCommand>(8);
+        let byte_budget = pool.new_writer_byte_budget();
         let writer = MeWriter {
             id: writer_id,
             addr: SocketAddr::new(
@@ -1877,6 +1883,7 @@ mod tests {
             contour: Arc::new(AtomicU8::new(WriterContour::Active.as_u8())),
             created_at: Instant::now(),
             tx: tx.clone(),
+            byte_budget: byte_budget.clone(),
             cancel: CancellationToken::new(),
             degraded: Arc::new(AtomicBool::new(false)),
             rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
@@ -1886,7 +1893,9 @@ mod tests {
             allow_drain_fallback: Arc::new(AtomicBool::new(false)),
         };
         pool.writers.write().await.push(writer);
-        pool.registry.register_writer(writer_id, tx).await;
+        pool.registry
+            .register_writer(writer_id, tx, byte_budget)
+            .await;
         pool.conn_count.fetch_add(1, Ordering::Relaxed);
     }
 

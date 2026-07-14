@@ -1,6 +1,6 @@
 [package]
 name = "telemt"
-version = "3.4.23"
+version = "3.4.24"
 edition = "2024"
 
 [features]
@@ -15,8 +15,8 @@ tokio = { version = "1.52.3", features = ["full", "tracing"] }
 tokio-util = { version = "0.7.18", features = ["full"] }
 
 # Crypto
-aes = "0.8.4"
-ctr = "0.9.2"
+aes = { version = "0.8.4", features = ["zeroize"] }
+ctr = { version = "0.9.2", features = ["zeroize"] }
 cbc = "0.1.2"
 sha2 = "0.10.9"
 sha1 = "0.10.6"
