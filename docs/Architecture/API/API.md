@@ -163,7 +163,8 @@ Notes:
 | --- | --- | --- |
 | `400` | `bad_request` | Invalid JSON, validation failures, malformed request body. |
 | `400` | `access_not_editable` | `PATCH /v1/config` body contains an `access` key (managed via users API). |
-| `400` | `section_not_editable` | `PATCH /v1/config` body contains `server`, `network`, or an unknown top-level key. |
+| `400` | `section_not_editable` | `PATCH /v1/config` body contains `network` or an unknown top-level key. |
+| `400` | `field_not_editable` | `PATCH /v1/config` body contains a forbidden nested field under a partially editable section (e.g. `server.api`, `server.port`). |
 | `401` | `unauthorized` | Missing/invalid `Authorization` when `auth_header` is configured. |
 | `403` | `forbidden` | Source IP is not allowed by whitelist. |
 | `403` | `read_only` | Mutating endpoint called while `read_only=true`. |
@@ -254,16 +255,22 @@ bob = ["198.51.100.42/32"]
 
 ### `PatchConfigRequest`
 
-A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `show_link`, `dc_overrides`). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched sections and file comments are preserved.
+A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`) or the partially editable `server` object (only `listeners` is allowed under `server`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched sections and file comments are preserved.
 
 **Rejected keys:**
 - `access` → `400 access_not_editable` (users/secrets are managed via `POST/PATCH /v1/users`).
-- `server`, `network`, or any unknown top-level key → `400 section_not_editable`.
+- `network`, or any unknown top-level key → `400 section_not_editable`.
+- `server` with any key other than `listeners` (e.g. `port`, `api`, `admin_api`) → `400 field_not_editable`.
 - An object with no editable keys → `400 bad_request` (empty patch).
 
 Example — patch only the SNI domain:
 ```json
 {"censorship": {"tls_domain": "front.example.com"}}
+```
+
+Example — replace `[[server.listeners]]` (other `[server]` fields including `[server.api]` are preserved):
+```json
+{"server": {"listeners": [{"ip": "0.0.0.0", "port": 443, "client_mss": "92"}]}}
 ```
 
 ### `RotateSecretRequest`
@@ -285,10 +292,10 @@ Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the 
 | `timeouts` | `object?` | `[timeouts]` section, if present. |
 | `censorship` | `object?` | `[censorship]` section, if present. |
 | `upstreams` | `object?` | `[upstreams]` section, if present. |
-| `show_link` | `object?` | `[show_link]` section, if present. |
 | `dc_overrides` | `object?` | `[dc_overrides]` section, if present. |
+| `server` | `object?` | Partial `[server]` view when editable nested fields are present. Currently only `listeners` may appear; `api`/`admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
 
-Sections absent from the config file are absent from the response (not `null`). Only the editable sections above are returned; `access` (users/secrets), `server` (carries the API `auth_header` and per-node identity), and `network` (per-node addresses) are always excluded.
+Sections absent from the config file are absent from the response (not `null`). Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed.
 
 ### `PatchConfigResponse`
 
@@ -1360,14 +1367,15 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `Content-Type: application/json` | recommended | Not enforced, but body must be valid JSON. |
 | `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. If supplied and it does not match the current on-disk revision, returns `409 revision_conflict`. If omitted, the patch applies unconditionally. |
 
-**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `show_link`, `dc_overrides`.
+**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, plus partially editable `server` (only nested `listeners`).
 
 **Rejected keys and their error codes:**
 
 | Key | HTTP | `error.code` |
 | --- | --- | --- |
 | `access` | `400` | `access_not_editable` |
-| `server`, `network`, or any unknown key | `400` | `section_not_editable` |
+| `network`, or any unknown top-level key | `400` | `section_not_editable` |
+| `server` with keys other than `listeners` | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
 
 **Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. File comments and untouched sections are preserved.
@@ -1396,7 +1404,8 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `200` | — | Patch applied successfully. |
 | `400` | `bad_request` | Invalid JSON, empty patch, or config validation/deserialization failure. |
 | `400` | `access_not_editable` | Patch contains an `access` key. |
-| `400` | `section_not_editable` | Patch contains `server`, `network`, or an unknown top-level key. |
+| `400` | `section_not_editable` | Patch contains `network` or an unknown top-level key. |
+| `400` | `field_not_editable` | Patch contains a forbidden nested `server.*` field (anything other than `listeners`). |
 | `401` | `unauthorized` | Missing or invalid `Authorization` header. |
 | `403` | `read_only` | API is in read-only mode. |
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |

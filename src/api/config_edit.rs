@@ -1,12 +1,14 @@
 //! Config-editing API: read managed sections and apply sparse field patches.
 //! `access.*` is intentionally not editable here (owned by the users API).
+//! `[server]` is only partially editable — see [`EDITABLE_SERVER_FIELDS`].
 
 use serde_json::Value as Json;
 use toml::Value as Toml;
 
 use super::ApiShared;
 use super::config_store::{
-    EDITABLE_SECTIONS, compute_revision, current_revision, save_sections_to_disk,
+    EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS, compute_revision, current_revision,
+    is_editable_section, save_sections_to_disk,
 };
 use super::model::ApiFailure;
 use crate::config::ProxyConfig;
@@ -55,7 +57,7 @@ pub(super) async fn apply_patch_to_path(
         ));
     }
 
-    // 2. convert + reject access / unknown sections
+    // 2. convert + reject access / unknown sections / forbidden server fields
     let patch_toml = json_to_toml(patch_json)
         .map_err(|e| ApiFailure::bad_request(format!("invalid patch: {}", e)))?;
     let patch_table = patch_toml
@@ -68,19 +70,22 @@ pub(super) async fn apply_patch_to_path(
             "access.* is managed via the users API, not editable here",
         ));
     }
-    for key in patch_table.keys() {
-        if !EDITABLE_SECTIONS.contains(&key.as_str()) {
+    for (key, value) in patch_table {
+        if !is_editable_section(key.as_str()) {
             return Err(ApiFailure::new(
                 hyper::StatusCode::BAD_REQUEST,
                 "section_not_editable",
                 format!("section not editable: {}", key),
             ));
         }
+        if key == "server" {
+            validate_server_patch(value)?;
+        }
     }
     let touched: Vec<&str> = patch_table
         .keys()
         .map(|k| k.as_str())
-        .filter(|k| EDITABLE_SECTIONS.contains(k))
+        .filter(|k| is_editable_section(k))
         .collect();
     if touched.is_empty() {
         return Err(ApiFailure::bad_request("empty patch: no editable sections"));
@@ -138,17 +143,81 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
         .cloned()
         .unwrap_or_else(toml::value::Table::new);
     // Whitelist: return ONLY the editable sections. A blacklist (just removing
-    // `access`) would leak `server` (carries the API `auth_header` + per-node
-    // identity) and `network` (per-node addresses). Mirror the PATCH contract.
+    // `access`) would leak `server.api` (auth_header) and `network` (per-node
+    // addresses). Mirror the PATCH contract, including the nested server
+    // field-level allowlist.
     let mut table = toml::value::Table::new();
     for section in EDITABLE_SECTIONS {
         if let Some(value) = parsed_table.get(*section) {
             table.insert((*section).to_string(), value.clone());
         }
     }
+    if let Some(server) = parsed_table.get("server") {
+        if let Some(filtered) = filter_server_for_read(server) {
+            table.insert("server".to_string(), filtered);
+        }
+    }
 
     let revision = compute_revision(&original);
     Ok((Toml::Table(table), revision))
+}
+
+/// Keep only [`EDITABLE_SERVER_FIELDS`] from a `[server]` table for GET.
+fn filter_server_for_read(server: &Toml) -> Option<Toml> {
+    let Some(src) = server.as_table() else {
+        return None;
+    };
+    let mut out = toml::value::Table::new();
+    for field in EDITABLE_SERVER_FIELDS {
+        if let Some(value) = src.get(*field) {
+            // Skip empty listeners arrays so absent-vs-empty stays consistent
+            // with other optional sections.
+            if *field == "listeners" {
+                if let Some(arr) = value.as_array() {
+                    if arr.is_empty() {
+                        continue;
+                    }
+                }
+            }
+            out.insert((*field).to_string(), value.clone());
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(Toml::Table(out))
+    }
+}
+
+/// Reject any `[server]` patch keys outside [`EDITABLE_SERVER_FIELDS`].
+fn validate_server_patch(server: &Toml) -> Result<(), ApiFailure> {
+    let Some(table) = server.as_table() else {
+        return Err(ApiFailure::new(
+            hyper::StatusCode::BAD_REQUEST,
+            "section_not_editable",
+            "server patch must be a JSON object",
+        ));
+    };
+    if table.is_empty() {
+        return Err(ApiFailure::bad_request(
+            "empty server patch: provide at least one editable field \
+             (currently: listeners)",
+        ));
+    }
+    for key in table.keys() {
+        if !EDITABLE_SERVER_FIELDS.contains(&key.as_str()) {
+            return Err(ApiFailure::new(
+                hyper::StatusCode::BAD_REQUEST,
+                "field_not_editable",
+                format!(
+                    "server.{} is not editable via the config API; allowed server fields: {}",
+                    key,
+                    EDITABLE_SERVER_FIELDS.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Convert a serde_json value to a toml value. `null` is dropped from objects
@@ -289,8 +358,8 @@ mod tests {
 
     #[tokio::test]
     async fn read_managed_config_returns_only_editable_sections() {
-        // server carries the API auth_header + per-node identity; network carries
-        // per-node addresses. Neither must be exposed by GET /v1/config.
+        // Full server (api/port) and network must not leak. Listeners-only server
+        // is returned via the nested allowlist (covered in a dedicated test).
         let (path, _d) = temp_config(concat!(
             "[censorship]\ntls_domain = \"a\"\n",
             "[server]\nport = 443\n[server.api]\nauth_header = \"SECRET\"\n",
@@ -300,17 +369,74 @@ mod tests {
         let (value, _rev) = read_managed_config(&path).await.unwrap();
         let table = value.as_table().unwrap();
         assert!(table.contains_key("censorship"));
-        assert!(!table.contains_key("server")); // no API auth_header / identity leak
+        assert!(!table.contains_key("server")); // no listeners → omit whole server
         assert!(!table.contains_key("network")); // no per-node identity leak
         assert!(!table.contains_key("access")); // no users/secrets
     }
 
     #[tokio::test]
-    async fn patch_rejects_server_section() {
+    async fn read_managed_config_returns_server_listeners_only() {
+        let (path, _d) = temp_config(concat!(
+            "[censorship]\ntls_domain = \"a\"\n",
+            "[server]\nport = 443\n",
+            "[server.api]\nauth_header = \"SECRET\"\n",
+            "[[server.listeners]]\nip = \"0.0.0.0\"\nport = 443\n",
+        ));
+        let (value, _rev) = read_managed_config(&path).await.unwrap();
+        let table = value.as_table().unwrap();
+        let server = table.get("server").expect("server.listeners present").as_table().unwrap();
+        assert!(server.contains_key("listeners"));
+        assert!(!server.contains_key("api"));
+        assert!(!server.contains_key("port"));
+        let listeners = server["listeners"].as_array().unwrap();
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0]["port"].as_integer(), Some(443));
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_forbidden_server_fields() {
         let (path, _d) = temp_config("[censorship]\ntls_domain = \"a\"\n");
         let patch: Json = serde_json::json!({"server": {"port": 1}});
         let err = apply_patch_to_path(&path, &patch, None).await.unwrap_err();
-        assert_eq!(err.code, "section_not_editable");
+        assert_eq!(err.code, "field_not_editable");
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_server_api_field() {
+        let (path, _d) = temp_config("[censorship]\ntls_domain = \"a\"\n");
+        let patch: Json = serde_json::json!({"server": {"api": {"enabled": false}}});
+        let err = apply_patch_to_path(&path, &patch, None).await.unwrap_err();
+        assert_eq!(err.code, "field_not_editable");
+    }
+
+    #[tokio::test]
+    async fn patch_server_listeners_preserves_api() {
+        let (path, _d) = temp_config(concat!(
+            "[censorship]\ntls_domain = \"a\"\n",
+            "[server]\nport = 443\n",
+            "[server.api]\nenabled = true\nauth_header = \"SECRET\"\n",
+            "[[server.listeners]]\nip = \"0.0.0.0\"\nport = 443\n",
+        ));
+        let patch: Json = serde_json::json!({
+            "server": {
+                "listeners": [
+                    {"ip": "0.0.0.0", "port": 8443, "client_mss": "92"}
+                ]
+            }
+        });
+        let resp = apply_patch_to_path(&path, &patch, None).await.unwrap();
+        assert!(resp.changed.iter().any(|c| c == "server"));
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed: toml::Value = toml::from_str(&written).unwrap();
+        assert_eq!(
+            parsed["server"]["api"]["auth_header"].as_str(),
+            Some("SECRET"),
+            "{written}"
+        );
+        let listeners = parsed["server"]["listeners"].as_array().unwrap();
+        assert_eq!(listeners.len(), 1, "{written}");
+        assert_eq!(listeners[0]["port"].as_integer(), Some(8443), "{written}");
+        assert_eq!(listeners[0]["client_mss"].as_str(), Some("92"), "{written}");
     }
 
     #[tokio::test]
