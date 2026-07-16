@@ -52,6 +52,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```toml
     include = "secrets.toml"
     ```
+  - **API interaction**: The config API is include-aware. `GET /v1/config` and the users API expand includes before parsing, and writes (`PATCH /v1/config` and the `POST/PATCH/DELETE /v1/users` family) update the file that actually defines the edited section — e.g. an `[access.users]` table placed in an included `users.toml` is edited in place there, not duplicated into the main config. The config revision used for `If-Match` optimistic concurrency is computed over the fully expanded config, so editing an included file changes the revision. A section defined in more than one file is treated as corrupted and cannot be edited via the API.
 ## show_link
   - **Constraints / validation**: Accepts `"*"` or an array of usernames. Empty array means "show none".
   - **Description**: Legacy top-level link visibility selector (`"*"` for all users or explicit usernames list).

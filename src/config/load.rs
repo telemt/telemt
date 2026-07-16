@@ -26,6 +26,29 @@ mod runtime_auth;
 mod validation;
 
 use self::includes::{hash_rendered_snapshot, normalize_config_path, preprocess_includes};
+
+/// Expand `include = "file"` directives in `content` using `base_dir` as the
+/// anchor for relative paths. Returns the fully-inlined TOML text ready for
+/// `toml::from_str`. Used by the config API to parse files that contain include
+/// directives without going through the full `ProxyConfig::load` pipeline.
+pub(crate) fn expand_config_includes(content: &str, base_dir: &Path) -> Result<String> {
+    let mut source_files = BTreeSet::new();
+    preprocess_includes(content, base_dir, 0, &mut source_files)
+}
+
+/// Expand `include` directives like [`expand_config_includes`], but also return
+/// the set of files pulled in via `include` (normalized, deduplicated). The
+/// config-write path uses this to locate the file that actually owns a section
+/// so an included section is updated in place instead of being duplicated into
+/// the main config. The returned set does not contain the main file itself.
+pub(crate) fn expand_config_includes_with_sources(
+    content: &str,
+    base_dir: &Path,
+) -> Result<(String, Vec<PathBuf>)> {
+    let mut source_files = BTreeSet::new();
+    let rendered = preprocess_includes(content, base_dir, 0, &mut source_files)?;
+    Ok((rendered, source_files.into_iter().collect()))
+}
 use self::normalize::{
     is_valid_ad_tag, is_valid_tls_domain_name, normalize_domain_to_ascii,
     normalize_exclusive_mask_target, normalize_mask_host_to_ascii, parse_exclusive_mask_target,
