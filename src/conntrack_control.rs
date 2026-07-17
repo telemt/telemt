@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::config::{ConntrackBackend, ConntrackMode, ProxyConfig};
@@ -57,10 +58,11 @@ impl PressureState {
     }
 }
 
-pub(crate) fn spawn_conntrack_controller(
+pub(crate) async fn run_conntrack_controller(
     config_rx: watch::Receiver<Arc<ProxyConfig>>,
     stats: Arc<Stats>,
     shared: Arc<ProxySharedState>,
+    cancellation: CancellationToken,
 ) {
     if !cfg!(target_os = "linux") {
         let cfg = config_rx.borrow();
@@ -87,16 +89,15 @@ pub(crate) fn spawn_conntrack_controller(
 
     let (tx, rx) = mpsc::channel(CONNTRACK_EVENT_QUEUE_CAPACITY);
     shared.set_conntrack_close_sender(tx);
-    tokio::spawn(async move {
-        run_conntrack_controller(config_rx, stats, shared, rx).await;
-    });
+    run_conntrack_controller_worker(config_rx, stats, shared, rx, cancellation).await;
 }
 
-async fn run_conntrack_controller(
+async fn run_conntrack_controller_worker(
     mut config_rx: watch::Receiver<Arc<ProxyConfig>>,
     stats: Arc<Stats>,
     shared: Arc<ProxySharedState>,
     mut close_rx: mpsc::Receiver<ConntrackCloseEvent>,
+    cancellation: CancellationToken,
 ) {
     let mut cfg = config_rx.borrow().clone();
     let mut pressure_state = PressureState::new(stats.as_ref());
@@ -115,6 +116,7 @@ async fn run_conntrack_controller(
 
     loop {
         tokio::select! {
+            _ = cancellation.cancelled() => break,
             changed = config_rx.changed() => {
                 if changed.is_err() {
                     break;

@@ -10,6 +10,8 @@ use crate::tls_front::TlsFrontCache;
 use crate::tls_front::fetcher::TlsFetchStrategy;
 use crate::transport::UpstreamManager;
 
+use super::generation::RuntimeTaskScope;
+
 fn tls_fetch_host_for_domain(mask_host: &str, primary_tls_domain: &str, domain: &str) -> String {
     if mask_host.eq_ignore_ascii_case(primary_tls_domain) {
         domain.to_string()
@@ -23,6 +25,7 @@ pub(crate) async fn bootstrap_tls_front(
     tls_domains: &[String],
     upstream_manager: Arc<UpstreamManager>,
     startup_tracker: &Arc<StartupTracker>,
+    task_scope: RuntimeTaskScope,
 ) -> Option<Arc<TlsFrontCache>> {
     startup_tracker
         .start_component(
@@ -69,7 +72,7 @@ pub(crate) async fn bootstrap_tls_front(
         let scope_initial = tls_fetch_scope.clone();
         let upstream_initial = upstream_manager.clone();
         let strategy_initial = fetch_strategy.clone();
-        tokio::spawn(async move {
+        task_scope.spawn(async move {
             let mut join = tokio::task::JoinSet::new();
             for domain in domains_initial {
                 let cache_domain = cache_initial.clone();
@@ -109,7 +112,7 @@ pub(crate) async fn bootstrap_tls_front(
         let cache_timeout = cache.clone();
         let domains_timeout = tls_domains.to_vec();
         let fake_cert_len = config.censorship.fake_cert_len;
-        tokio::spawn(async move {
+        task_scope.spawn(async move {
             tokio::time::sleep(fetch_timeout).await;
             for domain in domains_timeout {
                 let cached = cache_timeout.get(&domain).await;
@@ -132,7 +135,7 @@ pub(crate) async fn bootstrap_tls_front(
         let scope_refresh = tls_fetch_scope.clone();
         let upstream_refresh = upstream_manager.clone();
         let strategy_refresh = fetch_strategy.clone();
-        tokio::spawn(async move {
+        task_scope.spawn(async move {
             loop {
                 let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
                 let jitter_secs = rand::rng().random_range(0..=7200);

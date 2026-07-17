@@ -72,6 +72,13 @@ pub(super) async fn current_revision(config_path: &Path) -> Result<String, ApiFa
     Ok(compute_revision(&content))
 }
 
+pub(crate) async fn current_revision_for_maestro(config_path: &Path) -> Result<String, String> {
+    let content = tokio::fs::read_to_string(config_path)
+        .await
+        .map_err(|error| format!("failed to read config: {}", error))?;
+    Ok(compute_revision(&content))
+}
+
 pub(super) fn compute_revision(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
@@ -84,6 +91,14 @@ pub(super) async fn load_config_from_disk(config_path: &Path) -> Result<ProxyCon
         .await
         .map_err(|e| ApiFailure::internal(format!("failed to join config loader: {}", e)))?
         .map_err(|e| ApiFailure::internal(format!("failed to load config: {}", e)))
+}
+
+pub(super) async fn load_config_for_reload(config_path: &Path) -> Result<ProxyConfig, ApiFailure> {
+    let config_path = config_path.to_path_buf();
+    tokio::task::spawn_blocking(move || ProxyConfig::load(config_path))
+        .await
+        .map_err(|error| ApiFailure::internal(format!("failed to join config loader: {}", error)))?
+        .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {}", error)))
 }
 
 #[allow(dead_code)]

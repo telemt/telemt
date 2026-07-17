@@ -66,33 +66,13 @@ fn extract_host_port_path(url: &str) -> Result<(String, u16, String)> {
     Ok((host, port, path))
 }
 
-async fn resolve_target_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
-    if let Some(addr) = resolve_socket_addr(host, port) {
-        return Ok(addr);
-    }
-
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|e| ProxyError::Proxy(format!("DNS resolve failed for {host}:{port}: {e}")))?
-        .collect();
-
-    if let Some(addr) = addrs.iter().copied().find(|addr| addr.is_ipv4()) {
-        return Ok(addr);
-    }
-
-    addrs
-        .first()
-        .copied()
-        .ok_or_else(|| ProxyError::Proxy(format!("DNS returned no addresses for {host}:{port}")))
-}
-
 async fn connect_https_transport(
     host: &str,
     port: u16,
     upstream: Option<Arc<UpstreamManager>>,
 ) -> Result<UpstreamStream> {
     if let Some(manager) = upstream {
-        let target = resolve_target_addr(host, port).await?;
+        let target = manager.resolve_hostname(host, port).await?;
         return timeout(HTTP_CONNECT_TIMEOUT, manager.connect(target, None, None))
             .await
             .map_err(|_| ProxyError::Proxy(format!("upstream connect timeout for {host}:{port}")))?

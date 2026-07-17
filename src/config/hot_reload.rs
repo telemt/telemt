@@ -1403,11 +1403,13 @@ fn reload_config(
 /// `detected_ip_v4` / `detected_ip_v6` are the IPs discovered during the
 /// startup probe — used when generating proxy links for newly added users,
 /// matching the same logic as the startup output.
+/// The watcher releases its notify and signal resources when `cancellation` fires.
 pub fn spawn_config_watcher(
     config_path: PathBuf,
     initial: Arc<ProxyConfig>,
     detected_ip_v4: Option<IpAddr>,
     detected_ip_v6: Option<IpAddr>,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> (watch::Receiver<Arc<ProxyConfig>>, watch::Receiver<LogLevel>) {
     let initial_level = initial.general.log_level.clone();
     let (config_tx, config_rx) = watch::channel(initial);
@@ -1515,10 +1517,14 @@ pub fn spawn_config_watcher(
                 _ = sighup.recv() => {
                     info!("SIGHUP received — reloading {:?}", config_path);
                 }
+                _ = cancellation.cancelled() => break,
             }
             #[cfg(not(unix))]
-            if notify_rx.recv().await.is_none() {
-                break;
+            tokio::select! {
+                msg = notify_rx.recv() => {
+                    if msg.is_none() { break; }
+                }
+                _ = cancellation.cancelled() => break,
             }
 
             // Debounce: drain extra events that arrive within a short quiet window.
