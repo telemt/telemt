@@ -384,7 +384,11 @@ mod tests {
         ));
         let (value, _rev) = read_managed_config(&path).await.unwrap();
         let table = value.as_table().unwrap();
-        let server = table.get("server").expect("server.listeners present").as_table().unwrap();
+        let server = table
+            .get("server")
+            .expect("server.listeners present")
+            .as_table()
+            .unwrap();
         assert!(server.contains_key("listeners"));
         assert!(!server.contains_key("api"));
         assert!(!server.contains_key("port"));
