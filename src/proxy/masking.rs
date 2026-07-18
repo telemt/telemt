@@ -959,6 +959,7 @@ fn configure_mask_backend_socket(stream: &TcpStream) {
 }
 
 /// Handles a bad client by forwarding it to the configured mask target.
+#[cfg(test)]
 pub async fn handle_bad_client<R, W>(
     reader: R,
     writer: W,
