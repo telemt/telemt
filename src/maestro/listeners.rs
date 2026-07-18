@@ -30,8 +30,15 @@ use super::helpers::{
 };
 
 pub(crate) struct BoundListeners {
-    pub(crate) listeners: Vec<(TcpListener, bool)>,
+    pub(crate) listeners: Vec<BoundTcpListener>,
     pub(crate) has_unix_listener: bool,
+}
+
+/// A TCP listener and the connection settings fixed when it was bound.
+pub(crate) struct BoundTcpListener {
+    listener: TcpListener,
+    proxy_protocol: bool,
+    tls_response_fragment_size: Option<u16>,
 }
 
 fn listener_port_or_legacy(listener: &crate::config::ListenerConfig, config: &ProxyConfig) -> u16 {
@@ -49,6 +56,18 @@ fn default_link_port(config: &ProxyConfig) -> u16 {
 
 fn mss_segment_multiplier(client_mss: u16) -> u16 {
     1460u16.div_ceil(client_mss)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn tcp_mss_runtime_profile(
+    handshake_mss: Option<u16>,
+    bulk_mss: Option<u16>,
+) -> (Option<u16>, Option<u16>) {
+    match (handshake_mss, bulk_mss) {
+        (Some(fragment_size), Some(listener_mss)) => (Some(listener_mss), Some(fragment_size)),
+        (listener_mss, None) => (listener_mss, None),
+        (None, Some(_)) => (None, None),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -82,6 +101,16 @@ pub(crate) async fn bind_listeners(
         )
         .await;
     let mut listeners = Vec::new();
+    let bulk_client_mss = match config.server.client_mss_bulk_value() {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Invalid bulk client MSS after config validation; disabling bulk MSS"
+            );
+            None
+        }
+    };
 
     for listener_conf in &config.server.listeners {
         let listener_port = listener_port_or_legacy(listener_conf, config);
@@ -94,7 +123,7 @@ pub(crate) async fn bind_listeners(
             warn!(%addr, "Skipping IPv6 listener: IPv6 disabled by [network]");
             continue;
         }
-        let client_mss = match listener_conf.effective_client_mss(&config.server) {
+        let configured_client_mss = match listener_conf.effective_client_mss(&config.server) {
             Ok(value) => value,
             Err(error) => {
                 warn!(
@@ -105,6 +134,11 @@ pub(crate) async fn bind_listeners(
                 None
             }
         };
+        #[cfg(target_os = "linux")]
+        let (client_mss, tls_response_fragment_size) =
+            tcp_mss_runtime_profile(configured_client_mss, bulk_client_mss);
+        #[cfg(not(target_os = "linux"))]
+        let (client_mss, tls_response_fragment_size) = (configured_client_mss, None);
         let options = ListenOptions {
             reuse_port: listener_conf.reuse_allow,
             ipv6_only: listener_conf.ip.is_ipv6(),
@@ -123,6 +157,15 @@ pub(crate) async fn bind_listeners(
                         client_mss,
                         segment_multiplier = mss_segment_multiplier(client_mss),
                         "Client-facing TCP MSS configured"
+                    );
+                }
+                if let Some(fragment_size) = tls_response_fragment_size {
+                    info!(
+                        %addr,
+                        fragment_size,
+                        bulk_mss = client_mss,
+                        segment_multiplier = mss_segment_multiplier(fragment_size),
+                        "Initial FakeTLS response fragmentation configured"
                     );
                 }
                 let listener_proxy_protocol = listener_conf
@@ -152,7 +195,11 @@ pub(crate) async fn bind_listeners(
                     print_proxy_links(&public_host, link_port, config);
                 }
 
-                listeners.push((listener, listener_proxy_protocol));
+                listeners.push(BoundTcpListener {
+                    listener,
+                    proxy_protocol: listener_proxy_protocol,
+                    tls_response_fragment_size,
+                });
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -387,7 +434,7 @@ pub(crate) async fn bind_listeners(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_tcp_accept_loops(
-    listeners: Vec<(TcpListener, bool)>,
+    listeners: Vec<BoundTcpListener>,
     config_rx: watch::Receiver<Arc<ProxyConfig>>,
     admission_rx: watch::Receiver<bool>,
     stats: Arc<Stats>,
@@ -404,7 +451,10 @@ pub(crate) fn spawn_tcp_accept_loops(
     shared: Arc<ProxySharedState>,
     max_connections: Arc<Semaphore>,
 ) {
-    for (listener, listener_proxy_protocol) in listeners {
+    for bound_listener in listeners {
+        let listener = bound_listener.listener;
+        let listener_proxy_protocol = bound_listener.proxy_protocol;
+        let tls_response_fragment_size = bound_listener.tls_response_fragment_size;
         let mut config_rx: watch::Receiver<Arc<ProxyConfig>> = config_rx.clone();
         let admission_rx_tcp = admission_rx.clone();
         let stats = stats.clone();
@@ -513,6 +563,7 @@ pub(crate) fn spawn_tcp_accept_loops(
                                 #[cfg(unix)]
                                 raw_fd,
                                 rst_mode,
+                                tls_response_fragment_size,
                             )
                             .run()
                             .await
@@ -601,5 +652,28 @@ pub(crate) fn spawn_tcp_accept_loops(
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tcp_mss_runtime_profile;
+
+    #[test]
+    fn client_mss_without_bulk_remains_connection_wide() {
+        assert_eq!(tcp_mss_runtime_profile(Some(92), None), (Some(92), None));
+    }
+
+    #[test]
+    fn client_mss_with_bulk_uses_bulk_listener_and_fragments_initial_response() {
+        assert_eq!(
+            tcp_mss_runtime_profile(Some(92), Some(1400)),
+            (Some(1400), Some(92))
+        );
+    }
+
+    #[test]
+    fn bulk_mss_without_handshake_mss_does_not_enable_shaping() {
+        assert_eq!(tcp_mss_runtime_profile(None, Some(1400)), (None, None));
     }
 }

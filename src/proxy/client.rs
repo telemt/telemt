@@ -109,7 +109,8 @@ use crate::transport::{UpstreamManager, configure_client_socket, parse_proxy_pro
 
 use crate::proxy::direct_relay::handle_via_direct_with_shared;
 use crate::proxy::handshake::{
-    HandshakeSuccess, handle_mtproto_handshake_with_shared, handle_tls_handshake_with_shared,
+    HandshakeSuccess, TlsResponseWriteOptions, handle_mtproto_handshake_with_shared,
+    handle_tls_handshake_with_shared, handle_tls_handshake_with_shared_and_options,
 };
 #[cfg(test)]
 use crate::proxy::handshake::{handle_mtproto_handshake, handle_tls_handshake};
@@ -989,6 +990,7 @@ pub struct RunningClientHandler {
     #[cfg(unix)]
     raw_fd: std::os::unix::io::RawFd,
     rst_on_close: crate::config::RstOnCloseMode,
+    tls_response_fragment_size: Option<u16>,
 }
 
 impl ClientHandler {
@@ -1036,6 +1038,7 @@ impl ClientHandler {
             #[cfg(unix)]
             raw_fd,
             crate::config::RstOnCloseMode::Off,
+            None,
         )
     }
 
@@ -1060,6 +1063,7 @@ impl ClientHandler {
         real_peer_report: Arc<std::sync::Mutex<Option<SocketAddr>>>,
         #[cfg(unix)] raw_fd: std::os::unix::io::RawFd,
         rst_on_close: crate::config::RstOnCloseMode,
+        tls_response_fragment_size: Option<u16>,
     ) -> RunningClientHandler {
         let normalized_peer = normalize_ip(peer);
         RunningClientHandler {
@@ -1084,6 +1088,7 @@ impl ClientHandler {
             #[cfg(unix)]
             raw_fd,
             rst_on_close,
+            tls_response_fragment_size,
         }
     }
 }
@@ -1105,12 +1110,6 @@ impl RunningClientHandler {
         #[cfg(unix)]
         let raw_fd = self.raw_fd;
         let rst_on_close = self.rst_on_close;
-        // MSS for the bulk data phase: once the handshake (incl. ServerHello) is
-        // sent, restore a normal MSS so only the handshake stays fragmented by the
-        // low listener `client_mss`. Cuts pps ~10x (anti-DDoS abuse on pps-policing
-        // hosts like FastVPS). None = keep handshake MSS for the whole connection.
-        #[cfg(unix)]
-        let bulk_mss: Option<u16> = self.config.server.client_mss_bulk_value().ok().flatten();
 
         let outcome = match self.do_handshake().await? {
             Some(outcome) => outcome,
@@ -1123,14 +1122,6 @@ impl RunningClientHandler {
                 #[cfg(unix)]
                 if matches!(rst_on_close, crate::config::RstOnCloseMode::Errors) {
                     let _ = crate::transport::socket::clear_linger_fd(raw_fd);
-                }
-                // Handshake (ServerHello) done — raise MSS for bulk transfer.
-                #[cfg(unix)]
-                if let Some(mss) = bulk_mss {
-                    if let Err(e) = crate::transport::socket::set_tcp_mss_fd(raw_fd, u32::from(mss))
-                    {
-                        debug!(error = %e, "Failed to raise bulk MSS; keeping handshake MSS");
-                    }
                 }
                 fut.await
             }
@@ -1412,50 +1403,58 @@ impl RunningClientHandler {
 
         let (read_half, write_half) = self.stream.into_split();
 
-        let (mut tls_reader, tls_writer, tls_user) = match handle_tls_handshake_with_shared(
-            &handshake,
-            read_half,
-            write_half,
-            peer,
-            &config,
-            &replay_checker,
-            &self.rng,
-            self.tls_cache.clone(),
-            self.shared.as_ref(),
-        )
-        .await
-        {
-            HandshakeResult::Success(result) => result,
-            HandshakeResult::BadClient { reader, writer } => {
-                stats.increment_connects_bad_with_class("tls_handshake_bad_client");
-                record_tls_fingerprint_bad_or_probe(
-                    stats.as_ref(),
-                    &config,
-                    peer.ip(),
-                    tls_fingerprint.as_ref(),
-                );
-                return Ok(masking_outcome(
-                    reader,
-                    writer,
-                    handshake.clone(),
-                    peer,
-                    local_addr,
-                    config.clone(),
-                    self.beobachten.clone(),
-                    self.shared.clone(),
-                ));
-            }
-            HandshakeResult::Error(e) => {
-                record_tls_fingerprint_bad_or_probe(
-                    stats.as_ref(),
-                    &config,
-                    peer.ip(),
-                    tls_fingerprint.as_ref(),
-                );
-                increment_bad_on_unknown_tls_sni(stats.as_ref(), &e);
-                return Err(e);
-            }
-        };
+        #[cfg(target_os = "linux")]
+        let response_write_options =
+            TlsResponseWriteOptions::tcp(self.raw_fd, self.tls_response_fragment_size);
+        #[cfg(not(target_os = "linux"))]
+        let response_write_options = TlsResponseWriteOptions::default();
+
+        let (mut tls_reader, tls_writer, tls_user) =
+            match handle_tls_handshake_with_shared_and_options(
+                &handshake,
+                read_half,
+                write_half,
+                peer,
+                &config,
+                &replay_checker,
+                &self.rng,
+                self.tls_cache.clone(),
+                self.shared.as_ref(),
+                response_write_options,
+            )
+            .await
+            {
+                HandshakeResult::Success(result) => result,
+                HandshakeResult::BadClient { reader, writer } => {
+                    stats.increment_connects_bad_with_class("tls_handshake_bad_client");
+                    record_tls_fingerprint_bad_or_probe(
+                        stats.as_ref(),
+                        &config,
+                        peer.ip(),
+                        tls_fingerprint.as_ref(),
+                    );
+                    return Ok(masking_outcome(
+                        reader,
+                        writer,
+                        handshake.clone(),
+                        peer,
+                        local_addr,
+                        config.clone(),
+                        self.beobachten.clone(),
+                        self.shared.clone(),
+                    ));
+                }
+                HandshakeResult::Error(e) => {
+                    record_tls_fingerprint_bad_or_probe(
+                        stats.as_ref(),
+                        &config,
+                        peer.ip(),
+                        tls_fingerprint.as_ref(),
+                    );
+                    increment_bad_on_unknown_tls_sni(stats.as_ref(), &e);
+                    return Err(e);
+                }
+            };
         record_tls_fingerprint_auth_success(
             stats.as_ref(),
             &config,

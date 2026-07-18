@@ -1940,6 +1940,98 @@ async fn fragmented_tls_mtproto_with_interleaved_ccs_is_accepted() {
     assert_eq!(success.dc_idx, 2);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn chunked_tls_response_preserves_complete_records_and_configured_mss() {
+    use crate::proxy::handshake::{
+        TlsResponseWriteOptions, handle_tls_handshake_with_shared_and_options,
+    };
+    use crate::proxy::shared_state::ProxySharedState;
+    use crate::transport::socket::{ListenOptions, create_listener};
+    use std::os::fd::{AsRawFd, BorrowedFd};
+
+    let options = ListenOptions {
+        reuse_port: false,
+        client_mss: Some(1400),
+        ..Default::default()
+    };
+    let socket = create_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
+    let listener = TcpListener::from_std(socket.into()).unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(listener_addr).await.unwrap();
+    let (server, peer) = listener.accept().await.unwrap();
+
+    let secret_hex = "56565656565656565656565656565656";
+    let secret = [0x56u8; 16];
+    let client_hello = make_valid_tls_client_hello(&secret, 0);
+    let mut config = ProxyConfig::default();
+    config.general.beobachten = false;
+    config.access.ignore_time_skew = true;
+    config
+        .access
+        .users
+        .insert("user".to_string(), secret_hex.to_string());
+
+    let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
+    let rng = SecureRandom::new();
+    let shared = ProxySharedState::new();
+    let raw_fd = server.as_raw_fd();
+    let mss_before = socket2::SockRef::from(&server).tcp_mss().unwrap();
+    let (read_half, write_half) = server.into_split();
+
+    let (tls_reader, tls_writer, tls_user) = match handle_tls_handshake_with_shared_and_options(
+        &client_hello,
+        read_half,
+        write_half,
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+        &shared,
+        TlsResponseWriteOptions::tcp(raw_fd, Some(92)),
+    )
+    .await
+    {
+        HandshakeResult::Success(result) => result,
+        _ => panic!("expected successful TLS handshake"),
+    };
+
+    // SAFETY: both split halves still own the accepted socket while it is borrowed.
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+    let mss_after = socket2::SockRef::from(&borrowed_fd).tcp_mss().unwrap();
+    assert_eq!(
+        mss_after, mss_before,
+        "chunked response writes must not change the configured socket MSS"
+    );
+    assert_eq!(tls_user, "user");
+
+    drop(tls_reader);
+    let mut writer = tls_writer.into_inner();
+    writer.shutdown().await.unwrap();
+
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(!response.is_empty());
+
+    let mut offset = 0;
+    while offset < response.len() {
+        assert!(response.len() - offset >= 5, "truncated TLS record header");
+        let payload_len = u16::from_be_bytes([response[offset + 3], response[offset + 4]]) as usize;
+        offset += 5;
+        assert!(
+            response.len() - offset >= payload_len,
+            "truncated TLS record payload"
+        );
+        offset += payload_len;
+    }
+    assert_eq!(
+        offset,
+        response.len(),
+        "chunked response writes must preserve complete TLS records"
+    );
+}
+
 #[tokio::test]
 async fn valid_tls_path_does_not_fall_back_to_mask_backend() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

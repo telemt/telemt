@@ -1619,12 +1619,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub client_mss: Option<String>,
 
-    /// Client-facing TCP MSS to switch to AFTER the TLS handshake (ServerHello)
-    /// is sent. Lets `client_mss` fragment ONLY the handshake (the DPI-inspected
-    /// part) while the bulk transfer uses normal-size packets — avoids the ~10x
-    /// packets-per-second blowup that triggers anti-DDoS abuse blocks on
-    /// pps-policing hosts. Empty/omitted = keep the handshake MSS for the whole
-    /// connection (previous behavior). Same preset/int grammar as `client_mss`.
+    /// Client-facing TCP MSS for bulk traffic when initial-response fragmentation
+    /// is enabled on Linux. The listener uses this MSS from connection setup;
+    /// `client_mss` becomes the fragment size for the authenticated FakeTLS
+    /// response. Empty/omitted keeps `client_mss` connection-wide. Uses the same
+    /// preset/integer grammar as `client_mss`.
     #[serde(default)]
     pub client_mss_bulk: Option<String>,
 
@@ -2484,7 +2483,7 @@ impl ServerConfig {
         parse_client_mss(self.client_mss.as_deref())
     }
 
-    /// Resolves the post-handshake (bulk transfer) client MSS, if configured.
+    /// Resolves the bulk-transfer client MSS, if configured.
     pub fn client_mss_bulk_value(&self) -> std::result::Result<Option<u16>, String> {
         parse_client_mss(self.client_mss_bulk.as_deref())
     }
