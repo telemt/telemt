@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::config::{ProxyConfig, SynLimitMode};
@@ -16,13 +17,29 @@ use self::model::{SynLimitNamespace, synlimit_namespace, synlimit_targets};
 
 static ACTIVE_SYNLIMIT_NAMESPACE: Mutex<Option<SynLimitNamespace>> = Mutex::new(None);
 
+/// Process-owned lifecycle handle for the SYN limiter reconciler.
+pub(crate) struct SynlimitController {
+    shutdown: CancellationToken,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl SynlimitController {
+    /// Stops config observation after any in-flight reconcile completes.
+    pub(crate) async fn shutdown(self) {
+        self.shutdown.cancel();
+        let _ = self.join.await;
+    }
+}
+
 /// Spawns the process-scoped SYN limiter reconciler for active generations.
 pub(crate) fn spawn_synlimit_controller(
     runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
-) -> tokio::task::JoinHandle<()> {
-    if !cfg!(target_os = "linux") {
-        return tokio::spawn(watch_active_runtime_configs(
+) -> SynlimitController {
+    let shutdown = CancellationToken::new();
+    let join = if !cfg!(target_os = "linux") {
+        tokio::spawn(watch_active_runtime_configs(
             runtime_watch_rx,
+            shutdown.clone(),
             |_generation_id, cfg| async move {
                 if has_synlimit_config(&cfg) {
                     warn!(
@@ -30,22 +47,24 @@ pub(crate) fn spawn_synlimit_controller(
                     );
                 }
             },
-        ));
-    }
-
-    tokio::spawn(watch_active_runtime_configs(
-        runtime_watch_rx,
-        |_generation_id, cfg| async move {
-            reconcile_synlimit_rules(&cfg).await;
-        },
-    ))
+        ))
+    } else {
+        tokio::spawn(watch_active_runtime_configs(
+            runtime_watch_rx,
+            shutdown.clone(),
+            |_generation_id, cfg| async move {
+                reconcile_synlimit_rules(&cfg).await;
+            },
+        ))
+    };
+    SynlimitController { shutdown, join }
 }
 
 async fn watch_active_runtime_configs<F, Fut>(
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
+    shutdown: CancellationToken,
     mut on_config: F,
-)
-where
+) where
     F: FnMut(u64, Arc<ProxyConfig>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
@@ -53,16 +72,26 @@ where
         if let Some(state) = runtime_watch_rx.borrow().clone() {
             break state;
         }
-        if runtime_watch_rx.changed().await.is_err() {
-            return;
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return,
+            changed = runtime_watch_rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
         }
     };
+    if shutdown.is_cancelled() {
+        return;
+    }
     let initial_config = current.config_rx.borrow().clone();
     on_config(current.generation_id, initial_config).await;
 
     loop {
         tokio::select! {
             biased;
+            _ = shutdown.cancelled() => break,
             changed = runtime_watch_rx.changed() => {
                 if changed.is_err() {
                     break;
@@ -78,10 +107,11 @@ where
             }
             changed = current.config_rx.changed() => {
                 if changed.is_err() {
-                    let Some(next) = wait_for_new_runtime(
-                        &mut runtime_watch_rx,
-                        current.generation_id,
-                    ).await else {
+                        let Some(next) = wait_for_new_runtime(
+                            &mut runtime_watch_rx,
+                            current.generation_id,
+                            &shutdown,
+                        ).await else {
                         break;
                     };
                     current = next;
@@ -105,6 +135,7 @@ where
 async fn wait_for_new_runtime(
     runtime_watch_rx: &mut watch::Receiver<Option<RuntimeWatchState>>,
     previous_generation_id: u64,
+    shutdown: &CancellationToken,
 ) -> Option<RuntimeWatchState> {
     loop {
         if let Some(state) = runtime_watch_rx.borrow().clone()
@@ -112,8 +143,14 @@ async fn wait_for_new_runtime(
         {
             return Some(state);
         }
-        if runtime_watch_rx.changed().await.is_err() {
-            return None;
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return None,
+            changed = runtime_watch_rx.changed() => {
+                if changed.is_err() {
+                    return None;
+                }
+            }
         }
     }
 }
@@ -250,8 +287,9 @@ fn has_synlimit_config(cfg: &ProxyConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Notify, mpsc};
 
     fn runtime_state(
         generation_id: u64,
@@ -283,6 +321,7 @@ mod tests {
         let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
         let watcher = tokio::spawn(watch_active_runtime_configs(
             runtime_rx,
+            CancellationToken::new(),
             move |generation_id, cfg| {
                 let observed_tx = observed_tx.clone();
                 async move {
@@ -311,5 +350,69 @@ mod tests {
         assert_eq!(observed_rx.recv().await, Some((2, 40)));
 
         watcher.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_inflight_reconcile_and_stops_future_updates() {
+        let (initial, config_tx, _admission_tx) = runtime_state(1, 10);
+        let (_runtime_tx, runtime_rx) = watch::channel(Some(initial));
+        let shutdown = CancellationToken::new();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started_callback = started.clone();
+        let release_callback = release.clone();
+        let calls_callback = calls.clone();
+        let watcher_shutdown = shutdown.clone();
+        let watcher = tokio::spawn(watch_active_runtime_configs(
+            runtime_rx,
+            watcher_shutdown,
+            move |_generation_id, _cfg| {
+                let started = started_callback.clone();
+                let release = release_callback.clone();
+                let calls = calls_callback.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::AcqRel);
+                    started.notify_one();
+                    release.notified().await;
+                }
+            },
+        ));
+        started.notified().await;
+
+        shutdown.cancel();
+        tokio::task::yield_now().await;
+        assert!(!watcher.is_finished());
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), watcher)
+            .await
+            .unwrap()
+            .unwrap();
+
+        drop(_runtime_tx);
+        let mut updated = ProxyConfig::default();
+        updated.server.max_connections = 20;
+        assert!(config_tx.send(Arc::new(updated)).is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_before_start_skips_initial_reconcile() {
+        let (initial, _config_tx, _admission_tx) = runtime_state(1, 10);
+        let (_runtime_tx, runtime_rx) = watch::channel(Some(initial));
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_callback = calls.clone();
+
+        watch_active_runtime_configs(runtime_rx, shutdown, move |_generation_id, _cfg| {
+            let calls = calls_callback.clone();
+            async move {
+                calls.fetch_add(1, Ordering::AcqRel);
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(Ordering::Acquire), 0);
     }
 }

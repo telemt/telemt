@@ -43,6 +43,7 @@ pub(crate) struct ReloadRequest {
 }
 
 impl ReloadRequest {
+    /// Validates mode-specific request parameters.
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
         match (self.mode, self.timeout_secs) {
             (ReloadMode::Instant, None) => Ok(()),
@@ -53,6 +54,7 @@ impl ReloadRequest {
         }
     }
 
+    /// Parses optional PATCH query parameters into a reload request.
     pub(crate) fn from_query(query: Option<&str>) -> Result<Option<Self>, String> {
         let Some(query) = query.filter(|query| !query.is_empty()) else {
             return Ok(None);
@@ -186,11 +188,22 @@ pub(crate) struct ReloadCommandReceiver {
     command_rx: mpsc::Receiver<ReloadCommand>,
 }
 
-#[derive(Default)]
 struct ReloadStatusState {
     next_reload_id: u64,
     active_reload_id: Option<u64>,
     statuses: VecDeque<ReloadStatus>,
+    accepting_commands: bool,
+}
+
+impl Default for ReloadStatusState {
+    fn default() -> Self {
+        Self {
+            next_reload_id: 0,
+            active_reload_id: None,
+            statuses: VecDeque::new(),
+            accepting_commands: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -199,6 +212,7 @@ struct ReloadStatusStore {
 }
 
 impl ReloadControl {
+    /// Creates the process-scoped coordinator channel and status store.
     pub(crate) fn channel(initial_generation: u64) -> (Self, ReloadCommandReceiver) {
         let (command_tx, command_rx) = mpsc::channel(RELOAD_COMMAND_CAPACITY);
         (
@@ -211,6 +225,7 @@ impl ReloadControl {
         )
     }
 
+    /// Atomically reserves and enqueues one reload operation.
     pub(crate) async fn submit(
         &self,
         config: Arc<ProxyConfig>,
@@ -232,7 +247,7 @@ impl ReloadControl {
             config_revision: status.config_revision.clone(),
             request,
         };
-        if self.command_tx.send(command).await.is_err() {
+        if self.command_tx.try_send(command).is_err() {
             self.status_store
                 .finish(
                     status.reload_id,
@@ -252,43 +267,55 @@ impl ReloadControl {
         })
     }
 
+    /// Returns a retained reload status by identifier.
     pub(crate) async fn status(&self, reload_id: u64) -> Option<ReloadStatus> {
         self.status_store.get(reload_id).await
     }
 
+    /// Returns the identifier of the currently active reload.
     pub(crate) async fn in_progress(&self) -> Option<u64> {
         self.status_store.state.lock().await.active_reload_id
     }
 
+    /// Rejects new commands while preserving an already accepted operation.
+    pub(crate) async fn begin_shutdown(&self) {
+        self.status_store.state.lock().await.accepting_commands = false;
+    }
+
+    /// Records a non-terminal lifecycle phase.
     pub(crate) async fn mark_phase(&self, reload_id: u64, phase: ReloadPhase) {
         self.status_store.mark_phase(reload_id, phase).await;
     }
 
+    /// Records process-owned fields deferred until the next process restart.
     pub(crate) async fn set_deferred_fields(&self, reload_id: u64, fields: Vec<String>) {
         self.status_store
             .update(reload_id, |status| status.deferred_fields = fields)
             .await;
     }
 
+    /// Commits the active generation and completes the matching reload.
     pub(crate) async fn succeed(&self, reload_id: u64, generation: u64) {
-        self.active_generation.store(generation, Ordering::Release);
         self.status_store
-            .finish(reload_id, ReloadPhase::Succeeded, None)
+            .finish_success(reload_id, generation, &self.active_generation)
             .await;
     }
 
+    /// Marks the matching reload as failed.
     pub(crate) async fn fail(&self, reload_id: u64, error: impl Into<String>) {
         self.status_store
             .finish(reload_id, ReloadPhase::Failed, Some(error.into()))
             .await;
     }
 
+    /// Marks the matching reload as rolled back.
     pub(crate) async fn rolled_back(&self, reload_id: u64, error: impl Into<String>) {
         self.status_store
             .finish(reload_id, ReloadPhase::RolledBack, Some(error.into()))
             .await;
     }
 
+    /// Appends a non-fatal warning to the matching reload status.
     pub(crate) async fn add_warning(&self, reload_id: u64, warning: impl Into<String>) {
         let warning = warning.into();
         self.status_store
@@ -298,6 +325,7 @@ impl ReloadControl {
 }
 
 impl ReloadCommandReceiver {
+    /// Receives the next accepted reload command.
     pub(crate) async fn recv(&mut self) -> Option<ReloadCommand> {
         self.command_rx.recv().await
     }
@@ -311,6 +339,9 @@ impl ReloadStatusStore {
         request: ReloadRequest,
     ) -> Result<ReloadStatus, ReloadSubmitError> {
         let mut state = self.state.lock().await;
+        if !state.accepting_commands {
+            return Err(ReloadSubmitError::MaestroUnavailable);
+        }
         if let Some(reload_id) = state.active_reload_id {
             return Err(ReloadSubmitError::InProgress(reload_id));
         }
@@ -375,6 +406,25 @@ impl ReloadStatusStore {
         }
     }
 
+    async fn finish_success(&self, reload_id: u64, generation: u64, active_generation: &AtomicU64) {
+        let mut state = self.state.lock().await;
+        if state.active_reload_id != Some(reload_id) {
+            return;
+        }
+        let Some(status) = state
+            .statuses
+            .iter_mut()
+            .find(|status| status.reload_id == reload_id)
+        else {
+            return;
+        };
+        status.state = ReloadPhase::Succeeded;
+        status.error = None;
+        status.finished_at_epoch_secs = Some(now_epoch_secs());
+        active_generation.store(generation, Ordering::Release);
+        state.active_reload_id = None;
+    }
+
     async fn update(&self, reload_id: u64, update: impl FnOnce(&mut ReloadStatus)) {
         let mut state = self.state.lock().await;
         if let Some(status) = state
@@ -395,99 +445,5 @@ fn now_epoch_secs() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_defaults_to_instant_keep_new() {
-        let request: ReloadRequest = serde_json::from_str("{}").unwrap();
-        assert_eq!(request, ReloadRequest::default());
-        assert_eq!(request.validate(), Ok(()));
-    }
-
-    #[test]
-    fn drain_requires_bounded_timeout() {
-        let missing = ReloadRequest {
-            mode: ReloadMode::Drain,
-            ..ReloadRequest::default()
-        };
-        assert!(missing.validate().is_err());
-        let valid = ReloadRequest {
-            mode: ReloadMode::Drain,
-            timeout_secs: Some(30),
-            ..ReloadRequest::default()
-        };
-        assert_eq!(valid.validate(), Ok(()));
-    }
-
-    #[test]
-    fn patch_query_parses_reload_policy() {
-        let request =
-            ReloadRequest::from_query(Some("reload=drain&timeout_secs=30&failure_policy=rollback"))
-                .unwrap()
-                .unwrap();
-        assert_eq!(request.mode, ReloadMode::Drain);
-        assert_eq!(request.timeout_secs, Some(30));
-        assert_eq!(request.failure_policy, ReloadFailurePolicy::Rollback);
-        assert!(ReloadRequest::from_query(Some("timeout_secs=30")).is_err());
-    }
-
-    #[test]
-    fn status_uses_documented_deferred_process_fields_key() {
-        let status = ReloadStatus {
-            reload_id: 1,
-            target_generation: 2,
-            config_revision: "revision".to_string(),
-            state: ReloadPhase::Succeeded,
-            mode: ReloadMode::Instant,
-            failure_policy: ReloadFailurePolicy::KeepNew,
-            requested_at_epoch_secs: 10,
-            started_at_epoch_secs: Some(11),
-            finished_at_epoch_secs: Some(12),
-            deferred_fields: vec!["server.listeners".to_string()],
-            warnings: Vec::new(),
-            error: None,
-        };
-        let value = serde_json::to_value(status).unwrap();
-
-        assert_eq!(
-            value["deferred_process_fields"],
-            serde_json::json!(["server.listeners"])
-        );
-        assert!(value.get("deferred_fields").is_none());
-    }
-
-    #[tokio::test]
-    async fn coordinator_rejects_concurrent_reload_and_releases_terminal_slot() {
-        let (control, mut receiver) = ReloadControl::channel(1);
-        let first = control
-            .submit(
-                Arc::new(ProxyConfig::default()),
-                "rev-1".to_string(),
-                ReloadRequest::default(),
-            )
-            .await
-            .unwrap();
-        let _command = receiver.recv().await.unwrap();
-        let second = control
-            .submit(
-                Arc::new(ProxyConfig::default()),
-                "rev-2".to_string(),
-                ReloadRequest::default(),
-            )
-            .await;
-        assert_eq!(second, Err(ReloadSubmitError::InProgress(first.reload_id)));
-        control
-            .succeed(first.reload_id, first.target_generation)
-            .await;
-        let third = control
-            .submit(
-                Arc::new(ProxyConfig::default()),
-                "rev-3".to_string(),
-                ReloadRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(third.reload_id, first.reload_id + 1);
-    }
-}
+#[path = "reload_tests.rs"]
+mod tests;

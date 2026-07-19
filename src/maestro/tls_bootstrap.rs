@@ -225,7 +225,46 @@ pub(crate) async fn bootstrap_tls_front(
 
 #[cfg(test)]
 mod tests {
-    use super::{readiness_error, tls_fetch_host_for_domain};
+    use super::*;
+    use crate::startup::StartupComponentStatus;
+    use crate::stats::Stats;
+
+    fn test_config(cache_dir: &std::path::Path) -> ProxyConfig {
+        let mut config = ProxyConfig::default();
+        config.censorship.tls_emulation = true;
+        config.censorship.tls_domain = "front.example".to_string();
+        config.censorship.mask_host = Some("127.0.0.1".to_string());
+        config.censorship.mask_port = 1;
+        config.censorship.tls_front_dir = cache_dir.display().to_string();
+        config.censorship.tls_fetch.profiles.truncate(1);
+        config.censorship.tls_fetch.attempt_timeout_ms = 10;
+        config.censorship.tls_fetch.total_budget_ms = 20;
+        config
+    }
+
+    fn upstream_manager(config: &ProxyConfig) -> Arc<UpstreamManager> {
+        Arc::new(UpstreamManager::new(
+            Vec::new(),
+            config.general.upstream_connect_retry_attempts,
+            config.general.upstream_connect_retry_backoff_ms,
+            config.general.upstream_connect_budget_ms,
+            config.general.tg_connect,
+            config.general.upstream_unhealthy_fail_threshold,
+            config.general.upstream_connect_failfast_hard_errors,
+            Arc::new(Stats::new()),
+        ))
+    }
+
+    async fn tls_component_status(tracker: &StartupTracker) -> StartupComponentStatus {
+        tracker
+            .snapshot()
+            .await
+            .components
+            .into_iter()
+            .find(|component| component.id == COMPONENT_TLS_FRONT_BOOTSTRAP)
+            .unwrap()
+            .status
+    }
 
     #[test]
     fn tls_fetch_host_uses_each_domain_when_mask_host_is_primary_default() {
@@ -250,5 +289,97 @@ mod tests {
             readiness_error(&["front.example".to_string()]),
             Some("TLS-front profiles are not ready for domains: front.example".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn require_ready_rejects_default_cache_after_bounded_fetch_failure() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config = test_config(cache_dir.path());
+        let domains = vec![config.censorship.tls_domain.clone()];
+        let tracker = Arc::new(StartupTracker::new(1));
+        let scope = RuntimeTaskScope::new();
+
+        let result = bootstrap_tls_front(
+            &config,
+            &domains,
+            upstream_manager(&config),
+            &tracker,
+            scope.clone(),
+            TlsBootstrapPolicy::RequireReady,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            tls_component_status(&tracker).await,
+            StartupComponentStatus::Failed
+        );
+        scope.stop().await;
+    }
+
+    #[tokio::test]
+    async fn require_ready_accepts_non_default_disk_cache_when_refresh_fails() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config = test_config(cache_dir.path());
+        let domains = vec![config.censorship.tls_domain.clone()];
+        let seed = TlsFrontCache::new(&domains, config.censorship.fake_cert_len, cache_dir.path());
+        let mut cached = seed.default_entry().as_ref().clone();
+        cached.domain = domains[0].clone();
+        tokio::fs::write(
+            cache_dir.path().join("front.example.json"),
+            serde_json::to_vec(&cached).unwrap(),
+        )
+        .await
+        .unwrap();
+        let tracker = Arc::new(StartupTracker::new(1));
+        let scope = RuntimeTaskScope::new();
+
+        let cache = bootstrap_tls_front(
+            &config,
+            &domains,
+            upstream_manager(&config),
+            &tracker,
+            scope.clone(),
+            TlsBootstrapPolicy::RequireReady,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(cache.default_profile_domains(&domains).await.is_empty());
+        assert_eq!(
+            tls_component_status(&tracker).await,
+            StartupComponentStatus::Ready
+        );
+        scope.stop().await;
+    }
+
+    #[tokio::test]
+    async fn best_effort_returns_ready_and_refresh_tasks_are_scope_owned() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let config = test_config(cache_dir.path());
+        let domains = vec![config.censorship.tls_domain.clone()];
+        let tracker = Arc::new(StartupTracker::new(1));
+        let scope = RuntimeTaskScope::new();
+
+        let cache = bootstrap_tls_front(
+            &config,
+            &domains,
+            upstream_manager(&config),
+            &tracker,
+            scope.clone(),
+            TlsBootstrapPolicy::BestEffort,
+        )
+        .await
+        .unwrap();
+
+        assert!(cache.is_some());
+        assert_eq!(
+            tls_component_status(&tracker).await,
+            StartupComponentStatus::Ready
+        );
+        tokio::time::timeout(Duration::from_secs(1), scope.stop())
+            .await
+            .unwrap();
     }
 }

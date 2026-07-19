@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::stats::QuotaStore;
@@ -13,7 +14,7 @@ use super::reload::{
     ReloadCommand, ReloadCommandReceiver, ReloadControl, ReloadFailurePolicy, ReloadMode,
     ReloadPhase,
 };
-use super::runtime_build::{deferred_process_fields, prepare_runtime};
+use super::runtime_build::{PreparedRuntime, deferred_process_fields, prepare_runtime};
 use super::runtime_tasks::RuntimeLogFilter;
 
 pub(crate) struct ReloadSupervisor {
@@ -25,6 +26,24 @@ pub(crate) struct ReloadSupervisor {
     detected_ips_tx: watch::Sender<(Option<std::net::IpAddr>, Option<std::net::IpAddr>)>,
     runtime_log_filter: RuntimeLogFilter,
     runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
+}
+
+/// Process-owned handle that quiesces reloads before shutdown snapshots the runtime.
+pub(crate) struct ReloadSupervisorHandle {
+    control: ReloadControl,
+    shutdown: CancellationToken,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl ReloadSupervisorHandle {
+    /// Stops new submissions and waits for the accepted reload to finish.
+    pub(crate) async fn quiesce(self) {
+        self.control.begin_shutdown().await;
+        self.shutdown.cancel();
+        if let Err(error) = self.join.await {
+            warn!(error = %error, "Reload supervisor failed while quiescing");
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,6 +89,7 @@ async fn cleanup_candidate(generation: &RuntimeGeneration) -> bool {
 
 impl ReloadSupervisor {
     #[allow(clippy::too_many_arguments)]
+    /// Starts the process-scoped reload supervisor and returns its shutdown owner.
     pub(crate) fn spawn(
         active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
         control: ReloadControl,
@@ -79,7 +99,7 @@ impl ReloadSupervisor {
         detected_ips_tx: watch::Sender<(Option<std::net::IpAddr>, Option<std::net::IpAddr>)>,
         runtime_log_filter: RuntimeLogFilter,
         runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
-    ) {
+    ) -> ReloadSupervisorHandle {
         let supervisor = Self {
             active_runtime,
             control,
@@ -90,12 +110,35 @@ impl ReloadSupervisor {
             runtime_log_filter,
             runtime_watch_tx,
         };
-        tokio::spawn(supervisor.run());
+        let control = supervisor.control.clone();
+        let shutdown = CancellationToken::new();
+        let join = tokio::spawn(supervisor.run(shutdown.clone()));
+        ReloadSupervisorHandle {
+            control,
+            shutdown,
+            join,
+        }
     }
 
-    async fn run(mut self) {
-        while let Some(command) = self.commands.recv().await {
-            self.reload(command).await;
+    async fn run(mut self, shutdown: CancellationToken) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    if self.control.in_progress().await.is_some()
+                        && let Some(command) = self.commands.recv().await
+                    {
+                        self.reload(command).await;
+                    }
+                    break;
+                }
+                command = self.commands.recv() => {
+                    let Some(command) = command else {
+                        break;
+                    };
+                    self.reload(command).await;
+                }
+            }
         }
     }
 
@@ -130,6 +173,23 @@ impl ReloadSupervisor {
             crate::api::config_store::current_revision_for_maestro(&self.config_path).await,
             command.request.failure_policy,
         );
+        self.activate_prepared(command, old_runtime, prepared, revision_action, |entries| {
+            crate::network::dns_overrides::install_entries(entries)
+                .map_err(|error| error.to_string())
+        })
+        .await;
+    }
+
+    async fn activate_prepared<InstallDns>(
+        &self,
+        command: ReloadCommand,
+        old_runtime: Arc<RuntimeGeneration>,
+        prepared: PreparedRuntime,
+        revision_action: RevisionGateAction,
+        install_dns: InstallDns,
+    ) where
+        InstallDns: FnOnce(&[String]) -> Result<(), String>,
+    {
         match revision_action {
             RevisionGateAction::Proceed => {}
             RevisionGateAction::Warn(warning) => {
@@ -149,9 +209,7 @@ impl ReloadSupervisor {
             .await;
         let new_runtime = prepared.generation;
         old_runtime.stop_accepting_sessions();
-        if let Err(error) = crate::network::dns_overrides::install_entries(
-            &new_runtime.config().network.dns_overrides,
-        ) {
+        if let Err(error) = install_dns(&new_runtime.config().network.dns_overrides) {
             let message = format!("runtime DNS activation failed: {}", error);
             if command.request.failure_policy == ReloadFailurePolicy::Rollback {
                 old_runtime.resume_accepting_sessions();
@@ -218,39 +276,5 @@ impl ReloadSupervisor {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn revision_gate_proceeds_only_on_verified_match() {
-        assert_eq!(
-            revision_gate_action(
-                "accepted",
-                Ok("accepted".to_string()),
-                ReloadFailurePolicy::Rollback,
-            ),
-            RevisionGateAction::Proceed
-        );
-    }
-
-    #[test]
-    fn revision_gate_applies_failure_policy_to_mismatch_and_read_error() {
-        for result in [
-            Ok("changed".to_string()),
-            Err("read failed".to_string()),
-        ] {
-            assert!(matches!(
-                revision_gate_action(
-                    "accepted",
-                    result.clone(),
-                    ReloadFailurePolicy::KeepNew,
-                ),
-                RevisionGateAction::Warn(_)
-            ));
-            assert!(matches!(
-                revision_gate_action("accepted", result, ReloadFailurePolicy::Rollback),
-                RevisionGateAction::Rollback(_)
-            ));
-        }
-    }
-}
+#[path = "reload_supervisor_tests.rs"]
+mod tests;

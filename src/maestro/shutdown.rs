@@ -21,6 +21,7 @@ use tracing::{info, warn};
 
 use super::generation::RuntimeGeneration;
 use super::helpers::{format_uptime, unit_label};
+use super::reload_supervisor::ReloadSupervisorHandle;
 use crate::stats::Stats;
 use crate::synlimit_control;
 
@@ -50,7 +51,8 @@ pub(crate) async fn wait_for_shutdown(
     process_started_at: Instant,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
-    synlimit_controller: tokio::task::JoinHandle<()>,
+    synlimit_controller: synlimit_control::SynlimitController,
+    reload_supervisor: ReloadSupervisorHandle,
 ) {
     let signal = wait_for_shutdown_signal().await;
     perform_shutdown(
@@ -59,6 +61,7 @@ pub(crate) async fn wait_for_shutdown(
         active_runtime,
         quota_state_path,
         synlimit_controller,
+        reload_supervisor,
     )
     .await;
 }
@@ -89,12 +92,15 @@ async fn perform_shutdown(
     process_started_at: Instant,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
-    synlimit_controller: tokio::task::JoinHandle<()>,
+    synlimit_controller: synlimit_control::SynlimitController,
+    reload_supervisor: ReloadSupervisorHandle,
 ) {
-    let runtime = active_runtime.load_full();
-    let stats = runtime.stats.as_ref();
     let shutdown_started_at = Instant::now();
     info!(signal = %signal, "Received shutdown signal");
+
+    reload_supervisor.quiesce().await;
+    let runtime = active_runtime.load_full();
+    let stats = runtime.stats.as_ref();
 
     // Dump stats if SIGQUIT
     if signal == ShutdownSignal::Quit {
@@ -124,8 +130,7 @@ async fn perform_shutdown(
         }
     }
 
-    synlimit_controller.abort();
-    let _ = synlimit_controller.await;
+    synlimit_controller.shutdown().await;
     if let Err(error) = synlimit_control::clear_synlimit_rules_all_backends().await {
         warn!(error = %error, "Failed to clear SYN limiter rules during shutdown");
     }
