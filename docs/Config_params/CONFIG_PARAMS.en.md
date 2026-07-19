@@ -2311,7 +2311,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`ip`](#ip) | `IpAddr` | — | `✘` |
 | [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`client_mss`](#client_mss-serverlisteners) | `String` | `[server].client_mss` | `✘` |
-| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"`, or `"nftables"` | `false` | `✔` |
+| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"`, `"nftables"`, or `"pf"` | `false` | `✔` |
 | [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✔` |
 | [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✔` |
 | [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `1` | `✔` |
@@ -2356,8 +2356,8 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     client_mss = "256"
     ```
 ## synlimit (server.listeners)
-  - **Constraints / validation**: `false`, `"iptables"`, or `"nftables"`. Omitted or `false` disables SYN limiting for this listener.
-  - **Description**: Installs per-listener Linux netfilter two-tier SYN-fix rules for the listener port. `"iptables"` uses `iptables`/`ip6tables` filter rules with the `hashlimit`, `length`, and TTL/hop-limit matches. `"nftables"` uses Telemt-owned tables with per-source `meter` rules and equivalent IPv4/IPv6 classifiers. Rules are inserted early in `INPUT`, accept under-limit SYN packets, and reject over-limit SYN packets with TCP RST so clients retry promptly instead of waiting for a silent DROP timeout. The generic bucket is controlled by `synlimit_seconds`, `synlimit_hitcount`, and `synlimit_burst`; the iOS-like TTL/length bucket is controlled by `synlimit_ios_*`. Rules are reconciled at runtime and removed during graceful Telemt shutdown; `SIGKILL` cannot be cleaned up by the process. Requires CAP_NET_ADMIN. `synlimit*` changes hot-reload for existing listener endpoints; changing listener `ip` or `port` still requires restart/rebind.
+  - **Constraints / validation**: `false`, `"iptables"`, `"nftables"`, or `"pf"`. Omitted or `false` disables SYN limiting for this listener.
+  - **Description**: Installs per-listener firewall rules for the listener port. `"iptables"` uses Linux `iptables`/`ip6tables` filter rules with the `hashlimit`, `length`, and TTL/hop-limit matches. `"nftables"` uses Linux Telemt-owned tables with per-source `meter` rules and equivalent IPv4/IPv6 classifiers. These Linux rules are inserted early in `INPUT`, accept under-limit SYN packets, and reject over-limit SYN packets with TCP RST so clients retry promptly instead of waiting for a silent DROP timeout. `"pf"` uses FreeBSD PF source tracking in a Telemt anchor with `max-src-conn-rate`; PF applies this rate after TCP three-way handshake completion, accepts under-limit connections, and rejects over-limit new connections until the source rate falls back below the configured window. The generic bucket is controlled by `synlimit_seconds`, `synlimit_hitcount`, and `synlimit_burst` on Linux; PF maps `synlimit_hitcount / synlimit_seconds` to `max-src-conn-rate` and has no direct equivalents for `synlimit_burst`, `synlimit_ios_*`, or `synlimit_hashlimit_*`. Rules are reconciled at runtime and removed during graceful Telemt shutdown; `SIGKILL` cannot be cleaned up by the process. Linux requires CAP_NET_ADMIN. FreeBSD requires root and a main PF ruleset hook such as `anchor "telemt_synlimit/*"`. `synlimit*` changes hot-reload for existing listener endpoints; changing listener `ip` or `port` still requires restart/rebind.
   - **Operator note**: Telemt does not persist rules with `iptables-persistent`, write `/etc/sysctl.d`, edit systemd limits, or modify `client_mss`. Apply host-level tuning manually if your deployment policy requires it.
   - **Example**:
 
@@ -2371,10 +2371,15 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ip = "::"
     port = 443
     synlimit = "nftables"
+
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "pf"
     ```
 ## synlimit_seconds (server.listeners)
   - **Constraints / validation**: `u32`, must be `> 0`. Default is `60`.
-  - **Description**: Generic SYN-fix token-bucket interval. The rate is `synlimit_hitcount / synlimit_seconds` and is rendered to native netfilter rate units (`second`, `minute`, `hour`, or `day`). This bucket handles SYN packets that do not match the iOS-like TTL/length classifier.
+  - **Description**: Generic SYN-fix token-bucket interval. For Linux backends, the rate is `synlimit_hitcount / synlimit_seconds` and is rendered to native netfilter rate units (`second`, `minute`, `hour`, or `day`). This bucket handles SYN packets that do not match the iOS-like TTL/length classifier. For PF, the same pair is rendered as `max-src-conn-rate hitcount/seconds`.
   - **Example**:
 
     ```toml
@@ -2446,7 +2451,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 ## synlimit_hashlimit_expire_ms (server.listeners)
   - **Constraints / validation**: `u32`, must be `> 0`. Default is `60000`.
-  - **Description**: Entry expiration in milliseconds for iptables/ip6tables hashlimit buckets. nftables meters use kernel-managed state and do not expose this exact knob.
+  - **Description**: Entry expiration in milliseconds for iptables/ip6tables hashlimit buckets. nftables meters and PF source tracking use kernel-managed state and do not expose this exact knob.
   - **Example**:
 
     ```toml
@@ -2458,7 +2463,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 ## synlimit_hashlimit_size (server.listeners)
   - **Constraints / validation**: `u32`, must be `> 0`. Default is `32768`.
-  - **Description**: Hash table size for iptables/ip6tables hashlimit buckets. nftables meters use kernel-managed state and do not expose this exact knob.
+  - **Description**: Hash table size for iptables/ip6tables hashlimit buckets. nftables meters and PF source tracking use kernel-managed state and do not expose this exact knob.
   - **Example**:
 
     ```toml

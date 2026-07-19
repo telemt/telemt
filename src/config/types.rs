@@ -1471,6 +1471,8 @@ pub enum SynLimitMode {
     Iptables,
     /// Use nftables two-tier SYN-fix rules with per-source token-bucket meters.
     Nftables,
+    /// Use FreeBSD PF source tracking with connection-rate state limits.
+    Pf,
 }
 
 impl Serialize for SynLimitMode {
@@ -1482,6 +1484,7 @@ impl Serialize for SynLimitMode {
             Self::Off => serializer.serialize_bool(false),
             Self::Iptables => serializer.serialize_str("iptables"),
             Self::Nftables => serializer.serialize_str("nftables"),
+            Self::Pf => serializer.serialize_str("pf"),
         }
     }
 }
@@ -1497,7 +1500,7 @@ impl<'de> Deserialize<'de> for SynLimitMode {
             type Value = SynLimitMode;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("false, iptables, or nftables")
+                formatter.write_str("false, iptables, nftables, or pf")
             }
 
             fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E>
@@ -1506,7 +1509,7 @@ impl<'de> Deserialize<'de> for SynLimitMode {
             {
                 if value {
                     Err(E::custom(
-                        "synlimit=true is ambiguous; use \"iptables\" or \"nftables\"",
+                        "synlimit=true is ambiguous; use \"iptables\", \"nftables\", or \"pf\"",
                     ))
                 } else {
                     Ok(SynLimitMode::Off)
@@ -1521,8 +1524,9 @@ impl<'de> Deserialize<'de> for SynLimitMode {
                     "false" | "off" | "disabled" | "none" => Ok(SynLimitMode::Off),
                     "iptables" => Ok(SynLimitMode::Iptables),
                     "nftables" => Ok(SynLimitMode::Nftables),
+                    "pf" => Ok(SynLimitMode::Pf),
                     _ => Err(E::custom(
-                        "synlimit must be false, \"iptables\", or \"nftables\"",
+                        "synlimit must be false, \"iptables\", \"nftables\", or \"pf\"",
                     )),
                 }
             }
