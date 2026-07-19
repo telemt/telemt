@@ -334,6 +334,7 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | `connections_bad_total` | `u64` | Failed/invalid client connections. |
 | `connections_bad_by_class` | `ClassCount[]` | Failed/invalid connections grouped by class. |
 | `handshake_failures_by_class` | `ClassCount[]` | Handshake failures grouped by class. |
+| `handshake_failures_by_stage` | `StageCount[]` | Handshake failures grouped by state-machine stage. |
 | `handshake_timeouts_total` | `u64` | Handshake timeout count. |
 | `configured_users` | `usize` | Number of configured users in config. |
 
@@ -342,6 +343,38 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | --- | --- | --- |
 | `class` | `string` | Failure class label. |
 | `total` | `u64` | Counter value for this class. |
+
+#### `StageCount`
+| Field | Type | Description |
+| --- | --- | --- |
+| `stage` | `string` | State-machine stage label. |
+| `total` | `u64` | Counter value for this stage. |
+
+#### Handshake failure stage diagnostics
+
+`handshake_failures_by_class` and `telemt_handshake_failures_by_class_total` describe the error kind. `handshake_failures_by_stage` and `telemt_handshake_failures_by_stage_total` describe where the same failure happened in the handshake state machine.
+
+This does not add a DPI verdict or any protocol decision. The stage is derived from the existing Telemt handshake control flow and is counted only when the existing handshake failure or timeout accounting path is reached.
+
+Fixed stage labels:
+
+| Stage | Meaning |
+| --- | --- |
+| `first_packet_prelude` | Reading the first 5 bytes before selecting the TLS or direct branch. |
+| `tls_clienthello_body` | Reading the TLS ClientHello body after the TLS record header. |
+| `tls_core` | Running the TLS-F handshake/auth flow. |
+| `tls_post_serverhello_mtproto` | Waiting for the 64-byte MTProto handshake after TLS ServerHello. |
+| `direct_mtproto` | Reading the direct classic/secure 64-byte MTProto handshake. |
+
+Example:
+
+```text
+telemt_handshake_failures_by_class_total{class="expected_64_got_0_unexpected_eof"} 3
+telemt_handshake_failures_by_stage_total{stage="direct_mtproto"} 1
+telemt_handshake_failures_by_stage_total{stage="tls_post_serverhello_mtproto"} 2
+```
+
+This means the same EOF-while-reading-64-bytes failure happened once in the direct MTProto path and twice after TLS ServerHello.
 
 ### `SystemInfoData`
 | Field | Type | Description |
@@ -927,6 +960,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `connections_bad_total` | `u64` | Failed/invalid connections. |
 | `connections_bad_by_class` | `ClassCount[]` | Failed/invalid connections grouped by class. |
 | `handshake_failures_by_class` | `ClassCount[]` | Handshake failures grouped by class. |
+| `handshake_failures_by_stage` | `StageCount[]` | Handshake failures grouped by state-machine stage. |
 | `handshake_timeouts_total` | `u64` | Handshake timeouts. |
 | `accept_permit_timeout_total` | `u64` | Listener admission permit acquisition timeouts. |
 | `configured_users` | `usize` | Configured user count. |
