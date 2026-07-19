@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::AUTHORIZATION;
@@ -19,8 +20,10 @@ use tokio::sync::{Mutex, RwLock, Semaphore, watch};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::config::{ApiGrayAction, ProxyConfig};
+use crate::config::ApiGrayAction;
 use crate::ip_tracker::UserIpTracker;
+use crate::maestro::generation::{RuntimeGeneration, RuntimeWatchState};
+use crate::maestro::reload::{ReloadAccepted, ReloadControl, ReloadRequest, ReloadSubmitError};
 use crate::proxy::route_mode::RouteRuntimeController;
 use crate::proxy::shared_state::ProxySharedState;
 use crate::startup::StartupTracker;
@@ -29,11 +32,13 @@ use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
 mod config_edit;
-mod config_store;
+pub(crate) mod config_store;
 mod events;
 mod http_utils;
 mod model;
 mod patch;
+#[cfg(test)]
+mod reload_tests;
 mod runtime_edge;
 mod runtime_init;
 mod runtime_min;
@@ -44,7 +49,8 @@ mod runtime_zero;
 mod users;
 
 use config_store::{
-    current_revision, ensure_expected_revision, load_config_from_disk, parse_if_match,
+    current_revision, ensure_expected_revision, load_config_for_reload, load_config_from_disk,
+    parse_if_match,
 };
 use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
@@ -107,12 +113,15 @@ pub(super) struct ApiShared {
     pub(super) minimal_cache: Arc<Mutex<Option<MinimalCacheEntry>>>,
     pub(super) runtime_edge_connections_cache: Arc<Mutex<Option<EdgeConnectionsCacheEntry>>>,
     pub(super) runtime_edge_recompute_lock: Arc<Mutex<()>>,
+    pub(super) cache_generation: Arc<AtomicU64>,
     pub(super) runtime_events: Arc<ApiEventStore>,
     pub(super) request_id: Arc<AtomicU64>,
     pub(super) runtime_state: Arc<ApiRuntimeState>,
     pub(super) startup_tracker: Arc<StartupTracker>,
     pub(super) route_runtime: Arc<RouteRuntimeController>,
     pub(super) proxy_shared: Arc<ProxySharedState>,
+    pub(super) reload_control: ReloadControl,
+    pub(super) active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
 }
 
 impl ApiShared {
@@ -122,6 +131,31 @@ impl ApiShared {
 
     fn detected_link_ips(&self) -> (Option<IpAddr>, Option<IpAddr>) {
         *self.detected_ips_rx.borrow()
+    }
+
+    fn for_runtime(&self, runtime: &RuntimeGeneration) -> Self {
+        Self {
+            stats: runtime.stats.clone(),
+            ip_tracker: runtime.ip_tracker.clone(),
+            me_pool: runtime.me_pool_runtime.clone(),
+            upstream_manager: runtime.upstream_manager.clone(),
+            config_path: self.config_path.clone(),
+            quota_state_path: self.quota_state_path.clone(),
+            detected_ips_rx: self.detected_ips_rx.clone(),
+            mutation_lock: self.mutation_lock.clone(),
+            minimal_cache: self.minimal_cache.clone(),
+            runtime_edge_connections_cache: self.runtime_edge_connections_cache.clone(),
+            runtime_edge_recompute_lock: self.runtime_edge_recompute_lock.clone(),
+            cache_generation: self.cache_generation.clone(),
+            runtime_events: self.runtime_events.clone(),
+            request_id: self.request_id.clone(),
+            runtime_state: self.runtime_state.clone(),
+            startup_tracker: self.startup_tracker.clone(),
+            route_runtime: runtime.route_runtime.clone(),
+            proxy_shared: runtime.proxy_shared.clone(),
+            reload_control: self.reload_control.clone(),
+            active_runtime: self.active_runtime.clone(),
+        }
     }
 }
 
@@ -142,6 +176,41 @@ fn user_action_route_matches(path: &str, suffix: &str) -> bool {
         .and_then(|path| path.strip_suffix(suffix))
         .map(|user| !user.is_empty() && !user.contains('/'))
         .unwrap_or(false)
+}
+
+fn reload_status_route_id(path: &str) -> Option<u64> {
+    path.strip_prefix("/v1/system/reload/")
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+        .and_then(|id| id.parse().ok())
+}
+
+async fn submit_reload_from_disk(
+    config_path: &std::path::Path,
+    mutation_lock: &Mutex<()>,
+    reload_control: &ReloadControl,
+    expected_revision: Option<&str>,
+    request: ReloadRequest,
+) -> Result<(ReloadAccepted, String), ApiFailure> {
+    let _guard = mutation_lock.lock().await;
+    ensure_expected_revision(config_path, expected_revision).await?;
+    let revision = current_revision(config_path).await?;
+    let config = Arc::new(load_config_for_reload(config_path).await?);
+    let accepted = reload_control
+        .submit(config, revision.clone(), request)
+        .await
+        .map_err(|error| match error {
+            ReloadSubmitError::InProgress(reload_id) => ApiFailure::new(
+                StatusCode::CONFLICT,
+                "reload_in_progress",
+                format!("Reload {} is already in progress", reload_id),
+            ),
+            ReloadSubmitError::MaestroUnavailable => ApiFailure::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "maestro_unavailable",
+                "Maestro reload coordinator is unavailable",
+            ),
+        })?;
+    Ok((accepted, revision))
 }
 
 fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
@@ -175,12 +244,14 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         | "/v1/stats/users/active-ips"
         | "/v1/stats/users/quota"
         | "/v1/stats/users" => Some(ALLOW_GET),
+        "/v1/system/reload" => Some(ALLOW_POST),
         "/v1/users" => Some(ALLOW_GET_POST),
         "/v1/config" => Some(ALLOW_GET_PATCH),
         _ if user_action_route_matches(path, "/reset-quota") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/rotate-secret") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/enable") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/disable") => Some(ALLOW_POST),
+        _ if reload_status_route_id(path).is_some() => Some(ALLOW_GET),
         _ if path
             .strip_prefix("/v1/users/")
             .map(|user| !user.is_empty() && !user.contains('/'))
@@ -200,14 +271,35 @@ pub async fn serve(
     route_runtime: Arc<RouteRuntimeController>,
     proxy_shared: Arc<ProxySharedState>,
     upstream_manager: Arc<UpstreamManager>,
-    config_rx: watch::Receiver<Arc<ProxyConfig>>,
-    admission_rx: watch::Receiver<bool>,
     config_path: PathBuf,
     quota_state_path: PathBuf,
     detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
     process_started_at_epoch_secs: u64,
     startup_tracker: Arc<StartupTracker>,
+    reload_control: ReloadControl,
+    mut active_runtime_rx: watch::Receiver<Option<Arc<ArcSwap<RuntimeGeneration>>>>,
+    mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
 ) {
+    let active_runtime = loop {
+        if let Some(active_runtime) = active_runtime_rx.borrow().clone() {
+            break active_runtime;
+        }
+        if active_runtime_rx.changed().await.is_err() {
+            warn!("Runtime generation channel closed before API bootstrap");
+            return;
+        }
+    };
+    let initial_watch_state = loop {
+        if let Some(watch_state) = runtime_watch_rx.borrow().clone() {
+            break watch_state;
+        }
+        if runtime_watch_rx.changed().await.is_err() {
+            warn!("Runtime watch channel closed before API bootstrap");
+            return;
+        }
+    };
+    let config_rx = initial_watch_state.config_rx.clone();
+    let admission_rx = initial_watch_state.admission_rx.clone();
     let listener = match TcpListener::bind(listen).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -241,6 +333,7 @@ pub async fn serve(
         minimal_cache: Arc::new(Mutex::new(None)),
         runtime_edge_connections_cache: Arc::new(Mutex::new(None)),
         runtime_edge_recompute_lock: Arc::new(Mutex::new(())),
+        cache_generation: Arc::new(AtomicU64::new(1)),
         runtime_events: Arc::new(ApiEventStore::new(
             config_rx.borrow().server.api.runtime_edge_events_capacity,
         )),
@@ -249,11 +342,12 @@ pub async fn serve(
         startup_tracker,
         route_runtime,
         proxy_shared,
+        reload_control,
+        active_runtime,
     });
 
     spawn_runtime_watchers(
-        config_rx.clone(),
-        admission_rx.clone(),
+        runtime_watch_rx,
         runtime_state.clone(),
         shared.runtime_events.clone(),
     );
@@ -282,13 +376,11 @@ pub async fn serve(
         };
 
         let shared_conn = shared.clone();
-        let config_rx_conn = config_rx.clone();
         tokio::spawn(async move {
             let _connection_permit = connection_permit;
             let svc = service_fn(move |req: Request<Incoming>| {
                 let shared_req = shared_conn.clone();
-                let config_rx_req = config_rx_conn.clone();
-                async move { handle(req, peer, shared_req, config_rx_req).await }
+                async move { handle(req, peer, shared_req).await }
             });
             match timeout(
                 API_HTTP_CONNECTION_TIMEOUT,
@@ -318,8 +410,19 @@ async fn handle(
     req: Request<Incoming>,
     peer: SocketAddr,
     shared: Arc<ApiShared>,
-    config_rx: watch::Receiver<Arc<ProxyConfig>>,
 ) -> Result<Response<Full<Bytes>>, IoError> {
+    let runtime = shared.active_runtime.load_full();
+    let previous_cache_generation = shared.cache_generation.swap(runtime.id, Ordering::AcqRel);
+    if previous_cache_generation != runtime.id {
+        *shared.minimal_cache.lock().await = None;
+        *shared.runtime_edge_connections_cache.lock().await = None;
+    }
+    let shared = Arc::new(shared.for_runtime(runtime.as_ref()));
+    let config_rx = runtime.config_rx.clone();
+    shared
+        .runtime_state
+        .admission_open
+        .store(*runtime.admission_rx.borrow(), Ordering::Relaxed);
     let request_id = shared.next_request_id();
     let cfg = config_rx.borrow().clone();
     let api_cfg = &cfg.server.api;
@@ -651,6 +754,33 @@ async fn handle(
                     config_edit::read_managed_config(&shared.config_path).await?;
                 Ok(success_response(StatusCode::OK, value, revision))
             }
+            ("POST", "/v1/system/reload") => {
+                if api_cfg.read_only {
+                    return Ok(error_response(
+                        request_id,
+                        ApiFailure::new(
+                            StatusCode::FORBIDDEN,
+                            "read_only",
+                            "API runs in read-only mode",
+                        ),
+                    ));
+                }
+                let expected_revision = parse_if_match(req.headers());
+                let request = read_optional_json::<ReloadRequest>(req.into_body(), body_limit)
+                    .await?
+                    .unwrap_or_default();
+                request.validate().map_err(ApiFailure::bad_request)?;
+
+                let (accepted, revision) = submit_reload_from_disk(
+                    &shared.config_path,
+                    shared.mutation_lock.as_ref(),
+                    &shared.reload_control,
+                    expected_revision.as_deref(),
+                    request,
+                )
+                .await?;
+                Ok(success_response(StatusCode::ACCEPTED, accepted, revision))
+            }
             ("PATCH", "/v1/config") => {
                 if api_cfg.read_only {
                     return Ok(error_response(
@@ -663,11 +793,20 @@ async fn handle(
                     ));
                 }
                 let expected_revision = parse_if_match(req.headers());
+                let reload_request =
+                    ReloadRequest::from_query(query.as_deref()).map_err(ApiFailure::bad_request)?;
                 let body = read_json::<serde_json::Value>(req.into_body(), body_limit).await?;
-                match config_edit::patch_config(body, expected_revision, &shared).await {
+                match config_edit::patch_config(body, expected_revision, reload_request, &shared)
+                    .await
+                {
                     Ok(resp) => {
                         let revision = resp.revision.clone();
-                        Ok(success_response(StatusCode::OK, resp, revision))
+                        let status = if resp.reload.is_some() {
+                            StatusCode::ACCEPTED
+                        } else {
+                            StatusCode::OK
+                        };
+                        Ok(success_response(status, resp, revision))
                     }
                     Err(error) => {
                         shared
@@ -678,6 +817,24 @@ async fn handle(
                 }
             }
             _ => {
+                if method == Method::GET
+                    && let Some(reload_id) = reload_status_route_id(normalized_path)
+                {
+                    let revision = current_revision(&shared.config_path).await?;
+                    let status =
+                        shared
+                            .reload_control
+                            .status(reload_id)
+                            .await
+                            .ok_or_else(|| {
+                                ApiFailure::new(
+                                    StatusCode::NOT_FOUND,
+                                    "reload_not_found",
+                                    format!("Reload {} was not found", reload_id),
+                                )
+                            })?;
+                    return Ok(success_response(StatusCode::OK, status, revision));
+                }
                 if method == Method::POST
                     && let Some(base_user) = normalized_path
                         .strip_prefix("/v1/users/")

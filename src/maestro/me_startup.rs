@@ -1,9 +1,11 @@
 #![allow(clippy::too_many_arguments)]
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{RwLock, watch};
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{error, info, warn};
 
 use crate::config::ProxyConfig;
@@ -17,7 +19,57 @@ use crate::stats::Stats;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
+use super::generation::RuntimeTaskScope;
 use super::helpers::load_startup_proxy_config_snapshot;
+
+async fn supervise_me_task<F, Fut>(task_name: &'static str, mut task: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    loop {
+        let result = AbortOnDropHandle::new(tokio::spawn(task())).await;
+        match result {
+            Ok(()) => warn!(task = task_name, "Middle-End supervisor task exited unexpectedly, restarting"),
+            Err(error) => {
+                error!(task = task_name, error = %error, "Middle-End supervisor task panicked, restarting in 1s");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+fn spawn_me_supervisors(
+    task_scope: RuntimeTaskScope,
+    pool: Arc<MePool>,
+    rng: Arc<SecureRandom>,
+    min_connections: usize,
+) {
+    let health_pool = pool.clone();
+    let health_rng = rng;
+    task_scope.spawn(supervise_me_task("health_monitor", move || {
+        let pool = health_pool.clone();
+        let rng = health_rng.clone();
+        async move {
+            crate::transport::middle_proxy::me_health_monitor(pool, rng, min_connections).await;
+        }
+    }));
+
+    let drain_pool = pool.clone();
+    task_scope.spawn(supervise_me_task("drain_timeout_enforcer", move || {
+        let pool = drain_pool.clone();
+        async move {
+            crate::transport::middle_proxy::me_drain_timeout_enforcer(pool).await;
+        }
+    }));
+
+    task_scope.spawn(supervise_me_task("zombie_writer_watchdog", move || {
+        let pool = pool.clone();
+        async move {
+            crate::transport::middle_proxy::me_zombie_writer_watchdog(pool).await;
+        }
+    }));
+}
 
 pub(crate) async fn initialize_me_pool(
     use_middle_proxy: bool,
@@ -30,6 +82,7 @@ pub(crate) async fn initialize_me_pool(
     stats: Arc<Stats>,
     api_me_pool: Arc<RwLock<Option<Arc<MePool>>>>,
     me_ready_tx: watch::Sender<u64>,
+    task_scope: RuntimeTaskScope,
 ) -> Option<Arc<MePool>> {
     if !use_middle_proxy {
         return None;
@@ -52,15 +105,8 @@ pub(crate) async fn initialize_me_pool(
         .as_ref()
         .map(|tag| hex::decode(tag).expect("general.ad_tag must be validated before startup"));
 
-    // =============================================================
-    // CRITICAL: Download Telegram proxy-secret (NOT user secret!)
-    //
-    // C MTProxy uses TWO separate secrets:
-    //   -S flag    = 16-byte user secret for client obfuscation
-    //   --aes-pwd  = 32-512 byte binary file for ME RPC auth
-    //
-    // proxy-secret is from: https://core.telegram.org/getProxySecret
-    // =============================================================
+    // The Telegram proxy-secret authenticates ME RPC and is distinct from client secrets.
+    // It corresponds to the C MTProxy --aes-pwd input and may be fetched from Telegram.
     let proxy_secret_path = config.general.proxy_secret_path.as_deref();
     let pool_size = config.general.middle_proxy_pool_size.max(1);
     let proxy_secret = loop {
@@ -319,143 +365,70 @@ pub(crate) async fn initialize_me_pool(
                     let rng_bg = rng.clone();
                     let startup_tracker_bg = startup_tracker.clone();
                     let me_ready_tx_bg = me_ready_tx.clone();
+                    let task_scope_bg = task_scope.clone();
                     let retry_limit = if me_init_retry_attempts == 0 {
                         String::from("unlimited")
                     } else {
                         me_init_retry_attempts.to_string()
                     };
-                    std::thread::spawn(move || {
-                        let runtime = match tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                        {
-                            Ok(runtime) => runtime,
-                            Err(error) => {
-                                error!(error = %error, "Failed to build background runtime for ME initialization");
-                                return;
-                            }
-                        };
-                        runtime.block_on(async move {
-                            let mut init_attempt: u32 = 0;
-                            loop {
-                                init_attempt = init_attempt.saturating_add(1);
-                                startup_tracker_bg.set_me_init_attempt(init_attempt).await;
-                                match pool_bg.init(pool_size, &rng_bg).await {
-                                    Ok(()) => {
-                                        startup_tracker_bg.set_me_last_error(None).await;
-                                        startup_tracker_bg
-                                            .complete_component(
-                                                COMPONENT_ME_POOL_INIT_STAGE1,
-                                                Some("ME pool initialized".to_string()),
-                                            )
-                                            .await;
-                                        startup_tracker_bg
-                                            .set_me_status(StartupMeStatus::Ready, "ready")
-                                            .await;
-                                        me_ready_tx_bg.send_modify(|version| {
-                                            *version = version.saturating_add(1);
-                                        });
-                                        info!(
+                    task_scope.spawn(async move {
+                        let mut init_attempt: u32 = 0;
+                        loop {
+                            init_attempt = init_attempt.saturating_add(1);
+                            startup_tracker_bg.set_me_init_attempt(init_attempt).await;
+                            match pool_bg.init(pool_size, &rng_bg).await {
+                                Ok(()) => {
+                                    startup_tracker_bg.set_me_last_error(None).await;
+                                    startup_tracker_bg
+                                        .complete_component(
+                                            COMPONENT_ME_POOL_INIT_STAGE1,
+                                            Some("ME pool initialized".to_string()),
+                                        )
+                                        .await;
+                                    startup_tracker_bg
+                                        .set_me_status(StartupMeStatus::Ready, "ready")
+                                        .await;
+                                    me_ready_tx_bg.send_modify(|version| {
+                                        *version = version.saturating_add(1);
+                                    });
+                                    info!(
+                                        attempt = init_attempt,
+                                        "Middle-End pool initialized successfully"
+                                    );
+                                    spawn_me_supervisors(
+                                        task_scope_bg,
+                                        pool_bg.clone(),
+                                        rng_bg.clone(),
+                                        pool_size,
+                                    );
+                                    break;
+                                }
+                                Err(e) => {
+                                    startup_tracker_bg
+                                        .set_me_last_error(Some(e.to_string()))
+                                        .await;
+                                    if init_attempt >= me_init_warn_after_attempts {
+                                        warn!(
+                                            error = %e,
                                             attempt = init_attempt,
-                                            "Middle-End pool initialized successfully"
+                                            retry_limit = %retry_limit,
+                                            retry_in_secs = 2,
+                                            "ME pool is not ready yet; retrying background initialization"
                                         );
-
-                                            // ── Supervised background tasks ──────────────────
-                                            // Each task runs inside a nested tokio::spawn so
-                                            // that a panic is caught via JoinHandle and the
-                                            // outer loop restarts the task automatically.
-                                            let pool_health = pool_bg.clone();
-                                            let rng_health = rng_bg.clone();
-                                            let min_conns = pool_size;
-                                            tokio::spawn(async move {
-                                                loop {
-                                                    let p = pool_health.clone();
-                                                    let r = rng_health.clone();
-                                                    let res = tokio::spawn(async move {
-                                                        crate::transport::middle_proxy::me_health_monitor(
-                                                            p, r, min_conns,
-                                                        )
-                                                        .await;
-                                                    })
-                                                    .await;
-                                                    match res {
-                                                        Ok(()) => warn!("me_health_monitor exited unexpectedly, restarting"),
-                                                        Err(e) => {
-                                                            error!(error = %e, "me_health_monitor panicked, restarting in 1s");
-                                                            tokio::time::sleep(Duration::from_secs(1)).await;
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                            let pool_drain_enforcer = pool_bg.clone();
-                                            tokio::spawn(async move {
-                                                loop {
-                                                    let p = pool_drain_enforcer.clone();
-                                                    let res = tokio::spawn(async move {
-                                                        crate::transport::middle_proxy::me_drain_timeout_enforcer(p).await;
-                                                    })
-                                                    .await;
-                                                    match res {
-                                                        Ok(()) => warn!("me_drain_timeout_enforcer exited unexpectedly, restarting"),
-                                                        Err(e) => {
-                                                            error!(error = %e, "me_drain_timeout_enforcer panicked, restarting in 1s");
-                                                            tokio::time::sleep(Duration::from_secs(1)).await;
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                            let pool_watchdog = pool_bg.clone();
-                                            tokio::spawn(async move {
-                                                loop {
-                                                    let p = pool_watchdog.clone();
-                                                    let res = tokio::spawn(async move {
-                                                        crate::transport::middle_proxy::me_zombie_writer_watchdog(p).await;
-                                                    })
-                                                    .await;
-                                                    match res {
-                                                        Ok(()) => warn!("me_zombie_writer_watchdog exited unexpectedly, restarting"),
-                                                        Err(e) => {
-                                                            error!(error = %e, "me_zombie_writer_watchdog panicked, restarting in 1s");
-                                                            tokio::time::sleep(Duration::from_secs(1)).await;
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                            // CRITICAL: keep the current-thread runtime
-                                            // alive. Without this, block_on() returns,
-                                            // the Runtime is dropped, and ALL spawned
-                                            // background tasks (health monitor, drain
-                                            // enforcer, zombie watchdog) are silently
-                                            // cancelled — causing the draining-writer
-                                            // leak that brought us here.
-                                            std::future::pending::<()>().await;
-                                            unreachable!();
+                                    } else {
+                                        info!(
+                                            error = %e,
+                                            attempt = init_attempt,
+                                            retry_limit = %retry_limit,
+                                            retry_in_secs = 2,
+                                            "ME pool startup warmup: retrying background initialization"
+                                        );
                                     }
-                                    Err(e) => {
-                                        startup_tracker_bg.set_me_last_error(Some(e.to_string())).await;
-                                        if init_attempt >= me_init_warn_after_attempts {
-                                            warn!(
-                                                error = %e,
-                                                attempt = init_attempt,
-                                                retry_limit = %retry_limit,
-                                                retry_in_secs = 2,
-                                                "ME pool is not ready yet; retrying background initialization"
-                                            );
-                                        } else {
-                                            info!(
-                                                error = %e,
-                                                attempt = init_attempt,
-                                                retry_limit = %retry_limit,
-                                                retry_in_secs = 2,
-                                                "ME pool startup warmup: retrying background initialization"
-                                            );
-                                        }
-                                        pool_bg.reset_stun_state();
-                                        tokio::time::sleep(Duration::from_secs(2)).await;
-                                    }
+                                    pool_bg.reset_stun_state();
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
                                 }
                             }
-                        });
+                        }
                     });
                     startup_tracker
                         .set_me_status(StartupMeStatus::Initializing, "background_init")
@@ -490,70 +463,12 @@ pub(crate) async fn initialize_me_pool(
                                     "Middle-End pool initialized successfully"
                                 );
 
-                                // ── Supervised background tasks ──────────────────
-                                let pool_clone = pool.clone();
-                                let rng_clone = rng.clone();
-                                let min_conns = pool_size;
-                                tokio::spawn(async move {
-                                    loop {
-                                        let p = pool_clone.clone();
-                                        let r = rng_clone.clone();
-                                        let res = tokio::spawn(async move {
-                                            crate::transport::middle_proxy::me_health_monitor(
-                                                p, r, min_conns,
-                                            )
-                                            .await;
-                                        })
-                                        .await;
-                                        match res {
-                                            Ok(()) => warn!(
-                                                "me_health_monitor exited unexpectedly, restarting"
-                                            ),
-                                            Err(e) => {
-                                                error!(error = %e, "me_health_monitor panicked, restarting in 1s");
-                                                tokio::time::sleep(Duration::from_secs(1)).await;
-                                            }
-                                        }
-                                    }
-                                });
-                                let pool_drain_enforcer = pool.clone();
-                                tokio::spawn(async move {
-                                    loop {
-                                        let p = pool_drain_enforcer.clone();
-                                        let res = tokio::spawn(async move {
-                                                crate::transport::middle_proxy::me_drain_timeout_enforcer(p).await;
-                                            })
-                                            .await;
-                                        match res {
-                                            Ok(()) => warn!(
-                                                "me_drain_timeout_enforcer exited unexpectedly, restarting"
-                                            ),
-                                            Err(e) => {
-                                                error!(error = %e, "me_drain_timeout_enforcer panicked, restarting in 1s");
-                                                tokio::time::sleep(Duration::from_secs(1)).await;
-                                            }
-                                        }
-                                    }
-                                });
-                                let pool_watchdog = pool.clone();
-                                tokio::spawn(async move {
-                                    loop {
-                                        let p = pool_watchdog.clone();
-                                        let res = tokio::spawn(async move {
-                                                crate::transport::middle_proxy::me_zombie_writer_watchdog(p).await;
-                                            })
-                                            .await;
-                                        match res {
-                                            Ok(()) => warn!(
-                                                "me_zombie_writer_watchdog exited unexpectedly, restarting"
-                                            ),
-                                            Err(e) => {
-                                                error!(error = %e, "me_zombie_writer_watchdog panicked, restarting in 1s");
-                                                tokio::time::sleep(Duration::from_secs(1)).await;
-                                            }
-                                        }
-                                    }
-                                });
+                                spawn_me_supervisors(
+                                    task_scope.clone(),
+                                    pool.clone(),
+                                    rng.clone(),
+                                    pool_size,
+                                );
 
                                 break Some(pool);
                             }
@@ -664,5 +579,71 @@ pub(crate) async fn initialize_me_pool(
                 .await;
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    struct DropSignal(Arc<Notify>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_supervisor_aborts_its_current_child() {
+        let scope = RuntimeTaskScope::new();
+        let dropped = Arc::new(Notify::new());
+        let dropped_for_task = dropped.clone();
+        scope.spawn(supervise_me_task("test", move || {
+            let dropped = dropped_for_task.clone();
+            async move {
+                let _signal = DropSignal(dropped);
+                std::future::pending::<()>().await;
+            }
+        }));
+        tokio::task::yield_now().await;
+
+        scope.stop().await;
+
+        tokio::time::timeout(Duration::from_secs(1), dropped.notified())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervisor_restarts_exited_child_and_stops_with_runtime_scope() {
+        let scope = RuntimeTaskScope::new();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let restarted = Arc::new(Notify::new());
+        let starts_task = starts.clone();
+        let restarted_task = restarted.clone();
+        scope.spawn(supervise_me_task("restart_test", move || {
+            let starts = starts_task.clone();
+            let restarted = restarted_task.clone();
+            async move {
+                if starts.fetch_add(1, Ordering::AcqRel) + 1 >= 3 {
+                    restarted.notify_one();
+                }
+            }
+        }));
+
+        tokio::time::timeout(Duration::from_secs(1), restarted.notified())
+            .await
+            .unwrap();
+        scope.stop().await;
+        let stopped_at = starts.load(Ordering::Acquire);
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(stopped_at >= 3);
+        assert_eq!(starts.load(Ordering::Acquire), stopped_at);
     }
 }

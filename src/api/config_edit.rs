@@ -6,19 +6,28 @@ use toml::Value as Toml;
 
 use super::ApiShared;
 use super::config_store::{
-    EDITABLE_SECTIONS, compute_revision, current_revision, save_sections_to_disk,
+    EDITABLE_SECTIONS, compute_revision, current_revision, load_config_from_disk,
+    save_sections_to_disk,
 };
 use super::model::ApiFailure;
 use crate::config::ProxyConfig;
 use crate::config::hot_reload::classify_config_changes;
+use crate::maestro::reload::{ReloadAccepted, ReloadRequest, ReloadSubmitError};
+use crate::maestro::runtime_build::deferred_process_fields;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub(super) struct PatchConfigResponse {
     pub revision: String,
     pub restart_required: bool,
+    pub runtime_reload_required: bool,
+    pub process_restart_required: bool,
+    pub deferred_process_fields: Vec<String>,
     pub changed: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reload: Option<ReloadAccepted>,
 }
 
 /// Shared-state wrapper around [`apply_patch_to_path`]: serializes config
@@ -27,10 +36,40 @@ pub(super) struct PatchConfigResponse {
 pub(super) async fn patch_config(
     patch_json: Json,
     expected_revision: Option<String>,
+    reload_request: Option<ReloadRequest>,
     shared: &ApiShared,
 ) -> Result<PatchConfigResponse, ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
-    let resp = apply_patch_to_path(&shared.config_path, &patch_json, expected_revision).await?;
+    if reload_request.is_some()
+        && let Some(reload_id) = shared.reload_control.in_progress().await
+    {
+        return Err(ApiFailure::new(
+            hyper::StatusCode::CONFLICT,
+            "reload_in_progress",
+            format!("Reload {} is already in progress", reload_id),
+        ));
+    }
+    let mut resp = apply_patch_to_path(&shared.config_path, &patch_json, expected_revision).await?;
+    if let Some(request) = reload_request {
+        let config = Arc::new(load_config_from_disk(&shared.config_path).await?);
+        let accepted = shared
+            .reload_control
+            .submit(config, resp.revision.clone(), request)
+            .await
+            .map_err(|error| match error {
+                ReloadSubmitError::InProgress(reload_id) => ApiFailure::new(
+                    hyper::StatusCode::CONFLICT,
+                    "reload_in_progress",
+                    format!("Reload {} is already in progress", reload_id),
+                ),
+                ReloadSubmitError::MaestroUnavailable => ApiFailure::new(
+                    hyper::StatusCode::SERVICE_UNAVAILABLE,
+                    "maestro_unavailable",
+                    "Maestro reload coordinator is unavailable",
+                ),
+            })?;
+        resp.reload = Some(accepted);
+    }
     drop(_guard);
     shared
         .runtime_events
@@ -114,6 +153,7 @@ pub(super) async fn apply_patch_to_path(
 
     // 4. classify changes (Telemt's own hot/restart rule)
     let class = classify_config_changes(&old_cfg, &new_cfg);
+    let deferred_process_fields = deferred_process_fields(&old_cfg, &new_cfg);
 
     // 5. write only the touched top-level sections
     let revision = save_sections_to_disk(config_path, &new_cfg, &touched).await?;
@@ -121,7 +161,11 @@ pub(super) async fn apply_patch_to_path(
     Ok(PatchConfigResponse {
         revision,
         restart_required: class.restart_required,
+        runtime_reload_required: class.restart_required,
+        process_restart_required: !deferred_process_fields.is_empty(),
+        deferred_process_fields,
         changed: class.changed,
+        reload: None,
     })
 }
 
@@ -266,6 +310,9 @@ mod tests {
         let patch: Json = serde_json::json!({"censorship": {"tls_domain": "b.com"}});
         let resp = apply_patch_to_path(&path, &patch, None).await.unwrap();
         assert!(resp.restart_required);
+        assert!(resp.runtime_reload_required);
+        assert!(!resp.process_restart_required);
+        assert!(resp.deferred_process_fields.is_empty());
         assert!(resp.changed.iter().any(|c| c == "censorship"));
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("tls_domain = \"b.com\""));
@@ -406,6 +453,8 @@ mod tests {
         let patch: Json = serde_json::json!({"general": {"log_level": "debug"}});
         let resp = apply_patch_to_path(&path, &patch, None).await.unwrap();
         assert!(!resp.restart_required);
+        assert!(!resp.runtime_reload_required);
+        assert!(!resp.process_restart_required);
         assert!(resp.changed.iter().any(|c| c == "general"));
     }
 }

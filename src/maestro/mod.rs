@@ -13,19 +13,24 @@
 // - shutdown: graceful shutdown sequence and uptime logging.
 mod admission;
 mod connectivity;
+pub(crate) mod generation;
 mod helpers;
 mod listeners;
 mod me_startup;
+pub(crate) mod reload;
+mod reload_supervisor;
+pub(crate) mod runtime_build;
 mod runtime_tasks;
 mod shutdown;
 mod tls_bootstrap;
 
+use arc_swap::ArcSwap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, Semaphore, watch};
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload as tracing_reload};
 
 use crate::api;
 use crate::config::{LogLevel, ProxyConfig};
@@ -34,7 +39,7 @@ use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
 use crate::proxy::direct_buffer_budget::{
-    DirectBufferBudget, resolve_direct_buffer_hard_limit, spawn_direct_buffer_budget_controller,
+    DirectBufferBudget, resolve_direct_buffer_hard_limit, run_direct_buffer_budget_controller,
 };
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
@@ -46,7 +51,7 @@ use crate::startup::{
 };
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
-use crate::stats::{ReplayChecker, Stats};
+use crate::stats::{QuotaStore, ReplayChecker, Stats};
 use crate::stream::BufferPool;
 use crate::synlimit_control;
 use crate::transport::UpstreamManager;
@@ -343,7 +348,7 @@ async fn run_telemt_core(
             }
         };
     let (filter_layer, filter_handle) =
-        reload::Layer::new(EnvFilter::new(initial_filter_spec.clone()));
+        tracing_reload::Layer::new(EnvFilter::new(initial_filter_spec.clone()));
     startup_tracker
         .start_component(
             COMPONENT_TRACING_INIT,
@@ -387,6 +392,7 @@ async fn run_telemt_core(
             _logging_guard = Some(guard);
         }
     }
+    let runtime_log_filter = runtime_tasks::RuntimeLogFilter::new(filter_handle);
 
     startup_tracker
         .complete_component(
@@ -433,21 +439,26 @@ async fn run_telemt_core(
         warn!("Using default tls_domain. Consider setting a custom domain.");
     }
 
-    let stats = Arc::new(Stats::new());
+    let quota_store = Arc::new(QuotaStore::default());
+    let stats = Arc::new(Stats::with_quota_store(quota_store.clone()));
+    let runtime_task_scope = generation::RuntimeTaskScope::new();
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
     let quota_state_path = config.general.quota_state_path.clone();
     crate::quota_state::load_quota_state(&quota_state_path, stats.as_ref()).await;
 
-    let upstream_manager = Arc::new(UpstreamManager::new(
-        config.upstreams.clone(),
-        config.general.upstream_connect_retry_attempts,
-        config.general.upstream_connect_retry_backoff_ms,
-        config.general.upstream_connect_budget_ms,
-        config.general.tg_connect,
-        config.general.upstream_unhealthy_fail_threshold,
-        config.general.upstream_connect_failfast_hard_errors,
-        stats.clone(),
-    ));
+    let upstream_manager = Arc::new(
+        UpstreamManager::new(
+            config.upstreams.clone(),
+            config.general.upstream_connect_retry_attempts,
+            config.general.upstream_connect_retry_backoff_ms,
+            config.general.upstream_connect_budget_ms,
+            config.general.tg_connect,
+            config.general.upstream_unhealthy_fail_threshold,
+            config.general.upstream_connect_failfast_hard_errors,
+            stats.clone(),
+        )
+        .with_dns_overrides(&config.network.dns_overrides)?,
+    );
     let ip_tracker = Arc::new(UserIpTracker::new());
     ip_tracker
         .load_limits(
@@ -492,11 +503,15 @@ async fn run_telemt_core(
         config.access.cidr_rate_limits.clone(),
     );
 
-    let (api_config_tx, api_config_rx) = watch::channel(Arc::new(config.clone()));
     let (detected_ips_tx, detected_ips_rx) = watch::channel((None::<IpAddr>, None::<IpAddr>));
     let initial_direct_first = config.general.use_middle_proxy && config.general.me2dc_fallback;
     let initial_admission_open = !config.general.use_middle_proxy || initial_direct_first;
     let (admission_tx, admission_rx) = watch::channel(initial_admission_open);
+    let (reload_control, reload_commands) = reload::ReloadControl::channel(1);
+    let (active_runtime_tx, active_runtime_rx) =
+        watch::channel(None::<Arc<ArcSwap<generation::RuntimeGeneration>>>);
+    let (runtime_watch_tx, runtime_watch_rx) =
+        watch::channel(None::<generation::RuntimeWatchState>);
     let initial_route_mode = if !config.general.use_middle_proxy || initial_direct_first {
         RelayRouteMode::Direct
     } else {
@@ -530,12 +545,13 @@ async fn run_telemt_core(
             let upstream_manager_api = upstream_manager.clone();
             let route_runtime_api = route_runtime.clone();
             let proxy_shared_api = shared_state.clone();
-            let config_rx_api = api_config_rx.clone();
-            let admission_rx_api = admission_rx.clone();
             let config_path_api = config_path.clone();
             let quota_state_path_api = quota_state_path.clone();
             let startup_tracker_api = startup_tracker.clone();
             let detected_ips_rx_api = detected_ips_rx.clone();
+            let reload_control_api = reload_control.clone();
+            let active_runtime_rx_api = active_runtime_rx.clone();
+            let runtime_watch_rx_api = runtime_watch_rx.clone();
             tokio::spawn(async move {
                 api::serve(
                     listen,
@@ -545,13 +561,14 @@ async fn run_telemt_core(
                     route_runtime_api,
                     proxy_shared_api,
                     upstream_manager_api,
-                    config_rx_api,
-                    admission_rx_api,
                     config_path_api,
                     quota_state_path_api,
                     detected_ips_rx_api,
                     process_started_at_epoch_secs,
                     startup_tracker_api,
+                    reload_control_api,
+                    active_runtime_rx_api,
+                    runtime_watch_rx_api,
                 )
                 .await;
             });
@@ -591,8 +608,10 @@ async fn run_telemt_core(
         &tls_domains,
         upstream_manager.clone(),
         &startup_tracker,
+        runtime_task_scope.clone(),
+        tls_bootstrap::TlsBootstrapPolicy::BestEffort,
     )
-    .await;
+    .await?;
 
     startup_tracker
         .start_component(
@@ -718,6 +737,7 @@ async fn run_telemt_core(
             stats.clone(),
             api_me_pool.clone(),
             me_ready_tx.clone(),
+            runtime_task_scope.clone(),
         )
         .await
     };
@@ -805,16 +825,22 @@ async fn run_telemt_core(
         rng.clone(),
         ip_tracker.clone(),
         beobachten.clone(),
-        api_config_tx.clone(),
         me_pool.clone(),
         shared_state.clone(),
         me_ready_tx.clone(),
+        runtime_task_scope.clone(),
     )
     .await;
     let config_rx = runtime_watches.config_rx;
     let log_level_rx = runtime_watches.log_level_rx;
     let detected_ip_v4 = runtime_watches.detected_ip_v4;
     let detected_ip_v6 = runtime_watches.detected_ip_v6;
+    runtime_log_filter.start(
+        has_rust_log,
+        &effective_log_level,
+        log_level_rx,
+        runtime_task_scope.clone(),
+    );
 
     if direct_first_startup {
         let config_bg = config.clone();
@@ -827,7 +853,8 @@ async fn run_telemt_core(
         let api_me_pool_bg = api_me_pool.clone();
         let me_ready_tx_bg = me_ready_tx.clone();
         let config_rx_bg = config_rx.clone();
-        tokio::spawn(async move {
+        let task_scope_bg = runtime_task_scope.clone();
+        runtime_task_scope.spawn(async move {
             let mut bootstrap_attempt: u32 = 0;
             loop {
                 bootstrap_attempt = bootstrap_attempt.saturating_add(1);
@@ -842,6 +869,7 @@ async fn run_telemt_core(
                     stats_bg.clone(),
                     api_me_pool_bg.clone(),
                     me_ready_tx_bg.clone(),
+                    task_scope_bg.clone(),
                 )
                 .await;
                 if let Some(pool) = pool {
@@ -851,6 +879,7 @@ async fn run_telemt_core(
                         pool,
                         rng_bg,
                         me_ready_tx_bg,
+                        task_scope_bg,
                     );
                     break;
                 }
@@ -864,7 +893,7 @@ async fn run_telemt_core(
         let startup_tracker_ready = startup_tracker.clone();
         let api_me_pool_ready = api_me_pool.clone();
         let mut me_ready_rx_transport = me_ready_tx.subscribe();
-        tokio::spawn(async move {
+        runtime_task_scope.spawn(async move {
             if me_ready_rx_transport.changed().await.is_ok() {
                 if let Some(pool) = api_me_pool_ready.read().await.as_ref() {
                     pool.set_runtime_ready(true);
@@ -886,20 +915,54 @@ async fn run_telemt_core(
         &admission_tx,
         config_rx.clone(),
         me_ready_rx,
+        runtime_task_scope.clone(),
     )
     .await;
     let _admission_tx_hold = admission_tx;
-    conntrack_control::spawn_conntrack_controller(
+    let conntrack_scope = runtime_task_scope.clone();
+    runtime_task_scope.spawn(conntrack_control::run_conntrack_controller(
         config_rx.clone(),
         stats.clone(),
         shared_state.clone(),
-    );
-    spawn_direct_buffer_budget_controller(
+        conntrack_scope.cancellation_token(),
+    ));
+    runtime_task_scope.spawn(run_direct_buffer_budget_controller(
         direct_buffer_budget,
         buffer_pool.clone(),
         stats.clone(),
         shared_state.clone(),
         config.server.max_connections,
+    ));
+
+    let runtime_generation = generation::RuntimeGeneration::new(
+        1,
+        config_rx.clone(),
+        admission_rx.clone(),
+        stats.clone(),
+        upstream_manager.clone(),
+        replay_checker.clone(),
+        buffer_pool.clone(),
+        rng.clone(),
+        me_pool.clone(),
+        api_me_pool.clone(),
+        route_runtime.clone(),
+        tls_cache.clone(),
+        ip_tracker.clone(),
+        beobachten.clone(),
+        shared_state.clone(),
+        max_connections.clone(),
+        runtime_task_scope.clone(),
+    );
+    let active_runtime = Arc::new(ArcSwap::from(runtime_generation));
+    let reload_supervisor = reload_supervisor::ReloadSupervisor::spawn(
+        active_runtime.clone(),
+        reload_control,
+        reload_commands,
+        config_path.clone(),
+        quota_store,
+        detected_ips_tx,
+        runtime_log_filter,
+        runtime_watch_tx.clone(),
     );
 
     let bound = listeners::bind_listeners(
@@ -909,25 +972,15 @@ async fn run_telemt_core(
         detected_ip_v4,
         detected_ip_v6,
         &startup_tracker,
-        config_rx.clone(),
-        admission_rx.clone(),
-        stats.clone(),
-        upstream_manager.clone(),
-        replay_checker.clone(),
-        buffer_pool.clone(),
-        rng.clone(),
-        me_pool.clone(),
-        api_me_pool.clone(),
-        route_runtime.clone(),
-        tls_cache.clone(),
-        ip_tracker.clone(),
-        beobachten.clone(),
-        shared_state.clone(),
-        max_connections.clone(),
     )
     .await?;
     let listeners = bound.listeners;
-    let has_unix_listener = bound.has_unix_listener;
+    #[cfg(unix)]
+    let unix_listener = bound.unix_listener;
+    #[cfg(unix)]
+    let has_unix_listener = unix_listener.is_some();
+    #[cfg(not(unix))]
+    let has_unix_listener = false;
 
     if listeners.is_empty() && !has_unix_listener {
         error!("No listeners. Exiting.");
@@ -937,54 +990,30 @@ async fn run_telemt_core(
     // On Unix, caller supplies privilege drop after bind (may require root for port < 1024).
     drop_after_bind();
 
-    synlimit_control::reconcile_synlimit_rules(&config).await;
-    synlimit_control::spawn_synlimit_controller(config_rx.clone());
+    let synlimit_controller = synlimit_control::spawn_synlimit_controller(runtime_watch_rx);
 
-    runtime_tasks::apply_runtime_log_filter(
-        has_rust_log,
-        &effective_log_level,
-        filter_handle,
-        log_level_rx,
-    )
-    .await;
+    runtime_tasks::spawn_metrics_if_configured(&config, &startup_tracker, active_runtime.clone())
+        .await;
 
-    runtime_tasks::spawn_metrics_if_configured(
-        &config,
-        &startup_tracker,
-        stats.clone(),
-        beobachten.clone(),
-        shared_state.clone(),
-        ip_tracker.clone(),
-        tls_cache.clone(),
-        config_rx.clone(),
-    )
-    .await;
-
+    runtime_watch_tx.send_replace(Some(active_runtime.load_full().watch_state()));
+    active_runtime_tx.send_replace(Some(active_runtime.clone()));
     runtime_tasks::mark_runtime_ready(&startup_tracker).await;
 
     // Spawn signal handlers for SIGUSR1/SIGUSR2 (non-shutdown signals)
-    shutdown::spawn_signal_handlers(stats.clone(), process_started_at);
+    shutdown::spawn_signal_handlers(active_runtime.clone(), process_started_at);
 
-    listeners::spawn_tcp_accept_loops(
-        listeners,
-        config_rx.clone(),
-        admission_rx.clone(),
-        stats.clone(),
-        upstream_manager.clone(),
-        replay_checker.clone(),
-        buffer_pool.clone(),
-        rng.clone(),
-        me_pool.clone(),
-        api_me_pool.clone(),
-        route_runtime.clone(),
-        tls_cache.clone(),
-        ip_tracker.clone(),
-        beobachten.clone(),
-        shared_state,
-        max_connections.clone(),
-    );
+    listeners::spawn_tcp_accept_loops(listeners, active_runtime.clone());
+    #[cfg(unix)]
+    listeners::spawn_unix_accept_loop(unix_listener, active_runtime.clone());
 
-    shutdown::wait_for_shutdown(process_started_at, me_pool, stats, quota_state_path).await;
+    shutdown::wait_for_shutdown(
+        process_started_at,
+        active_runtime,
+        quota_state_path,
+        synlimit_controller,
+        reload_supervisor,
+    )
+    .await;
 
     Ok(())
 }

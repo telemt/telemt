@@ -8,6 +8,33 @@ use crate::error::{ProxyError, Result};
 
 type OverrideMap = HashMap<(String, u16), IpAddr>;
 
+/// Immutable DNS override snapshot owned by one runtime generation.
+#[derive(Debug, Clone, Default)]
+pub struct DnsOverrides {
+    entries: std::sync::Arc<OverrideMap>,
+}
+
+impl DnsOverrides {
+    /// Parses a validated generation-local override snapshot.
+    pub fn from_entries(entries: &[String]) -> Result<Self> {
+        Ok(Self {
+            entries: std::sync::Arc::new(parse_entries(entries)?),
+        })
+    }
+
+    /// Resolves a generation-local hostname override.
+    pub fn resolve(&self, host: &str, port: u16) -> Option<IpAddr> {
+        self.entries
+            .get(&(host.to_ascii_lowercase(), port))
+            .copied()
+    }
+
+    /// Resolves a generation-local override as a socket address.
+    pub fn resolve_socket_addr(&self, host: &str, port: u16) -> Option<SocketAddr> {
+        self.resolve(host, port).map(|ip| SocketAddr::new(ip, port))
+    }
+}
+
 static DNS_OVERRIDES: OnceLock<RwLock<OverrideMap>> = OnceLock::new();
 
 fn overrides_store() -> &'static RwLock<OverrideMap> {
@@ -178,6 +205,22 @@ mod tests {
 
         let resolved = resolve("mypetrovich.ru", 8443);
         assert_eq!(resolved, Some("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn generation_snapshots_do_not_observe_each_other() {
+        let first = DnsOverrides::from_entries(&["example.com:443:127.0.0.1".to_string()]).unwrap();
+        let second =
+            DnsOverrides::from_entries(&["example.com:443:127.0.0.2".to_string()]).unwrap();
+
+        assert_eq!(
+            first.resolve("example.com", 443),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(
+            second.resolve("example.com", 443),
+            Some("127.0.0.2".parse().unwrap())
+        );
     }
 
     #[test]

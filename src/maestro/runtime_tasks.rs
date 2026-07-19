@@ -2,9 +2,11 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Registry;
 use tracing_subscriber::reload;
 
 use crate::config::hot_reload::spawn_config_watcher;
@@ -21,10 +23,11 @@ use crate::startup::{
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{ReplayChecker, Stats};
-use crate::tls_front::TlsFrontCache;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::{MePool, MeReinitTrigger};
 
+use super::generation::RuntimeGeneration;
+use super::generation::RuntimeTaskScope;
 use super::helpers::write_beobachten_snapshot;
 
 pub(crate) struct RuntimeWatches {
@@ -32,6 +35,56 @@ pub(crate) struct RuntimeWatches {
     pub(crate) log_level_rx: watch::Receiver<LogLevel>,
     pub(crate) detected_ip_v4: Option<IpAddr>,
     pub(crate) detected_ip_v6: Option<IpAddr>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeLogFilter {
+    handle: reload::Handle<EnvFilter, Registry>,
+}
+
+impl RuntimeLogFilter {
+    pub(crate) fn new(handle: reload::Handle<EnvFilter, Registry>) -> Self {
+        Self { handle }
+    }
+
+    pub(crate) fn start(
+        &self,
+        has_rust_log: bool,
+        effective_log_level: &LogLevel,
+        log_level_rx: watch::Receiver<LogLevel>,
+        task_scope: RuntimeTaskScope,
+    ) {
+        self.apply(effective_log_level, has_rust_log);
+        self.spawn_watcher(log_level_rx, task_scope);
+    }
+
+    pub(crate) fn apply_reload(&self, level: &LogLevel) {
+        self.apply(level, false);
+    }
+
+    pub(crate) fn spawn_watcher(
+        &self,
+        mut log_level_rx: watch::Receiver<LogLevel>,
+        task_scope: RuntimeTaskScope,
+    ) {
+        let filter = self.clone();
+        task_scope.spawn(async move {
+            loop {
+                if log_level_rx.changed().await.is_err() {
+                    break;
+                }
+                let level = log_level_rx.borrow_and_update().clone();
+                filter.apply_reload(&level);
+            }
+        });
+    }
+
+    fn apply(&self, level: &LogLevel, has_rust_log: bool) {
+        let runtime_filter = EnvFilter::new(log_filter_spec(has_rust_log, level));
+        if let Err(error) = self.handle.reload(runtime_filter) {
+            tracing::error!(error = %error, "Failed to update runtime log filter");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -50,14 +103,14 @@ pub(crate) async fn spawn_runtime_tasks(
     rng: Arc<SecureRandom>,
     ip_tracker: Arc<UserIpTracker>,
     beobachten: Arc<BeobachtenStore>,
-    api_config_tx: watch::Sender<Arc<ProxyConfig>>,
     me_pool_for_policy: Option<Arc<MePool>>,
     shared_state: Arc<ProxySharedState>,
     me_ready_tx: watch::Sender<u64>,
+    task_scope: RuntimeTaskScope,
 ) -> RuntimeWatches {
     let um_clone = upstream_manager.clone();
     let dc_overrides_for_health = config.dc_overrides.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         um_clone
             .run_health_checks(
                 prefer_ipv6,
@@ -69,19 +122,19 @@ pub(crate) async fn spawn_runtime_tasks(
     });
 
     let rc_clone = replay_checker.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         rc_clone.run_periodic_cleanup().await;
     });
 
     let stats_maintenance = stats.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         stats_maintenance
             .run_periodic_user_stats_maintenance()
             .await;
     });
 
     let ip_tracker_maintenance = ip_tracker.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         ip_tracker_maintenance.run_periodic_maintenance().await;
     });
 
@@ -104,6 +157,7 @@ pub(crate) async fn spawn_runtime_tasks(
             config.clone(),
             detected_ip_v4,
             detected_ip_v6,
+            task_scope.cancellation_token(),
         );
     startup_tracker
         .complete_component(
@@ -111,21 +165,10 @@ pub(crate) async fn spawn_runtime_tasks(
             Some("config hot-reload watcher started".to_string()),
         )
         .await;
-    let mut config_rx_api_bridge = config_rx.clone();
-    let api_config_tx_bridge = api_config_tx.clone();
-    tokio::spawn(async move {
-        loop {
-            if config_rx_api_bridge.changed().await.is_err() {
-                break;
-            }
-            let cfg = config_rx_api_bridge.borrow_and_update().clone();
-            api_config_tx_bridge.send_replace(cfg);
-        }
-    });
-
     let stats_policy = stats.clone();
+    let upstream_policy = upstream_manager.clone();
     let mut config_rx_policy = config_rx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         loop {
             if config_rx_policy.changed().await.is_err() {
                 break;
@@ -133,6 +176,9 @@ pub(crate) async fn spawn_runtime_tasks(
             let cfg = config_rx_policy.borrow_and_update().clone();
             stats_policy
                 .apply_telemetry_policy(TelemetryPolicy::from_config(&cfg.general.telemetry));
+            if let Err(error) = upstream_policy.update_dns_overrides(&cfg.network.dns_overrides) {
+                warn!(error = %error, "Failed to update generation DNS overrides");
+            }
             if let Some(pool) = &me_pool_for_policy {
                 pool.update_runtime_transport_policy(
                     cfg.general.me_socks_kdf_policy,
@@ -149,7 +195,7 @@ pub(crate) async fn spawn_runtime_tasks(
 
     let ip_tracker_policy = ip_tracker.clone();
     let mut config_rx_ip_limits = config_rx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         let mut prev_limits = config_rx_ip_limits
             .borrow()
             .access
@@ -205,7 +251,7 @@ pub(crate) async fn spawn_runtime_tasks(
         config.access.cidr_rate_limits.clone(),
     );
     let mut config_rx_rate_limits = config_rx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         let mut prev_user_limits = config_rx_rate_limits
             .borrow()
             .access
@@ -236,7 +282,7 @@ pub(crate) async fn spawn_runtime_tasks(
 
     let shared_user_enabled = shared_state.clone();
     let mut config_rx_user_enabled = config_rx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         loop {
             if config_rx_user_enabled.changed().await.is_err() {
                 break;
@@ -257,7 +303,7 @@ pub(crate) async fn spawn_runtime_tasks(
 
     let beobachten_writer = beobachten.clone();
     let config_rx_beobachten = config_rx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         loop {
             let cfg = config_rx_beobachten.borrow().clone();
             let sleep_secs = cfg.general.beobachten_flush_secs.max(1);
@@ -278,7 +324,14 @@ pub(crate) async fn spawn_runtime_tasks(
     });
 
     if let Some(pool) = me_pool {
-        spawn_middle_proxy_runtime_tasks(config, config_rx.clone(), pool, rng, me_ready_tx);
+        spawn_middle_proxy_runtime_tasks(
+            config,
+            config_rx.clone(),
+            pool,
+            rng,
+            me_ready_tx,
+            task_scope,
+        );
     }
 
     RuntimeWatches {
@@ -295,6 +348,7 @@ pub(crate) fn spawn_middle_proxy_runtime_tasks(
     pool: Arc<MePool>,
     rng: Arc<SecureRandom>,
     me_ready_tx: watch::Sender<u64>,
+    task_scope: RuntimeTaskScope,
 ) {
     let reinit_trigger_capacity = config.general.me_reinit_trigger_channel.max(1);
     let (reinit_tx, reinit_rx) = mpsc::channel::<MeReinitTrigger>(reinit_trigger_capacity);
@@ -303,7 +357,7 @@ pub(crate) fn spawn_middle_proxy_runtime_tasks(
     let rng_clone_sched = rng.clone();
     let config_rx_clone_sched = config_rx.clone();
     let me_ready_tx_sched = me_ready_tx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         crate::transport::middle_proxy::me_reinit_scheduler(
             pool_clone_sched,
             rng_clone_sched,
@@ -317,7 +371,7 @@ pub(crate) fn spawn_middle_proxy_runtime_tasks(
     let pool_clone = pool.clone();
     let config_rx_clone = config_rx.clone();
     let reinit_tx_updater = reinit_tx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         crate::transport::middle_proxy::me_config_updater(
             pool_clone,
             config_rx_clone,
@@ -328,34 +382,9 @@ pub(crate) fn spawn_middle_proxy_runtime_tasks(
 
     let config_rx_clone_rot = config_rx.clone();
     let reinit_tx_rotation = reinit_tx.clone();
-    tokio::spawn(async move {
+    task_scope.spawn(async move {
         crate::transport::middle_proxy::me_rotation_task(config_rx_clone_rot, reinit_tx_rotation)
             .await;
-    });
-}
-
-pub(crate) async fn apply_runtime_log_filter(
-    has_rust_log: bool,
-    effective_log_level: &LogLevel,
-    filter_handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
-    mut log_level_rx: watch::Receiver<LogLevel>,
-) {
-    let runtime_filter = EnvFilter::new(log_filter_spec(has_rust_log, effective_log_level));
-    filter_handle
-        .reload(runtime_filter)
-        .expect("Failed to switch log filter");
-
-    tokio::spawn(async move {
-        loop {
-            if log_level_rx.changed().await.is_err() {
-                break;
-            }
-            let level = log_level_rx.borrow_and_update().clone();
-            let new_filter = tracing_subscriber::EnvFilter::new(log_filter_spec(false, &level));
-            if let Err(e) = filter_handle.reload(new_filter) {
-                tracing::error!("config reload: failed to update log filter: {}", e);
-            }
-        }
     });
 }
 
@@ -373,12 +402,7 @@ pub(crate) fn log_filter_spec(has_rust_log: bool, effective_log_level: &LogLevel
 pub(crate) async fn spawn_metrics_if_configured(
     config: &Arc<ProxyConfig>,
     startup_tracker: &Arc<StartupTracker>,
-    stats: Arc<Stats>,
-    beobachten: Arc<BeobachtenStore>,
-    shared_state: Arc<ProxySharedState>,
-    ip_tracker: Arc<UserIpTracker>,
-    tls_cache: Option<Arc<TlsFrontCache>>,
-    config_rx: watch::Receiver<Arc<ProxyConfig>>,
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
 ) {
     // metrics_listen takes precedence; fall back to metrics_port for backward compat.
     let metrics_target: Option<(u16, Option<String>)> =
@@ -408,28 +432,10 @@ pub(crate) async fn spawn_metrics_if_configured(
                 Some(format!("spawn metrics endpoint on {}", label)),
             )
             .await;
-        let stats = stats.clone();
-        let beobachten = beobachten.clone();
-        let shared_state = shared_state.clone();
-        let config_rx_metrics = config_rx.clone();
-        let ip_tracker_metrics = ip_tracker.clone();
-        let tls_cache_metrics = tls_cache.clone();
-        let whitelist = config.server.metrics_whitelist.clone();
+        let active_runtime = active_runtime.clone();
         let listen_backlog = config.server.listen_backlog;
         tokio::spawn(async move {
-            metrics::serve(
-                port,
-                listen,
-                listen_backlog,
-                stats,
-                beobachten,
-                shared_state,
-                ip_tracker_metrics,
-                tls_cache_metrics,
-                config_rx_metrics,
-                whitelist,
-            )
-            .await;
+            metrics::serve(port, listen, listen_backlog, active_runtime).await;
         });
         startup_tracker
             .complete_component(

@@ -916,26 +916,22 @@ async fn connect_tcp_with_upstream(
     strict_route: bool,
 ) -> Result<UpstreamStream> {
     if let Some(manager) = upstream {
-        let resolved = if let Some(addr) = resolve_socket_addr(host, port) {
-            Some(addr)
-        } else {
-            match tokio::net::lookup_host((host, port)).await {
-                Ok(mut addrs) => addrs.find(|a| a.is_ipv4()),
-                Err(e) => {
-                    if strict_route {
-                        return Err(anyhow!(
-                            "upstream route DNS resolution failed for {host}:{port}: {e}"
-                        ));
-                    }
-                    warn!(
-                        host = %host,
-                        port = port,
-                        scope = ?scope,
-                        error = %e,
-                        "Upstream DNS resolution failed, using direct connect"
-                    );
-                    None
+        let resolved = match manager.resolve_hostname(host, port).await {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                if strict_route {
+                    return Err(anyhow!(
+                        "upstream route DNS resolution failed for {host}:{port}: {e}"
+                    ));
                 }
+                warn!(
+                    host = %host,
+                    port = port,
+                    scope = ?scope,
+                    error = %e,
+                    "Upstream DNS resolution failed, using direct connect"
+                );
+                None
             }
         };
 
@@ -955,6 +951,9 @@ async fn connect_tcp_with_upstream(
                         error = %e,
                         "Upstream connect failed, using direct connect"
                     );
+                    return Ok(UpstreamStream::Tcp(
+                        timeout(connect_timeout, TcpStream::connect(addr)).await??,
+                    ));
                 }
             }
         } else if strict_route {

@@ -80,7 +80,11 @@ impl Stats {
             return handle;
         }
 
-        let entry = self.user_stats.entry(user.to_string()).or_default();
+        let quota = self.quota_store.user(user);
+        let entry = self
+            .user_stats
+            .entry(user.to_string())
+            .or_insert_with(|| Arc::new(UserStats::with_quota(quota)));
         if entry.last_seen_epoch_secs.load(Ordering::Relaxed) == 0 {
             self.touch_user_stats(entry.value().as_ref());
         }
@@ -166,10 +170,7 @@ impl Stats {
     #[inline]
     pub(crate) fn quota_charge_post_write(&self, user_stats: &UserStats, bytes: u64) -> u64 {
         self.touch_user_stats(user_stats);
-        user_stats
-            .quota_used
-            .fetch_add(bytes, Ordering::Relaxed)
-            .saturating_add(bytes)
+        user_stats.quota.charge(bytes)
     }
 
     pub(super) fn maybe_cleanup_user_stats(&self) {
