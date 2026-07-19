@@ -741,24 +741,6 @@ async fn render_metrics(
 
     let _ = writeln!(
         out,
-        "# HELP telemt_handshake_failures_by_stage_total Handshake failures by state-machine stage"
-    );
-    let _ = writeln!(
-        out,
-        "# TYPE telemt_handshake_failures_by_stage_total counter"
-    );
-    if core_enabled {
-        for (stage, total) in stats.get_handshake_failure_stage_counts() {
-            let _ = writeln!(
-                out,
-                "telemt_handshake_failures_by_stage_total{{stage=\"{}\"}} {}",
-                stage, total
-            );
-        }
-    }
-
-    let _ = writeln!(
-        out,
         "# HELP telemt_auth_expensive_checks_total Expensive authentication candidate checks executed during handshake validation"
     );
     let _ = writeln!(out, "# TYPE telemt_auth_expensive_checks_total counter");
@@ -3904,7 +3886,6 @@ mod tests {
         stats.increment_connects_bad_with_class("tls_handshake_bad_client");
         stats.increment_handshake_timeouts();
         stats.increment_handshake_failure_class("timeout");
-        stats.increment_handshake_failure_stage("tls_post_serverhello_mtproto");
         shared_state
             .handshake
             .auth_expensive_checks_total
@@ -3969,9 +3950,6 @@ mod tests {
         ));
         assert!(output.contains("telemt_handshake_timeouts_total 1"));
         assert!(output.contains("telemt_handshake_failures_by_class_total{class=\"timeout\"} 1"));
-        assert!(output.contains(
-            "telemt_handshake_failures_by_stage_total{stage=\"tls_post_serverhello_mtproto\"} 1"
-        ));
         assert!(output.contains("telemt_auth_expensive_checks_total 9"));
         assert!(output.contains("telemt_auth_budget_exhausted_total 2"));
         assert!(output.contains("telemt_upstream_connect_attempt_total 2"));
@@ -4178,7 +4156,6 @@ mod tests {
         assert!(output.contains("# TYPE telemt_connections_bad_by_class_total counter"));
         assert!(output.contains("# TYPE telemt_handshake_timeouts_total counter"));
         assert!(output.contains("# TYPE telemt_handshake_failures_by_class_total counter"));
-        assert!(output.contains("# TYPE telemt_handshake_failures_by_stage_total counter"));
         assert!(output.contains("# TYPE telemt_auth_expensive_checks_total counter"));
         assert!(output.contains("# TYPE telemt_auth_budget_exhausted_total counter"));
         assert!(output.contains("# TYPE telemt_upstream_connect_attempt_total counter"));

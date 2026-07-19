@@ -7,7 +7,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpStream;
@@ -24,57 +24,6 @@ enum HandshakeOutcome {
     NeedsRelay(PostHandshakeFuture),
     /// Handshake failed and masking must run outside handshake timeout budget
     NeedsMasking(PostHandshakeFuture),
-}
-
-#[derive(Clone, Copy)]
-enum HandshakeFailureStage {
-    FirstPacketPrelude,
-    TlsClientHelloBody,
-    TlsCore,
-    TlsPostServerHelloMtproto,
-    DirectMtproto,
-}
-
-impl HandshakeFailureStage {
-    fn as_label(self) -> &'static str {
-        match self {
-            Self::FirstPacketPrelude => "first_packet_prelude",
-            Self::TlsClientHelloBody => "tls_clienthello_body",
-            Self::TlsCore => "tls_core",
-            Self::TlsPostServerHelloMtproto => "tls_post_serverhello_mtproto",
-            Self::DirectMtproto => "direct_mtproto",
-        }
-    }
-
-    fn as_code(self) -> u8 {
-        match self {
-            Self::FirstPacketPrelude => 0,
-            Self::TlsClientHelloBody => 1,
-            Self::TlsCore => 2,
-            Self::TlsPostServerHelloMtproto => 3,
-            Self::DirectMtproto => 4,
-        }
-    }
-
-    fn from_code(code: u8) -> Self {
-        match code {
-            1 => Self::TlsClientHelloBody,
-            2 => Self::TlsCore,
-            3 => Self::TlsPostServerHelloMtproto,
-            4 => Self::DirectMtproto,
-            _ => Self::FirstPacketPrelude,
-        }
-    }
-}
-
-fn set_handshake_failure_stage(stage: &AtomicU8, value: HandshakeFailureStage) {
-    stage.store(value.as_code(), Ordering::Relaxed);
-}
-
-fn increment_handshake_failure_stage(stats: &Stats, stage: &AtomicU8) {
-    stats.increment_handshake_failure_stage(
-        HandshakeFailureStage::from_code(stage.load(Ordering::Relaxed)).as_label(),
-    );
 }
 
 #[must_use = "UserConnectionReservation must be kept alive to retain user/IP reservation until release or drop"]
@@ -733,15 +682,10 @@ where
     let config_for_timeout = config.clone();
     let beobachten_for_timeout = beobachten.clone();
     let peer_for_timeout = real_peer.ip();
-    let handshake_stage = AtomicU8::new(HandshakeFailureStage::FirstPacketPrelude.as_code());
 
     // Phase 2: active handshake (with timeout after the first client byte)
     let outcome = match timeout(handshake_timeout, async {
         let mut first_bytes = [0u8; 5];
-        set_handshake_failure_stage(
-            &handshake_stage,
-            HandshakeFailureStage::FirstPacketPrelude,
-        );
         if let Some(first_byte) = first_byte {
             first_bytes[0] = first_byte;
             stream.read_exact(&mut first_bytes[1..]).await?;
@@ -782,10 +726,6 @@ where
 
             let mut handshake = vec![0u8; 5 + tls_len];
             handshake[..5].copy_from_slice(&first_bytes);
-            set_handshake_failure_stage(
-                &handshake_stage,
-                HandshakeFailureStage::TlsClientHelloBody,
-            );
             let body_read = match read_with_progress(&mut stream, &mut handshake[5..]).await {
                 Ok(n) => n,
                 Err(e) => {
@@ -830,10 +770,6 @@ where
 
             let (read_half, write_half) = tokio::io::split(stream);
 
-            set_handshake_failure_stage(
-                &handshake_stage,
-                HandshakeFailureStage::TlsCore,
-            );
             let (mut tls_reader, tls_writer, tls_user) = match handle_tls_handshake_with_shared(
                 &handshake, read_half, write_half, real_peer,
                 &config, &replay_checker, &rng, tls_cache.clone(),
@@ -879,10 +815,6 @@ where
             );
 
             debug!(peer = %peer, "Reading MTProto handshake through TLS");
-            set_handshake_failure_stage(
-                &handshake_stage,
-                HandshakeFailureStage::TlsPostServerHelloMtproto,
-            );
             let mtproto_data = tls_reader.read_exact(HANDSHAKE_LEN).await?;
             let mtproto_handshake: [u8; HANDSHAKE_LEN] = mtproto_data[..].try_into()
                 .map_err(|_| ProxyError::InvalidHandshake("Short MTProto handshake".into()))?;
@@ -954,10 +886,6 @@ where
 
             let mut handshake = [0u8; HANDSHAKE_LEN];
             handshake[..5].copy_from_slice(&first_bytes);
-            set_handshake_failure_stage(
-                &handshake_stage,
-                HandshakeFailureStage::DirectMtproto,
-            );
             stream.read_exact(&mut handshake[5..]).await?;
 
             let (read_half, write_half) = tokio::io::split(stream);
@@ -1009,7 +937,6 @@ where
         Ok(Err(e)) => {
             debug!(peer = %peer, error = %e, "Handshake failed");
             stats_for_timeout.increment_handshake_failure_class(classify_handshake_failure_class(&e));
-            increment_handshake_failure_stage(stats_for_timeout.as_ref(), &handshake_stage);
             record_handshake_failure_class(
                 &beobachten_for_timeout,
                 &config_for_timeout,
@@ -1021,7 +948,6 @@ where
         Err(_) => {
             stats_for_timeout.increment_handshake_timeouts();
             stats_for_timeout.increment_handshake_failure_class("timeout");
-            increment_handshake_failure_stage(stats_for_timeout.as_ref(), &handshake_stage);
             debug!(peer = %peer, "Handshake timeout");
             record_beobachten_class(
                 &beobachten_for_timeout,
@@ -1341,14 +1267,9 @@ impl RunningClientHandler {
         let beobachten_for_timeout = self.beobachten.clone();
         let peer_for_timeout = self.peer.ip();
         let peer_for_log = self.peer;
-        let handshake_stage = AtomicU8::new(HandshakeFailureStage::FirstPacketPrelude.as_code());
 
         let outcome = match timeout(handshake_timeout, async {
             let mut first_bytes = [0u8; 5];
-            set_handshake_failure_stage(
-                &handshake_stage,
-                HandshakeFailureStage::FirstPacketPrelude,
-            );
             if let Some(first_byte) = first_byte {
                 first_bytes[0] = first_byte;
                 self.stream.read_exact(&mut first_bytes[1..]).await?;
@@ -1362,11 +1283,9 @@ impl RunningClientHandler {
             debug!(peer = %peer, is_tls = is_tls, "Handshake type detected");
 
             if is_tls {
-                self.handle_tls_client(first_bytes, local_addr, &handshake_stage)
-                    .await
+                self.handle_tls_client(first_bytes, local_addr).await
             } else {
-                self.handle_direct_client(first_bytes, local_addr, &handshake_stage)
-                    .await
+                self.handle_direct_client(first_bytes, local_addr).await
             }
         })
         .await
@@ -1375,7 +1294,6 @@ impl RunningClientHandler {
             Ok(Err(e)) => {
                 debug!(peer = %peer_for_log, error = %e, "Handshake failed");
                 stats.increment_handshake_failure_class(classify_handshake_failure_class(&e));
-                increment_handshake_failure_stage(stats.as_ref(), &handshake_stage);
                 record_handshake_failure_class(
                     &beobachten_for_timeout,
                     &config_for_timeout,
@@ -1387,7 +1305,6 @@ impl RunningClientHandler {
             Err(_) => {
                 stats.increment_handshake_timeouts();
                 stats.increment_handshake_failure_class("timeout");
-                increment_handshake_failure_stage(stats.as_ref(), &handshake_stage);
                 debug!(peer = %peer_for_log, "Handshake timeout");
                 record_beobachten_class(
                     &beobachten_for_timeout,
@@ -1406,7 +1323,6 @@ impl RunningClientHandler {
         mut self,
         first_bytes: [u8; 5],
         local_addr: SocketAddr,
-        handshake_stage: &AtomicU8,
     ) -> Result<HandshakeOutcome> {
         let peer = self.peer;
 
@@ -1442,7 +1358,6 @@ impl RunningClientHandler {
 
         let mut handshake = vec![0u8; 5 + tls_len];
         handshake[..5].copy_from_slice(&first_bytes);
-        set_handshake_failure_stage(handshake_stage, HandshakeFailureStage::TlsClientHelloBody);
         let body_read = match read_with_progress(&mut self.stream, &mut handshake[5..]).await {
             Ok(n) => n,
             Err(e) => {
@@ -1497,7 +1412,6 @@ impl RunningClientHandler {
 
         let (read_half, write_half) = self.stream.into_split();
 
-        set_handshake_failure_stage(handshake_stage, HandshakeFailureStage::TlsCore);
         let (mut tls_reader, tls_writer, tls_user) = match handle_tls_handshake_with_shared(
             &handshake,
             read_half,
@@ -1551,10 +1465,6 @@ impl RunningClientHandler {
         );
 
         debug!(peer = %peer, "Reading MTProto handshake through TLS");
-        set_handshake_failure_stage(
-            handshake_stage,
-            HandshakeFailureStage::TlsPostServerHelloMtproto,
-        );
         let mtproto_data = tls_reader.read_exact(HANDSHAKE_LEN).await?;
         let mtproto_handshake: [u8; HANDSHAKE_LEN] = mtproto_data[..]
             .try_into()
@@ -1631,7 +1541,6 @@ impl RunningClientHandler {
         mut self,
         first_bytes: [u8; 5],
         local_addr: SocketAddr,
-        handshake_stage: &AtomicU8,
     ) -> Result<HandshakeOutcome> {
         let peer = self.peer;
 
@@ -1655,7 +1564,6 @@ impl RunningClientHandler {
 
         let mut handshake = [0u8; HANDSHAKE_LEN];
         handshake[..5].copy_from_slice(&first_bytes);
-        set_handshake_failure_stage(handshake_stage, HandshakeFailureStage::DirectMtproto);
         self.stream.read_exact(&mut handshake[5..]).await?;
 
         let config = self.config.clone();

@@ -89,12 +89,6 @@ pub(super) struct ClassCount {
     pub(super) total: u64,
 }
 
-#[derive(Serialize, Clone)]
-pub(super) struct StageCount {
-    pub(super) stage: String,
-    pub(super) total: u64,
-}
-
 #[derive(Serialize)]
 pub(super) struct SummaryData {
     pub(super) uptime_seconds: f64,
@@ -102,7 +96,6 @@ pub(super) struct SummaryData {
     pub(super) connections_bad_total: u64,
     pub(super) connections_bad_by_class: Vec<ClassCount>,
     pub(super) handshake_failures_by_class: Vec<ClassCount>,
-    pub(super) handshake_failures_by_stage: Vec<StageCount>,
     pub(super) handshake_timeouts_total: u64,
     pub(super) configured_users: usize,
 }
@@ -120,7 +113,6 @@ pub(super) struct ZeroCoreData {
     pub(super) connections_bad_total: u64,
     pub(super) connections_bad_by_class: Vec<ClassCount>,
     pub(super) handshake_failures_by_class: Vec<ClassCount>,
-    pub(super) handshake_failures_by_stage: Vec<StageCount>,
     pub(super) handshake_timeouts_total: u64,
     pub(super) accept_permit_timeout_total: u64,
     pub(super) configured_users: usize,

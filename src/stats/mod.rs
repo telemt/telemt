@@ -133,7 +133,6 @@ pub struct Stats {
     connects_bad: AtomicU64,
     connects_bad_classes: DashMap<&'static str, AtomicU64>,
     handshake_failure_classes: DashMap<&'static str, AtomicU64>,
-    handshake_failure_stages: DashMap<&'static str, AtomicU64>,
     current_connections_direct: AtomicU64,
     current_connections_me: AtomicU64,
     route_cutover_parked_direct_current: AtomicU64,

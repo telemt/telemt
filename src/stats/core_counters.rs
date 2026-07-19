@@ -50,18 +50,6 @@ impl Stats {
             .or_insert_with(|| AtomicU64::new(0));
         entry.fetch_add(1, Ordering::Relaxed);
     }
-
-    pub fn increment_handshake_failure_stage(&self, stage: &'static str) {
-        if !self.telemetry_core_enabled() {
-            return;
-        }
-        let entry = self
-            .handshake_failure_stages
-            .entry(stage)
-            .or_insert_with(|| AtomicU64::new(0));
-        entry.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn increment_current_connections_direct(&self) {
         self.current_connections_direct
             .fetch_add(1, Ordering::Relaxed);

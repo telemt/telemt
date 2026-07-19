@@ -56,8 +56,8 @@ use events::ApiEventStore;
 use http_utils::{error_response, read_json, read_optional_json, success_response};
 use model::{
     ApiFailure, ClassCount, CreateUserRequest, DeleteUserResponse, HealthData, HealthReadyData,
-    PatchUserRequest, ResetUserQuotaResponse, RotateSecretRequest, StageCount, SummaryData,
-    UserActiveIps, is_valid_username,
+    PatchUserRequest, ResetUserQuotaResponse, RotateSecretRequest, SummaryData, UserActiveIps,
+    is_valid_username,
 };
 use patch::Patch;
 use runtime_edge::{
@@ -571,19 +571,12 @@ async fn handle(
                     .into_iter()
                     .map(|(class, total)| ClassCount { class, total })
                     .collect();
-                let handshake_failures_by_stage = shared
-                    .stats
-                    .get_handshake_failure_stage_counts()
-                    .into_iter()
-                    .map(|(stage, total)| StageCount { stage, total })
-                    .collect();
                 let data = SummaryData {
                     uptime_seconds: shared.stats.uptime_secs(),
                     connections_total: shared.stats.get_connects_all(),
                     connections_bad_total: shared.stats.get_connects_bad(),
                     connections_bad_by_class,
                     handshake_failures_by_class,
-                    handshake_failures_by_stage,
                     handshake_timeouts_total: shared.stats.get_handshake_timeouts(),
                     configured_users: cfg.access.users.len(),
                 };

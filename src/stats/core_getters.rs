@@ -38,21 +38,6 @@ impl Stats {
         out
     }
 
-    pub fn get_handshake_failure_stage_counts(&self) -> Vec<(String, u64)> {
-        let mut out: Vec<(String, u64)> = self
-            .handshake_failure_stages
-            .iter()
-            .map(|entry| {
-                (
-                    entry.key().to_string(),
-                    entry.value().load(Ordering::Relaxed),
-                )
-            })
-            .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
-    }
-
     pub fn get_accept_permit_timeout_total(&self) -> u64 {
         self.accept_permit_timeout_total.load(Ordering::Relaxed)
     }

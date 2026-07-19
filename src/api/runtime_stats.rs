@@ -9,9 +9,9 @@ use super::ApiShared;
 use super::model::{
     ClassCount, DcEndpointWriters, DcStatus, DcStatusData, MeWriterStatus, MeWritersData,
     MeWritersSummary, MinimalAllData, MinimalAllPayload, MinimalDcPathData, MinimalMeRuntimeData,
-    MinimalQuarantineData, StageCount, UpstreamDcStatus, UpstreamStatus, UpstreamSummaryData,
-    UpstreamsData, ZeroAllData, ZeroCodeCount, ZeroCoreData, ZeroDesyncData, ZeroMiddleProxyData,
-    ZeroPoolData, ZeroUpstreamData,
+    MinimalQuarantineData, UpstreamDcStatus, UpstreamStatus, UpstreamSummaryData, UpstreamsData,
+    ZeroAllData, ZeroCodeCount, ZeroCoreData, ZeroDesyncData, ZeroMiddleProxyData, ZeroPoolData,
+    ZeroUpstreamData,
 };
 
 const FEATURE_DISABLED_REASON: &str = "feature_disabled";
@@ -36,11 +36,6 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
         .into_iter()
         .map(|(class, total)| ClassCount { class, total })
         .collect();
-    let handshake_failure_stages = stats
-        .get_handshake_failure_stage_counts()
-        .into_iter()
-        .map(|(stage, total)| StageCount { stage, total })
-        .collect();
     let handshake_error_codes = stats
         .get_me_handshake_error_code_counts()
         .into_iter()
@@ -55,7 +50,6 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             connections_bad_total: stats.get_connects_bad(),
             connections_bad_by_class: bad_connection_classes,
             handshake_failures_by_class: handshake_failure_classes,
-            handshake_failures_by_stage: handshake_failure_stages,
             handshake_timeouts_total: stats.get_handshake_timeouts(),
             accept_permit_timeout_total: stats.get_accept_permit_timeout_total(),
             configured_users,
