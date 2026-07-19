@@ -954,7 +954,7 @@ async fn run_telemt_core(
         runtime_task_scope.clone(),
     );
     let active_runtime = Arc::new(ArcSwap::from(runtime_generation));
-    reload_supervisor::ReloadSupervisor::spawn(
+    let reload_supervisor = reload_supervisor::ReloadSupervisor::spawn(
         active_runtime.clone(),
         reload_control,
         reload_commands,
@@ -1011,6 +1011,7 @@ async fn run_telemt_core(
         active_runtime,
         quota_state_path,
         synlimit_controller,
+        reload_supervisor,
     )
     .await;
 

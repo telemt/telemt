@@ -14,19 +14,20 @@ pub(super) fn spawn_runtime_watchers(
     runtime_state: Arc<ApiRuntimeState>,
     runtime_events: Arc<ApiEventStore>,
 ) {
-    spawn_config_watcher(
+    let _config_watcher = spawn_config_watcher(
         runtime_watch_rx.clone(),
         runtime_state.clone(),
         runtime_events.clone(),
     );
-    spawn_admission_watcher(runtime_watch_rx, runtime_state, runtime_events);
+    let _admission_watcher =
+        spawn_admission_watcher(runtime_watch_rx, runtime_state, runtime_events);
 }
 
 fn spawn_config_watcher(
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
     runtime_state: Arc<ApiRuntimeState>,
     runtime_events: Arc<ApiEventStore>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Some(mut current) = runtime_watch_rx.borrow().clone() else {
             return;
@@ -77,14 +78,14 @@ fn spawn_config_watcher(
                 }
             }
         }
-    });
+    })
 }
 
 fn spawn_admission_watcher(
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
     runtime_state: Arc<ApiRuntimeState>,
     runtime_events: Arc<ApiEventStore>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Some(mut current) = runtime_watch_rx.borrow().clone() else {
             return;
@@ -123,7 +124,7 @@ fn spawn_admission_watcher(
                 }
             }
         }
-    });
+    })
 }
 
 fn active_generation_id(
@@ -281,6 +282,38 @@ mod tests {
                 .filter(|event| event.event_type == "config.reload.applied")
                 .count(),
             3
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_recovers_from_closed_generation_and_exits_with_process_channel() {
+        let (initial, initial_config_tx, _initial_admission_tx) = state(1);
+        let (runtime_watch_tx, runtime_watch_rx) = watch::channel(Some(initial));
+        let runtime_state = runtime_state();
+        let events = Arc::new(ApiEventStore::new(16));
+        let watcher = spawn_config_watcher(runtime_watch_rx, runtime_state.clone(), events.clone());
+        drop(initial_config_tx);
+        tokio::task::yield_now().await;
+
+        let (next, next_config_tx, _next_admission_tx) = state(2);
+        runtime_watch_tx.send_replace(Some(next));
+        wait_for_count(&runtime_state, 1).await;
+        next_config_tx.send_replace(Arc::new(ProxyConfig::default()));
+        wait_for_count(&runtime_state, 2).await;
+
+        drop(runtime_watch_tx);
+        tokio::time::timeout(Duration::from_secs(1), watcher)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            events
+                .snapshot(16)
+                .events
+                .iter()
+                .filter(|event| event.event_type == "config.reload.applied")
+                .count(),
+            2
         );
     }
 }

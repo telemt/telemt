@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 use crate::config::ApiGrayAction;
 use crate::ip_tracker::UserIpTracker;
 use crate::maestro::generation::{RuntimeGeneration, RuntimeWatchState};
-use crate::maestro::reload::{ReloadControl, ReloadRequest, ReloadSubmitError};
+use crate::maestro::reload::{ReloadAccepted, ReloadControl, ReloadRequest, ReloadSubmitError};
 use crate::proxy::route_mode::RouteRuntimeController;
 use crate::proxy::shared_state::ProxySharedState;
 use crate::startup::StartupTracker;
@@ -37,6 +37,8 @@ mod events;
 mod http_utils;
 mod model;
 mod patch;
+#[cfg(test)]
+mod reload_tests;
 mod runtime_edge;
 mod runtime_init;
 mod runtime_min;
@@ -180,6 +182,35 @@ fn reload_status_route_id(path: &str) -> Option<u64> {
     path.strip_prefix("/v1/system/reload/")
         .filter(|id| !id.is_empty() && !id.contains('/'))
         .and_then(|id| id.parse().ok())
+}
+
+async fn submit_reload_from_disk(
+    config_path: &std::path::Path,
+    mutation_lock: &Mutex<()>,
+    reload_control: &ReloadControl,
+    expected_revision: Option<&str>,
+    request: ReloadRequest,
+) -> Result<(ReloadAccepted, String), ApiFailure> {
+    let _guard = mutation_lock.lock().await;
+    ensure_expected_revision(config_path, expected_revision).await?;
+    let revision = current_revision(config_path).await?;
+    let config = Arc::new(load_config_for_reload(config_path).await?);
+    let accepted = reload_control
+        .submit(config, revision.clone(), request)
+        .await
+        .map_err(|error| match error {
+            ReloadSubmitError::InProgress(reload_id) => ApiFailure::new(
+                StatusCode::CONFLICT,
+                "reload_in_progress",
+                format!("Reload {} is already in progress", reload_id),
+            ),
+            ReloadSubmitError::MaestroUnavailable => ApiFailure::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "maestro_unavailable",
+                "Maestro reload coordinator is unavailable",
+            ),
+        })?;
+    Ok((accepted, revision))
 }
 
 fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
@@ -740,26 +771,14 @@ async fn handle(
                     .unwrap_or_default();
                 request.validate().map_err(ApiFailure::bad_request)?;
 
-                let _guard = shared.mutation_lock.lock().await;
-                ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
-                let revision = current_revision(&shared.config_path).await?;
-                let config = Arc::new(load_config_for_reload(&shared.config_path).await?);
-                let accepted = shared
-                    .reload_control
-                    .submit(config, revision.clone(), request)
-                    .await
-                    .map_err(|error| match error {
-                        ReloadSubmitError::InProgress(reload_id) => ApiFailure::new(
-                            StatusCode::CONFLICT,
-                            "reload_in_progress",
-                            format!("Reload {} is already in progress", reload_id),
-                        ),
-                        ReloadSubmitError::MaestroUnavailable => ApiFailure::new(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "maestro_unavailable",
-                            "Maestro reload coordinator is unavailable",
-                        ),
-                    })?;
+                let (accepted, revision) = submit_reload_from_disk(
+                    &shared.config_path,
+                    shared.mutation_lock.as_ref(),
+                    &shared.reload_control,
+                    expected_revision.as_deref(),
+                    request,
+                )
+                .await?;
                 Ok(success_response(StatusCode::ACCEPTED, accepted, revision))
             }
             ("PATCH", "/v1/config") => {
