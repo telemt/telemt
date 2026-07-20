@@ -118,13 +118,17 @@ pub(super) async fn save_config_to_disk(
 /// identity invariant at the Telemt layer too):
 ///
 ///   - `access`    : owned by the users API.
-///   - `server`    : carries per-node identity (`port`, `api`/`api_bind`, listeners).
 ///   - `network`   : carries per-node identity (`ipv4`/`ipv6`).
 ///   - `show_link` : legacy top-level scalar/array (not a `[table]`), superseded
 ///                   by the editable `general.links.show` sub-table. The
 ///                   section-upsert machinery here only handles `[table]` /
 ///                   `[[array-of-tables]]` blocks; a bare top-level key cannot be
 ///                   located or replaced safely, so it is edited via `general`.
+///
+/// `server` is partially editable: only the nested fields listed in
+/// [`EDITABLE_SERVER_FIELDS`] (currently `listeners`) may appear in GET/PATCH.
+/// Secrets and bind identity (`api`/`admin_api`, `port`, unix sockets, …) stay
+/// blocked. See also the field-level allowlist note below for `network.*`.
 ///
 /// A future field-level allowlist can re-admit specific safe fields
 /// (e.g. `network.dns_overrides`) without opening the whole section.
@@ -135,6 +139,20 @@ pub(super) const EDITABLE_SECTIONS: &[&str] = &[
     "upstreams",
     "dc_overrides",
 ];
+
+/// Nested fields under `[server]` that may be read/patched via the config API.
+///
+/// Arrays (e.g. `listeners`) replace wholesale on PATCH, matching the existing
+/// merge semantics for non-table values.
+pub(super) const EDITABLE_SERVER_FIELDS: &[&str] = &["listeners"];
+
+/// Whether `key` is an allowed top-level PATCH/GET section name.
+///
+/// Fully editable sections from [`EDITABLE_SECTIONS`], plus `server` which is
+/// further restricted by [`EDITABLE_SERVER_FIELDS`].
+pub(super) fn is_editable_section(key: &str) -> bool {
+    EDITABLE_SECTIONS.contains(&key) || key == "server"
+}
 
 /// Re-render the given top-level tables from `cfg` and upsert each into the
 /// on-disk file, preserving every untouched section (and its comments).
