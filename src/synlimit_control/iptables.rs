@@ -321,6 +321,7 @@ mod tests {
             nft_table: "telemt_synlimit_test".to_string(),
             iptables_chain: "TMT_SYN_TEST".to_string(),
             iptables_hashlimit_prefix: "TMTTEST".to_string(),
+            pf_anchor: "telemt_synlimit/test".to_string(),
         }
     }
 

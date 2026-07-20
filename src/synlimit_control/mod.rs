@@ -4,15 +4,16 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::config::{ProxyConfig, SynLimitMode};
+use crate::config::ProxyConfig;
 use crate::maestro::generation::RuntimeWatchState;
 
 mod command;
 mod iptables;
 mod model;
 mod nftables;
+mod pf;
 
-use self::command::has_cap_net_admin;
+use self::command::has_firewall_privileges;
 use self::model::{SynLimitNamespace, synlimit_namespace, synlimit_targets};
 
 static ACTIVE_SYNLIMIT_NAMESPACE: Mutex<Option<SynLimitNamespace>> = Mutex::new(None);
@@ -36,27 +37,13 @@ pub(crate) fn spawn_synlimit_controller(
     runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
 ) -> SynlimitController {
     let shutdown = CancellationToken::new();
-    let join = if !cfg!(target_os = "linux") {
-        tokio::spawn(watch_active_runtime_configs(
-            runtime_watch_rx,
-            shutdown.clone(),
-            |_generation_id, cfg| async move {
-                if has_synlimit_config(&cfg) {
-                    warn!(
-                        "SYN limiter is configured but unsupported on this OS; skipping netfilter rules"
-                    );
-                }
-            },
-        ))
-    } else {
-        tokio::spawn(watch_active_runtime_configs(
-            runtime_watch_rx,
-            shutdown.clone(),
-            |_generation_id, cfg| async move {
-                reconcile_synlimit_rules(&cfg).await;
-            },
-        ))
-    };
+    let join = tokio::spawn(watch_active_runtime_configs(
+        runtime_watch_rx,
+        shutdown.clone(),
+        |_generation_id, cfg| async move {
+            reconcile_synlimit_rules(&cfg).await;
+        },
+    ));
     SynlimitController { shutdown, join }
 }
 
@@ -176,10 +163,8 @@ pub(crate) async fn reconcile_synlimit_rules(cfg: &ProxyConfig) {
     let Some(namespace) = namespace else {
         return;
     };
-    if !has_cap_net_admin() {
-        warn!(
-            "SYN limiter configured but CAP_NET_ADMIN is not available; netfilter rules not applied"
-        );
+    if !has_firewall_privileges() {
+        warn!("SYN limiter configured but firewall privileges are not available; rules not applied");
         return;
     }
 
@@ -193,15 +178,20 @@ pub(crate) async fn reconcile_synlimit_rules(cfg: &ProxyConfig) {
         }
     }
 
-    if targets.has_iptables_targets()
-        && let Err(error) = iptables::apply_synlimit_rules(&targets, &namespace).await
-    {
-        warn!(error = %error, "Failed to apply iptables SYN limiter rules");
+    if targets.has_iptables_targets() {
+        if let Err(error) = iptables::apply_synlimit_rules(&targets, &namespace).await {
+            warn!(error = %error, "Failed to apply iptables SYN limiter rules");
+        }
     }
-    if targets.has_nft_targets()
-        && let Err(error) = nftables::apply_synlimit_rules(&targets, &namespace).await
-    {
-        warn!(error = %error, "Failed to apply nftables SYN limiter rules");
+    if targets.has_nft_targets() {
+        if let Err(error) = nftables::apply_synlimit_rules(&targets, &namespace).await {
+            warn!(error = %error, "Failed to apply nftables SYN limiter rules");
+        }
+    }
+    if targets.has_pf_targets() {
+        if let Err(error) = pf::apply_synlimit_rules(&targets, &namespace).await {
+            warn!(error = %error, "Failed to apply PF SYN limiter rules");
+        }
     }
 }
 
@@ -213,7 +203,7 @@ pub(crate) async fn clear_synlimit_rules_all_backends() -> Result<bool, String> 
 }
 
 async fn clear_synlimit_rules_for_namespace(namespace: &SynLimitNamespace) -> Result<bool, String> {
-    if !has_cap_net_admin() {
+    if !has_firewall_privileges() {
         return Ok(false);
     }
 
@@ -236,6 +226,14 @@ async fn clear_synlimit_rules_for_namespace(namespace: &SynLimitNamespace) -> Re
         }
     }
     match iptables::clear_rules_for_binary("ip6tables", namespace).await {
+        Ok(value) => {
+            removed |= value;
+        }
+        Err(error) => {
+            errors.push(error);
+        }
+    }
+    match pf::clear_rules(namespace).await {
         Ok(value) => {
             removed |= value;
         }
@@ -275,13 +273,6 @@ fn take_active_synlimit_namespace() -> Option<SynLimitNamespace> {
             None
         }
     }
-}
-
-fn has_synlimit_config(cfg: &ProxyConfig) -> bool {
-    cfg.server
-        .listeners
-        .iter()
-        .any(|listener| !matches!(listener.synlimit, SynLimitMode::Off))
 }
 
 #[cfg(test)]

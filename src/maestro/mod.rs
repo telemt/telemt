@@ -987,7 +987,9 @@ async fn run_telemt_core(
         std::process::exit(1);
     }
 
-    // On Unix, caller supplies privilege drop after bind (may require root for port < 1024).
+    synlimit_control::reconcile_synlimit_rules(&config).await;
+
+    // On Unix, caller supplies privilege drop after bind and privileged firewall setup.
     drop_after_bind();
 
     let synlimit_controller = synlimit_control::spawn_synlimit_controller(runtime_watch_rx);

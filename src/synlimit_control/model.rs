@@ -22,6 +22,7 @@ pub(super) struct SynLimitNamespace {
     pub(super) nft_table: String,
     pub(super) iptables_chain: String,
     pub(super) iptables_hashlimit_prefix: String,
+    pub(super) pf_anchor: String,
 }
 
 #[derive(Default)]
@@ -30,6 +31,8 @@ pub(super) struct SynLimitTargets {
     pub(super) iptables_v6: Vec<SynLimitRule>,
     pub(super) nft_v4: Vec<SynLimitRule>,
     pub(super) nft_v6: Vec<SynLimitRule>,
+    pub(super) pf_v4: Vec<SynLimitRule>,
+    pub(super) pf_v6: Vec<SynLimitRule>,
 }
 
 impl SynLimitTargets {
@@ -38,6 +41,8 @@ impl SynLimitTargets {
             && self.iptables_v6.is_empty()
             && self.nft_v4.is_empty()
             && self.nft_v6.is_empty()
+            && self.pf_v4.is_empty()
+            && self.pf_v6.is_empty()
     }
 
     pub(super) fn has_iptables_targets(&self) -> bool {
@@ -46,6 +51,10 @@ impl SynLimitTargets {
 
     pub(super) fn has_nft_targets(&self) -> bool {
         !self.nft_v4.is_empty() || !self.nft_v6.is_empty()
+    }
+
+    pub(super) fn has_pf_targets(&self) -> bool {
+        !self.pf_v4.is_empty() || !self.pf_v6.is_empty()
     }
 }
 
@@ -92,6 +101,8 @@ pub(super) fn synlimit_targets(cfg: &ProxyConfig) -> SynLimitTargets {
     let mut iptables_v6 = BTreeSet::new();
     let mut nft_v4 = BTreeSet::new();
     let mut nft_v6 = BTreeSet::new();
+    let mut pf_v4 = BTreeSet::new();
+    let mut pf_v6 = BTreeSet::new();
 
     for listener in &cfg.server.listeners {
         let backend = listener.synlimit;
@@ -124,6 +135,12 @@ pub(super) fn synlimit_targets(cfg: &ProxyConfig) -> SynLimitTargets {
             (SynLimitMode::Nftables, false) => {
                 nft_v6.insert(target);
             }
+            (SynLimitMode::Pf, true) => {
+                pf_v4.insert(target);
+            }
+            (SynLimitMode::Pf, false) => {
+                pf_v6.insert(target);
+            }
             (SynLimitMode::Off, _) => {}
         }
     }
@@ -133,6 +150,8 @@ pub(super) fn synlimit_targets(cfg: &ProxyConfig) -> SynLimitTargets {
         iptables_v6: iptables_v6.into_iter().collect(),
         nft_v4: nft_v4.into_iter().collect(),
         nft_v6: nft_v6.into_iter().collect(),
+        pf_v4: pf_v4.into_iter().collect(),
+        pf_v6: pf_v6.into_iter().collect(),
     }
 }
 
@@ -146,6 +165,8 @@ pub(super) fn synlimit_namespace(targets: &SynLimitTargets) -> Option<SynLimitNa
     write_namespace_rule_group(&mut hasher, b"iptables-v6", &targets.iptables_v6);
     write_namespace_rule_group(&mut hasher, b"nft-v4", &targets.nft_v4);
     write_namespace_rule_group(&mut hasher, b"nft-v6", &targets.nft_v6);
+    write_namespace_rule_group(&mut hasher, b"pf-v4", &targets.pf_v4);
+    write_namespace_rule_group(&mut hasher, b"pf-v6", &targets.pf_v6);
 
     let suffix = format!("{:016x}", hasher.finish());
     let iptables_suffix = &suffix[..12];
@@ -154,6 +175,7 @@ pub(super) fn synlimit_namespace(targets: &SynLimitTargets) -> Option<SynLimitNa
         nft_table: format!("telemt_synlimit_{suffix}"),
         iptables_chain: format!("TMT_SYN_{iptables_suffix}"),
         iptables_hashlimit_prefix: format!("TMT{hashlimit_suffix}"),
+        pf_anchor: format!("telemt_synlimit/{suffix}"),
     })
 }
 
@@ -307,6 +329,16 @@ mod tests {
                 Some(444),
                 SynLimitMode::Nftables,
             ),
+            listener(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 3)),
+                Some(445),
+                SynLimitMode::Pf,
+            ),
+            listener(
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                Some(445),
+                SynLimitMode::Pf,
+            ),
         ];
 
         let targets = synlimit_targets(&cfg);
@@ -315,6 +347,8 @@ mod tests {
         assert_eq!(targets.iptables_v6.len(), 1);
         assert_eq!(targets.nft_v4.len(), 1);
         assert_eq!(targets.nft_v6.len(), 1);
+        assert_eq!(targets.pf_v4.len(), 1);
+        assert_eq!(targets.pf_v6.len(), 1);
         assert_eq!(
             targets.iptables_v4[0].ip,
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)))
@@ -328,6 +362,11 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)))
         );
         assert_eq!(targets.nft_v6[0].ip, None);
+        assert_eq!(
+            targets.pf_v4[0].ip,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 3)))
+        );
+        assert_eq!(targets.pf_v6[0].ip, None);
     }
 
     #[test]
@@ -353,6 +392,7 @@ mod tests {
         assert!(first.iptables_chain.starts_with("TMT_SYN_"));
         assert!(first.iptables_chain.len() <= 28);
         assert!(first.iptables_hashlimit_prefix.starts_with("TMT"));
+        assert!(first.pf_anchor.starts_with("telemt_synlimit/"));
     }
 
     #[test]

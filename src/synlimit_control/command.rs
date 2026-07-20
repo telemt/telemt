@@ -74,7 +74,7 @@ fn resolve_command(binary: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.exists() && candidate.is_file())
 }
 
-pub(super) fn has_cap_net_admin() -> bool {
+pub(super) fn has_firewall_privileges() -> bool {
     #[cfg(target_os = "linux")]
     {
         let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
@@ -91,7 +91,11 @@ pub(super) fn has_cap_net_admin() -> bool {
         }
         false
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        nix::unistd::Uid::effective().is_root()
+    }
+    #[cfg(not(unix))]
     {
         false
     }

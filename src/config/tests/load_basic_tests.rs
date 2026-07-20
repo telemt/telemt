@@ -63,6 +63,26 @@ fn synlimit_synfix_defaults_are_loaded_for_listener() {
 }
 
 #[test]
+fn synlimit_pf_mode_is_loaded_for_listener() {
+    let cfg = load_config_from_temp_toml(
+        r#"
+            [censorship]
+            tls_domain = "example.com"
+
+            [access.users]
+            user = "00000000000000000000000000000000"
+
+            [[server.listeners]]
+            ip = "0.0.0.0"
+            port = 443
+            synlimit = "pf"
+        "#,
+    );
+
+    assert_eq!(cfg.server.listeners[0].synlimit, SynLimitMode::Pf);
+}
+
+#[test]
 fn synlimit_synfix_zero_values_are_rejected() {
     for (field, expected) in [
         (
