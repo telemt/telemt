@@ -390,6 +390,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
           set -euo pipefail
 
@@ -398,6 +399,10 @@ jobs:
 
           if [[ "${VERSION}" != *-* ]]; then
             TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
+          fi
+
+          if [ "${PRERELEASE}" = "false" ]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:stable"
           fi
 
           {

@@ -1,6 +1,8 @@
 services:
   telemt:
     image: ghcr.io/telemt/telemt:latest
+    # The stable tag points to the latest non-prerelease Docker image.
+    # image: ghcr.io/telemt/telemt:stable
     build:
       context: .
       target: prod
