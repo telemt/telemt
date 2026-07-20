@@ -54,7 +54,7 @@ fn synlimit_synfix_defaults_are_loaded_for_listener() {
     let listener = &cfg.server.listeners[0];
     assert_eq!(listener.synlimit_seconds, 60);
     assert_eq!(listener.synlimit_hitcount, 48);
-    assert_eq!(listener.synlimit_burst, 1);
+    assert_eq!(listener.synlimit_burst, 24);
     assert_eq!(listener.synlimit_ios_seconds, 1);
     assert_eq!(listener.synlimit_ios_hitcount, 12);
     assert_eq!(listener.synlimit_ios_burst, 24);

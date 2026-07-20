@@ -2314,7 +2314,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
 | [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"` oder `"nftables"` | `false` | `✔` |
 | [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✔` |
 | [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✔` |
-| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `1` | `✔` |
+| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `24` | `✔` |
 | [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✔` |
 | [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✔` |
 | [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✔` |
@@ -2397,7 +2397,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     synlimit_hitcount = 48
     ```
 ## synlimit_burst (server.listeners)
-  - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `1`.
+  - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `24`.
   - **Beschreibung**: Generische SYN-Fix-Token-Bucket-Burst-Größe. Höhere Werte ermöglichen kurze Verbindungsstöße von derselben Source-IP, bevor die stabile `synlimit_hitcount / synlimit_seconds`-Rate durchgesetzt wird.
   - **Beispiel**:
 
@@ -2406,7 +2406,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_burst = 1
+    synlimit_burst = 24
     ```
 ## synlimit_ios_seconds (server.listeners)
   - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `1`.
