@@ -64,6 +64,7 @@ pub mod client;
 pub(crate) mod direct_buffer_budget;
 pub mod direct_relay;
 pub mod handshake;
+pub mod http_mask;
 pub mod masking;
 pub mod middle_relay;
 pub mod relay;

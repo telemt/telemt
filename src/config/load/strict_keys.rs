@@ -290,6 +290,7 @@ const CENSORSHIP_CONFIG_KEYS: &[&str] = &[
     "tls_full_cert_ttl_secs",
     "alpn_enforce",
     "mask_proxy_protocol",
+    "http_mask",
     "mask_shape_hardening",
     "mask_shape_hardening_aggressive_mode",
     "mask_shape_bucket_floor_bytes",
@@ -314,6 +315,8 @@ const TLS_FETCH_CONFIG_KEYS: &[&str] = &[
     "deterministic",
     "profile_cache_ttl_secs",
 ];
+
+const HTTP_MASK_CONFIG_KEYS: &[&str] = &["enabled", "cert_file", "key_file", "upstream", "alpn"];
 
 const ACCESS_CONFIG_KEYS: &[&str] = &[
     "users",
@@ -400,6 +403,7 @@ fn known_config_keys_for_suggestion() -> Vec<&'static str> {
         TIMEOUTS_CONFIG_KEYS,
         CENSORSHIP_CONFIG_KEYS,
         TLS_FETCH_CONFIG_KEYS,
+        HTTP_MASK_CONFIG_KEYS,
         ACCESS_CONFIG_KEYS,
         RATE_LIMIT_BPS_CONFIG_KEYS,
         UPSTREAM_CONFIG_KEYS,
@@ -602,6 +606,13 @@ fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<UnknownConfigKe
         &known_for_suggestion,
         &["censorship", "tls_fetch"],
         TLS_FETCH_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["censorship", "http_mask"],
+        HTTP_MASK_CONFIG_KEYS,
     );
     check_known_table(
         parsed_toml,
