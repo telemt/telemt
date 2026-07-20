@@ -190,6 +190,18 @@ impl TlsFrontCache {
         (snapshot, suppressed)
     }
 
+    /// Returns configured domains that still resolve to the synthetic default profile.
+    pub(crate) async fn default_profile_domains(&self, domains: &[String]) -> Vec<String> {
+        let guard = self.memory.read().await;
+        domains
+            .iter()
+            .filter(|domain| {
+                guard.get(domain.as_str()).unwrap_or(&self.default).domain == "default"
+            })
+            .cloned()
+            .collect()
+    }
+
     fn full_cert_sent_shard_index(client_ip: IpAddr) -> usize {
         let mut hasher = DefaultHasher::new();
         client_ip.hash(&mut hasher);
@@ -544,6 +556,23 @@ mod tests {
     fn cert_info_domain_match_rejects_multi_label_wildcard_san() {
         let cached = cached_with_cert_info("deep.api.b.com", None, vec!["*.b.com"]);
         assert!(!cert_info_matches_domain(&cached));
+    }
+
+    #[tokio::test]
+    async fn default_profile_domains_reports_only_unprepared_entries() {
+        let domains = vec!["ready.example".to_string(), "pending.example".to_string()];
+        let cache = TlsFrontCache::new(&domains, 1024, "tlsfront-test-cache");
+        cache
+            .set(
+                "ready.example",
+                cached_with_cert_info("ready.example", None, Vec::new()),
+            )
+            .await;
+
+        assert_eq!(
+            cache.default_profile_domains(&domains).await,
+            vec!["pending.example".to_string()]
+        );
     }
 
     #[tokio::test]

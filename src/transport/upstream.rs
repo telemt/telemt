@@ -4,6 +4,7 @@
 
 #![allow(deprecated)]
 
+use arc_swap::ArcSwap;
 use rand::RngExt;
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -20,7 +21,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::config::{UpstreamConfig, UpstreamType};
 use crate::error::{ProxyError, Result};
-use crate::network::dns_overrides::{resolve_socket_addr, split_host_port};
+use crate::network::dns_overrides::{DnsOverrides, split_host_port};
 use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4, TG_DATACENTERS_V6};
 use crate::stats::Stats;
 use crate::transport::shadowsocks::{
@@ -333,6 +334,7 @@ pub struct UpstreamManager {
     no_upstreams_warn_epoch_ms: Arc<AtomicU64>,
     no_healthy_warn_epoch_ms: Arc<AtomicU64>,
     stats: Arc<Stats>,
+    dns_overrides: Arc<ArcSwap<DnsOverrides>>,
 }
 
 impl UpstreamManager {
@@ -374,7 +376,35 @@ impl UpstreamManager {
             no_upstreams_warn_epoch_ms: Arc::new(AtomicU64::new(0)),
             no_healthy_warn_epoch_ms: Arc::new(AtomicU64::new(0)),
             stats,
+            dns_overrides: Arc::new(ArcSwap::from_pointee(DnsOverrides::default())),
         }
+    }
+
+    pub(crate) fn with_dns_overrides(mut self, entries: &[String]) -> Result<Self> {
+        self.dns_overrides = Arc::new(ArcSwap::from_pointee(DnsOverrides::from_entries(entries)?));
+        Ok(self)
+    }
+
+    pub(crate) fn update_dns_overrides(&self, entries: &[String]) -> Result<()> {
+        let snapshot = DnsOverrides::from_entries(entries)?;
+        self.dns_overrides.store(Arc::new(snapshot));
+        Ok(())
+    }
+
+    pub(crate) async fn resolve_hostname(&self, host: &str, port: u16) -> Result<SocketAddr> {
+        if let Some(addr) = self.dns_overrides.load().resolve_socket_addr(host, port) {
+            return Ok(addr);
+        }
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(ProxyError::Io)?
+            .collect();
+        if let Some(addr) = addrs.iter().copied().find(SocketAddr::is_ipv4) {
+            return Ok(addr);
+        }
+        addrs.first().copied().ok_or_else(|| {
+            ProxyError::Proxy(format!("DNS returned no addresses for {host}:{port}"))
+        })
     }
 
     fn now_epoch_ms() -> u64 {
@@ -709,11 +739,12 @@ impl UpstreamManager {
     }
 
     async fn connect_hostname_with_dns_override(
+        &self,
         address: &str,
         connect_timeout: Duration,
     ) -> Result<TcpStream> {
         if let Some((host, port)) = split_host_port(address)
-            && let Some(addr) = resolve_socket_addr(&host, port)
+            && let Some(addr) = self.dns_overrides.load().resolve_socket_addr(&host, port)
         {
             return match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
                 Ok(Ok(stream)) => Ok(stream),
@@ -1203,7 +1234,8 @@ impl UpstreamManager {
                             "SOCKS4 interface binding is not supported for hostname addresses, ignoring"
                         );
                     }
-                    Self::connect_hostname_with_dns_override(address, connect_timeout).await?
+                    self.connect_hostname_with_dns_override(address, connect_timeout)
+                        .await?
                 };
 
                 // replace socks user_id with config.selected_scope, if set
@@ -1291,7 +1323,8 @@ impl UpstreamManager {
                             "SOCKS5 interface binding is not supported for hostname addresses, ignoring"
                         );
                     }
-                    Self::connect_hostname_with_dns_override(address, connect_timeout).await?
+                    self.connect_hostname_with_dns_override(address, connect_timeout)
+                        .await?
                 };
 
                 debug!(config = ?config, "Socks5 connection");
@@ -2018,6 +2051,45 @@ mod tests {
 
     const TEST_SHADOWSOCKS_URL: &str =
         "ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=@127.0.0.1:8388";
+
+    fn manager_with_dns(entries: &[String]) -> UpstreamManager {
+        UpstreamManager::new(Vec::new(), 1, 1, 1, 1, 1, false, Arc::new(Stats::new()))
+            .with_dns_overrides(entries)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn generation_local_dns_overrides_are_isolated_and_case_insensitive() {
+        let active = manager_with_dns(&["Front.Example:443:192.0.2.10".to_string()]);
+        let candidate = manager_with_dns(&["front.example:443:[2001:db8::10]".to_string()]);
+
+        assert_eq!(
+            active.resolve_hostname("front.example", 443).await.unwrap(),
+            "192.0.2.10:443".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            candidate
+                .resolve_hostname("FRONT.EXAMPLE", 443)
+                .await
+                .unwrap(),
+            "[2001:db8::10]:443".parse::<SocketAddr>().unwrap()
+        );
+
+        candidate
+            .update_dns_overrides(&["front.example:443:192.0.2.20".to_string()])
+            .unwrap();
+        assert_eq!(
+            active.resolve_hostname("FRONT.EXAMPLE", 443).await.unwrap(),
+            "192.0.2.10:443".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            candidate
+                .resolve_hostname("front.example", 443)
+                .await
+                .unwrap(),
+            "192.0.2.20:443".parse::<SocketAddr>().unwrap()
+        );
+    }
 
     #[test]
     fn required_healthy_group_count_applies_three_group_threshold() {

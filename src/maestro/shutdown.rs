@@ -12,17 +12,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 #[cfg(not(unix))]
 use tokio::signal;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 
+use super::generation::RuntimeGeneration;
+use super::helpers::{format_uptime, unit_label};
+use super::reload_supervisor::ReloadSupervisorHandle;
 use crate::stats::Stats;
 use crate::synlimit_control;
-use crate::transport::middle_proxy::MePool;
-
-use super::helpers::{format_uptime, unit_label};
 
 /// Signal that triggered shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,17 +49,19 @@ impl std::fmt::Display for ShutdownSignal {
 /// Waits for a shutdown signal and performs graceful shutdown.
 pub(crate) async fn wait_for_shutdown(
     process_started_at: Instant,
-    me_pool: Option<Arc<MePool>>,
-    stats: Arc<Stats>,
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
+    synlimit_controller: synlimit_control::SynlimitController,
+    reload_supervisor: ReloadSupervisorHandle,
 ) {
     let signal = wait_for_shutdown_signal().await;
     perform_shutdown(
         signal,
         process_started_at,
-        me_pool,
-        &stats,
+        active_runtime,
         quota_state_path,
+        synlimit_controller,
+        reload_supervisor,
     )
     .await;
 }
@@ -87,12 +90,17 @@ async fn wait_for_shutdown_signal() -> ShutdownSignal {
 async fn perform_shutdown(
     signal: ShutdownSignal,
     process_started_at: Instant,
-    me_pool: Option<Arc<MePool>>,
-    stats: &Stats,
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
+    synlimit_controller: synlimit_control::SynlimitController,
+    reload_supervisor: ReloadSupervisorHandle,
 ) {
     let shutdown_started_at = Instant::now();
     info!(signal = %signal, "Received shutdown signal");
+
+    reload_supervisor.quiesce().await;
+    let runtime = active_runtime.load_full();
+    let stats = runtime.stats.as_ref();
 
     // Dump stats if SIGQUIT
     if signal == ShutdownSignal::Quit {
@@ -103,12 +111,10 @@ async fn perform_shutdown(
     let uptime_secs = process_started_at.elapsed().as_secs();
     info!("Uptime: {}", format_uptime(uptime_secs));
 
-    if let Err(error) = synlimit_control::clear_synlimit_rules_all_backends().await {
-        warn!(error = %error, "Failed to clear SYN limiter rules during shutdown");
-    }
-
     // Graceful ME pool shutdown
-    if let Some(pool) = &me_pool {
+    runtime.stop_sessions().await;
+    runtime.stop_background_tasks().await;
+    if let Some(pool) = runtime.current_me_pool().await {
         match tokio::time::timeout(Duration::from_secs(2), pool.shutdown_send_close_conn_all())
             .await
         {
@@ -122,6 +128,11 @@ async fn perform_shutdown(
                 warn!("ME shutdown: RPC_CLOSE_CONN broadcast timed out");
             }
         }
+    }
+
+    synlimit_controller.shutdown().await;
+    if let Err(error) = synlimit_control::clear_synlimit_rules_all_backends().await {
+        warn!(error = %error, "Failed to clear SYN limiter rules during shutdown");
     }
 
     match crate::quota_state::save_quota_state(&quota_state_path, stats).await {
@@ -191,7 +202,10 @@ fn dump_stats(stats: &Stats, process_started_at: Instant) {
 /// - SIGUSR1: Log rotation acknowledgment (for external log rotation tools)
 /// - SIGUSR2: Dump runtime status to log
 #[cfg(unix)]
-pub(crate) fn spawn_signal_handlers(stats: Arc<Stats>, process_started_at: Instant) {
+pub(crate) fn spawn_signal_handlers(
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    process_started_at: Instant,
+) {
     tokio::spawn(async move {
         let mut sigusr1 =
             signal(SignalKind::user_defined1()).expect("Failed to register SIGUSR1 handler");
@@ -204,7 +218,8 @@ pub(crate) fn spawn_signal_handlers(stats: Arc<Stats>, process_started_at: Insta
                     handle_sigusr1();
                 }
                 _ = sigusr2.recv() => {
-                    handle_sigusr2(&stats, process_started_at);
+                    let runtime = active_runtime.load_full();
+                    handle_sigusr2(runtime.stats.as_ref(), process_started_at);
                 }
             }
         }
@@ -213,7 +228,10 @@ pub(crate) fn spawn_signal_handlers(stats: Arc<Stats>, process_started_at: Insta
 
 /// No-op on non-Unix platforms.
 #[cfg(not(unix))]
-pub(crate) fn spawn_signal_handlers(_stats: Arc<Stats>, _process_started_at: Instant) {
+pub(crate) fn spawn_signal_handlers(
+    _active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    _process_started_at: Instant,
+) {
     // No SIGUSR1/SIGUSR2 on non-Unix
 }
 

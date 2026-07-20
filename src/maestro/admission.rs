@@ -8,6 +8,8 @@ use crate::config::ProxyConfig;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::transport::middle_proxy::MePool;
 
+use super::generation::RuntimeTaskScope;
+
 const STARTUP_FALLBACK_AFTER: Duration = Duration::from_secs(80);
 const RUNTIME_FALLBACK_AFTER: Duration = Duration::from_secs(6);
 
@@ -19,6 +21,7 @@ pub(crate) async fn configure_admission_gate(
     admission_tx: &watch::Sender<bool>,
     config_rx: watch::Receiver<Arc<ProxyConfig>>,
     me_ready_rx: watch::Receiver<u64>,
+    task_scope: RuntimeTaskScope,
 ) {
     if config.general.use_middle_proxy {
         if me_pool.is_some() || config.general.me2dc_fallback {
@@ -64,7 +67,7 @@ pub(crate) async fn configure_admission_gate(
             let mut config_rx_gate = config_rx.clone();
             let mut me_ready_rx_gate = me_ready_rx;
             let mut admission_poll_ms = config.general.me_admission_poll_ms.max(1);
-            tokio::spawn(async move {
+            task_scope.spawn(async move {
                 let mut gate_open = initial_gate_open;
                 let mut route_mode = initial_route_mode;
                 let mut ready_observed = initial_ready;

@@ -8,6 +8,7 @@ mod core_getters;
 mod helpers;
 mod me_counters;
 mod me_getters;
+mod quota_store;
 mod replay;
 pub mod telemetry;
 pub mod tls_fingerprints;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Instant;
 
+pub(crate) use self::quota_store::QuotaStore;
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
@@ -344,6 +346,7 @@ pub struct Stats {
     cached_epoch_secs: AtomicU64,
     tls_fingerprints: tls_fingerprints::TlsFingerprintCollector,
     user_stats: DashMap<String, Arc<UserStats>>,
+    quota_store: Arc<QuotaStore>,
     user_stats_last_cleanup_epoch_secs: AtomicU64,
     start_time: parking_lot::RwLock<Option<Instant>>,
 }
@@ -356,12 +359,7 @@ pub struct UserStats {
     pub octets_to_client: AtomicU64,
     pub msgs_from_client: AtomicU64,
     pub msgs_to_client: AtomicU64,
-    /// Total bytes charged against per-user quota admission.
-    ///
-    /// This counter is the single source of truth for quota enforcement and
-    /// intentionally tracks attempted traffic, not guaranteed delivery.
-    pub quota_used: AtomicU64,
-    pub quota_last_reset_epoch_secs: AtomicU64,
+    quota: Arc<quota_store::UserQuotaCounters>,
     pub last_seen_epoch_secs: AtomicU64,
 }
 
@@ -378,9 +376,21 @@ pub enum QuotaReserveError {
 }
 
 impl UserStats {
+    fn with_quota(quota: Arc<quota_store::UserQuotaCounters>) -> Self {
+        Self {
+            quota,
+            ..Self::default()
+        }
+    }
+
     #[inline]
     pub fn quota_used(&self) -> u64 {
-        self.quota_used.load(Ordering::Relaxed)
+        self.quota.used()
+    }
+
+    #[inline]
+    pub(crate) fn refund_quota(&self, bytes: u64) {
+        self.quota.refund(bytes);
     }
 
     /// Attempts one CAS reservation step against the quota counter.
@@ -390,27 +400,20 @@ impl UserStats {
     /// with their own contention strategy.
     #[inline]
     pub fn quota_try_reserve(&self, bytes: u64, limit: u64) -> Result<u64, QuotaReserveError> {
-        let current = self.quota_used.load(Ordering::Relaxed);
-        if bytes > limit.saturating_sub(current) {
-            return Err(QuotaReserveError::LimitExceeded);
-        }
-
-        let next = current.saturating_add(bytes);
-        match self.quota_used.compare_exchange_weak(
-            current,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => Ok(next),
-            Err(_) => Err(QuotaReserveError::Contended),
-        }
+        self.quota.try_reserve(bytes, limit)
     }
 }
 
 impl Stats {
     pub fn new() -> Self {
-        let stats = Self::default();
+        Self::with_quota_store(Arc::new(QuotaStore::default()))
+    }
+
+    pub(crate) fn with_quota_store(quota_store: Arc<QuotaStore>) -> Self {
+        let stats = Self {
+            quota_store,
+            ..Self::default()
+        };
         stats.apply_telemetry_policy(TelemetryPolicy::default());
         stats.refresh_cached_epoch_secs();
         *stats.start_time.write() = Some(Instant::now());

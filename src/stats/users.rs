@@ -119,51 +119,21 @@ impl Stats {
     }
 
     pub fn get_user_quota_used(&self, user: &str) -> u64 {
-        self.user_stats
-            .get(user)
-            .map(|s| s.quota_used.load(Ordering::Relaxed))
-            .unwrap_or(0)
+        self.quota_store.used(user)
     }
 
     pub fn load_user_quota_state(&self, user: &str, used_bytes: u64, last_reset_epoch_secs: u64) {
-        let stats = self.get_or_create_user_stats_handle(user);
-        stats.quota_used.store(used_bytes, Ordering::Relaxed);
-        stats
-            .quota_last_reset_epoch_secs
-            .store(last_reset_epoch_secs, Ordering::Relaxed);
+        self.quota_store
+            .load(user, used_bytes, last_reset_epoch_secs);
     }
 
     pub fn reset_user_quota(&self, user: &str) -> UserQuotaSnapshot {
-        let stats = self.get_or_create_user_stats_handle(user);
         let last_reset_epoch_secs = Self::now_epoch_secs();
-        stats.quota_used.store(0, Ordering::Relaxed);
-        stats
-            .quota_last_reset_epoch_secs
-            .store(last_reset_epoch_secs, Ordering::Relaxed);
-        UserQuotaSnapshot {
-            used_bytes: 0,
-            last_reset_epoch_secs,
-        }
+        self.quota_store.reset(user, last_reset_epoch_secs)
     }
 
     pub fn user_quota_snapshot(&self) -> HashMap<String, UserQuotaSnapshot> {
-        let mut out = HashMap::new();
-        for entry in self.user_stats.iter() {
-            let stats = entry.value();
-            let used_bytes = stats.quota_used.load(Ordering::Relaxed);
-            let last_reset_epoch_secs = stats.quota_last_reset_epoch_secs.load(Ordering::Relaxed);
-            if used_bytes == 0 && last_reset_epoch_secs == 0 {
-                continue;
-            }
-            out.insert(
-                entry.key().clone(),
-                UserQuotaSnapshot {
-                    used_bytes,
-                    last_reset_epoch_secs,
-                },
-            );
-        }
-        out
+        self.quota_store.snapshot()
     }
 
     pub fn get_handshake_timeouts(&self) -> u64 {

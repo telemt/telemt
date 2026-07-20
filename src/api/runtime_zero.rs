@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -162,7 +163,7 @@ pub(super) fn build_system_info_data(
         build_time_utc,
         rustc_version,
         process_started_at_epoch_secs: shared.runtime_state.process_started_at_epoch_secs,
-        uptime_seconds: shared.stats.uptime_secs(),
+        uptime_seconds: process_uptime_seconds(shared.runtime_state.process_started_at_epoch_secs),
         config_path: shared.config_path.display().to_string(),
         config_hash: revision.to_string(),
         config_reload_count: shared
@@ -171,6 +172,18 @@ pub(super) fn build_system_info_data(
             .load(Ordering::Relaxed),
         last_config_reload_epoch_secs,
     }
+}
+
+fn process_uptime_seconds(process_started_at_epoch_secs: u64) -> f64 {
+    let now_epoch_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    process_uptime_seconds_at(process_started_at_epoch_secs, now_epoch_secs)
+}
+
+fn process_uptime_seconds_at(process_started_at_epoch_secs: u64, now_epoch_secs: u64) -> f64 {
+    now_epoch_secs.saturating_sub(process_started_at_epoch_secs) as f64
 }
 
 pub(super) async fn build_runtime_gates_data(
@@ -337,5 +350,16 @@ fn me_writer_pick_mode_label(mode: MeWriterPickMode) -> &'static str {
     match mode {
         MeWriterPickMode::SortedRr => "sorted_rr",
         MeWriterPickMode::P2c => "p2c",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_uptime_seconds_at;
+
+    #[test]
+    fn process_uptime_is_monotonic_and_saturating() {
+        assert_eq!(process_uptime_seconds_at(100, 135), 35.0);
+        assert_eq!(process_uptime_seconds_at(135, 100), 0.0);
     }
 }

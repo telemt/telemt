@@ -1,6 +1,5 @@
 use crate::stats::UserStats;
 use std::io;
-use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
 struct QuotaIoSentinel;
@@ -52,17 +51,5 @@ pub(super) fn refund_reserved_quota_bytes(user_stats: &UserStats, reserved_bytes
     if reserved_bytes == 0 {
         return;
     }
-    let mut current = user_stats.quota_used.load(Ordering::Relaxed);
-    loop {
-        let next = current.saturating_sub(reserved_bytes);
-        match user_stats.quota_used.compare_exchange_weak(
-            current,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return,
-            Err(observed) => current = observed,
-        }
-    }
+    user_stats.refund_quota(reserved_bytes);
 }
