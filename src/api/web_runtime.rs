@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
@@ -13,12 +13,14 @@ use super::model::ApiFailure;
 use super::{ALLOW_GET, ALLOW_POST, ApiShared};
 use crate::config::ProxyConfig;
 use crate::web::control::{WebRuntimeLifecycle, WebRuntimePublication};
-use crate::web::manager::{ControlError, SessionDetail, WebProcessRuntime};
+use crate::web::manager::{
+    ControlError, OperatorLifecycleError, SessionDetail, WebProcessRuntime,
+};
 
 // Exact JSON DTOs and strict query parsing stay independent from route dispatch.
 mod request;
 use request::{
-    CloseRequest, RuntimeInstanceRequest, parse_session_query, parse_session_ref,
+    CloseRequest, DrainRequest, RuntimeInstanceRequest, parse_session_query, parse_session_ref,
     valid_runtime_instance,
 };
 
@@ -27,6 +29,9 @@ const SESSIONS_PATH: &str = "/v1/runtime/web/sessions";
 const CLOSE_PATH: &str = "/v1/runtime/web/sessions/close";
 const DEBUG_CLEAR_PATH: &str = "/v1/runtime/web/debug/clear";
 const LEARNING_RESET_PATH: &str = "/v1/runtime/web/carrier-learning/reset";
+const LIFECYCLE_PAUSE_PATH: &str = "/v1/runtime/web/lifecycle/pause";
+const LIFECYCLE_DRAIN_PATH: &str = "/v1/runtime/web/lifecycle/drain";
+const LIFECYCLE_RESUME_PATH: &str = "/v1/runtime/web/lifecycle/resume";
 const SESSION_DETAIL_PREFIX: &str = "/v1/runtime/web/sessions/";
 const OPERATION_PREFIX: &str = "/v1/runtime/web/operations/";
 const MAX_CONTROL_BODY_BYTES: usize = 64 * 1024;
@@ -35,7 +40,12 @@ const MAX_CONTROL_BODY_BYTES: usize = 64 * 1024;
 pub(super) fn allowed_methods(path: &str) -> Option<&'static str> {
     match path {
         STATUS_PATH | SESSIONS_PATH => Some(ALLOW_GET),
-        CLOSE_PATH | DEBUG_CLEAR_PATH | LEARNING_RESET_PATH => Some(ALLOW_POST),
+        CLOSE_PATH
+        | DEBUG_CLEAR_PATH
+        | LEARNING_RESET_PATH
+        | LIFECYCLE_PAUSE_PATH
+        | LIFECYCLE_DRAIN_PATH
+        | LIFECYCLE_RESUME_PATH => Some(ALLOW_POST),
         _ if detail_ref(path).is_some() || operation_ref(path).is_some() => Some(ALLOW_GET),
         _ => None,
     }
@@ -103,6 +113,67 @@ pub(super) async fn handle(
             let status = runtime
                 .control_operation(operation_id)
                 .map_err(control_failure)?;
+            Ok(success_response(StatusCode::OK, status, revision))
+        }
+        ("POST", LIFECYCLE_PAUSE_PATH) => {
+            require_mutable(config)?;
+            reject_query(query)?;
+            require_json_content_type(&request)?;
+            let request = read_json::<RuntimeInstanceRequest>(
+                request.into_body(),
+                body_limit.min(MAX_CONTROL_BODY_BYTES),
+            )
+            .await?;
+            let runtime = control_runtime(shared)?;
+            require_runtime_instance(&runtime, &request.runtime_instance)?;
+            let status = runtime.pause_operator().await.map_err(lifecycle_failure)?;
+            shared.runtime_events.record(
+                "api.web.lifecycle.pause.ok",
+                format!("epoch={}", status.epoch),
+            );
+            Ok(success_response(StatusCode::OK, status, revision))
+        }
+        ("POST", LIFECYCLE_DRAIN_PATH) => {
+            require_mutable(config)?;
+            reject_query(query)?;
+            require_json_content_type(&request)?;
+            let request = read_json::<DrainRequest>(
+                request.into_body(),
+                body_limit.min(MAX_CONTROL_BODY_BYTES),
+            )
+            .await?;
+            let timeout = drain_timeout(request.timeout_secs)?;
+            let runtime = control_runtime(shared)?;
+            require_runtime_instance(&runtime, &request.runtime_instance)?;
+            let status = runtime
+                .drain_operator(timeout)
+                .await
+                .map_err(lifecycle_failure)?;
+            shared.runtime_events.record(
+                "api.web.lifecycle.drain.accepted",
+                format!(
+                    "epoch={} timeout_secs={}",
+                    status.epoch, request.timeout_secs
+                ),
+            );
+            Ok(success_response(StatusCode::ACCEPTED, status, revision))
+        }
+        ("POST", LIFECYCLE_RESUME_PATH) => {
+            require_mutable(config)?;
+            reject_query(query)?;
+            require_json_content_type(&request)?;
+            let request = read_json::<RuntimeInstanceRequest>(
+                request.into_body(),
+                body_limit.min(MAX_CONTROL_BODY_BYTES),
+            )
+            .await?;
+            let runtime = control_runtime(shared)?;
+            require_runtime_instance(&runtime, &request.runtime_instance)?;
+            let status = runtime.resume_operator().await.map_err(lifecycle_failure)?;
+            shared.runtime_events.record(
+                "api.web.lifecycle.resume.ok",
+                format!("epoch={}", status.epoch),
+            );
             Ok(success_response(StatusCode::OK, status, revision))
         }
         ("POST", CLOSE_PATH) => {
@@ -195,6 +266,8 @@ struct WebStatusData {
     listeners: Vec<String>,
     effective_config_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    operator_lifecycle: Option<crate::web::manager::OperatorLifecycleStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<crate::web::manager::WebRuntimeStatus>,
 }
 
@@ -221,6 +294,7 @@ impl WebStatusData {
                 WebRuntimeLifecycle::DeadlineExceeded => "deadline_exceeded",
             })
         };
+        let operator_lifecycle = runtime.map(WebProcessRuntime::operator_lifecycle_status);
         Self {
             lifecycle: publication.lifecycle.as_str(),
             lifecycle_epoch: publication.epoch,
@@ -233,6 +307,7 @@ impl WebStatusData {
                 .map(ToString::to_string)
                 .collect(),
             effective_config_enabled,
+            operator_lifecycle,
             runtime: runtime.map(WebProcessRuntime::try_status),
         }
     }
@@ -369,12 +444,32 @@ fn control_failure(error: ControlError) -> ApiFailure {
     }
 }
 
+fn lifecycle_failure(error: OperatorLifecycleError) -> ApiFailure {
+    match error {
+        OperatorLifecycleError::Closed => runtime_unavailable(WebRuntimeLifecycle::Draining),
+        OperatorLifecycleError::OperationInProgress => ApiFailure::new(
+            StatusCode::CONFLICT,
+            "web_lifecycle_in_progress",
+            "Another WEB drain operation is active",
+        ),
+    }
+}
+
 fn snapshot_busy() -> ApiFailure {
     ApiFailure::new(
         StatusCode::SERVICE_UNAVAILABLE,
         "web_snapshot_busy",
         "WEB runtime snapshot is temporarily busy",
     )
+}
+
+fn drain_timeout(timeout_secs: u64) -> Result<Duration, ApiFailure> {
+    if !(1..=3600).contains(&timeout_secs) {
+        return Err(ApiFailure::bad_request(
+            "timeout_secs must be within 1..=3600",
+        ));
+    }
+    Ok(Duration::from_secs(timeout_secs))
 }
 
 fn reject_query(query: Option<&str>) -> Result<(), ApiFailure> {
@@ -401,44 +496,5 @@ fn millis(duration: std::time::Duration) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use hyper::header::HeaderValue;
-
-    #[test]
-    fn route_table_keeps_status_read_only_and_controls_post_only() {
-        assert_eq!(allowed_methods(STATUS_PATH), Some(ALLOW_GET));
-        assert_eq!(allowed_methods(SESSIONS_PATH), Some(ALLOW_GET));
-        assert_eq!(allowed_methods(CLOSE_PATH), Some(ALLOW_POST));
-        assert_eq!(allowed_methods(DEBUG_CLEAR_PATH), Some(ALLOW_POST));
-        assert_eq!(allowed_methods(LEARNING_RESET_PATH), Some(ALLOW_POST));
-        assert_eq!(
-            allowed_methods("/v1/runtime/web/sessions/ws1.instance.0000000000000001"),
-            Some(ALLOW_GET)
-        );
-    }
-
-    #[test]
-    fn control_content_type_is_exact_and_single() {
-        let exact = Request::builder()
-            .header(CONTENT_TYPE, "application/json")
-            .body(())
-            .unwrap();
-        assert!(require_json_content_type(&exact).is_ok());
-
-        let parameterized = Request::builder()
-            .header(CONTENT_TYPE, "application/json; charset=utf-8")
-            .body(())
-            .unwrap();
-        assert!(require_json_content_type(&parameterized).is_err());
-
-        let mut duplicated = Request::builder()
-            .header(CONTENT_TYPE, "application/json")
-            .body(())
-            .unwrap();
-        duplicated
-            .headers_mut()
-            .append(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        assert!(require_json_content_type(&duplicated).is_err());
-    }
-}
+#[path = "web_runtime/tests.rs"]
+mod tests;

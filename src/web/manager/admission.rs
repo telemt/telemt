@@ -13,11 +13,21 @@ impl WebProcessRuntime {
         max_streams: usize,
         client_ip: IpAddr,
         public_addr: SocketAddr,
-    ) -> Option<u16> {
+    ) -> Result<u16, super::ManagerError> {
+        let _operator_admission = match self.try_operator_admission() {
+            Ok(admission) => admission,
+            Err(error) => {
+                self.streams_rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(error);
+            }
+        };
         let now = Instant::now();
         let mut state = self.stream_admission.lock();
-        if state.closed
-            || state.streams_live >= self.limits.max_streams_global
+        if state.closed {
+            self.streams_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(super::ManagerError::Closed);
+        }
+        if state.streams_live >= self.limits.max_streams_global
             || state
                 .streams_per_profile
                 .get(&profile_key)
@@ -33,17 +43,17 @@ impl WebProcessRuntime {
         {
             self.streams_rejected.fetch_add(1, Ordering::Relaxed);
             self.limit_hits.fetch_add(1, Ordering::Relaxed);
-            return None;
+            return Err(super::ManagerError::Limit);
         }
         let Some(peer_port) = allocate_stream_port(&mut state, client_ip, public_addr) else {
             self.streams_rejected.fetch_add(1, Ordering::Relaxed);
             self.limit_hits.fetch_add(1, Ordering::Relaxed);
-            return None;
+            return Err(super::ManagerError::Limit);
         };
         state.streams_live += 1;
         *state.streams_per_profile.entry(profile_key).or_insert(0) += 1;
         self.streams_opened.fetch_add(1, Ordering::Relaxed);
-        Some(peer_port)
+        Ok(peer_port)
     }
 
     /// Releases one live logical-stream slot after its relay task exits.
@@ -60,6 +70,8 @@ impl WebProcessRuntime {
         }
         state.streams_live = state.streams_live.saturating_sub(1);
         decrement_map(&mut state.streams_per_profile, &profile_key);
+        drop(state);
+        self.notify_operator_work_changed();
     }
 
     /// Records a logical stream rejected outside manager quota acquisition.

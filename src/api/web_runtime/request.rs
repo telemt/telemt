@@ -22,6 +22,16 @@ pub(super) struct RuntimeInstanceRequest {
     pub(super) runtime_instance: String,
 }
 
+/// Process-fenced graceful drain request with one bounded relative deadline.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DrainRequest {
+    /// Random process identifier copied from WEB runtime status.
+    pub(super) runtime_instance: String,
+    /// Relative drain deadline frozen into one monotonic server deadline.
+    pub(super) timeout_secs: u64,
+}
+
 /// One process-fenced asynchronous close request.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -328,6 +338,14 @@ mod tests {
             serde_json::from_value::<CloseRequest>(serde_json::json!({
                 "runtime_instance": runtime_instance,
                 "selector": {"kind": "all", "extra": true},
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<DrainRequest>(serde_json::json!({
+                "runtime_instance": runtime_instance,
+                "timeout_secs": 30,
+                "extra": true,
             }))
             .is_err()
         );

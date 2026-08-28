@@ -186,6 +186,7 @@ impl Drop for WebSocketConnection {
             drop(self.slot.take());
             self.entry.released.cancel();
             runtime.websocket_notify.notify_waiters();
+            runtime.notify_operator_work_changed();
         }
     }
 }

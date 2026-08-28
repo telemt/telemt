@@ -229,14 +229,12 @@ impl WebSession {
         let Some(manager) = self.manager.upgrade() else {
             return Err(ManagerError::Closed);
         };
-        let Some(peer_port) = manager.try_acquire_stream(
+        let peer_port = manager.try_acquire_stream(
             self.profile_key,
             self.profile.max_streams,
             self.client_ip,
             self.profile.public_addr,
-        ) else {
-            return Err(ManagerError::Limit);
-        };
+        )?;
         if !state.active_peer_ports.insert(peer_port) {
             manager.release_stream(
                 self.profile_key,

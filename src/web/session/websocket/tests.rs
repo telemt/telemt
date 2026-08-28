@@ -153,7 +153,7 @@ async fn rejected_open_retains_stream_quota_until_lane_socket_teardown() {
                 runtime.session.client_ip,
                 runtime.session.profile.public_addr,
             )
-            .is_none()
+            .is_err()
     );
 
     runtime.session.close_websocket_lane(reservation);
@@ -271,7 +271,7 @@ async fn closed_session_keeps_stream_owned_quota_until_task_completion() {
                 runtime.session.client_ip,
                 runtime.session.profile.public_addr,
             )
-            .is_none()
+            .is_err()
     );
     runtime.session.wait().await;
     let peer_port = runtime

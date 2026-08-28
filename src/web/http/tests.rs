@@ -30,6 +30,9 @@ mod session_policy_tests;
 // Runtime control integration stays separate from carrier protocol scenarios.
 #[path = "control_tests.rs"]
 mod control_tests;
+// Reversible operator lifecycle coverage stays separate from terminal shutdown tests.
+#[path = "operator_lifecycle_tests.rs"]
+mod operator_lifecycle_tests;
 
 const TEST_CARRIER_DEADLINES_SECS: [u64; 4] = [3, 5, 8, 12];
 

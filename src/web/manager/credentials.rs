@@ -66,6 +66,7 @@ impl WebProcessRuntime {
         if !config.web.enabled || !generation.proxy_shared.is_user_enabled(&profile.user) {
             return Err(ManagerError::Closed);
         }
+        let _operator_admission = self.try_operator_admission()?;
         let now = Instant::now();
         let mut state = self.state.lock();
         remove_expired_locked(&mut state, now);

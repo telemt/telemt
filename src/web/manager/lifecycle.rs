@@ -80,11 +80,14 @@ impl WebProcessRuntime {
             remove_bootstrap_locked(&mut state, bootstrap_hash);
         }
         self.sessions_closed.fetch_add(1, Ordering::Relaxed);
+        drop(state);
+        self.notify_operator_work_changed();
     }
 
     /// Closes every WEB authority gate before any graceful wait begins.
     pub(crate) fn begin_shutdown(self: &std::sync::Arc<Self>) -> WebShutdownDrain {
         let started = TokioInstant::now();
+        self.close_operator_lifecycle();
         self.shutdown.cancel();
         self.close_control_submission_gate();
         self.close_websockets();

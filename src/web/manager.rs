@@ -34,6 +34,11 @@ mod admission;
 // Shutdown and expiry work remain outside request-path coordination.
 mod lifecycle;
 pub(crate) use lifecycle::WebShutdownOutcome;
+// Reversible operator admission stays independent from terminal process shutdown.
+mod operator_lifecycle;
+pub(crate) use operator_lifecycle::{
+    OperatorLifecycleError, OperatorLifecycleStatus,
+};
 // Queue and WebSocket allocations share one process-owned data-plane budget.
 mod budget;
 // WebSocket admission, replacement, and liveness are process-scoped.
@@ -79,6 +84,8 @@ pub(crate) enum ManagerError {
     Committed,
     /// The process or session has stopped accepting work.
     Closed,
+    /// Operator pause or drain temporarily rejects new WEB work.
+    AdmissionPaused,
 }
 
 impl ManagerError {
@@ -92,6 +99,7 @@ impl ManagerError {
             Self::Concurrent => "concurrent",
             Self::Committed => "committed",
             Self::Closed => "closed",
+            Self::AdmissionPaused => "admission_paused",
         }
     }
 }
@@ -155,6 +163,7 @@ pub(crate) struct WebProcessRuntime {
     websocket_next_id: AtomicU64,
     websocket_clock: std::time::Instant,
     websocket_notify: Arc<Notify>,
+    operator_lifecycle: operator_lifecycle::OperatorLifecycle,
     data_budget: Arc<WebDataBudget>,
     control_operations: Mutex<control::ControlOperationRegistry>,
     next_control_operation_id: AtomicU64,
@@ -200,8 +209,13 @@ impl WebProcessRuntime {
             .saturating_sub(limits.websocket_http_connection_reserve);
         let lane_poll_limit = limits.max_http_handlers / 2;
         let lane_aux_poll_limit = (lane_poll_limit / 2).max(1);
+        let runtime_instance: Arc<str> =
+            Arc::from(format!("{:032x}", rand::random::<u128>()));
         let runtime = Arc::new(Self {
-            runtime_instance: Arc::from(format!("{:032x}", rand::random::<u128>())),
+            operator_lifecycle: operator_lifecycle::OperatorLifecycle::new(Arc::clone(
+                &runtime_instance,
+            )),
+            runtime_instance,
             active_runtime,
             trace,
             http_connections: Arc::new(Semaphore::new(limits.max_http_connections)),

@@ -288,12 +288,14 @@ impl WebSession {
             return None;
         }
         let manager = self.manager.upgrade()?;
-        let peer_port = manager.try_acquire_stream(
-            self.profile_key,
-            self.profile.max_streams,
-            self.client_ip,
-            self.profile.public_addr,
-        )?;
+        let peer_port = manager
+            .try_acquire_stream(
+                self.profile_key,
+                self.profile.max_streams,
+                self.client_ip,
+                self.profile.public_addr,
+            )
+            .ok()?;
         if state.active_peer_ports.insert(peer_port) {
             return Some(peer_port);
         }

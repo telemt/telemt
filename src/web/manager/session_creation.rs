@@ -189,6 +189,7 @@ impl WebProcessRuntime {
                 ip_learning_eligible,
                 carrier_deadline_at: entry.carrier_deadline_at.ok_or(ManagerError::Protocol)?,
             };
+            let _operator_admission = self.try_operator_admission()?;
             state
                 .bootstraps
                 .get_mut(&bootstrap_hash)
@@ -272,6 +273,7 @@ impl WebProcessRuntime {
         let Some(carrier) = candidates.first().copied() else {
             return Err(ManagerError::Protocol);
         };
+        let _operator_admission = self.try_operator_admission()?;
         if !admit_initial(self, &mut state, now, client_ip, profile_key, &profile) {
             return Err(ManagerError::Limit);
         }

@@ -189,7 +189,10 @@ pub(super) async fn handle_session(
             response
         }
         Err(
-            error @ (ManagerError::Limit | ManagerError::Backpressure | ManagerError::Concurrent),
+            error @ (ManagerError::Limit
+                | ManagerError::Backpressure
+                | ManagerError::Concurrent
+                | ManagerError::AdmissionPaused),
         ) => {
             runtime.trace().record_profile_lifecycle(
                 client_ip,
