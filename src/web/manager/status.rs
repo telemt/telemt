@@ -1,7 +1,6 @@
 use std::net::IpAddr;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -298,6 +297,7 @@ impl WebProcessRuntime {
             .limits
             .max_http_connections
             .saturating_sub(self.limits.websocket_http_connection_reserve);
+        let aggregates = self.telemetry.aggregates();
         WebRuntimeStatus {
             runtime_instance: self.runtime_instance().to_string(),
             generation_id,
@@ -312,6 +312,13 @@ impl WebProcessRuntime {
                 (
                     "http_connections",
                     permits(&self.http_connections, self.limits.max_http_connections),
+                ),
+                (
+                    "http_overload_connections",
+                    permits(
+                        &self.http_overload_connections,
+                        self.limits.max_http_overload_connections,
+                    ),
                 ),
                 (
                     "http_handlers",
@@ -346,13 +353,13 @@ impl WebProcessRuntime {
                 ),
             ],
             auxiliary_tasks: self.tasks.len(),
-            session_incarnations_created: self.sessions_created.load(Ordering::Relaxed),
-            session_incarnations_closed: self.sessions_closed.load(Ordering::Relaxed),
-            streams_opened: self.streams_opened.load(Ordering::Relaxed),
-            streams_rejected: self.streams_rejected.load(Ordering::Relaxed),
-            bytes_up: self.bytes_up.load(Ordering::Relaxed),
-            bytes_down: self.bytes_down.load(Ordering::Relaxed),
-            limit_hits: self.limit_hits.load(Ordering::Relaxed),
+            session_incarnations_created: aggregates.sessions_created,
+            session_incarnations_closed: aggregates.sessions_closed,
+            streams_opened: aggregates.streams_opened,
+            streams_rejected: aggregates.streams_rejected,
+            bytes_up: aggregates.bytes_up,
+            bytes_down: aggregates.bytes_down,
+            limit_hits: aggregates.limit_hits,
             partial,
         }
     }

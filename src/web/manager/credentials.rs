@@ -1,6 +1,5 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -14,6 +13,7 @@ use super::{BootstrapResult, ManagerError, TOKEN_BYTES, TokenHash, WebProcessRun
 use crate::config::WebRuntimeProfile;
 use crate::maestro::generation::RuntimeGeneration;
 use crate::web::session::WebSession;
+use crate::web::telemetry::WebRejectionReason;
 
 impl WebProcessRuntime {
     /// Issues a one-use bootstrap credential for an active compatible profile.
@@ -63,7 +63,14 @@ impl WebProcessRuntime {
             .as_ref()
             .and_then(|runtime| matching_profile(runtime, &profile))
             .ok_or(ManagerError::Authentication)?;
-        if !config.web.enabled || !generation.proxy_shared.is_user_enabled(&profile.user) {
+        if !config.web.enabled {
+            self.telemetry
+                .record_rejection(WebRejectionReason::ConfigDisabled);
+            return Err(ManagerError::Closed);
+        }
+        if !generation.proxy_shared.is_user_enabled(&profile.user) {
+            self.telemetry
+                .record_rejection(WebRejectionReason::UserDisabled);
             return Err(ManagerError::Closed);
         }
         let _operator_admission = self.try_operator_admission()?;
@@ -71,32 +78,47 @@ impl WebProcessRuntime {
         let mut state = self.state.lock();
         remove_expired_locked(&mut state, now);
         state.apply_issuance_policy(generation.id, config.web.enabled);
-        if state.closed
-            || !state.issuance_enabled
-            || state
-                .bootstraps_per_ip
-                .get(&client_ip)
-                .copied()
-                .unwrap_or(0)
-                >= self.limits.max_bootstraps_per_ip
-            || !allow_rate(
-                &mut state.bootstrap_rate,
-                now,
-                self.limits.new_bootstraps_per_minute,
-                self.limits.new_bootstraps_burst,
-            )
+        if state.closed || !state.issuance_enabled {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::RuntimeClosed);
+            return Err(ManagerError::Limit);
+        }
+        if state
+            .bootstraps_per_ip
+            .get(&client_ip)
+            .copied()
+            .unwrap_or(0)
+            >= self.limits.max_bootstraps_per_ip
         {
-            self.limit_hits.fetch_add(1, Ordering::Relaxed);
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BootstrapCapacity);
+            return Err(ManagerError::Limit);
+        }
+        if !allow_rate(
+            &mut state.bootstrap_rate,
+            now,
+            self.limits.new_bootstraps_per_minute,
+            self.limits.new_bootstraps_burst,
+        ) {
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BootstrapRate);
             return Err(ManagerError::Limit);
         }
         if state.bootstraps.len() >= self.limits.max_bootstraps_global
             && !evict_oldest_unused_bootstrap(&mut state)
         {
-            self.limit_hits.fetch_add(1, Ordering::Relaxed);
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BootstrapCapacity);
             return Err(ManagerError::Limit);
         }
         let Some((token, hash)) = new_unique_token(generation, &state) else {
-            self.limit_hits.fetch_add(1, Ordering::Relaxed);
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BootstrapCapacity);
             return Err(ManagerError::Limit);
         };
         let trace_session_id = self.trace.next_session_id();

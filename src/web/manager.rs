@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -12,6 +12,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::config::{WebCarrier, WebLimitsConfig};
 use crate::maestro::generation::RuntimeGeneration;
+use crate::web::telemetry::{WebRejectionReason, WebTelemetry};
 use crate::web::trace::WebTraceStore;
 
 // Credential maps, quotas, and token-bucket helpers remain private to the manager.
@@ -37,7 +38,7 @@ pub(crate) use lifecycle::WebShutdownOutcome;
 // Reversible operator admission stays independent from terminal process shutdown.
 mod operator_lifecycle;
 pub(crate) use operator_lifecycle::{
-    OperatorLifecycleError, OperatorLifecycleStatus,
+    OperatorLifecycleError, OperatorLifecycleState, OperatorLifecycleStatus,
 };
 // Queue and WebSocket allocations share one process-owned data-plane budget.
 mod budget;
@@ -48,6 +49,9 @@ mod status;
 pub(crate) use status::{
     SessionDetail, SessionFilter, SessionListRequest, SessionRefError, WebRuntimeStatus,
 };
+// Fixed-cardinality capacity snapshots serve API and Prometheus observability.
+mod observability;
+pub(crate) use observability::{WebCapacityResourceStatus, WebCapacitySnapshot};
 // Asynchronous bounded close operations isolate mutation lifecycle from HTTP requests.
 mod control;
 pub(crate) use budget::WebSocketBudgetLease;
@@ -152,6 +156,7 @@ pub(crate) struct WebProcessRuntime {
     stream_admission: Mutex<StreamAdmissionState>,
     learning: Mutex<learning::CarrierLearning>,
     http_connections: Arc<Semaphore>,
+    http_overload_connections: Arc<Semaphore>,
     http_handlers: Arc<Semaphore>,
     lane_polls: Arc<Semaphore>,
     lane_aux_polls: Arc<Semaphore>,
@@ -169,13 +174,7 @@ pub(crate) struct WebProcessRuntime {
     next_control_operation_id: AtomicU64,
     shutdown: CancellationToken,
     tasks: TaskTracker,
-    sessions_created: AtomicU64,
-    sessions_closed: AtomicU64,
-    streams_opened: AtomicU64,
-    streams_rejected: AtomicU64,
-    bytes_up: AtomicU64,
-    bytes_down: AtomicU64,
-    limit_hits: AtomicU64,
+    telemetry: Arc<WebTelemetry>,
 }
 
 impl WebProcessRuntime {
@@ -184,13 +183,14 @@ impl WebProcessRuntime {
     pub(crate) fn start(active_runtime: Arc<ArcSwap<RuntimeGeneration>>) -> Arc<Self> {
         let config = active_runtime.load().config();
         let trace = WebTraceStore::new(config.web.debug.clone(), &config.web.limits);
-        Self::start_with_trace(active_runtime, trace)
+        Self::start_with_trace(active_runtime, trace, WebTelemetry::new())
     }
 
     /// Starts one process-scoped manager with a shared API-visible trace store.
     pub(crate) fn start_with_trace(
         active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
         trace: Arc<WebTraceStore>,
+        telemetry: Arc<WebTelemetry>,
     ) -> Arc<Self> {
         let initial_generation = active_runtime.load_full();
         let config = initial_generation.config();
@@ -209,8 +209,7 @@ impl WebProcessRuntime {
             .saturating_sub(limits.websocket_http_connection_reserve);
         let lane_poll_limit = limits.max_http_handlers / 2;
         let lane_aux_poll_limit = (lane_poll_limit / 2).max(1);
-        let runtime_instance: Arc<str> =
-            Arc::from(format!("{:032x}", rand::random::<u128>()));
+        let runtime_instance: Arc<str> = Arc::from(format!("{:032x}", rand::random::<u128>()));
         let runtime = Arc::new(Self {
             operator_lifecycle: operator_lifecycle::OperatorLifecycle::new(Arc::clone(
                 &runtime_instance,
@@ -219,6 +218,9 @@ impl WebProcessRuntime {
             active_runtime,
             trace,
             http_connections: Arc::new(Semaphore::new(limits.max_http_connections)),
+            http_overload_connections: Arc::new(Semaphore::new(
+                limits.max_http_overload_connections,
+            )),
             http_handlers: Arc::new(Semaphore::new(limits.max_http_handlers)),
             lane_polls: Arc::new(Semaphore::new(lane_poll_limit)),
             lane_aux_polls: Arc::new(Semaphore::new(lane_aux_poll_limit)),
@@ -239,13 +241,7 @@ impl WebProcessRuntime {
             learning: Mutex::new(carrier_learning),
             shutdown: CancellationToken::new(),
             tasks: TaskTracker::new(),
-            sessions_created: AtomicU64::new(0),
-            sessions_closed: AtomicU64::new(0),
-            streams_opened: AtomicU64::new(0),
-            streams_rejected: AtomicU64::new(0),
-            bytes_up: AtomicU64::new(0),
-            bytes_down: AtomicU64::new(0),
-            limit_hits: AtomicU64::new(0),
+            telemetry,
         });
         let weak = Arc::downgrade(&runtime);
         let shutdown = runtime.shutdown.clone();
@@ -287,6 +283,16 @@ impl WebProcessRuntime {
         &self.trace
     }
 
+    /// Returns the process-owned operational telemetry handle.
+    pub(crate) fn telemetry(&self) -> &Arc<WebTelemetry> {
+        &self.telemetry
+    }
+
+    /// Returns whether terminal process shutdown has started.
+    pub(crate) fn is_shutdown(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
+
     /// Reserves one accepted HTTP connection.
     pub(crate) fn try_http_connection(&self) -> Option<OwnedSemaphorePermit> {
         let permit = Arc::clone(&self.http_connections).try_acquire_owned().ok();
@@ -296,11 +302,28 @@ impl WebProcessRuntime {
         permit
     }
 
+    /// Waits for one accepted HTTP connection slot after bounded overload admission.
+    pub(crate) async fn acquire_http_connection(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.http_connections)
+            .acquire_owned()
+            .await
+            .ok()
+    }
+
+    /// Reserves one accepted socket outside ordinary HTTP connection capacity.
+    pub(crate) fn try_http_overload_connection(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.http_overload_connections)
+            .try_acquire_owned()
+            .ok()
+    }
+
     /// Reserves one concurrently executing HTTP request handler.
     pub(crate) fn try_http_handler(&self) -> Option<OwnedSemaphorePermit> {
         let permit = Arc::clone(&self.http_handlers).try_acquire_owned().ok();
         if permit.is_none() {
             self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::HttpHandlerCapacity);
         }
         permit
     }
@@ -315,6 +338,11 @@ impl WebProcessRuntime {
         let permit = Arc::clone(slots).try_acquire_owned().ok();
         if permit.is_none() {
             self.record_limit_hit();
+            self.telemetry.record_rejection(if auxiliary {
+                WebRejectionReason::LaneAuxPollCapacity
+            } else {
+                WebRejectionReason::LanePollCapacity
+            });
         }
         permit
     }
@@ -323,7 +351,7 @@ impl WebProcessRuntime {
     pub(crate) fn try_stream_handshake(&self) -> Option<OwnedSemaphorePermit> {
         let permit = Arc::clone(&self.stream_handshakes).try_acquire_owned().ok();
         if permit.is_none() {
-            self.record_stream_rejected();
+            self.record_stream_rejected_reason(WebRejectionReason::StreamHandshakeCapacity);
         }
         permit
     }
@@ -359,10 +387,14 @@ impl WebProcessRuntime {
     ) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
         let Some(bytes) = u32::try_from(bytes).ok() else {
             self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyBytesCapacity);
             return None;
         };
         let Some(reader) = Arc::clone(&self.body_readers).try_acquire_owned().ok() else {
             self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyReaderCapacity);
             return None;
         };
         let Some(body) = Arc::clone(&self.body_bytes)
@@ -370,6 +402,8 @@ impl WebProcessRuntime {
             .ok()
         else {
             self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyBytesCapacity);
             return None;
         };
         Some((reader, body))
@@ -383,6 +417,8 @@ impl WebProcessRuntime {
             .ok();
         if permit.is_none() {
             self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::BodyBytesCapacity);
         }
         permit
     }
@@ -401,6 +437,8 @@ impl WebProcessRuntime {
             .try_reserve_queue(owner, bytes, items, control, downlink)
         {
             self.record_limit_hit();
+            self.telemetry
+                .record_rejection(WebRejectionReason::QueueGlobalCapacity);
             return false;
         }
         true
@@ -473,15 +511,15 @@ impl WebProcessRuntime {
 
     /// Accounts one successfully committed carrier uplink body.
     pub(crate) fn record_up(&self, bytes: usize) {
-        self.bytes_up.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.telemetry.record_up(bytes);
     }
 
     /// Accounts one emitted carrier downlink body.
     pub(crate) fn record_down(&self, bytes: usize) {
-        self.bytes_down.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.telemetry.record_down(bytes);
     }
 
     fn record_limit_hit(&self) {
-        self.limit_hits.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.record_limit_hit();
     }
 }

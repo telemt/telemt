@@ -31,6 +31,9 @@ impl WebSession {
         };
         let generation = manager.active_generation();
         if !*generation.admission_rx.borrow() {
+            manager.record_stream_rejected_reason(
+                crate::web::telemetry::WebRejectionReason::GenerationAdmissionClosed,
+            );
             self.trace_lifecycle(
                 crate::web::trace::TraceLifecycleEvent::StreamRejected,
                 Some(stream.id),
@@ -70,6 +73,9 @@ impl WebSession {
             }
         };
         if let Err(future) = generation.try_spawn_session(future) {
+            manager.record_stream_rejected_reason(
+                crate::web::telemetry::WebRejectionReason::GenerationScopeClosed,
+            );
             retain_rejected.store(retain_reservation_on_reject, Ordering::Release);
             self.trace_lifecycle(
                 crate::web::trace::TraceLifecycleEvent::StreamRejected,
@@ -257,7 +263,9 @@ async fn run_stream(
         return;
     };
     let Ok(_connection_permit) = connection_permits.try_acquire_owned() else {
-        manager.record_stream_rejected();
+        manager.record_stream_rejected_reason(
+            crate::web::telemetry::WebRejectionReason::GenerationConnectionCapacity,
+        );
         session.trace_lifecycle(
             crate::web::trace::TraceLifecycleEvent::StreamRejected,
             Some(stream_identity.id),

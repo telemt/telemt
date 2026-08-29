@@ -57,6 +57,78 @@ fn web_config_builds_canonical_runtime_snapshot() {
 }
 
 #[test]
+fn web_http_connection_capacity_policy_is_bounded_and_configurable() {
+    let configured = WEB_CONFIG
+        .replace(
+            "carrier = \"https-lanes\"",
+            "carrier = \"https-lanes\"\nhttp_connection_capacity_action = \"wait\"",
+        )
+        .replace(
+            "[[web.vhosts]]",
+            "[web.limits]\nmax_http_overload_connections = 23\n\n[web.timeouts]\nhttp_overload_timeout_ms = 731\n\n[[web.vhosts]]",
+        );
+    let config = load_config_from_temp_toml(&configured);
+
+    assert_eq!(
+        config.web.http_connection_capacity_action,
+        WebHttpConnectionCapacityAction::Wait
+    );
+    assert_eq!(config.web.limits.max_http_overload_connections, 23);
+    assert_eq!(config.web.timeouts.http_overload_timeout_ms, 731);
+
+    let defaults = ProxyConfig::default();
+    assert_eq!(
+        defaults.web.http_connection_capacity_action,
+        WebHttpConnectionCapacityAction::Drop
+    );
+    assert_eq!(defaults.web.limits.max_http_overload_connections, 64);
+    assert_eq!(defaults.web.timeouts.http_overload_timeout_ms, 250);
+}
+
+#[test]
+fn web_http_connection_capacity_policy_rejects_unknown_or_unbounded_values() {
+    let unknown = WEB_CONFIG.replace(
+        "carrier = \"https-lanes\"",
+        "carrier = \"https-lanes\"\nhttp_connection_capacity_action = \"queue\"",
+    );
+    assert!(load_config_error_from_temp_toml(&unknown).contains("http_connection_capacity_action"));
+
+    for timeout in [0, 60_001] {
+        let invalid = WEB_CONFIG.replace(
+            "[[web.vhosts]]",
+            &format!("[web.timeouts]\nhttp_overload_timeout_ms = {timeout}\n\n[[web.vhosts]]"),
+        );
+        assert!(
+            load_config_error_from_temp_toml(&invalid)
+                .contains("web.timeouts.http_overload_timeout_ms")
+        );
+    }
+
+    let no_overload_slots = WEB_CONFIG.replace(
+        "[[web.vhosts]]",
+        "[web.limits]\nmax_http_overload_connections = 0\n\n[[web.vhosts]]",
+    );
+    assert!(
+        load_config_error_from_temp_toml(&no_overload_slots)
+            .contains("web.limits.max_http_overload_connections")
+    );
+}
+
+#[test]
+fn web_decoy_rejects_direct_and_wildcard_listener_loops() {
+    let direct = WEB_CONFIG.replace("http://127.0.0.1:18081", "http://127.0.0.1:18080");
+    assert!(
+        load_config_error_from_temp_toml(&direct).contains("decoy upstream overlaps WEB listener")
+    );
+
+    let wildcard = direct.replace("ip = \"127.0.0.1\"", "ip = \"0.0.0.0\"");
+    assert!(
+        load_config_error_from_temp_toml(&wildcard)
+            .contains("decoy upstream overlaps WEB listener")
+    );
+}
+
+#[test]
 fn web_profile_user_labels_are_bounded_for_runtime_status() {
     let user = "a".repeat(65);
     let invalid = WEB_CONFIG.replace("alice", &user);

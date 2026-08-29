@@ -1,6 +1,5 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -278,7 +277,9 @@ impl WebProcessRuntime {
             return Err(ManagerError::Limit);
         }
         let Some((session_token, session_hash)) = new_unique_token(&generation, &state) else {
-            self.limit_hits.fetch_add(1, Ordering::Relaxed);
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(crate::web::telemetry::WebRejectionReason::SessionCapacity);
             return Err(ManagerError::Limit);
         };
         let carrier_deadline_at = carrier_request
@@ -341,7 +342,7 @@ impl WebProcessRuntime {
             )
         };
         decrement_map(&mut state.bootstraps_per_ip, &issuance_ip);
-        self.sessions_created.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.record_session_created();
         let identity = session.trace_identity();
         let result = CreateResult {
             token: session_token,

@@ -7,6 +7,7 @@ use std::time::Instant;
 use tokio::sync::watch;
 
 use super::manager::WebProcessRuntime;
+use super::telemetry::WebTelemetry;
 
 /// Process-owned WEB ingress lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,16 @@ pub(crate) enum WebRuntimeLifecycle {
 }
 
 impl WebRuntimeLifecycle {
+    /// Complete fixed lifecycle set used by one-hot metrics.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Starting,
+        Self::NoWebListener,
+        Self::Running,
+        Self::Draining,
+        Self::Drained,
+        Self::DeadlineExceeded,
+    ];
+
     /// Returns the stable API token for this lifecycle state.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -52,28 +63,34 @@ pub(crate) struct WebRuntimePublication {
     pub(crate) listeners: Arc<[SocketAddr]>,
     /// Weak runtime access that never extends data-plane ownership.
     pub(crate) runtime: Weak<WebProcessRuntime>,
+    /// Process-owned counters that remain readable after runtime release.
+    pub(crate) telemetry: Arc<WebTelemetry>,
 }
 
 /// Single-writer process lifecycle publisher for WEB ingress.
 #[derive(Clone)]
 pub(crate) struct WebRuntimeControl {
     epoch: Arc<AtomicU64>,
+    telemetry: Arc<WebTelemetry>,
     tx: watch::Sender<WebRuntimePublication>,
 }
 
 impl WebRuntimeControl {
     /// Creates the process channel in the pre-listener `starting` state.
     pub(crate) fn new() -> Self {
+        let telemetry = WebTelemetry::new();
         let publication = WebRuntimePublication {
             epoch: 1,
             lifecycle: WebRuntimeLifecycle::Starting,
             since: Instant::now(),
             listeners: Arc::from([]),
             runtime: Weak::new(),
+            telemetry: Arc::clone(&telemetry),
         };
         let (tx, _rx) = watch::channel(publication);
         Self {
             epoch: Arc::new(AtomicU64::new(1)),
+            telemetry,
             tx,
         }
     }
@@ -81,6 +98,11 @@ impl WebRuntimeControl {
     /// Subscribes without transferring runtime ownership to the receiver.
     pub(crate) fn subscribe(&self) -> watch::Receiver<WebRuntimePublication> {
         self.tx.subscribe()
+    }
+
+    /// Returns the shared process-owned WEB telemetry handle.
+    pub(crate) fn telemetry(&self) -> Arc<WebTelemetry> {
+        Arc::clone(&self.telemetry)
     }
 
     /// Publishes one lifecycle transition and optional weak runtime reference.
@@ -97,6 +119,7 @@ impl WebRuntimeControl {
             since: Instant::now(),
             listeners,
             runtime,
+            telemetry: Arc::clone(&self.telemetry),
         });
     }
 }

@@ -315,6 +315,7 @@ pub(super) async fn run_telemt_core(
         &runtime.config,
         &startup_tracker,
         active_runtime.clone(),
+        web_runtime_control.subscribe(),
     )
     .await;
 

@@ -265,6 +265,7 @@ const WEB_CONFIG_KEYS: &[&str] = &[
     "carriers",
     "carrier_learning",
     "carrier_negotiation_aggressiveness",
+    "http_connection_capacity_action",
     "debug",
     "limits",
     "timeouts",
@@ -278,6 +279,7 @@ const WEB_LIMITS_CONFIG_KEYS: &[&str] = &[
     "carrier_batch_bytes",
     "max_frames_per_body",
     "max_http_connections",
+    "max_http_overload_connections",
     "max_http_handlers",
     "max_lane_open_waits_per_session",
     "pending_bytes_per_lane",
@@ -354,6 +356,7 @@ const WEB_TIMEOUTS_CONFIG_KEYS: &[&str] = &[
     "bootstrap_lifetime_secs",
     "reconnect_grace_secs",
     "http_idle_secs",
+    "http_overload_timeout_ms",
     "shutdown_secs",
     "decoy_header_secs",
 ];

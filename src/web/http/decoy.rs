@@ -15,6 +15,7 @@ use super::{
 };
 use crate::config::{WebRuntimeDecoy, WebRuntimeVhost};
 use crate::web::manager::WebProcessRuntime;
+use crate::web::telemetry::WebDecoyUpstreamOutcome;
 
 /// Serves the configured ordinary site after optionally removing carrier material.
 /// Transport-sanitized static fallbacks remain uncacheable after query removal.
@@ -195,16 +196,18 @@ async fn proxy_to_upstream(
         .map(|value| value.as_str())
         .unwrap_or("/");
     let Ok(uri) = path_and_query.parse::<Uri>() else {
-        return bad_gateway();
+        return decoy_failure(runtime, WebDecoyUpstreamOutcome::RequestError);
     };
     *request.uri_mut() = uri;
     let _deadline_lease = match lease_deadline(request_deadline.as_ref(), header_timeout) {
         Ok(lease) => lease,
-        Err(()) => return bad_gateway(),
+        Err(()) => {
+            return decoy_failure(runtime, WebDecoyUpstreamOutcome::DeadlineExhausted);
+        }
     };
-    let stream = match tokio::time::timeout(header_timeout, TcpStream::connect(addr)).await {
-        Ok(Ok(stream)) => stream,
-        _ => return bad_gateway(),
+    let stream = match connect_upstream(addr, header_timeout).await {
+        Ok(stream) => stream,
+        Err(outcome) => return decoy_failure(runtime, outcome),
     };
     drop(_deadline_lease);
     let max_header_bytes = runtime
@@ -217,12 +220,19 @@ async fn proxy_to_upstream(
     builder.max_buf_size(max_header_bytes);
     let _deadline_lease = match lease_deadline(request_deadline.as_ref(), header_timeout) {
         Ok(lease) => lease,
-        Err(()) => return bad_gateway(),
+        Err(()) => {
+            return decoy_failure(runtime, WebDecoyUpstreamOutcome::DeadlineExhausted);
+        }
     };
     let (mut sender, connection) =
         match tokio::time::timeout(header_timeout, builder.handshake(TokioIo::new(stream))).await {
             Ok(Ok(parts)) => parts,
-            _ => return bad_gateway(),
+            Ok(Err(_)) => {
+                return decoy_failure(runtime, WebDecoyUpstreamOutcome::HttpHandshakeError);
+            }
+            Err(_) => {
+                return decoy_failure(runtime, WebDecoyUpstreamOutcome::HttpHandshakeTimeout);
+            }
         };
     drop(_deadline_lease);
     runtime.spawn_auxiliary(async move {
@@ -230,19 +240,48 @@ async fn proxy_to_upstream(
     });
     let _deadline_lease = match lease_deadline(request_deadline.as_ref(), header_timeout) {
         Ok(lease) => lease,
-        Err(()) => return bad_gateway(),
+        Err(()) => {
+            return decoy_failure(runtime, WebDecoyUpstreamOutcome::DeadlineExhausted);
+        }
     };
     let mut response =
         match tokio::time::timeout(header_timeout, sender.send_request(request)).await {
             Ok(Ok(response)) => response,
-            _ => return bad_gateway(),
+            Ok(Err(_)) => {
+                return decoy_failure(runtime, WebDecoyUpstreamOutcome::RequestError);
+            }
+            Err(_) => {
+                return decoy_failure(runtime, WebDecoyUpstreamOutcome::ResponseHeadTimeout);
+            }
         };
     drop(_deadline_lease);
+    runtime
+        .telemetry()
+        .record_decoy(WebDecoyUpstreamOutcome::Success);
     remove_hop_by_hop(response.headers_mut());
     response.map(|body| {
         body.map_err(|error| -> BoxError { Box::new(error) })
             .boxed_unsync()
     })
+}
+
+async fn connect_upstream(
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<TcpStream, WebDecoyUpstreamOutcome> {
+    match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Err(WebDecoyUpstreamOutcome::ConnectRefused)
+        }
+        Ok(Err(_)) => Err(WebDecoyUpstreamOutcome::ConnectError),
+        Err(_) => Err(WebDecoyUpstreamOutcome::ConnectTimeout),
+    }
+}
+
+fn decoy_failure(runtime: &WebProcessRuntime, outcome: WebDecoyUpstreamOutcome) -> HttpResponse {
+    runtime.telemetry().record_decoy(outcome);
+    bad_gateway()
 }
 
 fn lease_deadline(
@@ -314,5 +353,17 @@ mod tests {
         };
         assert!(resolve_static_path("/../index.html", &site).is_none());
         assert!(resolve_static_path("//index.html", &site).is_none());
+    }
+
+    #[tokio::test]
+    async fn closed_loopback_origin_is_classified_as_connect_refused() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        assert_eq!(
+            connect_upstream(addr, Duration::from_secs(1)).await.err(),
+            Some(WebDecoyUpstreamOutcome::ConnectRefused)
+        );
     }
 }

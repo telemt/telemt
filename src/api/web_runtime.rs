@@ -13,12 +13,13 @@ use super::model::ApiFailure;
 use super::{ALLOW_GET, ALLOW_POST, ApiShared};
 use crate::config::ProxyConfig;
 use crate::web::control::{WebRuntimeLifecycle, WebRuntimePublication};
-use crate::web::manager::{
-    ControlError, OperatorLifecycleError, SessionDetail, WebProcessRuntime,
-};
+use crate::web::manager::{ControlError, OperatorLifecycleError, SessionDetail, WebProcessRuntime};
 
 // Exact JSON DTOs and strict query parsing stay independent from route dispatch.
 mod request;
+// Ingress, capacity, and decoy telemetry remain separate availability planes.
+mod observability;
+use observability::{WebCapacityStatus, WebDecoyUpstreamStatus, WebIngressStatus};
 use request::{
     CloseRequest, DrainRequest, RuntimeInstanceRequest, parse_session_query, parse_session_ref,
     valid_runtime_instance,
@@ -73,7 +74,7 @@ pub(super) async fn handle(
             reject_query(query)?;
             let publication = shared.web_runtime_rx.borrow().clone();
             let runtime = publication.runtime.upgrade();
-            let data = WebStatusData::new(publication, runtime.as_deref(), config.web.enabled);
+            let data = WebStatusData::new(publication, runtime.as_deref(), config);
             Ok(success_response(StatusCode::OK, data, revision))
         }
         ("GET", SESSIONS_PATH) => {
@@ -265,6 +266,9 @@ struct WebStatusData {
     reason: Option<&'static str>,
     listeners: Vec<String>,
     effective_config_enabled: bool,
+    ingress: WebIngressStatus,
+    capacity: WebCapacityStatus,
+    decoy_upstream: WebDecoyUpstreamStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     operator_lifecycle: Option<crate::web::manager::OperatorLifecycleStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,7 +279,7 @@ impl WebStatusData {
     fn new(
         publication: WebRuntimePublication,
         runtime: Option<&WebProcessRuntime>,
-        effective_config_enabled: bool,
+        config: &ProxyConfig,
     ) -> Self {
         let available = runtime.is_some()
             && matches!(
@@ -295,6 +299,9 @@ impl WebStatusData {
             })
         };
         let operator_lifecycle = runtime.map(WebProcessRuntime::operator_lifecycle_status);
+        let ingress = WebIngressStatus::new(&publication, runtime.is_some());
+        let capacity = WebCapacityStatus::new(&publication, runtime, config);
+        let decoy_upstream = WebDecoyUpstreamStatus::new(&publication);
         Self {
             lifecycle: publication.lifecycle.as_str(),
             lifecycle_epoch: publication.epoch,
@@ -306,7 +313,10 @@ impl WebStatusData {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
-            effective_config_enabled,
+            effective_config_enabled: config.web.enabled,
+            ingress,
+            capacity,
+            decoy_upstream,
             operator_lifecycle,
             runtime: runtime.map(WebProcessRuntime::try_status),
         }

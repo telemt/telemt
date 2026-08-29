@@ -2,6 +2,9 @@ use super::*;
 
 /// Validates WEB request, learning, and lifecycle timeouts.
 pub(super) fn validate(timeouts: &WebTimeoutsConfig) -> Result<()> {
+    if !(1..=60_000).contains(&timeouts.http_overload_timeout_ms) {
+        return config_error("web.timeouts.http_overload_timeout_ms must be within [1, 60000]");
+    }
     let values = [
         ("header_secs", timeouts.header_secs),
         ("body_secs", timeouts.body_secs),

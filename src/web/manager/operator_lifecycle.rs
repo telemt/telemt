@@ -16,6 +16,9 @@ pub(crate) use status::{
     OperatorDrainOutcome, OperatorDrainState, OperatorDrainStatus, OperatorLifecycleState,
     OperatorLifecycleStatus,
 };
+// Mutable and published lifecycle state storage.
+mod state;
+use state::{ActiveDrain, OperatorLifecycleInner, OperatorSnapshot, WorkCounts};
 
 const OPERATOR_ADMISSION_CLOSED: usize = 1 << (usize::BITS - 1);
 const OPERATOR_REGISTRATION_COUNT: usize = OPERATOR_ADMISSION_CLOSED - 1;
@@ -28,19 +31,6 @@ pub(crate) enum OperatorLifecycleError {
     Closed,
     /// One drain already owns the single active operation slot.
     OperationInProgress,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct WorkCounts {
-    sessions: usize,
-    streams: usize,
-    websockets: usize,
-}
-
-impl WorkCounts {
-    fn is_zero(self) -> bool {
-        self.sessions == 0 && self.streams == 0 && self.websockets == 0
-    }
 }
 
 struct OperatorAdmission {
@@ -114,29 +104,6 @@ impl Drop for OperatorRegistration<'_> {
     }
 }
 
-struct ActiveDrain {
-    sequence: u64,
-    cancellation: CancellationToken,
-}
-
-struct OperatorLifecycleInner {
-    state: OperatorLifecycleState,
-    epoch: u64,
-    since: Instant,
-    terminal: bool,
-    active: Option<ActiveDrain>,
-    drain: Option<OperatorDrainStatus>,
-}
-
-#[derive(Clone)]
-struct OperatorSnapshot {
-    state: OperatorLifecycleState,
-    epoch: u64,
-    since: Instant,
-    terminal: bool,
-    drain: Option<OperatorDrainStatus>,
-}
-
 pub(super) struct OperatorLifecycle {
     runtime_instance: Arc<str>,
     admission: OperatorAdmission,
@@ -187,8 +154,8 @@ impl OperatorLifecycle {
 
     pub(super) fn status(&self, config_enabled: bool) -> OperatorLifecycleStatus {
         let snapshot = self.published.load();
-        let admission_open = !snapshot.terminal
-            && snapshot.state == OperatorLifecycleState::Running;
+        let admission_open =
+            !snapshot.terminal && snapshot.state == OperatorLifecycleState::Running;
         OperatorLifecycleStatus {
             state: snapshot.state,
             epoch: snapshot.epoch,
@@ -203,6 +170,30 @@ impl OperatorLifecycle {
         self.published.load().terminal
     }
 
+    fn rejection_reason(&self) -> crate::web::telemetry::WebRejectionReason {
+        let inner = self.inner.lock();
+        if inner.terminal {
+            return crate::web::telemetry::WebRejectionReason::RuntimeClosed;
+        }
+        match inner.state {
+            OperatorLifecycleState::Paused => {
+                crate::web::telemetry::WebRejectionReason::OperatorPaused
+            }
+            OperatorLifecycleState::Draining => {
+                crate::web::telemetry::WebRejectionReason::OperatorDraining
+            }
+            OperatorLifecycleState::ForceClosing => {
+                crate::web::telemetry::WebRejectionReason::OperatorForceClosing
+            }
+            OperatorLifecycleState::Drained => {
+                crate::web::telemetry::WebRejectionReason::OperatorDrained
+            }
+            OperatorLifecycleState::Running => {
+                crate::web::telemetry::WebRejectionReason::RuntimeClosed
+            }
+        }
+    }
+
     fn publish_locked(&self, inner: &OperatorLifecycleInner) {
         self.published.store(Arc::new(OperatorSnapshot {
             state: inner.state,
@@ -213,11 +204,7 @@ impl OperatorLifecycle {
         }));
     }
 
-    fn transition_locked(
-        &self,
-        inner: &mut OperatorLifecycleInner,
-        state: OperatorLifecycleState,
-    ) {
+    fn transition_locked(&self, inner: &mut OperatorLifecycleInner, state: OperatorLifecycleState) {
         if inner.state != state {
             inner.state = state;
             inner.epoch = inner.epoch.saturating_add(1);
@@ -460,9 +447,14 @@ impl WebProcessRuntime {
     pub(super) fn try_operator_admission(
         &self,
     ) -> Result<OperatorRegistration<'_>, super::ManagerError> {
-        self.operator_lifecycle
-            .try_register()
-            .ok_or(super::ManagerError::AdmissionPaused)
+        match self.operator_lifecycle.try_register() {
+            Some(registration) => Ok(registration),
+            None => {
+                self.telemetry
+                    .record_rejection(self.operator_lifecycle.rejection_reason());
+                Err(super::ManagerError::AdmissionPaused)
+            }
+        }
     }
 
     pub(super) fn notify_operator_work_changed(&self) {

@@ -1,5 +1,4 @@
 use std::net::IpAddr;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use tokio::time::Instant as TokioInstant;
@@ -79,7 +78,7 @@ impl WebProcessRuntime {
         for bootstrap_hash in bootstrap_hashes {
             remove_bootstrap_locked(&mut state, bootstrap_hash);
         }
-        self.sessions_closed.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.record_session_closed();
         drop(state);
         self.notify_operator_work_changed();
     }
@@ -93,6 +92,7 @@ impl WebProcessRuntime {
         self.close_websockets();
         self.data_budget.close();
         self.http_connections.close();
+        self.http_overload_connections.close();
         self.http_handlers.close();
         self.lane_polls.close();
         self.lane_aux_polls.close();
@@ -234,28 +234,29 @@ impl WebShutdownDrain {
             .saturating_duration_since(self.started)
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
+        let aggregates = self.runtime.telemetry.aggregates();
         match outcome {
             WebShutdownOutcome::Drained => info!(
                 target: "telemt::web",
                 shutdown_drained = true,
                 shutdown_budget_ms = budget_ms,
                 shutdown_elapsed_ms = elapsed_ms,
-                sessions_created = self.runtime.sessions_created.load(Ordering::Relaxed),
-                sessions_closed = self.runtime.sessions_closed.load(Ordering::Relaxed),
+                sessions_created = aggregates.sessions_created,
+                sessions_closed = aggregates.sessions_closed,
                 sessions_live,
                 sessions_pending,
                 session_tasks_live,
                 auxiliary_tasks_live,
-                streams_opened = self.runtime.streams_opened.load(Ordering::Relaxed),
-                streams_rejected = self.runtime.streams_rejected.load(Ordering::Relaxed),
+                streams_opened = aggregates.streams_opened,
+                streams_rejected = aggregates.streams_rejected,
                 streams_live,
                 pending_bytes = budget.queue_bytes,
                 pending_items = budget.queue_items,
                 websocket_bytes = budget.websocket_bytes,
                 data_high_water_bytes = budget.high_water_bytes,
-                bytes_up = self.runtime.bytes_up.load(Ordering::Relaxed),
-                bytes_down = self.runtime.bytes_down.load(Ordering::Relaxed),
-                limit_hits = self.runtime.limit_hits.load(Ordering::Relaxed),
+                bytes_up = aggregates.bytes_up,
+                bytes_down = aggregates.bytes_down,
+                limit_hits = aggregates.limit_hits,
                 "WEB runtime stopped"
             ),
             WebShutdownOutcome::DeadlineExceeded => warn!(
@@ -263,22 +264,22 @@ impl WebShutdownDrain {
                 shutdown_drained = false,
                 shutdown_budget_ms = budget_ms,
                 shutdown_elapsed_ms = elapsed_ms,
-                sessions_created = self.runtime.sessions_created.load(Ordering::Relaxed),
-                sessions_closed = self.runtime.sessions_closed.load(Ordering::Relaxed),
+                sessions_created = aggregates.sessions_created,
+                sessions_closed = aggregates.sessions_closed,
                 sessions_live,
                 sessions_pending,
                 session_tasks_live,
                 auxiliary_tasks_live,
-                streams_opened = self.runtime.streams_opened.load(Ordering::Relaxed),
-                streams_rejected = self.runtime.streams_rejected.load(Ordering::Relaxed),
+                streams_opened = aggregates.streams_opened,
+                streams_rejected = aggregates.streams_rejected,
                 streams_live,
                 pending_bytes = budget.queue_bytes,
                 pending_items = budget.queue_items,
                 websocket_bytes = budget.websocket_bytes,
                 data_high_water_bytes = budget.high_water_bytes,
-                bytes_up = self.runtime.bytes_up.load(Ordering::Relaxed),
-                bytes_down = self.runtime.bytes_down.load(Ordering::Relaxed),
-                limit_hits = self.runtime.limit_hits.load(Ordering::Relaxed),
+                bytes_up = aggregates.bytes_up,
+                bytes_down = aggregates.bytes_down,
+                limit_hits = aggregates.limit_hits,
                 "WEB runtime shutdown deadline exceeded"
             ),
         }

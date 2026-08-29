@@ -106,7 +106,10 @@ async fn pause_fence_leaves_no_late_admission_commits_under_scheduler_pressure()
 #[tokio::test]
 async fn empty_drain_completes_gracefully_and_stays_closed_until_resume() {
     let (runtime, generation) = test_runtime();
-    let accepted = runtime.drain_operator(Duration::from_secs(30)).await.unwrap();
+    let accepted = runtime
+        .drain_operator(Duration::from_secs(30))
+        .await
+        .unwrap();
     assert_eq!(accepted.state, OperatorLifecycleState::Draining);
 
     let completed = tokio::time::timeout(Duration::from_secs(1), async {

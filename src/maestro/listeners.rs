@@ -6,6 +6,7 @@
 //! - `bind` prepares and activates sockets without partial startup binding.
 //! - `accept` runs cancellation-aware TCP accept loops.
 //! - `control` coordinates reversible listener transitions and shutdown.
+//! - `web_overload` handles accepted WEB sockets outside ordinary capacity.
 
 mod accept;
 mod bind;
@@ -13,6 +14,7 @@ mod control;
 mod plan;
 #[cfg(unix)]
 mod unix;
+mod web_overload;
 
 pub(crate) use bind::bind_listeners;
 pub(crate) use control::{ListenerManager, PreparedListenerTransition};

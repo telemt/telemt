@@ -83,7 +83,57 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
     timeouts::validate(&config.web.timeouts)?;
     websocket::validate(&carriers, &config.web.limits, &config.web.timeouts)?;
     validate_vhosts(config)?;
+    validate_decoy_listener_separation(config)?;
     Ok(())
+}
+
+/// Rejects a direct decoy recursion into an effective WEB listener.
+pub(super) fn validate_decoy_listener_separation(config: &ProxyConfig) -> Result<()> {
+    let web_listeners = config
+        .server
+        .listeners
+        .iter()
+        .filter(|listener| listener.transport == ListenerTransport::Web)
+        .filter(|listener| {
+            (listener.ip.is_ipv4() && config.network.ipv4)
+                || (listener.ip.is_ipv6() && config.network.ipv6 != Some(false))
+        })
+        .map(|listener| SocketAddr::new(listener.ip, listener.port.unwrap_or(config.server.port)))
+        .collect::<Vec<_>>();
+    for (vhost_idx, vhost) in config.web.vhosts.iter().enumerate() {
+        let WebDecoyConfig::HttpUpstream { upstream } = &vhost.decoy else {
+            continue;
+        };
+        let parsed = url::Url::parse(upstream).map_err(|error| {
+            ProxyError::Config(format!(
+                "web.vhosts[{vhost_idx}].decoy.upstream is invalid: {error}"
+            ))
+        })?;
+        let Some(port) = parsed.port_or_known_default() else {
+            continue;
+        };
+        let upstream_ip = match parsed.host() {
+            Some(url::Host::Ipv4(ip)) => IpAddr::V4(ip),
+            Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip),
+            _ => continue,
+        };
+        let upstream_addr = SocketAddr::new(upstream_ip, port);
+        if web_listeners
+            .iter()
+            .any(|listener| listener_covers(*listener, upstream_addr))
+        {
+            return config_error(&format!(
+                "web.vhosts[{vhost_idx}].decoy upstream overlaps WEB listener {upstream_addr}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn listener_covers(listener: SocketAddr, target: SocketAddr) -> bool {
+    listener.port() == target.port()
+        && (listener.ip() == target.ip()
+            || (listener.ip().is_unspecified() && listener.is_ipv4() == target.is_ipv4()))
 }
 
 fn validate_web_listener(
@@ -169,6 +219,10 @@ fn validate_limits(limits: &WebLimitsConfig) -> Result<()> {
 
     let positive = [
         ("max_http_connections", limits.max_http_connections),
+        (
+            "max_http_overload_connections",
+            limits.max_http_overload_connections,
+        ),
         ("max_http_handlers", limits.max_http_handlers),
         (
             "max_lane_open_waits_per_session",
@@ -222,6 +276,10 @@ fn validate_limits(limits: &WebLimitsConfig) -> Result<()> {
     }
     for (field, value) in [
         ("max_http_connections", limits.max_http_connections),
+        (
+            "max_http_overload_connections",
+            limits.max_http_overload_connections,
+        ),
         ("max_http_handlers", limits.max_http_handlers),
         ("max_body_readers", limits.max_body_readers),
         ("max_body_bytes_global", limits.max_body_bytes_global),

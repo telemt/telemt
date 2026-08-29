@@ -40,6 +40,7 @@ usize_default!(default_web_max_frame_payload_bytes, 1024 * 1024);
 usize_default!(default_web_carrier_batch_bytes, 2 * 1024 * 1024);
 usize_default!(default_web_max_frames_per_body, 4096);
 usize_default!(default_web_max_http_connections, 1024);
+usize_default!(default_web_max_http_overload_connections, 64);
 usize_default!(default_web_max_http_handlers, 512);
 usize_default!(default_web_max_lane_open_waits_per_session, 16);
 usize_default!(default_web_pending_bytes_per_lane, 8 * 1024 * 1024);
@@ -105,5 +106,6 @@ pub(super) fn default_web_carrier_learning() -> bool {
 u64_default!(default_web_bootstrap_lifetime_secs, 120);
 u64_default!(default_web_reconnect_grace_secs, 120);
 u64_default!(default_web_http_idle_secs, 75);
+u64_default!(default_web_http_overload_timeout_ms, 250);
 u64_default!(default_web_shutdown_secs, 15);
 u64_default!(default_web_decoy_header_timeout_secs, 30);

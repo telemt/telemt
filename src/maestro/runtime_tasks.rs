@@ -405,6 +405,7 @@ pub(crate) async fn spawn_metrics_if_configured(
     config: &Arc<ProxyConfig>,
     startup_tracker: &Arc<StartupTracker>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    web_runtime_rx: tokio::sync::watch::Receiver<crate::web::control::WebRuntimePublication>,
 ) {
     // metrics_listen takes precedence; fall back to metrics_port for backward compat.
     let metrics_target: Option<(u16, Option<String>)> =
@@ -437,7 +438,7 @@ pub(crate) async fn spawn_metrics_if_configured(
         let active_runtime = active_runtime.clone();
         let listen_backlog = config.server.listen_backlog;
         tokio::spawn(async move {
-            metrics::serve(port, listen, listen_backlog, active_runtime).await;
+            metrics::serve(port, listen, listen_backlog, active_runtime, web_runtime_rx).await;
         });
         startup_tracker
             .complete_component(

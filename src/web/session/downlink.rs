@@ -183,6 +183,11 @@ impl WebSession {
                 && data_items <= item_limit - items
         };
         if !fits {
+            if let Some(manager) = self.manager.upgrade() {
+                manager.telemetry().record_rejection(
+                    crate::web::telemetry::WebRejectionReason::QueueSessionCapacity,
+                );
+            }
             return false;
         }
         let Some(manager) = self.manager.upgrade() else {

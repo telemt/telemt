@@ -26,6 +26,9 @@ use crate::tls_front::cache;
 use crate::tls_front::fetcher;
 use crate::transport::{ListenOptions, create_listener};
 
+// Process-owned WEB metrics stay isolated from the legacy renderer body.
+mod web;
+
 // Keeps `/metrics` response size bounded when per-user telemetry is enabled.
 const USER_LABELED_METRICS_MAX_USERS: usize = 4096;
 // Keeps TLS-front per-domain health series bounded for large generated configs.
@@ -38,6 +41,7 @@ pub async fn serve(
     listen: Option<String>,
     listen_backlog: u32,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    web_runtime_rx: tokio::sync::watch::Receiver<crate::web::control::WebRuntimePublication>,
 ) {
     // If `metrics_listen` is set, bind on that single address only.
     if let Some(ref listen_addr) = listen {
@@ -54,7 +58,7 @@ pub async fn serve(
         match bind_metrics_listener(addr, ipv6_only, listen_backlog) {
             Ok(listener) => {
                 info!("Metrics endpoint: http://{}/metrics and /beobachten", addr);
-                serve_listener(listener, active_runtime).await;
+                serve_listener(listener, active_runtime, web_runtime_rx).await;
             }
             Err(e) => {
                 warn!(error = %e, "Failed to bind metrics on {}", addr);
@@ -100,14 +104,15 @@ pub async fn serve(
             warn!("Metrics listener is unavailable on both IPv4 and IPv6");
         }
         (Some(listener), None) | (None, Some(listener)) => {
-            serve_listener(listener, active_runtime).await;
+            serve_listener(listener, active_runtime, web_runtime_rx).await;
         }
         (Some(listener4), Some(listener6)) => {
             let active_runtime_v6 = active_runtime.clone();
+            let web_runtime_rx_v6 = web_runtime_rx.clone();
             tokio::spawn(async move {
-                serve_listener(listener6, active_runtime_v6).await;
+                serve_listener(listener6, active_runtime_v6, web_runtime_rx_v6).await;
             });
-            serve_listener(listener4, active_runtime).await;
+            serve_listener(listener4, active_runtime, web_runtime_rx).await;
         }
     }
 }
@@ -127,7 +132,11 @@ fn bind_metrics_listener(
     TcpListener::from_std(socket.into())
 }
 
-async fn serve_listener(listener: TcpListener, active_runtime: Arc<ArcSwap<RuntimeGeneration>>) {
+async fn serve_listener(
+    listener: TcpListener,
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    web_runtime_rx: tokio::sync::watch::Receiver<crate::web::control::WebRuntimePublication>,
+) {
     let connection_permits = Arc::new(Semaphore::new(METRICS_MAX_CONTROL_CONNECTIONS));
 
     loop {
@@ -165,28 +174,13 @@ async fn serve_listener(listener: TcpListener, active_runtime: Arc<ArcSwap<Runti
         };
 
         let active_runtime = active_runtime.clone();
+        let web_runtime_rx = web_runtime_rx.clone();
         tokio::spawn(async move {
             let _connection_permit = connection_permit;
             let svc = service_fn(move |req| {
                 let runtime = active_runtime.load_full();
-                let stats = runtime.stats.clone();
-                let beobachten = runtime.beobachten.clone();
-                let shared_state = runtime.proxy_shared.clone();
-                let ip_tracker = runtime.ip_tracker.clone();
-                let tls_cache = runtime.tls_cache.clone();
-                let config = runtime.config();
-                async move {
-                    handle(
-                        req,
-                        &stats,
-                        &beobachten,
-                        &shared_state,
-                        &ip_tracker,
-                        tls_cache.as_deref(),
-                        &config,
-                    )
-                    .await
-                }
+                let web_publication = web_runtime_rx.borrow().clone();
+                async move { handle(req, &runtime, &web_publication).await }
             });
             match timeout(
                 METRICS_HTTP_CONNECTION_TIMEOUT,
@@ -212,15 +206,26 @@ async fn serve_listener(listener: TcpListener, active_runtime: Arc<ArcSwap<Runti
 
 async fn handle<B>(
     req: Request<B>,
-    stats: &Stats,
-    beobachten: &BeobachtenStore,
-    shared_state: &ProxySharedState,
-    ip_tracker: &UserIpTracker,
-    tls_cache: Option<&TlsFrontCache>,
-    config: &ProxyConfig,
+    runtime: &RuntimeGeneration,
+    web_publication: &crate::web::control::WebRuntimePublication,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    let stats = &runtime.stats;
+    let beobachten = &runtime.beobachten;
+    let shared_state = &runtime.proxy_shared;
+    let ip_tracker = &runtime.ip_tracker;
+    let tls_cache = runtime.tls_cache.as_deref();
+    let config = runtime.config();
+
     if req.uri().path() == "/metrics" {
-        let body = render_metrics(stats, shared_state, config, ip_tracker, tls_cache).await;
+        let body = render_metrics(
+            stats,
+            shared_state,
+            &config,
+            ip_tracker,
+            tls_cache,
+            web_publication,
+        )
+        .await;
         let resp = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
@@ -230,7 +235,7 @@ async fn handle<B>(
     }
 
     if req.uri().path() == "/beobachten" {
-        let body = render_beobachten(stats, beobachten, config);
+        let body = render_beobachten(stats, beobachten, &config);
         let resp = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/plain; charset=utf-8")
@@ -432,6 +437,7 @@ async fn render_metrics(
     config: &ProxyConfig,
     ip_tracker: &UserIpTracker,
     tls_cache: Option<&TlsFrontCache>,
+    web_publication: &crate::web::control::WebRuntimePublication,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(4096);
@@ -3856,6 +3862,7 @@ async fn render_metrics(
         unique_ip_suppressed
     );
 
+    web::render(&mut out, web_publication, config);
     out
 }
 
@@ -3869,6 +3876,11 @@ mod tests {
     use crate::tls_front::types::{
         CachedTlsData, ParsedServerHello, TlsBehaviorProfile, TlsCertPayload, TlsProfileSource,
     };
+
+    fn test_web_publication() -> crate::web::control::WebRuntimePublication {
+        let control = crate::web::control::WebRuntimeControl::new();
+        control.subscribe().borrow().clone()
+    }
 
     #[tokio::test]
     async fn test_render_metrics_format() {
@@ -3937,7 +3949,15 @@ mod tests {
             .await
             .unwrap();
 
-        let output = render_metrics(&stats, shared_state.as_ref(), &config, &tracker, None).await;
+        let output = render_metrics(
+            &stats,
+            shared_state.as_ref(),
+            &config,
+            &tracker,
+            None,
+            &test_web_publication(),
+        )
+        .await;
 
         assert!(output.contains(&format!(
             "telemt_build_info{{version=\"{}\"}} 1",
@@ -4065,7 +4085,15 @@ mod tests {
             )
             .await;
 
-        let output = render_metrics(&stats, &shared_state, &config, &tracker, Some(&cache)).await;
+        let output = render_metrics(
+            &stats,
+            &shared_state,
+            &config,
+            &tracker,
+            Some(&cache),
+            &test_web_publication(),
+        )
+        .await;
 
         assert!(output.contains("telemt_tls_front_profile_domains{status=\"configured\"} 2"));
         assert!(output.contains("telemt_tls_front_profile_domains{status=\"emitted\"} 2"));
@@ -4113,7 +4141,15 @@ mod tests {
         let shared_state = ProxySharedState::new();
         let tracker = UserIpTracker::new();
         let config = ProxyConfig::default();
-        let output = render_metrics(&stats, &shared_state, &config, &tracker, None).await;
+        let output = render_metrics(
+            &stats,
+            &shared_state,
+            &config,
+            &tracker,
+            None,
+            &test_web_publication(),
+        )
+        .await;
         assert!(output.contains("telemt_connections_total 0"));
         assert!(output.contains("telemt_connections_bad_total 0"));
         assert!(output.contains("telemt_handshake_timeouts_total 0"));
@@ -4137,7 +4173,15 @@ mod tests {
         let mut config = ProxyConfig::default();
         config.access.user_max_unique_ips_global_each = 2;
 
-        let output = render_metrics(&stats, &shared_state, &config, &tracker, None).await;
+        let output = render_metrics(
+            &stats,
+            &shared_state,
+            &config,
+            &tracker,
+            None,
+            &test_web_publication(),
+        )
+        .await;
 
         assert!(output.contains("telemt_user_unique_ips_limit{user=\"alice\"} 2"));
         assert!(output.contains("telemt_user_unique_ips_utilization{user=\"alice\"} 0.500000"));
@@ -4149,7 +4193,15 @@ mod tests {
         let shared_state = ProxySharedState::new();
         let tracker = UserIpTracker::new();
         let config = ProxyConfig::default();
-        let output = render_metrics(&stats, &shared_state, &config, &tracker, None).await;
+        let output = render_metrics(
+            &stats,
+            &shared_state,
+            &config,
+            &tracker,
+            None,
+            &test_web_publication(),
+        )
+        .await;
         assert!(output.contains("# TYPE telemt_uptime_seconds gauge"));
         assert!(output.contains("# TYPE telemt_connections_total counter"));
         assert!(output.contains("# TYPE telemt_connections_bad_total counter"));
@@ -4214,27 +4266,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_endpoint_integration() {
-        let stats = Arc::new(Stats::new());
-        let beobachten = Arc::new(BeobachtenStore::new());
-        let shared_state = ProxySharedState::new();
-        let tracker = UserIpTracker::new();
         let mut config = ProxyConfig::default();
-        stats.increment_connects_all();
-        stats.increment_connects_all();
-        stats.increment_connects_all();
+        config.general.beobachten = true;
+        config.general.beobachten_minutes = 10;
+        let runtime = crate::maestro::generation::test_runtime_generation(1, config);
+        let web_publication = test_web_publication();
+        runtime.stats.increment_connects_all();
+        runtime.stats.increment_connects_all();
+        runtime.stats.increment_connects_all();
 
         let req = Request::builder().uri("/metrics").body(()).unwrap();
-        let resp = handle(
-            req,
-            &stats,
-            &beobachten,
-            shared_state.as_ref(),
-            &tracker,
-            None,
-            &config,
-        )
-        .await
-        .unwrap();
+        let resp = handle(req, &runtime, &web_publication).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(
@@ -4251,25 +4293,13 @@ mod tests {
                 ))
         );
 
-        config.general.beobachten = true;
-        config.general.beobachten_minutes = 10;
-        beobachten.record(
+        runtime.beobachten.record(
             "TLS-scanner",
             "203.0.113.10".parse::<IpAddr>().unwrap(),
             Duration::from_secs(600),
         );
         let req_beob = Request::builder().uri("/beobachten").body(()).unwrap();
-        let resp_beob = handle(
-            req_beob,
-            &stats,
-            &beobachten,
-            shared_state.as_ref(),
-            &tracker,
-            None,
-            &config,
-        )
-        .await
-        .unwrap();
+        let resp_beob = handle(req_beob, &runtime, &web_publication).await.unwrap();
         assert_eq!(resp_beob.status(), StatusCode::OK);
         let body_beob = resp_beob.into_body().collect().await.unwrap().to_bytes();
         let beob_text = std::str::from_utf8(body_beob.as_ref()).unwrap();
@@ -4277,17 +4307,7 @@ mod tests {
         assert!(beob_text.contains("203.0.113.10-1"));
 
         let req404 = Request::builder().uri("/other").body(()).unwrap();
-        let resp404 = handle(
-            req404,
-            &stats,
-            &beobachten,
-            shared_state.as_ref(),
-            &tracker,
-            None,
-            &config,
-        )
-        .await
-        .unwrap();
+        let resp404 = handle(req404, &runtime, &web_publication).await.unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
     }
 }

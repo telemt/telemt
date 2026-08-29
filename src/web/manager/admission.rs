@@ -1,9 +1,9 @@
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use super::state::{allocate_stream_port, allow_rate, decrement_map, release_stream_port};
 use super::{ProfileKey, WebProcessRuntime};
+use crate::web::telemetry::WebRejectionReason;
 
 impl WebProcessRuntime {
     /// Reserves one process-wide and per-profile live logical-stream slot.
@@ -17,14 +17,16 @@ impl WebProcessRuntime {
         let _operator_admission = match self.try_operator_admission() {
             Ok(admission) => admission,
             Err(error) => {
-                self.streams_rejected.fetch_add(1, Ordering::Relaxed);
+                self.telemetry.record_stream_rejected();
                 return Err(error);
             }
         };
         let now = Instant::now();
         let mut state = self.stream_admission.lock();
         if state.closed {
-            self.streams_rejected.fetch_add(1, Ordering::Relaxed);
+            self.telemetry.record_stream_rejected();
+            self.telemetry
+                .record_rejection(WebRejectionReason::RuntimeClosed);
             return Err(super::ManagerError::Closed);
         }
         if state.streams_live >= self.limits.max_streams_global
@@ -34,25 +36,26 @@ impl WebProcessRuntime {
                 .copied()
                 .unwrap_or(0)
                 >= max_streams
-            || !allow_rate(
-                &mut state.stream_rate,
-                now,
-                self.limits.new_streams_per_minute,
-                self.limits.new_streams_burst,
-            )
         {
-            self.streams_rejected.fetch_add(1, Ordering::Relaxed);
-            self.limit_hits.fetch_add(1, Ordering::Relaxed);
+            self.record_stream_rejected_reason(WebRejectionReason::StreamCapacity);
+            return Err(super::ManagerError::Limit);
+        }
+        if !allow_rate(
+            &mut state.stream_rate,
+            now,
+            self.limits.new_streams_per_minute,
+            self.limits.new_streams_burst,
+        ) {
+            self.record_stream_rejected_reason(WebRejectionReason::StreamRate);
             return Err(super::ManagerError::Limit);
         }
         let Some(peer_port) = allocate_stream_port(&mut state, client_ip, public_addr) else {
-            self.streams_rejected.fetch_add(1, Ordering::Relaxed);
-            self.limit_hits.fetch_add(1, Ordering::Relaxed);
+            self.record_stream_rejected_reason(WebRejectionReason::StreamTupleExhausted);
             return Err(super::ManagerError::Limit);
         };
         state.streams_live += 1;
         *state.streams_per_profile.entry(profile_key).or_insert(0) += 1;
-        self.streams_opened.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.record_stream_opened();
         Ok(peer_port)
     }
 
@@ -76,8 +79,14 @@ impl WebProcessRuntime {
 
     /// Records a logical stream rejected outside manager quota acquisition.
     pub(crate) fn record_stream_rejected(&self) {
-        self.streams_rejected.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.record_stream_rejected();
         self.record_limit_hit();
+    }
+
+    /// Records one logical stream rejection with its operational cause.
+    pub(crate) fn record_stream_rejected_reason(&self, reason: WebRejectionReason) {
+        self.record_stream_rejected();
+        self.telemetry.record_rejection(reason);
     }
 }
 

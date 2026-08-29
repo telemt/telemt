@@ -12,6 +12,9 @@ use super::web_debug::WebDebugConfig;
 // Serialized WEB defaults remain separate from the runtime data model.
 mod defaults;
 use defaults::*;
+// Accepted-socket overload policy remains separate from the bulky WEB data model.
+mod overload;
+pub use overload::WebHttpConnectionCapacityAction;
 
 /// Client-facing secret representation used to derive a WEB capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -95,6 +98,9 @@ pub struct WebLimitsConfig {
     /// Process-wide accepted WEB HTTP connection ceiling.
     #[serde(default = "default_web_max_http_connections")]
     pub max_http_connections: usize,
+    /// Accepted overload sockets allowed to wait or emit a retryable response.
+    #[serde(default = "default_web_max_http_overload_connections")]
+    pub max_http_overload_connections: usize,
     /// Process-wide concurrently executing HTTP handler ceiling.
     #[serde(default = "default_web_max_http_handlers")]
     pub max_http_handlers: usize,
@@ -226,6 +232,7 @@ impl Default for WebLimitsConfig {
             carrier_batch_bytes: default_web_carrier_batch_bytes(),
             max_frames_per_body: default_web_max_frames_per_body(),
             max_http_connections: default_web_max_http_connections(),
+            max_http_overload_connections: default_web_max_http_overload_connections(),
             max_http_handlers: default_web_max_http_handlers(),
             max_lane_open_waits_per_session: default_web_max_lane_open_waits_per_session(),
             pending_bytes_per_lane: default_web_pending_bytes_per_lane(),
@@ -333,6 +340,9 @@ pub struct WebTimeoutsConfig {
     /// Maximum idle lifetime of a WEB HTTP keep-alive connection.
     #[serde(default = "default_web_http_idle_secs")]
     pub http_idle_secs: u64,
+    /// Per-phase wait or response deadline for accepted HTTP overload sockets.
+    #[serde(default = "default_web_http_overload_timeout_ms")]
+    pub http_overload_timeout_ms: u64,
     /// Maximum graceful wait for WEB connections and process-owned tasks.
     #[serde(default = "default_web_shutdown_secs")]
     pub shutdown_secs: u64,
@@ -364,6 +374,7 @@ impl Default for WebTimeoutsConfig {
             bootstrap_lifetime_secs: default_web_bootstrap_lifetime_secs(),
             reconnect_grace_secs: default_web_reconnect_grace_secs(),
             http_idle_secs: default_web_http_idle_secs(),
+            http_overload_timeout_ms: default_web_http_overload_timeout_ms(),
             shutdown_secs: default_web_shutdown_secs(),
             decoy_header_secs: default_web_decoy_header_timeout_secs(),
         }
@@ -401,6 +412,9 @@ pub struct WebConfig {
     /// Controls the evidence thresholds used by automatic carrier ranking.
     #[serde(default)]
     pub carrier_negotiation_aggressiveness: WebCarrierNegotiationAggressiveness,
+    /// Action applied when accepted HTTP connection capacity is exhausted.
+    #[serde(default)]
+    pub http_connection_capacity_action: WebHttpConnectionCapacityAction,
     /// Hard process and protocol limits.
     #[serde(default)]
     pub limits: WebLimitsConfig,
@@ -447,6 +461,7 @@ impl Default for WebConfig {
             carriers: WebCarriers::default(),
             carrier_learning: default_web_carrier_learning(),
             carrier_negotiation_aggressiveness: WebCarrierNegotiationAggressiveness::default(),
+            http_connection_capacity_action: WebHttpConnectionCapacityAction::default(),
             limits: WebLimitsConfig::default(),
             debug: WebDebugConfig::default(),
             timeouts: WebTimeoutsConfig::default(),

@@ -284,10 +284,13 @@ impl WebSession {
     }
 
     fn reserve_stream_locked(&self, state: &mut SessionState) -> Option<u16> {
+        let manager = self.manager.upgrade()?;
         if state.active_peer_ports.len() >= self.profile.max_streams_per_session {
+            manager.record_stream_rejected_reason(
+                crate::web::telemetry::WebRejectionReason::StreamSessionCapacity,
+            );
             return None;
         }
-        let manager = self.manager.upgrade()?;
         let peer_port = manager
             .try_acquire_stream(
                 self.profile_key,

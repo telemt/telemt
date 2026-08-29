@@ -216,6 +216,11 @@ impl ProxyConfig {
         runtime_web::rebuild(self)
     }
 
+    /// Revalidates decoy separation after restart-only listener fields are resolved.
+    pub(crate) fn validate_web_decoy_listener_separation(&self) -> Result<()> {
+        validate_web::validate_decoy_listener_separation(self)
+    }
+
     pub(crate) fn runtime_user_auth(&self) -> Option<&UserAuthSnapshot> {
         self.runtime_user_auth.as_deref()
     }

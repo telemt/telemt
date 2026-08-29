@@ -5,6 +5,7 @@ const WEB_DEBUG_STATUS_PAGE_BYTES: usize = 8 * 1024 * 1024;
 const WEB_DEBUG_GROUP_SCRATCH_BYTES: usize = 4 * 1024 * 1024;
 const WEB_CARRIER_LEARNING_ENTRY_BYTES: usize = 512;
 const WEB_LANE_STATE_BYTES: usize = 512;
+const WEB_OVERLOAD_CONNECTION_BYTES: usize = 4 * 1024;
 
 /// Validates process-wide body, header, queue, static, and debug reservations.
 pub(super) fn validate(limits: &WebLimitsConfig) -> Result<()> {
@@ -29,6 +30,12 @@ pub(super) fn validate(limits: &WebLimitsConfig) -> Result<()> {
         .checked_mul(limits.max_header_bytes)
         .ok_or_else(|| {
             ProxyError::Config("web.limits HTTP header reservations overflow usize".to_string())
+        })?;
+    let overload_connection_reservation = limits
+        .max_http_overload_connections
+        .checked_mul(WEB_OVERLOAD_CONNECTION_BYTES)
+        .ok_or_else(|| {
+            ProxyError::Config("web.limits HTTP overload reservations overflow usize".to_string())
         })?;
     let debug_ring_index = limits
         .debug_records_capacity
@@ -77,6 +84,7 @@ pub(super) fn validate(limits: &WebLimitsConfig) -> Result<()> {
         .and_then(|value| value.checked_add(carrier_learning_reservation))
         .and_then(|value| value.checked_add(lane_state_reservation))
         .and_then(|value| value.checked_add(http_header_reservation))
+        .and_then(|value| value.checked_add(overload_connection_reservation))
         .ok_or_else(|| ProxyError::Config("web.limits byte ceilings overflow usize".to_string()))?;
     if reserved > limits.memory_envelope_bytes
         || limits.memory_envelope_bytes > MAX_WEB_MEMORY_ENVELOPE_BYTES

@@ -45,6 +45,9 @@ pub(crate) async fn prepare_runtime(
     quota_store: Arc<QuotaStore>,
     runtime_log_filter: RuntimeLogFilter,
 ) -> Result<PreparedRuntime, String> {
+    config
+        .validate_web_decoy_listener_separation()
+        .map_err(|error| error.to_string())?;
     let started_at_epoch_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

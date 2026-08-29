@@ -8,6 +8,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use super::{ManagerError, ProfileKey, WebProcessRuntime, WebSocketBudgetLease};
+use crate::web::telemetry::WebRejectionReason;
 
 // Deterministic victim ordering remains isolated from registry mutation.
 mod policy;
@@ -208,7 +209,7 @@ pub(super) async fn admit(
         return Err(ManagerError::Closed);
     }
     let liveness_interval_ms = liveness_interval.as_millis().min(u128::from(u64::MAX)) as u64;
-    match try_admit(
+    let capacity_reason = match try_admit(
         runtime,
         owner,
         session_id,
@@ -220,12 +221,23 @@ pub(super) async fn admit(
         &parent_cancellation,
     ) {
         Ok(connection) => return Ok(connection),
-        Err(TryAdmitError::Conflict) => return Err(ManagerError::Concurrent),
-        Err(TryAdmitError::Closed) => return Err(ManagerError::Closed),
-        Err(TryAdmitError::Capacity) => {}
-    }
+        Err(TryAdmitError::Conflict) => {
+            runtime
+                .telemetry()
+                .record_rejection(WebRejectionReason::Concurrent);
+            return Err(ManagerError::Concurrent);
+        }
+        Err(TryAdmitError::Closed) => {
+            runtime
+                .telemetry()
+                .record_rejection(WebRejectionReason::RuntimeClosed);
+            return Err(ManagerError::Closed);
+        }
+        Err(TryAdmitError::Capacity(reason)) => reason,
+    };
     let Some(victim) = select_victim(runtime, owner, session_id, client_ip, None, true) else {
         runtime.record_limit_hit();
+        runtime.telemetry().record_rejection(capacity_reason);
         return Err(ManagerError::Limit);
     };
     let released = victim.released.cancelled();
@@ -249,17 +261,28 @@ pub(super) async fn admit(
         &parent_cancellation,
     ) {
         Ok(connection) => Ok(connection),
-        Err(TryAdmitError::Conflict) => Err(ManagerError::Concurrent),
-        Err(TryAdmitError::Closed) => Err(ManagerError::Closed),
-        Err(TryAdmitError::Capacity) => {
+        Err(TryAdmitError::Conflict) => {
+            runtime
+                .telemetry()
+                .record_rejection(WebRejectionReason::Concurrent);
+            Err(ManagerError::Concurrent)
+        }
+        Err(TryAdmitError::Closed) => {
+            runtime
+                .telemetry()
+                .record_rejection(WebRejectionReason::RuntimeClosed);
+            Err(ManagerError::Closed)
+        }
+        Err(TryAdmitError::Capacity(reason)) => {
             runtime.record_limit_hit();
+            runtime.telemetry().record_rejection(reason);
             Err(ManagerError::Limit)
         }
     }
 }
 
 enum TryAdmitError {
-    Capacity,
+    Capacity(WebRejectionReason),
     Conflict,
     Closed,
 }
@@ -292,10 +315,13 @@ fn try_admit(
     }
     let slot = Arc::clone(&runtime.websocket_connections)
         .try_acquire_owned()
-        .map_err(|_| TryAdmitError::Capacity)?;
-    let base_budget = runtime
-        .try_websocket_base_budget(owner, base_bytes)
-        .ok_or(TryAdmitError::Capacity)?;
+        .map_err(|_| TryAdmitError::Capacity(WebRejectionReason::WebSocketConnectionCapacity))?;
+    let base_budget =
+        runtime
+            .try_websocket_base_budget(owner, base_bytes)
+            .ok_or(TryAdmitError::Capacity(
+                WebRejectionReason::WebSocketBytesCapacity,
+            ))?;
     if parent_cancellation.is_cancelled() {
         return Err(TryAdmitError::Closed);
     }
@@ -304,7 +330,7 @@ fn try_admit(
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)
         })
-        .map_err(|_| TryAdmitError::Capacity)?;
+        .map_err(|_| TryAdmitError::Capacity(WebRejectionReason::WebSocketConnectionCapacity))?;
     let now = runtime.websocket_tick();
     let entry = Arc::new(WebSocketEntry {
         id,

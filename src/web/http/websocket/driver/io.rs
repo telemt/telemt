@@ -46,7 +46,7 @@ pub(super) async fn reserve_data(
     cancellation: &CancellationToken,
     timeout: Duration,
 ) -> Result<WebSocketBudgetLease, ()> {
-    tokio::time::timeout(timeout, async {
+    match tokio::time::timeout(timeout, async {
         loop {
             if cancellation.is_cancelled() {
                 return Err(());
@@ -63,7 +63,15 @@ pub(super) async fn reserve_data(
         }
     })
     .await
-    .map_err(|_| ())?
+    {
+        Ok(result) => result,
+        Err(_) => {
+            runtime.telemetry().record_rejection(
+                crate::web::telemetry::WebRejectionReason::WebSocketBytesCapacity,
+            );
+            Err(())
+        }
+    }
 }
 
 pub(super) async fn process_multiplex(

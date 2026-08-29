@@ -58,8 +58,13 @@ impl ListenerManager {
             .map(|listener| listener.spec.addr)
             .collect();
         let has_web = !web_listeners.is_empty();
-        let web_runtime =
-            has_web.then(|| WebProcessRuntime::start_with_trace(active_runtime.clone(), trace));
+        let web_runtime = has_web.then(|| {
+            WebProcessRuntime::start_with_trace(
+                active_runtime.clone(),
+                trace,
+                web_control.telemetry(),
+            )
+        });
         let mut slots = BTreeMap::new();
         for listener in bound.listeners {
             let addr = listener.spec.addr;
@@ -457,6 +462,32 @@ mod tests {
         let pending = manager.begin_transition(prepared).await.unwrap();
         manager.finish_transition(pending);
         TcpStream::connect(new_addr).await.unwrap();
+
+        manager.shutdown().await.unwrap();
+        runtime.stop_sessions().await;
+    }
+
+    #[tokio::test]
+    async fn acceptor_liveness_counts_only_web_listeners() {
+        let runtime = test_runtime_generation(1, ProxyConfig::default());
+        let active_runtime = Arc::new(ArcSwap::from(runtime.clone()));
+        let (native_listener, _native_addr) = bound_listener().await;
+        let (mut web_listener, _web_addr) = bound_listener().await;
+        web_listener.spec.transport = ListenerTransport::Web;
+        let bound = BoundListeners {
+            listeners: vec![native_listener, web_listener],
+            #[cfg(unix)]
+            unix_listener: None,
+        };
+        let trace = WebTraceStore::new(
+            runtime.config().web.debug.clone(),
+            &runtime.config().web.limits,
+        );
+        let control = WebRuntimeControl::new();
+        let receiver = control.subscribe();
+        let mut manager = ListenerManager::start(bound, active_runtime, trace, control);
+
+        assert_eq!(receiver.borrow().telemetry.live_acceptors(), 1);
 
         manager.shutdown().await.unwrap();
         runtime.stop_sessions().await;

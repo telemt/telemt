@@ -46,10 +46,7 @@ async fn live_runtime() -> (
     Arc<crate::maestro::generation::RuntimeGeneration>,
     TcpListener,
 ) {
-    let generation = test_runtime_generation(
-        1,
-        runtime_config([71; 32], WebCarrier::Https),
-    );
+    let generation = test_runtime_generation(1, runtime_config([71; 32], WebCarrier::Https));
     let runtime = WebProcessRuntime::start(Arc::new(ArcSwap::from(Arc::clone(&generation))));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     (runtime, generation, listener)
@@ -100,12 +97,7 @@ async fn pause_preserves_decoy_retry_and_exact_session_replay() {
     let hello = frame::encode(FrameType::Hello, 0, &[1]);
 
     runtime.pause_operator().await.unwrap();
-    let paused_create = request(
-        &listener,
-        &runtime,
-        create_request(&bootstrap, &hello),
-    )
-    .await;
+    let paused_create = request(&listener, &runtime, create_request(&bootstrap, &hello)).await;
     let (paused_headers, _) = split_response(&paused_create);
     assert!(paused_headers.starts_with(b"HTTP/1.1 503"));
     assert_eq!(response_header(paused_headers, "retry-after"), "1");
@@ -131,26 +123,20 @@ async fn pause_preserves_decoy_retry_and_exact_session_replay() {
     let decoy = request(&listener, &runtime, decoy).await;
     let (decoy_headers, decoy_body) = split_response(&decoy);
     assert!(decoy_headers.starts_with(b"HTTP/1.1 200"));
-    assert!(!decoy_body.windows(11).any(|window| window == b"bootstrap=\""));
+    assert!(
+        !decoy_body
+            .windows(11)
+            .any(|window| window == b"bootstrap=\"")
+    );
 
     runtime.resume_operator().await.unwrap();
-    let created = request(
-        &listener,
-        &runtime,
-        create_request(&bootstrap, &hello),
-    )
-    .await;
+    let created = request(&listener, &runtime, create_request(&bootstrap, &hello)).await;
     let (created_headers, _) = split_response(&created);
     assert!(created_headers.starts_with(b"HTTP/1.1 200"));
     let token = response_header(created_headers, "x-session-token").to_string();
 
     runtime.pause_operator().await.unwrap();
-    let replay = request(
-        &listener,
-        &runtime,
-        create_request(&bootstrap, &hello),
-    )
-    .await;
+    let replay = request(&listener, &runtime, create_request(&bootstrap, &hello)).await;
     let (replay_headers, _) = split_response(&replay);
     assert!(replay_headers.starts_with(b"HTTP/1.1 200"));
     assert_eq!(response_header(replay_headers, "x-session-token"), token);
@@ -230,7 +216,10 @@ async fn paused_replacement_preserves_old_session_and_attempt_replay() {
     let replay = request(&listener, &runtime, first_request).await;
     let (replay_headers, _) = split_response(&replay);
     assert!(replay_headers.starts_with(b"HTTP/1.1 200"));
-    assert_eq!(response_header(replay_headers, "x-session-token"), first_token);
+    assert_eq!(
+        response_header(replay_headers, "x-session-token"),
+        first_token
+    );
 
     runtime.resume_operator().await.unwrap();
     let replacement = request(&listener, &runtime, replacement_request).await;
@@ -249,7 +238,10 @@ async fn client_delete_during_drain_completes_naturally() {
     let (runtime, generation, listener) = live_runtime().await;
     let bootstrap = issue_bootstrap(&runtime);
     let (_, token) = create_session(&listener, &runtime, &bootstrap).await;
-    runtime.drain_operator(Duration::from_secs(30)).await.unwrap();
+    runtime
+        .drain_operator(Duration::from_secs(30))
+        .await
+        .unwrap();
 
     let delete = format!(
         "DELETE /api/v1/session HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -281,8 +273,14 @@ async fn deadline_force_closes_all_sessions_and_requires_explicit_resume() {
     let bootstrap = issue_bootstrap(&runtime);
     let (_, token) = create_session(&listener, &runtime, &bootstrap).await;
 
-    let accepted = runtime.drain_operator(Duration::from_secs(30)).await.unwrap();
-    assert_eq!(serde_json::to_value(&accepted).unwrap()["state"], "draining");
+    let accepted = runtime
+        .drain_operator(Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&accepted).unwrap()["state"],
+        "draining"
+    );
     assert!(matches!(
         runtime.drain_operator(Duration::from_secs(30)).await,
         Err(OperatorLifecycleError::OperationInProgress)
@@ -323,7 +321,10 @@ async fn resume_before_deadline_cancels_drain_without_closing_existing_session()
     let bootstrap = issue_bootstrap(&runtime);
     let (_, token) = create_session(&listener, &runtime, &bootstrap).await;
 
-    runtime.drain_operator(Duration::from_secs(30)).await.unwrap();
+    runtime
+        .drain_operator(Duration::from_secs(30))
+        .await
+        .unwrap();
     let still_draining = runtime.pause_operator().await.unwrap();
     assert_eq!(
         serde_json::to_value(&still_draining).unwrap()["state"],

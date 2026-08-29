@@ -230,3 +230,34 @@ fn synlimited_endpoint_move_remains_restart_only() {
     assert_eq!(resolved.effective.server.listeners[0].port, Some(443));
     assert!(!resolved.runtime_changed);
 }
+
+#[test]
+fn deferred_listener_identity_cannot_create_an_effective_decoy_loop() {
+    let mut old = ProxyConfig::default();
+    old.server.listeners = vec![test_listener(18080)];
+    old.server.listeners[0].transport = crate::config::ListenerTransport::Web;
+    let mut desired = old.clone();
+    desired.server.listeners[0].port = Some(18081);
+    desired.server.listen_backlog = desired.server.listen_backlog.saturating_add(1);
+    desired.web.vhosts = vec![
+        serde_json::from_value(serde_json::json!({
+            "host": "proxy.example",
+            "public_addr": "203.0.113.10:443",
+            "decoy": {
+                "mode": "http_upstream",
+                "upstream": "http://127.0.0.1:18080"
+            },
+            "profiles": []
+        }))
+        .unwrap(),
+    ];
+
+    assert!(desired.validate_web_decoy_listener_separation().is_ok());
+    let resolved = resolve_reload_config(&old, &desired);
+    assert!(
+        resolved
+            .effective
+            .validate_web_decoy_listener_separation()
+            .is_err()
+    );
+}

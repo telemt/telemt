@@ -13,9 +13,11 @@ use crate::config::{ListenerTransport, RstOnCloseMode};
 use crate::proxy::ClientHandler;
 use crate::transport::socket::set_linger_zero;
 use crate::web::manager::WebProcessRuntime;
+use crate::web::telemetry::{WebAcceptorGuard, WebHttpConnectionOverloadOutcome};
 
 use super::bind::BoundTcpListener;
 use super::plan::ListenerBindSpec;
+use super::web_overload;
 use crate::maestro::generation::RuntimeGeneration;
 use crate::maestro::helpers::{
     expected_handshake_close_description, is_expected_handshake_eof, peer_close_description,
@@ -190,6 +192,7 @@ async fn run_accept_loop(
     web_runtime: Option<Arc<WebProcessRuntime>>,
     connections: TaskTracker,
     cancellation: CancellationToken,
+    _web_acceptor_guard: Option<WebAcceptorGuard>,
 ) {
     loop {
         let accepted = tokio::select! {
@@ -204,8 +207,45 @@ async fn run_accept_loop(
                         error!(addr = %spec.addr, "WEB listener has no process runtime");
                         return;
                     };
+                    web_runtime.telemetry().record_accept();
                     let Some(connection_permit) = web_runtime.try_http_connection() else {
-                        drop(stream);
+                        let config = web_runtime.active_generation().config();
+                        let action = config.web.http_connection_capacity_action;
+                        let phase_timeout =
+                            Duration::from_millis(config.web.timeouts.http_overload_timeout_ms);
+                        drop(config);
+                        if action == crate::config::WebHttpConnectionCapacityAction::Drop {
+                            web_runtime.telemetry().record_rejection(
+                                crate::web::telemetry::WebRejectionReason::HttpConnectionCapacity,
+                            );
+                            web_runtime
+                                .telemetry()
+                                .record_overload(WebHttpConnectionOverloadOutcome::Dropped);
+                            drop(stream);
+                            continue;
+                        }
+                        let Some(overload_permit) = web_runtime.try_http_overload_connection()
+                        else {
+                            web_runtime.telemetry().record_rejection(
+                                crate::web::telemetry::WebRejectionReason::HttpConnectionCapacity,
+                            );
+                            web_runtime.telemetry().record_overload(
+                                WebHttpConnectionOverloadOutcome::OverflowCapacityDrop,
+                            );
+                            drop(stream);
+                            continue;
+                        };
+                        connections.spawn(web_overload::serve(
+                            stream,
+                            peer_addr,
+                            spec.web_client_ip_source,
+                            Arc::clone(&spec.web_trusted_proxy_cidrs),
+                            Arc::clone(web_runtime),
+                            cancellation.clone(),
+                            overload_permit,
+                            action,
+                            phase_timeout,
+                        ));
                         continue;
                     };
                     connections.spawn(crate::web::http::serve_connection(
@@ -245,6 +285,9 @@ async fn run_accept_loop(
                 }
             }
             Err(error_value) => {
+                if let Some(web_runtime) = &web_runtime {
+                    web_runtime.telemetry().record_accept_error();
+                }
                 error!(addr = %spec.addr, error = %error_value, "TCP accept error");
                 tokio::select! {
                     biased;
@@ -262,8 +305,16 @@ impl ListenerSlot {
         active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
         web_runtime: Option<Arc<WebProcessRuntime>>,
     ) -> Self {
+        let web_runtime = if bound.spec.transport == ListenerTransport::Web {
+            web_runtime
+        } else {
+            None
+        };
         let cancellation = CancellationToken::new();
         let connections = TaskTracker::new();
+        let web_acceptor_guard = web_runtime
+            .as_ref()
+            .map(|runtime| runtime.telemetry().acceptor_guard());
         let task = tokio::spawn(run_accept_loop(
             bound.listener.clone(),
             bound.spec.clone(),
@@ -271,6 +322,7 @@ impl ListenerSlot {
             web_runtime.clone(),
             connections.clone(),
             cancellation.clone(),
+            web_acceptor_guard,
         ));
         Self {
             spec: bound.spec,
@@ -364,6 +416,10 @@ impl ListenerSlot {
         self.active_runtime = active_runtime.clone();
         self.cancellation = CancellationToken::new();
         self.connections = TaskTracker::new();
+        let web_acceptor_guard = self
+            .web_runtime
+            .as_ref()
+            .map(|runtime| runtime.telemetry().acceptor_guard());
         self.task = Some(tokio::spawn(run_accept_loop(
             self.listener.clone(),
             self.spec.clone(),
@@ -371,6 +427,7 @@ impl ListenerSlot {
             self.web_runtime.clone(),
             self.connections.clone(),
             self.cancellation.clone(),
+            web_acceptor_guard,
         )));
     }
 }

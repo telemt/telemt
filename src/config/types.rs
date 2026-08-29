@@ -53,8 +53,9 @@ pub use server::{
 };
 #[allow(unused_imports)]
 pub use web::{
-    WebCarrierNegotiationAggressiveness, WebConfig, WebDecoyConfig, WebLimitsConfig,
-    WebProfileConfig, WebSecretMode, WebTimeoutsConfig, WebVhostConfig,
+    WebCarrierNegotiationAggressiveness, WebConfig, WebDecoyConfig,
+    WebHttpConnectionCapacityAction, WebLimitsConfig, WebProfileConfig, WebSecretMode,
+    WebTimeoutsConfig, WebVhostConfig,
 };
 pub(crate) use web::{
     WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeVhost, WebStaticAsset,

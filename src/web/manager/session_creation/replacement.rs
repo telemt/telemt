@@ -48,7 +48,9 @@ impl WebProcessRuntime {
             return Err(ManagerError::Closed);
         }
         let Some((session_token, session_hash)) = new_unique_token(&generation, &state) else {
-            self.limit_hits.fetch_add(1, Ordering::Relaxed);
+            self.record_limit_hit();
+            self.telemetry
+                .record_rejection(crate::web::telemetry::WebRejectionReason::SessionCapacity);
             drop(state);
             self.cancel_replacement(bootstrap_hash, &replacement.old_session);
             return Err(ManagerError::Limit);
@@ -112,8 +114,8 @@ impl WebProcessRuntime {
         {
             *slot = Some(replacement.old_session.carrier());
         }
-        self.sessions_created.fetch_add(1, Ordering::Relaxed);
-        self.sessions_closed.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.record_session_created();
+        self.telemetry.record_session_closed();
         let result = CreateResult {
             token: session_token,
             carrier: replacement.carrier,
