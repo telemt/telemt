@@ -76,6 +76,7 @@ web_trusted_proxy_cidrs = ["127.0.0.1/32"]
 [web]
 enabled = true
 carrier = "https-lanes"
+http_connection_capacity_action = "drop"
 
 [[web.vhosts]]
 host = "proxy.example.com"
@@ -92,6 +93,8 @@ max_sessions = 8
 max_streams = 512
 max_streams_per_session = 64
 ```
+
+Accepted-socket overload handling is independently configurable. `drop` preserves the legacy close after `accept(2)`. `respond` writes an empty retryable `503` without parsing a request. `wait` waits outside the accept loop for ordinary connection capacity and then enters normal HTTP handling; timeout writes the same `503`. Both waiting and response writing use `web.timeouts.http_overload_timeout_ms` per phase. `web.limits.max_http_overload_connections` bounds sockets outside ordinary capacity and requires a process restart when changed; the action and timeout are hot-reloadable.
 
 ## Server-side carrier negotiation
 
@@ -144,7 +147,7 @@ Every pre-Upgrade authentication, shape, lane-reservation, or capacity failure f
 
 The WEB listener must use `proxy_protocol = false` and `reuse_allow = false`. It cannot use `client_mss`, `synlimit`, `announce`, or `announce_ip`. `web_trusted_proxy_cidrs` must be non-empty and must contain only the immediate NGINX or HAProxy peers; `/0` networks are rejected.
 
-The HTTP decoy origin must be a loopback, link-local, or private IP literal. Telemt preserves ordinary request method, path, query, headers, streamed body, response status, headers, and body while removing hop-by-hop headers. Malformed carrier requests have carrier credentials and bodies removed before falling back to the decoy.
+The HTTP decoy origin must be a loopback, link-local, or private IP literal. Telemt preserves ordinary request method, path, query, headers, streamed body, response status, headers, and body while removing hop-by-hop headers. Malformed carrier requests have carrier credentials and bodies removed before falling back to the decoy. A literal decoy endpoint that exactly matches an effective WEB listener, or is covered by its same-family wildcard address on the same port, is rejected. Indirect loops through DNS, NGINX, HAProxy, or another forwarding layer cannot be proven from Telemt configuration and must be excluded operationally.
 
 An immutable static-site snapshot can be used instead:
 
@@ -205,6 +208,14 @@ Place the `map` in NGINX's `http` context. `client_max_body_size` must be at lea
 
 Public HTTP/2 is mandatory for `https-lanes`; use the equivalent HTTP/2 directive supported by the installed NGINX release. WebSocket Upgrade requires HTTP/1.1, so the public endpoint must also permit HTTP/1.1 and the private NGINX-to-Telemt hop remains HTTP/1.1. Preserve `Connection`, `Upgrade`, and `Sec-WebSocket-*` exactly as shown. Ensure the upstream connection capacity can sustain the expected simultaneous lane polls or WebSocket lanes; `keepalive` controls the idle pool and is not a concurrency limit.
 
+### Distinguishing refusal from WEB capacity
+
+`connect() failed (111: Connection refused) while connecting to upstream` is a TCP-connect failure before Telemt accepts a socket. Check that the Telemt process is running, the effective WEB listener address and port match the NGINX upstream, both processes share the expected network namespace and address family, and no local firewall actively rejects the connection. Startup bind failure, terminal listener removal, or switching NGINX to a desired port before a restart-only listener change becomes effective can produce this symptom. Kernel listen-backlog pressure is separate and normally requires host `ListenOverflows`/`ListenDrops` telemetry.
+
+WEB capacity is enforced after successful `accept(2)`. Exhausting `max_http_connections` therefore produces the configured `drop`, `wait`, or `respond` outcome; it does not produce an upstream connect refusal. Handler, body, lane, stream, queue, and WebSocket limits have their own HTTP, decoy, or stream-local failure boundaries. Operator pause and drain also leave the WEB listener bound, so they cannot by themselves cause a refusal.
+
+Use `GET /v1/runtime/web/status` to correlate only Telemt-owned state. `ingress.accepting_connections` requires a running publication, a readable runtime, and one live acceptor for every effective WEB listener. `capacity.saturated_resources`, typed rejection totals, and overload outcomes identify failures after acceptance. `decoy_upstream` describes only Telemt's outgoing plain-HTTP decoy hop. None of these fields claims that the public NGINX TLS endpoint is reachable; use an external TCP/TLS probe and NGINX or HAProxy telemetry for that boundary.
+
 ## HAProxy TLS termination
 
 ```haproxy
@@ -236,6 +247,7 @@ The frontend or `defaults` section must also set `timeout client 65s` or longer 
 | WEB listener inventory, bind address, and trust policy | Process-owned; restart Telemt. |
 | Any `[web.limits]` value | Process-owned memory/resource contract; restart Telemt. |
 | `web.enabled`, carrier/negotiation policy, `web.debug`, timeouts, vhosts, profiles, and decoys | Applied by the config watcher or a runtime generation reload. |
+| Operator pause/drain state | Process-owned and ephemeral; survives generation reload, never writes config, and resets to `running` after process restart. |
 | Existing HTTP connections and WEB sessions | Keep their acquisition-time HTTP idle limit, carrier candidates, limits, body timeout, closed-token replay lifetime, and absolute session/negotiation deadlines; each issued bridge embeds its request, retry, and probe-coalescing values. WebSocket upgrade, open, write, backpressure, and eviction operations use the parent session's frozen deadlines. Newly issued bridges use the active policy, while new logical streams use the active relay generation. |
 | Process shutdown | Captures the latest reloaded `web.timeouts.shutdown_secs` once and shares that single absolute deadline across listener acceptors and connections plus WEB sessions and auxiliary tasks. The waits do not receive sequential per-component budgets. |
 
@@ -257,6 +269,7 @@ WEB configuration, runtime status, and bounded runtime controls share the authen
 | Inspect bounded server-side WEB request and lifecycle details | Yes, through authenticated `GET /web-status`. |
 | Inspect lifecycle, capacity planes, learning/debug state, and live sessions | Yes, through `GET /v1/runtime/web/status` and `/v1/runtime/web/sessions`. |
 | Close selected live WEB sessions | Yes, through the asynchronous `POST /v1/runtime/web/sessions/close` operation. |
+| Pause, deadline-drain, or resume new WEB work | Yes, through `/v1/runtime/web/lifecycle/{pause,drain,resume}`. |
 | Clear debug records or reset carrier learning | Yes, through the corresponding runtime POST endpoints. |
 | Manage `[access.users]` | Yes, through `/v1/users`. User creation does not create a WEB profile. |
 | Revoke one user | Yes. `/v1/users/{username}/disable` updates admission immediately and cancels that user's active sessions. |
@@ -276,17 +289,24 @@ The API whitelist checks the direct TCP peer and does not trust `X-Forwarded-For
 
 ### Runtime status and control
 
-`GET /v1/runtime/web/status` always returns the published lifecycle (`starting`, `no_web_listener`, `running`, `draining`, `drained`, or `deadline_exceeded`), its epoch and age, effective listener addresses, and availability. When the process-owned WEB runtime is alive, `runtime` adds its random 128-bit `runtime_instance`, active generation, immutable limits, plane-local capacity counters, carrier-learning/debug epochs, and totals. Status collection uses non-blocking plane reads: a contended plane is omitted and named in `partial`; the endpoint never waits for, cleans up, or mutates the data plane.
+`GET /v1/runtime/web/status` always returns the published ingress lifecycle (`starting`, `no_web_listener`, `running`, `draining`, `drained`, or `deadline_exceeded`), its epoch and age, effective listener addresses, and backward-compatible runtime availability. `ingress` independently reports configured listeners, live acceptors, accepting state, accept totals, and a stable reason. `capacity` reports effective accepted-socket overload policy, fixed resource usage, instantaneous saturation, partial planes, typed rejection decisions, and overload outcomes. `decoy_upstream` reports fixed outcomes and the age of the latest internal origin result. When the process-owned WEB runtime is alive, `operator_lifecycle` independently exposes `running`, `paused`, `draining`, `force_closing`, or `drained`, its own epoch/admission flags, and the active or latest drain. `runtime` adds the random 128-bit `runtime_instance`, active generation, immutable limits, plane-local capacity counters, carrier-learning/debug epochs, and totals. Runtime plane collection uses non-blocking reads: a contended plane is omitted and named in `partial`; the endpoint never waits for, cleans up, or mutates the data plane.
+
+Prometheus exports the same process-owned planes as fixed-cardinality `telemt_web_*` families: ingress and operator one-hot states, listener/accept counters, capacity usage and saturation, typed terminal rejections, accepted-socket overload outcomes, internal decoy-origin outcomes, and existing session/stream/carrier totals. Labels are closed enums or fixed resource names; user, host, client IP, token, profile key, runtime instance, listener address, and generation ID are never labels. A successful `wait` outcome does not increment a rejection counter.
 
 `GET /v1/runtime/web/sessions` returns at most 50 sessions by default and at most 200 when `limit` is supplied. Its ordered scan is capped at 1000 candidates. `cursor` and `session_ref` use the opaque canonical form `ws1.<runtime-instance>.<lowercase-hex-id>`; exact `session_ref` is mutually exclusive with `cursor` and `limit`. Filters are `ip`, `host`, `user`, `user_agent_id`, `key_id`, `carrier`, and `state`; duplicate or unknown query fields are rejected. The detail route is `GET /v1/runtime/web/sessions/{session_ref}`. A retained closed-session tombstone returns `410`; a contended exact snapshot returns `503 web_snapshot_busy`. Responses expose bounded non-secret metadata and never expose bootstrap/session bearers, capabilities, secret hashes, or synthetic/KDF ports.
 
 Every runtime POST requires `Content-Type: application/json` exactly, rejects unknown JSON fields, obeys API authentication, whitelist, and `read_only`, and carries the current `runtime_instance` as an ABA fence. Available controls are:
 
+- `POST /v1/runtime/web/lifecycle/pause` with `{"runtime_instance":"..."}`. It blocks new bootstrap, session incarnation, replacement, and logical-stream admission after a linearizable fence. Existing carrier exchanges and streams continue, exact session replay remains available, and bridge rejection stays on the decoy route.
+- `POST /v1/runtime/web/lifecycle/drain` with `{"runtime_instance":"...","timeout_secs":30}`. It returns `202`, keeps the same admission fence closed, and waits asynchronously for sessions, streams, and session-owned WebSockets. At the monotonic deadline it signals close to every remaining live session and reports `force_closing` until zero is confirmed. Natural and forced completion both remain closed until resume. A concurrent second drain returns `409 web_lifecycle_in_progress`.
+- `POST /v1/runtime/web/lifecycle/resume` with `{"runtime_instance":"..."}`. It cancels an active drain and reopens only operator admission. If forced close already committed, old session cancellation cannot be undone. Config, user, generation, and terminal shutdown gates still dominate.
 - `POST /v1/runtime/web/sessions/close` with one selector: `{"kind":"refs","session_refs":[...]}`, `{"kind":"filter",...}`, or `{"kind":"all"}`. Exact refs are limited to 200, a filter must be non-empty, only one close operation may run, and `all` is rejected while effective issuance remains enabled. The `202` response returns `operation_id`; poll `GET /v1/runtime/web/operations/{operation_id}`. The operation scans only sessions at or below its submission high-water mark in chunks of 128.
 - `POST /v1/runtime/web/debug/clear` with `{"runtime_instance":"..."}`. The response reports cleared records, bytes still leased by already rendered snapshots, and the new epoch. In-flight writers from the old epoch cannot repopulate the ring.
 - `POST /v1/runtime/web/carrier-learning/reset` with the same body shape. It clears retained process-local evidence and advances the learning epoch; already frozen attempt chains and live sessions are unchanged.
 
 For a deterministic close-all, patch `{"web":{"enabled":false}}` with runtime reload enabled, wait until `runtime.manager.issuance_enabled` is `false`, submit the `all` selector using that same `runtime_instance`, and poll the operation to a terminal state. Disabling WEB stops new bootstrap/session issuance but never implicitly closes existing sessions.
+
+Operator lifecycle is WEB-only and does not change global readiness, liveness, native TCP/Unix listeners, TLS-fronting, or fallback behavior. A pre-pause WebSocket lane reservation is already admitted logical work: it may finish opening and remains included in drain accounting. Lifecycle rejection consumes no rate/quota tokens and adds no hot-path relay lock.
 
 ### Server-side WEB debug view
 

@@ -111,6 +111,9 @@ Notes:
 | `GET` | `/v1/runtime/web/operations/{operation_id}` | none | `200` | `ControlOperationStatus` |
 | `POST` | `/v1/runtime/web/debug/clear` | `RuntimeInstanceRequest` | `200` | `DebugClearData` |
 | `POST` | `/v1/runtime/web/carrier-learning/reset` | `RuntimeInstanceRequest` | `200` | `LearningResetData` |
+| `POST` | `/v1/runtime/web/lifecycle/pause` | `RuntimeInstanceRequest` | `200` | `OperatorLifecycleStatus` |
+| `POST` | `/v1/runtime/web/lifecycle/drain` | `DrainRequest` | `202` | `OperatorLifecycleStatus` |
+| `POST` | `/v1/runtime/web/lifecycle/resume` | `RuntimeInstanceRequest` | `200` | `OperatorLifecycleStatus` |
 | `GET` | `/v1/stats/users/active-ips` | none | `200` | `UserActiveIps[]` |
 | `GET` | `/v1/stats/users` | none | `200` | `UserInfo[]` |
 | `GET` | `/v1/config` | none | `200` | `ConfigData` |
@@ -159,6 +162,9 @@ Notes:
 | `GET /v1/runtime/web/operations/{operation_id}` | Returns one of the 32 most recently retained WEB close-operation states. |
 | `POST /v1/runtime/web/debug/clear` | Clears the bounded WEB debug ring under an epoch fence. |
 | `POST /v1/runtime/web/carrier-learning/reset` | Clears process-local carrier-learning evidence without changing live attempt chains. |
+| `POST /v1/runtime/web/lifecycle/pause` | Ephemerally closes new WEB work admission without closing existing sessions or streams. |
+| `POST /v1/runtime/web/lifecycle/drain` | Starts one asynchronous graceful WEB drain under a bounded monotonic deadline. |
+| `POST /v1/runtime/web/lifecycle/resume` | Cancels an active drain, if any, and reopens only the operator-owned admission fence. |
 | `GET /v1/stats/users/active-ips` | Returns users that currently have non-empty active source-IP lists. |
 | `GET /v1/stats/users` | Alias of `GET /v1/users`; returns disk-first user views with runtime lag flag. |
 | `GET /v1/config` | Returns the current editable config sections as JSON (no `access.*`) plus the revision. |
@@ -193,6 +199,7 @@ Notes:
 | `409` | `web_runtime_mismatch` | A runtime instance, session reference, or operation reference belongs to another WEB process instance. |
 | `409` | `web_issuance_enabled` | A WEB close-all operation was requested while effective issuance remained enabled. |
 | `409` | `web_operation_in_progress` | Another bounded WEB close operation is active. |
+| `409` | `web_lifecycle_in_progress` | Another WEB drain operation is active. |
 | `409` | `user_exists` | User already exists on create. |
 | `409` | `last_user_forbidden` | Attempt to delete last configured user. |
 | `413` | `payload_too_large` | Body exceeds `request_body_limit_bytes`. |
@@ -328,7 +335,7 @@ Sections absent from the config file are absent from the response (not `null`). 
 
 ### WEB runtime identity and lifecycle
 
-The WEB control plane is process-fenced. `runtime_instance` is a random 128-bit lowercase hexadecimal value created with the process-owned WEB runtime. Session references use `ws1.<runtime_instance>.<16-lowercase-hex-id>` and close-operation references use `wo1.<runtime_instance>.<16-lowercase-hex-id>`. Treat all three as opaque. A reference from another process instance returns `409 web_runtime_mismatch`, preventing an old controller from targeting reused counters after restart.
+The WEB control plane is process-fenced. `runtime_instance` is a random 128-bit lowercase hexadecimal value created with the process-owned WEB runtime. Session references use `ws1.<runtime_instance>.<16-lowercase-hex-id>`, close-operation references use `wo1.<runtime_instance>.<16-lowercase-hex-id>`, and drain references use `wd1.<runtime_instance>.<16-lowercase-hex-id>`. Treat all references as opaque. A reference from another process instance returns `409 web_runtime_mismatch`, preventing an old controller from targeting reused counters after restart.
 
 `GET /v1/config` is the desired on-disk configuration view. `GET /v1/runtime/web/status` is the effective process view. Its envelope `revision` still identifies the current source graph and can therefore be newer than the active runtime generation while a reload is pending.
 
@@ -339,13 +346,27 @@ The WEB control plane is process-fenced. `runtime_instance` is a random 128-bit 
 | `lifecycle` | `string` | `starting`, `no_web_listener`, `running`, `draining`, `drained`, or `deadline_exceeded`. |
 | `lifecycle_epoch` | `u64` | Monotonic publication epoch. |
 | `lifecycle_age_ms` | `u64` | Monotonic age of the current lifecycle publication. |
-| `available` | `bool` | Whether a readable process runtime is currently published. |
+| `available` | `bool` | Backward-compatible readable-runtime flag; it is not public TLS or private acceptor readiness. |
 | `reason` | `string?` | Stable unavailability reason when `available=false`. |
 | `listeners` | `string[]` | Effective bound WEB listener addresses. |
 | `effective_config_enabled` | `bool` | `web.enabled` in the API request's active runtime generation. |
+| `ingress` | `WebIngressStatus` | Process-owned listener/acceptor liveness and TCP accept counters. |
+| `capacity` | `WebCapacityStatus` | Effective accepted-socket policy, fixed global resources, and typed rejection counters. |
+| `decoy_upstream` | `WebDecoyUpstreamStatus` | Passive outcomes for Telemt's internal plain-HTTP decoy origin hop. |
+| `operator_lifecycle` | `OperatorLifecycleStatus?` | Process-local reversible admission and active/latest drain status while a runtime is published. |
 | `runtime` | `WebRuntimeStatus?` | Present while the weak process-runtime publication can be upgraded. |
 
+`WebIngressStatus` contains `configured_listeners`, `live_acceptors`, `accepting_connections`, optional `reason`, `tcp_accept_total`, and `tcp_accept_error_total`. Accepting requires lifecycle `running`, a readable runtime, at least one effective WEB listener, and one live accept loop per listener. Stable non-accepting reasons are `starting`, `no_web_listener`, `ingress_draining`, `ingress_drained`, `deadline_exceeded`, `runtime_released`, and `acceptor_unavailable`. Accept errors are `accept(2)` failures observed by Telemt; they are not kernel backlog drops or failed connection attempts that never reached the process.
+
+`WebCapacityStatus` contains `http_connection_capacity_action`, `max_http_overload_connections`, `http_overload_timeout_ms`, fixed `resources`, `saturated_resources`, `partial`, `rejections`, and `http_connection_overload_outcomes`. Each resource has a closed-set `resource`, `unit`, `used`, `available`, `limit`, and terminal `closed` flag. Saturation is an instantaneous plane-local observation and never changes `available` or ingress readiness. Rejections are monotonic admission decisions indexed only by a closed reason enum; an internally retried queue or byte-budget decision may later make progress. Accepted-socket outcomes are `dropped`, `wait_admitted`, `wait_timeout_503`, `responded_503`, `overflow_capacity_drop`, `response_error_drop`, and `shutdown_drop`; `wait_admitted` is not a rejection.
+
+`WebDecoyUpstreamStatus` contains the complete fixed outcome set plus optional `last_outcome` and `last_outcome_age_ms`. Outcomes distinguish `success`, `deadline_exhausted`, `connect_refused`, `connect_timeout`, `connect_error`, `http_handshake_timeout`, `http_handshake_error`, `response_head_timeout`, and `request_error`. This describes only Telemt to the configured decoy origin. A public client to NGINX refusal, or an NGINX to Telemt refusal before `accept(2)`, is outside this counter plane.
+
 `WebRuntimeStatus` includes `runtime_instance`, `generation_id`, immutable effective `limits`, manager/stream/budget/WebSocket/learning/debug planes, permit usage, task/counter totals, and `partial`. Plane locks are read with `try_lock`; a contended plane is omitted and named in `partial`. Status collection performs no cleanup, waits, or data-plane mutation, so fields are plane-local observations rather than one globally atomic snapshot. `runtime.manager.issuance_enabled` is the authority to check before close-all.
+
+`OperatorLifecycleStatus` is a lock-free process snapshot with `state`, monotonic `epoch`, `age_ms`, `admission_open`, `effective_new_work_admission`, and the active or latest `drain`. States are `running`, `paused`, `draining`, `force_closing`, and `drained`. Drain status contains its opaque id, phase/outcome, frozen timeout, wall-clock correlation timestamps, latest session/stream/WebSocket remainder, and `force_close_signalled`. The response envelope `revision` remains a config source-graph revision and is not a lifecycle version.
+
+The Prometheus endpoint exports the same process-owned observations through fixed-cardinality `telemt_web_*` families: ingress/operator lifecycle states, independent ingress flags, listener and TCP accept counts, resource usage/closure/saturation, typed rejection totals, accepted-socket overload outcomes, internal decoy-origin outcomes, and session/stream/carrier aggregate totals. WEB labels never contain a host, user, client IP, listener address, token, session reference, profile key, runtime instance, or generation ID. Telemt does not claim health for the externally owned NGINX or HAProxy TLS endpoint; that boundary requires terminator telemetry and an external TCP/TLS probe.
 
 ### WEB session enumeration
 
@@ -369,6 +390,26 @@ Each `SessionRow` contains `session_ref`, optional bounded `user_agent` and `use
 ### WEB runtime mutations
 
 Every WEB runtime POST requires the currently published `runtime_instance`, exactly one `Content-Type: application/json` header, no query parameters, and a JSON object with no unknown fields. All mutations inherit API authentication, direct-peer whitelist, body limit, audit recording, and `read_only` enforcement.
+
+Operator lifecycle requests are:
+
+```json
+{"runtime_instance":"0123456789abcdef0123456789abcdef"}
+```
+
+for `POST /v1/runtime/web/lifecycle/pause` and `/resume`, and:
+
+```json
+{"runtime_instance":"0123456789abcdef0123456789abcdef","timeout_secs":30}
+```
+
+for `POST /v1/runtime/web/lifecycle/drain`, where `timeout_secs` is bounded to `1..=3600`. Pause and resume return `200`; drain freezes one monotonic absolute deadline and returns `202` without waiting for completion. A second drain while one is `draining` or `force_closing` returns `409 web_lifecycle_in_progress` and cannot alter the first deadline. Repeated pause/resume requests already satisfied by the current state are idempotent and do not advance the lifecycle epoch. Pause during an active drain leaves that drain running. Resume cancels an active drain and opens admission; if the deadline already committed its forced-close snapshot, those old session close signals remain effective.
+
+Pause and drain block bootstrap issuance, initial/replacement session creation, and logical-stream admission. Exact session-creation replay, existing DATA/WINDOW/CLOSE, carrier polling/WebSocket exchanges, and explicit session DELETE remain available. Rejection does not consume bootstrap/session/stream rate or quota state: authenticated session creation returns retryable `503` with `Retry-After: 1`, while bridge issuance preserves the decoy route and a rejected logical `OPEN` receives a stream-local close.
+
+Drain remains graceful until either all live sessions, logical-stream ownership, and session-owned WebSockets reach zero or its deadline fires. The deadline is the latest time to commit close signals, not a claim that cooperative task teardown is already complete. At the deadline every remaining live session receives an idempotent close signal outside manager locks, status becomes `force_closing`, and only confirmed zero publishes `drained` with outcome `forced`. Natural zero publishes outcome `graceful`. Both outcomes keep operator admission closed until explicit resume.
+
+This lifecycle is ephemeral: it survives in-process generation reload because its authority is process-owned, is not written to configuration, and starts as `running` after process restart. Resume never overrides `web.enabled=false`, disabled-user policy, generation health admission, or terminal process shutdown. The global health/readiness and native TCP/Unix admission contracts are unchanged.
 
 `POST /v1/runtime/web/sessions/close` accepts:
 
