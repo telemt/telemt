@@ -129,12 +129,10 @@ impl ProcessControlPlane {
         if self.inner.shutdown_completed.load(Ordering::Acquire) {
             return true;
         }
-        let registrations_stopped = tokio::time::timeout_at(
-            deadline,
-            self.inner.admission.wait_for_registrations(),
-        )
-        .await
-        .is_ok();
+        let registrations_stopped =
+            tokio::time::timeout_at(deadline, self.inner.admission.wait_for_registrations())
+                .await
+                .is_ok();
         let tasks_stopped = tokio::time::timeout_at(deadline, self.inner.tasks.wait())
             .await
             .is_ok();
@@ -188,7 +186,8 @@ mod tests {
         let first = tokio::spawn(async move { first_scope.shutdown(Duration::from_secs(1)).await });
         tokio::task::yield_now().await;
         let second_scope = scope.clone();
-        let second = tokio::spawn(async move { second_scope.shutdown(Duration::from_secs(1)).await });
+        let second =
+            tokio::spawn(async move { second_scope.shutdown(Duration::from_secs(1)).await });
 
         tokio::task::yield_now().await;
         assert!(!first.is_finished());
@@ -204,7 +203,8 @@ mod tests {
         let scope = ProcessControlPlane::new();
         let registration = scope.inner.admission.try_register().unwrap();
         let first_scope = scope.clone();
-        let first = tokio::spawn(async move { first_scope.shutdown(Duration::from_secs(30)).await });
+        let first =
+            tokio::spawn(async move { first_scope.shutdown(Duration::from_secs(30)).await });
         tokio::task::yield_now().await;
 
         first.abort();

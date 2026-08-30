@@ -82,9 +82,7 @@ impl Stats {
             return;
         }
 
-        let mut slots = self
-            .me_handshake_error_code_slots
-            .load(Ordering::Acquire);
+        let mut slots = self.me_handshake_error_code_slots.load(Ordering::Acquire);
         loop {
             if slots >= ME_HANDSHAKE_ERROR_CODE_MAX {
                 if let Some(entry) = self.me_handshake_error_codes.get(&code) {
@@ -508,9 +506,7 @@ mod tests {
             (WORKERS * CODES_PER_WORKER) as u64
         );
         assert_eq!(
-            stats
-                .me_handshake_error_code_slots
-                .load(Ordering::Acquire),
+            stats.me_handshake_error_code_slots.load(Ordering::Acquire),
             counts.len()
         );
     }

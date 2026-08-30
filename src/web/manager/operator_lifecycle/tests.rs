@@ -138,11 +138,8 @@ async fn drain_request_returns_after_registering_its_worker() {
     let (runtime, generation) = test_runtime();
     let registration = runtime.try_operator_admission().unwrap();
     let drain_runtime = Arc::clone(&runtime);
-    let drain = tokio::spawn(async move {
-        drain_runtime
-            .drain_operator(Duration::from_secs(30))
-            .await
-    });
+    let drain =
+        tokio::spawn(async move { drain_runtime.drain_operator(Duration::from_secs(30)).await });
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while runtime.operator_lifecycle_status().state != OperatorLifecycleState::Draining {

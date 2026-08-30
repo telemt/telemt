@@ -266,8 +266,7 @@ where
         return HandshakeResult::BadClient { reader, writer };
     }
 
-    let selected_tls_domain =
-        matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
+    let selected_tls_domain = matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
     let cached_entry = if config.censorship.tls_emulation {
         if let Some(cache) = tls_cache.as_ref() {
             let cached_entry = cache.get(selected_tls_domain).await;

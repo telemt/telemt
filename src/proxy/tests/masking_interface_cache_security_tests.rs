@@ -1,18 +1,10 @@
 #![cfg(unix)]
 
 use super::*;
-use std::sync::{Mutex, OnceLock};
-
-fn interface_cache_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 #[tokio::test]
 async fn tdd_repeated_local_listener_checks_do_not_repeat_interface_enumeration_within_window() {
-    let _guard = interface_cache_test_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _guard = interface_cache_test_lock().lock().await;
     reset_local_interface_enumerations_for_tests();
 
     let local_addr: SocketAddr = "0.0.0.0:443".parse().expect("valid local addr");
@@ -29,9 +21,7 @@ async fn tdd_repeated_local_listener_checks_do_not_repeat_interface_enumeration_
 
 #[tokio::test]
 async fn tdd_non_local_port_short_circuit_does_not_enumerate_interfaces() {
-    let _guard = interface_cache_test_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _guard = interface_cache_test_lock().lock().await;
     reset_local_interface_enumerations_for_tests();
 
     let local_addr: SocketAddr = "0.0.0.0:443".parse().expect("valid local addr");

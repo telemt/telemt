@@ -8,9 +8,7 @@ fn nonempty_line_count(text: &str) -> usize {
 
 #[test]
 fn subtle_stress_single_unknown_dc_under_concurrency_logs_once() {
-    let _guard = unknown_dc_test_lock()
-        .lock()
-        .expect("unknown dc test lock must be available");
+    let _guard = unknown_dc_test_lock().blocking_lock();
     clear_unknown_dc_log_cache_for_testing();
 
     let winners = Arc::new(AtomicUsize::new(0));
@@ -103,9 +101,7 @@ fn subtle_light_fuzz_dc_resolution_never_panics_and_preserves_port() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subtle_integration_parallel_same_dc_logs_one_line() {
-    let _guard = unknown_dc_test_lock()
-        .lock()
-        .expect("unknown dc test lock must be available");
+    let _guard = unknown_dc_test_lock().lock().await;
     clear_unknown_dc_log_cache_for_testing();
 
     let rel_dir = format!("target/telemt-direct-relay-same-{}", std::process::id());
@@ -148,9 +144,7 @@ async fn subtle_integration_parallel_same_dc_logs_one_line() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subtle_integration_parallel_unique_dcs_log_unique_lines() {
-    let _guard = unknown_dc_test_lock()
-        .lock()
-        .expect("unknown dc test lock must be available");
+    let _guard = unknown_dc_test_lock().lock().await;
     clear_unknown_dc_log_cache_for_testing();
 
     let rel_dir = format!("target/telemt-direct-relay-unique-{}", std::process::id());

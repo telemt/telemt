@@ -143,11 +143,8 @@ impl MePoolLifecycle {
     }
 
     /// Spawns a writer after its caller completed task registration.
-    pub(super) fn spawn_registered_writer<F>(
-        &self,
-        registration: MeTaskRegistration<'_>,
-        future: F,
-    ) where
+    pub(super) fn spawn_registered_writer<F>(&self, registration: MeTaskRegistration<'_>, future: F)
+    where
         F: Future<Output = ()> + Send + 'static,
     {
         self.writer_tasks.spawn(future);
@@ -215,11 +212,7 @@ impl MePoolLifecycle {
     }
 
     /// Joins producers, writers, and cleanup ownership under one deadline.
-    pub(super) async fn shutdown_pool(
-        &self,
-        pool: &Arc<MePool>,
-        timeout: Duration,
-    ) -> bool {
+    pub(super) async fn shutdown_pool(&self, pool: &Arc<MePool>, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         self.begin_shutdown();
         pool.set_runtime_ready(false);

@@ -98,7 +98,9 @@ pub(super) fn auth_probe_is_throttled_in(
     };
     if auth_probe_state_expired(&entry, now) {
         drop(entry);
-        state.remove_if(&peer_ip, |_, current| auth_probe_state_expired(current, now));
+        state.remove_if(&peer_ip, |_, current| {
+            auth_probe_state_expired(current, now)
+        });
         return false;
     }
     now < entry.blocked_until
@@ -116,7 +118,9 @@ pub(super) fn auth_probe_saturation_grace_exhausted_in(
     };
     if auth_probe_state_expired(&entry, now) {
         drop(entry);
-        state.remove_if(&peer_ip, |_, current| auth_probe_state_expired(current, now));
+        state.remove_if(&peer_ip, |_, current| {
+            auth_probe_state_expired(current, now)
+        });
         return false;
     }
 
@@ -264,7 +268,8 @@ pub(super) fn auth_probe_record_failure_with_state_in(
                     }
                 }
 
-                let Some((evict_key, evict_fail_streak, evict_last_seen)) = eviction_candidate else {
+                let Some((evict_key, evict_fail_streak, evict_last_seen)) = eviction_candidate
+                else {
                     return;
                 };
                 if state

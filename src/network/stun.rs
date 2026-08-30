@@ -394,8 +394,8 @@ async fn resolve_stun_addr(
     }
 
     if let Some((host, port)) = split_host_port(stun_addr)
-        && let Some(addr) = dns_resolver
-            .and_then(|resolver| resolver.resolve_socket_addr(&host, port))
+        && let Some(addr) =
+            dns_resolver.and_then(|resolver| resolver.resolve_socket_addr(&host, port))
     {
         return Ok(match (addr.is_ipv4(), family) {
             (true, IpFamily::V4) | (false, IpFamily::V6) => Some(addr),

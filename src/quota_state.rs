@@ -83,10 +83,7 @@ impl QuotaStateOwner {
     }
 
     /// Persists a checkpoint filtered to the active configured user set.
-    pub(crate) async fn save(
-        &self,
-        configured_users: &BTreeSet<String>,
-    ) -> std::io::Result<()> {
+    pub(crate) async fn save(&self, configured_users: &BTreeSet<String>) -> std::io::Result<()> {
         let guard = Arc::clone(&self.mutation).lock_owned().await;
         let state = self.state_for_users(configured_users, None);
         let path = self.path.clone();
@@ -313,9 +310,8 @@ mod tests {
 
         let alice_owner = owner.clone();
         let alice_users = configured.clone();
-        let alice = tokio::spawn(async move {
-            alice_owner.reset_user(&alice_users, "alice").await
-        });
+        let alice =
+            tokio::spawn(async move { alice_owner.reset_user(&alice_users, "alice").await });
         let bob_owner = owner.clone();
         let bob_users = configured.clone();
         let bob = tokio::spawn(async move { bob_owner.reset_user(&bob_users, "bob").await });

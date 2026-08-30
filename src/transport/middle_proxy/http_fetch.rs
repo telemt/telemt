@@ -159,15 +159,15 @@ pub(crate) async fn https_get(
         HTTP_REQUEST_TIMEOUT,
         Limited::new(response.into_body(), max_body_bytes).collect(),
     )
-        .await
-        .map_err(|_| ProxyError::Proxy(format!("HTTP body read timeout for {url}")))?
-        .map_err(|e| {
-            ProxyError::Proxy(format!(
-                "HTTP body read failed or exceeded {max_body_bytes} bytes for {url}: {e}"
-            ))
-        })?
-        .to_bytes()
-        .to_vec();
+    .await
+    .map_err(|_| ProxyError::Proxy(format!("HTTP body read timeout for {url}")))?
+    .map_err(|e| {
+        ProxyError::Proxy(format!(
+            "HTTP body read failed or exceeded {max_body_bytes} bytes for {url}: {e}"
+        ))
+    })?
+    .to_bytes()
+    .to_vec();
 
     Ok(HttpsGetResponse {
         status,

@@ -53,9 +53,7 @@ impl OperatorAdmissionRejection {
         match self {
             Self::Paused => crate::web::telemetry::WebRejectionReason::OperatorPaused,
             Self::Draining => crate::web::telemetry::WebRejectionReason::OperatorDraining,
-            Self::ForceClosing => {
-                crate::web::telemetry::WebRejectionReason::OperatorForceClosing
-            }
+            Self::ForceClosing => crate::web::telemetry::WebRejectionReason::OperatorForceClosing,
             Self::Drained => crate::web::telemetry::WebRejectionReason::OperatorDrained,
             Self::RuntimeClosed => crate::web::telemetry::WebRejectionReason::RuntimeClosed,
         }
@@ -90,7 +88,7 @@ impl OperatorAdmission {
         loop {
             if state & OPERATOR_ADMISSION_CLOSED != 0 {
                 return Err(
-                    OperatorAdmissionRejection::from_admission_state(state).telemetry_reason(),
+                    OperatorAdmissionRejection::from_admission_state(state).telemetry_reason()
                 );
             }
             if state & OPERATOR_REGISTRATION_COUNT == OPERATOR_REGISTRATION_COUNT {
@@ -113,15 +111,11 @@ impl OperatorAdmission {
         let reason = (reason as usize) << OPERATOR_REJECTION_SHIFT;
         let mut state = self.state.load(Ordering::Acquire);
         loop {
-            let next = (state & OPERATOR_REGISTRATION_COUNT)
-                | OPERATOR_ADMISSION_CLOSED
-                | reason;
-            match self.state.compare_exchange_weak(
-                state,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            let next = (state & OPERATOR_REGISTRATION_COUNT) | OPERATOR_ADMISSION_CLOSED | reason;
+            match self
+                .state
+                .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => return,
                 Err(observed) => state = observed,
             }

@@ -213,11 +213,9 @@ async fn run_accept_loop(
                         continue;
                     }
                     if web_runtime.is_shutdown() {
-                        web_runtime
-                            .telemetry()
-                            .record_rejection(
-                                crate::web::telemetry::WebRejectionReason::RuntimeClosed,
-                            );
+                        web_runtime.telemetry().record_rejection(
+                            crate::web::telemetry::WebRejectionReason::RuntimeClosed,
+                        );
                         drop(stream);
                         continue;
                     }
@@ -233,9 +231,8 @@ async fn run_accept_loop(
                         Err(HttpConnectionAdmissionError::AtCapacity) => {
                             let config = web_runtime.active_generation().config();
                             let action = config.web.http_connection_capacity_action;
-                            let phase_timeout = Duration::from_millis(
-                                config.web.timeouts.http_overload_timeout_ms,
-                            );
+                            let phase_timeout =
+                                Duration::from_millis(config.web.timeouts.http_overload_timeout_ms);
                             drop(config);
                             if action == crate::config::WebHttpConnectionCapacityAction::Drop {
                                 web_runtime.telemetry().record_rejection(
@@ -247,30 +244,29 @@ async fn run_accept_loop(
                                 drop(stream);
                                 continue;
                             }
-                            let overload_permit =
-                                match web_runtime.try_http_overload_connection() {
-                                    Ok(permit) => permit,
-                                    Err(HttpConnectionAdmissionError::Closed) => {
-                                        web_runtime.telemetry().record_rejection(
-                                            crate::web::telemetry::WebRejectionReason::RuntimeClosed,
-                                        );
-                                        web_runtime.telemetry().record_overload(
-                                            WebHttpConnectionOverloadOutcome::ShutdownDrop,
-                                        );
-                                        drop(stream);
-                                        continue;
-                                    }
-                                    Err(HttpConnectionAdmissionError::AtCapacity) => {
-                                        web_runtime.telemetry().record_rejection(
+                            let overload_permit = match web_runtime.try_http_overload_connection() {
+                                Ok(permit) => permit,
+                                Err(HttpConnectionAdmissionError::Closed) => {
+                                    web_runtime.telemetry().record_rejection(
+                                        crate::web::telemetry::WebRejectionReason::RuntimeClosed,
+                                    );
+                                    web_runtime.telemetry().record_overload(
+                                        WebHttpConnectionOverloadOutcome::ShutdownDrop,
+                                    );
+                                    drop(stream);
+                                    continue;
+                                }
+                                Err(HttpConnectionAdmissionError::AtCapacity) => {
+                                    web_runtime.telemetry().record_rejection(
                                             crate::web::telemetry::WebRejectionReason::HttpConnectionCapacity,
                                         );
-                                        web_runtime.telemetry().record_overload(
-                                            WebHttpConnectionOverloadOutcome::OverflowCapacityDrop,
-                                        );
-                                        drop(stream);
-                                        continue;
-                                    }
-                                };
+                                    web_runtime.telemetry().record_overload(
+                                        WebHttpConnectionOverloadOutcome::OverflowCapacityDrop,
+                                    );
+                                    drop(stream);
+                                    continue;
+                                }
+                            };
                             connections.spawn(web_overload::serve(
                                 stream,
                                 peer_addr,

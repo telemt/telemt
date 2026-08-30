@@ -23,9 +23,9 @@ use super::control_plane::ProcessControlPlane;
 use super::generation::RuntimeGeneration;
 use super::helpers::{format_uptime, unit_label};
 use super::reload_supervisor::ReloadSupervisorHandle;
+use crate::quota_state::QuotaStateOwner;
 use crate::stats::Stats;
 use crate::synlimit_control;
-use crate::quota_state::QuotaStateOwner;
 
 /// Signal that triggered shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,10 +130,7 @@ async fn perform_shutdown(
         warn!(error = %error, "Failed to clear SYN limiter rules during shutdown");
     }
 
-    if !process_control_plane
-        .shutdown(Duration::from_secs(5))
-        .await
-    {
+    if !process_control_plane.shutdown(Duration::from_secs(5)).await {
         warn!("Process control-plane task shutdown deadline expired");
     }
 

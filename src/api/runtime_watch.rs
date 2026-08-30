@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
 
-use crate::maestro::generation::RuntimeWatchState;
 use crate::maestro::control_plane::ProcessControlPlane;
+use crate::maestro::generation::RuntimeWatchState;
 
 use super::ApiRuntimeState;
 use super::events::ApiEventStore;

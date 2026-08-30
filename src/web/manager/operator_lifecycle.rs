@@ -18,8 +18,8 @@ pub(crate) use status::{
 };
 // Admission fencing and registration-drain synchronization.
 mod admission;
-use admission::{OperatorAdmission, OperatorAdmissionRejection};
 pub(super) use admission::OperatorRegistration;
+use admission::{OperatorAdmission, OperatorAdmissionRejection};
 // Mutable and published lifecycle state storage.
 mod state;
 use state::{ActiveDrain, OperatorLifecycleInner, OperatorSnapshot, WorkCounts};
@@ -246,9 +246,9 @@ impl WebProcessRuntime {
                 self.operator_lifecycle
                     .transition_locked(&mut inner, OperatorLifecycleState::Paused);
             }
-            self.operator_lifecycle.admission.close(
-                OperatorAdmissionRejection::for_state(inner.state),
-            );
+            self.operator_lifecycle
+                .admission
+                .close(OperatorAdmissionRejection::for_state(inner.state));
             self.operator_lifecycle.publish_locked(&inner);
         }
         self.operator_lifecycle

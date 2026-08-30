@@ -392,22 +392,21 @@ impl MePool {
             key: dc_key,
             active: true,
         };
-        self.lifecycle.spawn_registered_producer(registration, async move {
-            let mut current_addr = addr;
-            loop {
-                pool.stats.increment_me_refill_triggered_total();
-                let restored = pool
-                    .refill_writer_after_loss(current_addr, writer_dc)
-                    .await;
-                if !restored {
-                    warn!(%current_addr, dc = writer_dc, "ME immediate refill failed");
-                }
+        self.lifecycle
+            .spawn_registered_producer(registration, async move {
+                let mut current_addr = addr;
+                loop {
+                    pool.stats.increment_me_refill_triggered_total();
+                    let restored = pool.refill_writer_after_loss(current_addr, writer_dc).await;
+                    if !restored {
+                        warn!(%current_addr, dc = writer_dc, "ME immediate refill failed");
+                    }
 
-                let Some(next_addr) = run_guard.next_or_finish() else {
-                    return;
-                };
-                current_addr = next_addr;
-            }
-        });
+                    let Some(next_addr) = run_guard.next_or_finish() else {
+                        return;
+                    };
+                    current_addr = next_addr;
+                }
+            });
     }
 }

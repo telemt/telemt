@@ -192,8 +192,8 @@ fn validate_payload(mode: HealthcheckMode, body: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        HEALTHCHECK_RESPONSE_MAX_BYTES, HealthcheckMode, parse_status_code,
-        read_response_bounded, split_response, validate_payload,
+        HEALTHCHECK_RESPONSE_MAX_BYTES, HealthcheckMode, parse_status_code, read_response_bounded,
+        split_response, validate_payload,
     };
 
     #[test]

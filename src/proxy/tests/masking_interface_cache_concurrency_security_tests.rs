@@ -1,19 +1,11 @@
 #![cfg(unix)]
 
 use super::*;
-use std::sync::{Mutex, OnceLock};
 use tokio::sync::Barrier;
-
-fn interface_cache_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adversarial_parallel_cold_miss_performs_single_interface_refresh() {
-    let _guard = interface_cache_test_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _guard = interface_cache_test_lock().lock().await;
     reset_local_interface_enumerations_for_tests();
 
     let local_addr: SocketAddr = "0.0.0.0:443".parse().expect("valid local addr");

@@ -22,57 +22,11 @@ use crate::transport::middle_proxy::MePool;
 use super::generation::RuntimeTaskScope;
 use super::helpers::load_startup_proxy_config_snapshot;
 
-async fn supervise_me_task<F, Fut>(task_name: &'static str, mut task: F)
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    loop {
-        let result = AbortOnDropHandle::new(tokio::spawn(task())).await;
-        match result {
-            Ok(()) => warn!(
-                task = task_name,
-                "Middle-End supervisor task exited unexpectedly, restarting"
-            ),
-            Err(error) => {
-                error!(task = task_name, error = %error, "Middle-End supervisor task panicked, restarting in 1s");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        }
-    }
-}
-
-fn spawn_me_supervisors(
-    task_scope: RuntimeTaskScope,
-    pool: Arc<MePool>,
-    rng: Arc<SecureRandom>,
-    min_connections: usize,
-) {
-    let health_pool = pool.clone();
-    let health_rng = rng;
-    task_scope.spawn(supervise_me_task("health_monitor", move || {
-        let pool = health_pool.clone();
-        let rng = health_rng.clone();
-        async move {
-            crate::transport::middle_proxy::me_health_monitor(pool, rng, min_connections).await;
-        }
-    }));
-
-    let drain_pool = pool.clone();
-    task_scope.spawn(supervise_me_task("drain_timeout_enforcer", move || {
-        let pool = drain_pool.clone();
-        async move {
-            crate::transport::middle_proxy::me_drain_timeout_enforcer(pool).await;
-        }
-    }));
-
-    task_scope.spawn(supervise_me_task("zombie_writer_watchdog", move || {
-        let pool = pool.clone();
-        async move {
-            crate::transport::middle_proxy::me_zombie_writer_watchdog(pool).await;
-        }
-    }));
-}
+// Restarting supervisors for long-lived ME maintenance tasks.
+mod supervisor;
+use supervisor::spawn_me_supervisors;
+#[cfg(test)]
+use supervisor::supervise_me_task;
 
 pub(crate) async fn initialize_me_pool(
     use_middle_proxy: bool,
@@ -587,67 +541,4 @@ pub(crate) async fn initialize_me_pool(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Notify;
-
-    struct DropSignal(Arc<Notify>);
-
-    impl Drop for DropSignal {
-        fn drop(&mut self) {
-            self.0.notify_one();
-        }
-    }
-
-    #[tokio::test]
-    async fn scoped_supervisor_aborts_its_current_child() {
-        let scope = RuntimeTaskScope::new();
-        let dropped = Arc::new(Notify::new());
-        let dropped_for_task = dropped.clone();
-        scope.spawn(supervise_me_task("test", move || {
-            let dropped = dropped_for_task.clone();
-            async move {
-                let _signal = DropSignal(dropped);
-                std::future::pending::<()>().await;
-            }
-        }));
-        tokio::task::yield_now().await;
-
-        scope.stop().await;
-
-        tokio::time::timeout(Duration::from_secs(1), dropped.notified())
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn supervisor_restarts_exited_child_and_stops_with_runtime_scope() {
-        let scope = RuntimeTaskScope::new();
-        let starts = Arc::new(AtomicUsize::new(0));
-        let restarted = Arc::new(Notify::new());
-        let starts_task = starts.clone();
-        let restarted_task = restarted.clone();
-        scope.spawn(supervise_me_task("restart_test", move || {
-            let starts = starts_task.clone();
-            let restarted = restarted_task.clone();
-            async move {
-                if starts.fetch_add(1, Ordering::AcqRel) + 1 >= 3 {
-                    restarted.notify_one();
-                }
-            }
-        }));
-
-        tokio::time::timeout(Duration::from_secs(1), restarted.notified())
-            .await
-            .unwrap();
-        scope.stop().await;
-        let stopped_at = starts.load(Ordering::Acquire);
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-        }
-
-        assert!(stopped_at >= 3);
-        assert_eq!(starts.load(Ordering::Acquire), stopped_at);
-    }
-}
+mod tests;

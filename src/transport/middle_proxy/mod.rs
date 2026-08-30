@@ -61,9 +61,9 @@ pub use ping::{
     MePingFamily, MePingReport, MePingSample, format_me_route, format_sample_line, run_me_ping,
 };
 pub use pool::MePool;
-pub(crate) use registry::ConnLease;
 #[allow(unused_imports)]
 pub use pool_nat::{detect_public_ip, stun_probe};
+pub(crate) use registry::ConnLease;
 pub use registry::ConnRegistry;
 pub use rotation::{MeReinitTrigger, me_reinit_scheduler, me_rotation_task};
 #[allow(unused_imports)]

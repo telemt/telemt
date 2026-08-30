@@ -52,16 +52,9 @@ pub(super) async fn run_telemt_core(
     let runtime_task_scope = generation::RuntimeTaskScope::new();
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
     let quota_state_path = config.general.quota_state_path.clone();
-    let quota_state = crate::quota_state::QuotaStateOwner::new(
-        quota_state_path,
-        quota_store.clone(),
-    );
-    let configured_quota_users = config
-        .access
-        .users
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let quota_state =
+        crate::quota_state::QuotaStateOwner::new(quota_state_path, quota_store.clone());
+    let configured_quota_users = config.access.users.keys().cloned().collect::<BTreeSet<_>>();
     quota_state.load(&configured_quota_users).await;
 
     let upstream_manager = Arc::new(

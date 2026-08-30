@@ -68,10 +68,7 @@ impl MePool {
             .values()
             .filter(|pending| pending.is_some())
             .count();
-        let inflight_dc_keys = refill_states
-            .keys()
-            .copied()
-            .collect::<Vec<RefillDcKey>>();
+        let inflight_dc_keys = refill_states.keys().copied().collect::<Vec<RefillDcKey>>();
         drop(refill_states);
 
         let mut by_dc_map = HashMap::<(i16, &'static str), usize>::new();
