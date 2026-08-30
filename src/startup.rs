@@ -1,6 +1,6 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 
 pub const COMPONENT_CONFIG_LOAD: &str = "config_load";
 pub const COMPONENT_TRACING_INIT: &str = "tracing_init";
@@ -139,12 +139,16 @@ struct StartupState {
 pub struct StartupTracker {
     started_at_instant: Instant,
     state: RwLock<StartupState>,
+    /// Flips to `true` once the startup pipeline is fully initialized.
+    ready: watch::Sender<bool>,
 }
 
 impl StartupTracker {
     pub fn new(started_at_epoch_secs: u64) -> Self {
+        let (ready, _) = watch::channel(false);
         Self {
             started_at_instant: Instant::now(),
+            ready,
             state: RwLock::new(StartupState {
                 status: StartupStatus::Initializing,
                 degraded: false,
@@ -256,6 +260,25 @@ impl StartupTracker {
         guard.status = StartupStatus::Ready;
         guard.current_stage = "ready".to_string();
         guard.ready_at_epoch_secs = Some(now_epoch_secs());
+        drop(guard);
+        self.ready.send_replace(true);
+    }
+
+    /// Returns a watch that flips to `true` once the runtime is ready.
+    ///
+    /// Readiness is reached only after listeners are bound and, when requested,
+    /// privileges are dropped. Runtime artifacts (caches, snapshots) must not be
+    /// created before that point: files created while still running as root are
+    /// not writable by the unprivileged user afterwards.
+    pub fn ready_watch(&self) -> watch::Receiver<bool> {
+        self.ready.subscribe()
+    }
+
+    /// Waits until the runtime is ready; returns immediately if it already is.
+    pub async fn wait_ready(&self) {
+        let mut ready = self.ready.subscribe();
+        // The sender lives as long as `self`, so this cannot fail while awaited.
+        let _ = ready.wait_for(|ready| *ready).await;
     }
 
     pub async fn snapshot(&self) -> StartupSnapshot {
@@ -378,4 +401,33 @@ fn now_epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn wait_ready_resolves_once_runtime_is_marked_ready() {
+        let tracker = Arc::new(StartupTracker::new(1));
+        let mut ready = tracker.ready_watch();
+        assert!(!*ready.borrow());
+
+        let waiter = {
+            let tracker = tracker.clone();
+            tokio::spawn(async move { tracker.wait_ready().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        tracker.mark_ready().await;
+        waiter.await.unwrap();
+        assert!(*ready.borrow_and_update());
+
+        // Already ready: returns immediately, also for fresh subscribers.
+        tracker.wait_ready().await;
+        assert!(*tracker.ready_watch().borrow());
+    }
 }
