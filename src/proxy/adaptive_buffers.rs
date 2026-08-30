@@ -2,7 +2,7 @@
 
 use dashmap::DashMap;
 use std::cmp::max;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const EMA_ALPHA: f64 = 0.2;
@@ -294,6 +294,11 @@ fn profiles() -> &'static DashMap<String, UserAdaptiveProfile> {
     USER_PROFILES.get_or_init(DashMap::new)
 }
 
+fn profile_insert_guard() -> &'static Mutex<()> {
+    static PROFILE_INSERT_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    PROFILE_INSERT_GUARD.get_or_init(|| Mutex::new(()))
+}
+
 /// Returns a fresh user's recent successful Direct tier, or `Base` when stale.
 #[allow(dead_code)]
 pub fn seed_tier_for_user(user: &str) -> AdaptiveTier {
@@ -320,29 +325,58 @@ pub fn record_user_tier(user: &str, tier: AdaptiveTier) {
     if user.len() > MAX_USER_KEY_BYTES {
         return;
     }
+    record_user_tier_with_cap(
+        profiles(),
+        profile_insert_guard(),
+        user,
+        tier,
+        MAX_USER_PROFILES_ENTRIES,
+    );
+}
+
+fn record_user_tier_with_cap(
+    profiles: &DashMap<String, UserAdaptiveProfile>,
+    insert_guard: &Mutex<()>,
+    user: &str,
+    tier: AdaptiveTier,
+    max_entries: usize,
+) {
     let now = Instant::now();
-    let mut was_vacant = false;
-    match profiles().entry(user.to_string()) {
-        dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-            let existing = *entry.get();
-            let effective = if now.saturating_duration_since(existing.seen_at) > PROFILE_TTL {
-                tier
-            } else {
-                max(existing.tier, tier)
-            };
-            entry.insert(UserAdaptiveProfile {
-                tier: effective,
-                seen_at: now,
-            });
-        }
-        dashmap::mapref::entry::Entry::Vacant(slot) => {
-            slot.insert(UserAdaptiveProfile { tier, seen_at: now });
-            was_vacant = true;
-        }
+    if let Some(mut entry) = profiles.get_mut(user) {
+        let effective = if now.saturating_duration_since(entry.seen_at) > PROFILE_TTL {
+            tier
+        } else {
+            max(entry.tier, tier)
+        };
+        *entry = UserAdaptiveProfile {
+            tier: effective,
+            seen_at: now,
+        };
+        return;
     }
-    if was_vacant && profiles().len() > MAX_USER_PROFILES_ENTRIES {
-        profiles().retain(|_, v| now.saturating_duration_since(v.seen_at) <= PROFILE_TTL);
+
+    let _guard = insert_guard
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(mut entry) = profiles.get_mut(user) {
+        let effective = if now.saturating_duration_since(entry.seen_at) > PROFILE_TTL {
+            tier
+        } else {
+            max(entry.tier, tier)
+        };
+        *entry = UserAdaptiveProfile {
+            tier: effective,
+            seen_at: now,
+        };
+        return;
     }
+    if profiles.len() >= max_entries {
+        profiles.retain(|_, value| now.saturating_duration_since(value.seen_at) <= PROFILE_TTL);
+    }
+    if profiles.len() >= max_entries {
+        return;
+    }
+    profiles.insert(user.to_string(), UserAdaptiveProfile { tier, seen_at: now });
 }
 
 #[cfg(test)]
@@ -437,6 +471,17 @@ mod adaptive_direct_budget_policy_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_profile_cardinality_is_hard_bounded() {
+        let profiles = DashMap::new();
+        let insert_guard = Mutex::new(());
+        for index in 0..64 {
+            let user = format!("user-{index}");
+            record_user_tier_with_cap(&profiles, &insert_guard, &user, AdaptiveTier::Base, 16);
+        }
+        assert_eq!(profiles.len(), 16);
+    }
 
     fn sample(
         c2s_bytes: u64,

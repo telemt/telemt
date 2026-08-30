@@ -161,6 +161,7 @@ const GENERAL_CONFIG_KEYS: &[&str] = &[
     "proxy_secret_auto_reload_secs",
     "proxy_config_auto_reload_secs",
     "me_reinit_singleflight",
+    "me_reinit_max_concurrency",
     "me_reinit_trigger_channel",
     "me_reinit_coalesce_window_ms",
     "me_deterministic_writer_sort",

@@ -10,6 +10,7 @@ use std::sync::atomic::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
+use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +24,7 @@ use crate::transport::UpstreamManager;
 
 use super::ConnRegistry;
 use super::codec::WriterCommand;
+use super::pool_lifecycle::MePoolLifecycle;
 
 const ME_FORCE_CLOSE_SAFETY_FALLBACK_SECS: u64 = 300;
 
@@ -30,12 +32,6 @@ const ME_FORCE_CLOSE_SAFETY_FALLBACK_SECS: u64 = 300;
 pub(super) struct RefillDcKey {
     pub dc: i32,
     pub family: IpFamily,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct RefillEndpointKey {
-    pub dc: i32,
-    pub addr: SocketAddr,
 }
 
 #[derive(Clone)]
@@ -146,6 +142,18 @@ pub(super) enum WriterContour {
     Warm = 0,
     Active = 1,
     Draining = 2,
+}
+
+pub(super) struct WriterOpenReservation<'a> {
+    counter: Option<&'a AtomicUsize>,
+}
+
+impl Drop for WriterOpenReservation<'_> {
+    fn drop(&mut self) {
+        if let Some(counter) = self.counter {
+            counter.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 impl WriterContour {
@@ -265,11 +273,48 @@ pub(super) struct ReinitCore {
     pub(super) pending_hardswap_generation: AtomicU64,
     pub(super) pending_hardswap_started_at_epoch_secs: AtomicU64,
     pub(super) pending_hardswap_map_hash: AtomicU64,
+    pub(super) scheduler_inflight: AtomicUsize,
+    pub(super) max_concurrency_effective: AtomicUsize,
+    pub(super) coordinator: ParkingMutex<ReinitCoordinatorState>,
+    pub(super) status: ArcSwap<ReinitStatusSnapshot>,
     pub(super) hardswap: AtomicBool,
     pub(super) me_hardswap_warmup_delay_min_ms: AtomicU64,
     pub(super) me_hardswap_warmup_delay_max_ms: AtomicU64,
     pub(super) me_hardswap_warmup_extra_passes: AtomicU32,
     pub(super) me_hardswap_warmup_pass_backoff_base_ms: AtomicU64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ReinitStatusSnapshot {
+    pub(super) active_generation: u64,
+    pub(super) warm_generations: Vec<u64>,
+    pub(super) pending_hardswap_generation: u64,
+    pub(super) pending_hardswap_started_at_epoch_secs: u64,
+    pub(super) pending_hardswap_map_hash: u64,
+    pub(super) inflight: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ReinitPendingState {
+    pub(super) generation: u64,
+    pub(super) started_at_epoch_secs: u64,
+    pub(super) map_hash: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ReinitAttemptState {
+    pub(super) generation: u64,
+    pub(super) map_hash: u64,
+    pub(super) hardswap: bool,
+    pub(super) committed: bool,
+}
+
+pub(super) struct ReinitCoordinatorState {
+    pub(super) next_attempt_id: u64,
+    pub(super) active_generation: u64,
+    pub(super) desired_map_hash: u64,
+    pub(super) pending: Option<ReinitPendingState>,
+    pub(super) attempts: HashMap<u64, ReinitAttemptState>,
 }
 
 pub(super) struct WriterLifecycleCore {
@@ -421,6 +466,7 @@ pub struct MePool {
     pub(super) floor_runtime: Arc<FloorRuntimeCore>,
     pub(super) writer_selection_policy: Arc<WriterSelectionPolicyCore>,
     pub(super) transport_policy: Arc<TransportPolicyCore>,
+    pub(super) lifecycle: MePoolLifecycle,
     pub(super) decision: NetworkDecision,
     pub(super) upstream: Option<Arc<UpstreamManager>>,
     pub(super) rng: Arc<SecureRandom>,
@@ -431,9 +477,12 @@ pub struct MePool {
     pub(super) endpoint_dc_map: Arc<RwLock<HashMap<SocketAddr, Option<i32>>>>,
     pub(super) default_dc: AtomicI32,
     pub(super) next_writer_id: AtomicU64,
+    pub(super) writer_connect_active_reserved: AtomicUsize,
+    pub(super) writer_connect_warm_reserved: AtomicUsize,
     pub(super) rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
-    pub(super) refill_inflight: Arc<Mutex<HashSet<RefillEndpointKey>>>,
-    pub(super) refill_inflight_dc: Arc<Mutex<HashSet<RefillDcKey>>>,
+    pub(super) refill_states: Arc<ParkingMutex<HashMap<RefillDcKey, Option<SocketAddr>>>>,
+    pub(super) refill_running: AtomicUsize,
+    pub(super) refill_pending: AtomicUsize,
     pub(super) conn_count: AtomicUsize,
     pub(super) draining_active_runtime: AtomicU64,
     pub(super) stats: Arc<crate::stats::Stats>,
@@ -573,12 +622,14 @@ impl MePool {
         me_route_blocking_send_timeout_ms: u64,
         me_route_inline_recovery_attempts: u32,
         me_route_inline_recovery_wait_ms: u64,
+        me_connection_cleanup_capacity: usize,
     ) -> Arc<Self> {
         let endpoint_dc_map = Self::build_endpoint_dc_map_from_maps(&proxy_map_v4, &proxy_map_v6);
         let preferred_endpoints_by_dc =
             Self::build_preferred_endpoints_by_dc(&decision, &proxy_map_v4, &proxy_map_v6);
-        let registry = Arc::new(ConnRegistry::with_route_channel_capacity(
+        let registry = Arc::new(ConnRegistry::with_route_and_cleanup_capacity(
             me_route_channel_capacity,
+            me_connection_cleanup_capacity,
         ));
         registry.update_route_backpressure_policy(
             me_route_backpressure_base_timeout_ms,
@@ -587,6 +638,14 @@ impl MePool {
         );
         let (writer_epoch, _) = watch::channel(0u64);
         let now_epoch_secs = Self::now_epoch_secs();
+        let reinit_status = ReinitStatusSnapshot {
+            active_generation: 1,
+            warm_generations: Vec::new(),
+            pending_hardswap_generation: 0,
+            pending_hardswap_started_at_epoch_secs: 0,
+            pending_hardswap_map_hash: 0,
+            inflight: 0,
+        };
         stats.set_me_writer_byte_budget_limit_bytes(me_writer_byte_budget_bytes);
         Arc::new(Self {
             routing: Arc::new(RoutingCore {
@@ -603,6 +662,16 @@ impl MePool {
                 pending_hardswap_generation: AtomicU64::new(0),
                 pending_hardswap_started_at_epoch_secs: AtomicU64::new(0),
                 pending_hardswap_map_hash: AtomicU64::new(0),
+                scheduler_inflight: AtomicUsize::new(0),
+                max_concurrency_effective: AtomicUsize::new(1),
+                coordinator: ParkingMutex::new(ReinitCoordinatorState {
+                    next_attempt_id: 1,
+                    active_generation: 1,
+                    desired_map_hash: 0,
+                    pending: None,
+                    attempts: HashMap::new(),
+                }),
+                status: ArcSwap::from_pointee(reinit_status),
                 hardswap: AtomicBool::new(hardswap),
                 me_hardswap_warmup_delay_min_ms: AtomicU64::new(me_hardswap_warmup_delay_min_ms),
                 me_hardswap_warmup_delay_max_ms: AtomicU64::new(me_hardswap_warmup_delay_max_ms),
@@ -805,6 +874,7 @@ impl MePool {
                     me_reader_route_data_wait_ms,
                 )),
             }),
+            lifecycle: MePoolLifecycle::new(),
             decision,
             upstream,
             rng,
@@ -830,9 +900,12 @@ impl MePool {
             endpoint_dc_map: Arc::new(RwLock::new(endpoint_dc_map)),
             default_dc: AtomicI32::new(default_dc.unwrap_or(2)),
             next_writer_id: AtomicU64::new(1),
+            writer_connect_active_reserved: AtomicUsize::new(0),
+            writer_connect_warm_reserved: AtomicUsize::new(0),
             rtt_stats: Arc::new(Mutex::new(HashMap::new())),
-            refill_inflight: Arc::new(Mutex::new(HashSet::new())),
-            refill_inflight_dc: Arc::new(Mutex::new(HashSet::new())),
+            refill_states: Arc::new(ParkingMutex::new(HashMap::new())),
+            refill_running: AtomicUsize::new(0),
+            refill_pending: AtomicUsize::new(0),
             conn_count: AtomicUsize::new(0),
             draining_active_runtime: AtomicU64::new(0),
             endpoint_quarantine: Arc::new(Mutex::new(HashMap::new())),
@@ -1263,6 +1336,7 @@ impl MePool {
         self.translate_our_addr_with_reflection(addr, None)
     }
 
+    #[allow(dead_code)]
     pub fn registry(&self) -> &Arc<ConnRegistry> {
         &self.registry
     }
@@ -1730,6 +1804,69 @@ impl MePool {
             }
             WriterContour::Warm => warm_writers < self.adaptive_floor_warm_cap_configured_total(),
             WriterContour::Draining => true,
+        }
+    }
+
+    pub(super) async fn reserve_writer_open(
+        &self,
+        contour: WriterContour,
+        allow_coverage_override: bool,
+        writer_dc: i32,
+    ) -> Option<WriterOpenReservation<'_>> {
+        let counter = match contour {
+            WriterContour::Active => &self.writer_connect_active_reserved,
+            WriterContour::Warm => &self.writer_connect_warm_reserved,
+            WriterContour::Draining => {
+                return Some(WriterOpenReservation { counter: None });
+            }
+        };
+
+        loop {
+            if !self
+                .can_open_writer_for_contour(contour, allow_coverage_override, writer_dc)
+                .await
+            {
+                return None;
+            }
+            let (active_writers, warm_writers, _) =
+                self.non_draining_writer_counts_by_contour().await;
+            let live = match contour {
+                WriterContour::Active => active_writers,
+                WriterContour::Warm => warm_writers,
+                WriterContour::Draining => 0,
+            };
+            let mut limit = match contour {
+                WriterContour::Active => self.adaptive_floor_active_cap_configured_total(),
+                WriterContour::Warm => self.adaptive_floor_warm_cap_configured_total(),
+                WriterContour::Draining => usize::MAX,
+            };
+            if contour == WriterContour::Active && allow_coverage_override {
+                limit = limit
+                    .max(self.active_coverage_required_total().await)
+                    .saturating_add(
+                        self.reconnect_runtime
+                            .me_reconnect_max_concurrent_per_dc
+                            .max(1) as usize,
+                    );
+            }
+
+            let reserved = counter.load(Ordering::Acquire);
+            if live.saturating_add(reserved) >= limit {
+                return None;
+            }
+            if counter
+                .compare_exchange_weak(
+                    reserved,
+                    reserved + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return Some(WriterOpenReservation {
+                    counter: Some(counter),
+                });
+            }
         }
     }
 

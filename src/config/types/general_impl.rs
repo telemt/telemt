@@ -159,6 +159,7 @@ impl Default for GeneralConfig {
             proxy_secret_auto_reload_secs: default_proxy_secret_reload_secs(),
             proxy_config_auto_reload_secs: default_proxy_config_reload_secs(),
             me_reinit_singleflight: default_me_reinit_singleflight(),
+            me_reinit_max_concurrency: default_me_reinit_max_concurrency(),
             me_reinit_trigger_channel: default_me_reinit_trigger_channel(),
             me_reinit_coalesce_window_ms: default_me_reinit_coalesce_window_ms(),
             me_deterministic_writer_sort: default_me_deterministic_writer_sort(),

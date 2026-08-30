@@ -34,7 +34,7 @@ use crate::stats::{
     MeD2cFlushReason, MeD2cQuotaRejectStage, MeD2cWriteMode, QuotaReserveError, Stats, UserStats,
 };
 use crate::stream::{BufferPool, CryptoReader, CryptoWriter, PooledBuffer};
-use crate::transport::middle_proxy::{MePool, MeResponse, proto_flags_for_tag};
+use crate::transport::middle_proxy::{ConnLease, MePool, MeResponse, proto_flags_for_tag};
 
 mod c2me;
 mod d2c;

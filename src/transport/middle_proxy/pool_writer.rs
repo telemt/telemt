@@ -269,7 +269,10 @@ async fn rpc_proxy_req_signal_loop(
             continue;
         };
 
-        let (conn_id, mut service_rx) = pool.registry.register().await;
+        let Some((conn_lease, mut service_rx)) = pool.register_connection().await else {
+            return;
+        };
+        let conn_id = conn_lease.conn_id();
         // Service RPC_PROXY_REQ signal path is intentionally route-only:
         // do not bind synthetic conn_id into regular writer/client accounting.
 
@@ -286,7 +289,7 @@ async fn rpc_proxy_req_signal_loop(
             send_service_writer_command(&tx_signal, WriterCommand::DataAndFlush(payload)).await
         {
             stats_signal.increment_me_rpc_proxy_req_signal_failed_total();
-            let _ = pool.registry.unregister(conn_id).await;
+            conn_lease.unregister().await;
             match error {
                 ServiceWriterCommandSendError::Closed => return,
                 ServiceWriterCommandSendError::TimedOut => continue,
@@ -313,7 +316,7 @@ async fn rpc_proxy_req_signal_loop(
                 .await
         {
             stats_signal.increment_me_rpc_proxy_req_signal_failed_total();
-            let _ = pool.registry.unregister(conn_id).await;
+            conn_lease.unregister().await;
             match error {
                 ServiceWriterCommandSendError::Closed => return,
                 ServiceWriterCommandSendError::TimedOut => continue,
@@ -321,7 +324,7 @@ async fn rpc_proxy_req_signal_loop(
         }
 
         stats_signal.increment_me_rpc_proxy_req_signal_close_sent_total();
-        let _ = pool.registry.unregister(conn_id).await;
+        conn_lease.unregister().await;
     }
 }
 
@@ -394,14 +397,14 @@ impl MePool {
         writer_dc: i32,
         allow_coverage_override: bool,
     ) -> Result<()> {
-        if !self
-            .can_open_writer_for_contour(contour, allow_coverage_override, writer_dc)
+        let Some(_writer_open_reservation) = self
+            .reserve_writer_open(contour, allow_coverage_override, writer_dc)
             .await
-        {
+        else {
             return Err(ProxyError::Proxy(format!(
                 "ME {contour:?} writer cap reached"
             )));
-        }
+        };
 
         let secret_len = self.proxy_secret.read().await.secret.len();
         if secret_len < 32 {
@@ -415,6 +418,9 @@ impl MePool {
         let hs = self
             .handshake_only(stream, addr, upstream_egress, rng)
             .await?;
+        let Some(task_registration) = self.lifecycle.try_register() else {
+            return Err(ProxyError::Proxy("ME pool lifecycle closed".into()));
+        };
 
         let writer_id = self.next_writer_id.fetch_add(1, Ordering::Relaxed);
         let contour = Arc::new(AtomicU8::new(contour.as_u8()));
@@ -499,7 +505,7 @@ impl MePool {
         let route_fairshare_enabled = self.transport_policy.me_route_fairshare_enabled.clone();
         let reader_route_data_wait_ms = self.transport_policy.me_reader_route_data_wait_ms.clone();
 
-        tokio::spawn(async move {
+        self.lifecycle.spawn_registered_writer(task_registration, async move {
             // Reader MUST be the first branch in biased select! to avoid read starvation.
             let exit = tokio::select! {
                 biased;

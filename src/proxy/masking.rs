@@ -1,7 +1,6 @@
 //! Masking - forward unrecognized traffic to mask host
 
 use crate::config::ProxyConfig;
-use crate::network::dns_overrides::resolve_socket_addr;
 use crate::protocol::tls;
 use crate::proxy::shared_state::ProxySharedState;
 use crate::stats::beobachten::BeobachtenStore;
@@ -41,6 +40,7 @@ const MASK_RELAY_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
 const MASK_BUFFER_SIZE: usize = 8192;
 const MASK_BUFFER_GROW_AFTER_BYTES: usize = 256 * 1024;
 const MASK_BUFFER_MAX_SIZE: usize = 64 * 1024;
+const MASK_DNS_RESULT_MAX_ADDRESSES: usize = 64;
 #[cfg(unix)]
 #[cfg(not(test))]
 const LOCAL_INTERFACE_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -532,19 +532,25 @@ fn parse_mask_host_ip_literal(host: &str) -> Option<IpAddr> {
 async fn resolve_mask_target_addrs(
     mask_host: &str,
     mask_port: u16,
+    upstream_manager: Option<&crate::transport::UpstreamManager>,
 ) -> std::io::Result<Vec<SocketAddr>> {
-    if let Some(addr) = resolve_socket_addr(mask_host, mask_port) {
-        return Ok(vec![addr]);
-    }
-
     if let Some(ip) = parse_mask_host_ip_literal(mask_host) {
         return Ok(vec![SocketAddr::new(ip, mask_port)]);
+    }
+
+    if let Some(upstream_manager) = upstream_manager {
+        return upstream_manager
+            .resolve_all(mask_host, mask_port)
+            .await
+            .map_err(|error| IoError::new(ErrorKind::NotFound, error.to_string()));
     }
 
     let addrs = timeout(MASK_TIMEOUT, lookup_host((mask_host, mask_port)))
         .await
         .map_err(|_| IoError::new(ErrorKind::TimedOut, "mask target DNS lookup timed out"))??;
-    let addrs = addrs.collect::<Vec<_>>();
+    let addrs = addrs
+        .take(MASK_DNS_RESULT_MAX_ADDRESSES)
+        .collect::<Vec<_>>();
     if addrs.is_empty() {
         return Err(IoError::new(
             ErrorKind::NotFound,
@@ -1000,6 +1006,34 @@ pub(crate) async fn handle_bad_client_with_shared<R, W>(
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    handle_bad_client_with_shared_resolver(
+        reader,
+        writer,
+        initial_data,
+        peer,
+        local_addr,
+        config,
+        beobachten,
+        shared,
+        None,
+    )
+    .await;
+}
+
+pub(super) async fn handle_bad_client_with_shared_resolver<R, W>(
+    reader: R,
+    writer: W,
+    initial_data: &[u8],
+    peer: SocketAddr,
+    local_addr: SocketAddr,
+    config: &ProxyConfig,
+    beobachten: &BeobachtenStore,
+    shared: &ProxySharedState,
+    upstream_manager: Option<&crate::transport::UpstreamManager>,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let client_type = detect_client_type(initial_data);
     if config.general.beobachten {
         let ttl = masking_beobachten_ttl(config);
@@ -1112,7 +1146,8 @@ pub(crate) async fn handle_bad_client_with_shared<R, W>(
     let mask_host = mask_target.host;
     let mask_port = mask_target.port;
 
-    let resolved_mask_addrs = match resolve_mask_target_addrs(mask_host, mask_port).await {
+    let resolved_mask_addrs =
+        match resolve_mask_target_addrs(mask_host, mask_port, upstream_manager).await {
         Ok(addrs) => addrs,
         Err(e) => {
             let outcome_started = Instant::now();

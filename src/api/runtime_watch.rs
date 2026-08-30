@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 use crate::maestro::generation::RuntimeWatchState;
+use crate::maestro::control_plane::ProcessControlPlane;
 
 use super::ApiRuntimeState;
 use super::events::ApiEventStore;
@@ -13,22 +14,29 @@ pub(super) fn spawn_runtime_watchers(
     runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
     runtime_state: Arc<ApiRuntimeState>,
     runtime_events: Arc<ApiEventStore>,
+    control_plane: &ProcessControlPlane,
 ) {
-    let _config_watcher = spawn_config_watcher(
+    spawn_config_watcher(
         runtime_watch_rx.clone(),
         runtime_state.clone(),
         runtime_events.clone(),
+        control_plane,
     );
-    let _admission_watcher =
-        spawn_admission_watcher(runtime_watch_rx, runtime_state, runtime_events);
+    spawn_admission_watcher(
+        runtime_watch_rx,
+        runtime_state,
+        runtime_events,
+        control_plane,
+    );
 }
 
 fn spawn_config_watcher(
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
     runtime_state: Arc<ApiRuntimeState>,
     runtime_events: Arc<ApiEventStore>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    control_plane: &ProcessControlPlane,
+) {
+    let _ = control_plane.spawn(async move {
         let Some(mut current) = runtime_watch_rx.borrow().clone() else {
             return;
         };
@@ -78,15 +86,16 @@ fn spawn_config_watcher(
                 }
             }
         }
-    })
+    });
 }
 
 fn spawn_admission_watcher(
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
     runtime_state: Arc<ApiRuntimeState>,
     runtime_events: Arc<ApiEventStore>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    control_plane: &ProcessControlPlane,
+) {
+    let _ = control_plane.spawn(async move {
         let Some(mut current) = runtime_watch_rx.borrow().clone() else {
             return;
         };
@@ -124,7 +133,7 @@ fn spawn_admission_watcher(
                 }
             }
         }
-    })
+    });
 }
 
 fn active_generation_id(
@@ -246,7 +255,13 @@ mod tests {
         let (runtime_watch_tx, runtime_watch_rx) = watch::channel(Some(initial));
         let runtime_state = runtime_state();
         let events = Arc::new(ApiEventStore::new(16));
-        spawn_runtime_watchers(runtime_watch_rx, runtime_state.clone(), events.clone());
+        let control_plane = ProcessControlPlane::new();
+        spawn_runtime_watchers(
+            runtime_watch_rx,
+            runtime_state.clone(),
+            events.clone(),
+            &control_plane,
+        );
         tokio::task::yield_now().await;
 
         assert_eq!(runtime_state.config_reload_count.load(Ordering::Relaxed), 0);
@@ -283,6 +298,7 @@ mod tests {
                 .count(),
             3
         );
+        assert!(control_plane.shutdown(Duration::from_secs(1)).await);
     }
 
     #[tokio::test]
@@ -291,7 +307,13 @@ mod tests {
         let (runtime_watch_tx, runtime_watch_rx) = watch::channel(Some(initial));
         let runtime_state = runtime_state();
         let events = Arc::new(ApiEventStore::new(16));
-        let watcher = spawn_config_watcher(runtime_watch_rx, runtime_state.clone(), events.clone());
+        let control_plane = ProcessControlPlane::new();
+        spawn_config_watcher(
+            runtime_watch_rx,
+            runtime_state.clone(),
+            events.clone(),
+            &control_plane,
+        );
         drop(initial_config_tx);
         tokio::task::yield_now().await;
 
@@ -302,10 +324,7 @@ mod tests {
         wait_for_count(&runtime_state, 2).await;
 
         drop(runtime_watch_tx);
-        tokio::time::timeout(Duration::from_secs(1), watcher)
-            .await
-            .unwrap()
-            .unwrap();
+        assert!(control_plane.shutdown(Duration::from_secs(1)).await);
         assert_eq!(
             events
                 .snapshot(16)

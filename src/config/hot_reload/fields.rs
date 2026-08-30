@@ -10,6 +10,7 @@ pub struct HotFields {
     pub update_every_secs: u64,
     pub me_reinit_every_secs: u64,
     pub me_reinit_singleflight: bool,
+    pub me_reinit_max_concurrency: usize,
     pub me_reinit_coalesce_window_ms: u64,
     pub hardswap: bool,
     pub me_pool_drain_ttl_secs: u64,
@@ -102,6 +103,7 @@ impl HotFields {
             update_every_secs: cfg.general.effective_update_every_secs(),
             me_reinit_every_secs: cfg.general.me_reinit_every_secs,
             me_reinit_singleflight: cfg.general.me_reinit_singleflight,
+            me_reinit_max_concurrency: cfg.general.me_reinit_max_concurrency,
             me_reinit_coalesce_window_ms: cfg.general.me_reinit_coalesce_window_ms,
             hardswap: cfg.general.hardswap,
             me_pool_drain_ttl_secs: cfg.general.me_pool_drain_ttl_secs,
@@ -236,6 +238,7 @@ pub(super) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyC
     cfg.general.proxy_config_auto_reload_secs = new.general.proxy_config_auto_reload_secs;
     cfg.general.me_reinit_every_secs = new.general.me_reinit_every_secs;
     cfg.general.me_reinit_singleflight = new.general.me_reinit_singleflight;
+    cfg.general.me_reinit_max_concurrency = new.general.me_reinit_max_concurrency;
     cfg.general.me_reinit_coalesce_window_ms = new.general.me_reinit_coalesce_window_ms;
     cfg.general.hardswap = new.general.hardswap;
     cfg.general.me_pool_drain_ttl_secs = new.general.me_pool_drain_ttl_secs;

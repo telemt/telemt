@@ -1,5 +1,42 @@
 use super::*;
 
+struct RelayConnLease {
+    connection: Option<ConnLease>,
+    conn_id: u64,
+    shared: Arc<ProxySharedState>,
+}
+
+impl RelayConnLease {
+    fn new(connection: ConnLease, shared: Arc<ProxySharedState>) -> Self {
+        let conn_id = connection.conn_id();
+        Self {
+            connection: Some(connection),
+            conn_id,
+            shared,
+        }
+    }
+
+    fn conn_id(&self) -> u64 {
+        self.conn_id
+    }
+
+    async fn unregister(mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        clear_relay_idle_candidate_in(self.shared.as_ref(), connection.conn_id());
+        connection.unregister().await;
+    }
+}
+
+impl Drop for RelayConnLease {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.as_ref() {
+            clear_relay_idle_candidate_in(self.shared.as_ref(), connection.conn_id());
+        }
+    }
+}
+
 /// Runs Middle-End relay with explicit kernel-conntrack close publication policy.
 pub(crate) async fn handle_via_middle_proxy_with_conntrack<R, W>(
     mut crypto_reader: CryptoReader<R>,
@@ -44,7 +81,11 @@ where
         "Routing via Middle-End"
     );
 
-    let (conn_id, me_rx) = me_pool.registry().register().await;
+    let Some((connection, me_rx)) = me_pool.register_connection().await else {
+        return Err(ProxyError::MiddleConnectionLost);
+    };
+    let relay_connection = RelayConnLease::new(connection, Arc::clone(&shared));
+    let conn_id = relay_connection.conn_id();
     let trace_id = session_id;
     let bytes_me2c = Arc::new(AtomicU64::new(0));
     let mut forensics = RelayForensicsState {
@@ -76,7 +117,7 @@ where
         let _cutover_park_lease = stats.acquire_middle_cutover_park_lease();
         tokio::time::sleep(delay).await;
         let _ = me_pool.send_close(conn_id).await;
-        me_pool.registry().unregister(conn_id).await;
+        relay_connection.unregister().await;
         return Err(ProxyError::RouteSwitched);
     }
 
@@ -825,8 +866,7 @@ where
         }
     }
 
-    clear_relay_idle_candidate_in(shared.as_ref(), conn_id);
-    me_pool.registry().unregister(conn_id).await;
+    relay_connection.unregister().await;
     let pool_snapshot = buffer_pool.stats();
     stats.set_buffer_pool_gauges(
         pool_snapshot.pooled,

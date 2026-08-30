@@ -308,3 +308,21 @@ async fn non_empty_writer_ids_returns_only_writers_with_bound_clients() {
     assert!(!non_empty.contains(&20));
     assert!(!non_empty.contains(&30));
 }
+
+#[tokio::test]
+async fn leased_registration_removes_hot_route_before_async_cleanup() {
+    let registry = Arc::new(ConnRegistry::with_route_and_cleanup_capacity(8, 1));
+    let mut cleanup_rx = registry.take_cleanup_receiver().unwrap();
+    let (lease, _rx) = registry.register_leased().await.unwrap();
+    let conn_id = lease.conn_id();
+
+    drop(lease);
+
+    assert_eq!(
+        registry.route_nowait(conn_id, MeResponse::Ack(1)).await,
+        RouteResult::NoConn
+    );
+    assert_eq!(cleanup_rx.recv().await, Some(conn_id));
+    registry.unregister(conn_id).await;
+    assert!(registry.active_conn_ids().await.is_empty());
+}

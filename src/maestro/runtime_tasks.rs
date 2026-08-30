@@ -26,6 +26,7 @@ use crate::stats::{ReplayChecker, Stats};
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::{MePool, MeReinitTrigger};
 
+use super::control_plane::ProcessControlPlane;
 use super::generation::RuntimeGeneration;
 use super::generation::RuntimeTaskScope;
 use super::helpers::write_beobachten_snapshot;
@@ -158,6 +159,7 @@ pub(crate) async fn spawn_runtime_tasks(
         detected_ip_v4,
         detected_ip_v6,
         task_scope.cancellation_token(),
+        Some(upstream_manager.dns_resolver()),
         config_watcher_activation,
     );
     task_scope.spawn(config_watcher_task);
@@ -168,7 +170,6 @@ pub(crate) async fn spawn_runtime_tasks(
         )
         .await;
     let stats_policy = stats.clone();
-    let upstream_policy = upstream_manager.clone();
     let mut config_rx_policy = config_rx.clone();
     task_scope.spawn(async move {
         loop {
@@ -178,9 +179,6 @@ pub(crate) async fn spawn_runtime_tasks(
             let cfg = config_rx_policy.borrow_and_update().clone();
             stats_policy
                 .apply_telemetry_policy(TelemetryPolicy::from_config(&cfg.general.telemetry));
-            if let Err(error) = upstream_policy.update_dns_overrides(&cfg.network.dns_overrides) {
-                warn!(error = %error, "Failed to update generation DNS overrides");
-            }
             if let Some(pool) = &me_pool_for_policy {
                 pool.update_runtime_transport_policy(
                     cfg.general.me_socks_kdf_policy,
@@ -406,7 +404,9 @@ pub(crate) async fn spawn_metrics_if_configured(
     startup_tracker: &Arc<StartupTracker>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     web_runtime_rx: tokio::sync::watch::Receiver<crate::web::control::WebRuntimePublication>,
-) {
+    tls_full_cert_budget: Arc<crate::tls_front::cache::TlsFullCertBudget>,
+    control_plane: ProcessControlPlane,
+) -> std::io::Result<()> {
     // metrics_listen takes precedence; fall back to metrics_port for backward compat.
     let metrics_target: Option<(u16, Option<String>)> =
         if let Some(ref listen) = config.server.metrics_listen {
@@ -414,12 +414,15 @@ pub(crate) async fn spawn_metrics_if_configured(
                 Ok(addr) => Some((addr.port(), Some(listen.clone()))),
                 Err(e) => {
                     startup_tracker
-                        .skip_component(
+                        .fail_component(
                             COMPONENT_METRICS_START,
                             Some(format!("invalid metrics_listen \"{}\": {}", listen, e)),
                         )
                         .await;
-                    None
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid metrics_listen \"{}\": {}", listen, e),
+                    ));
                 }
             }
         } else {
@@ -435,15 +438,30 @@ pub(crate) async fn spawn_metrics_if_configured(
                 Some(format!("spawn metrics endpoint on {}", label)),
             )
             .await;
-        let active_runtime = active_runtime.clone();
         let listen_backlog = config.server.listen_backlog;
-        tokio::spawn(async move {
-            metrics::serve(port, listen, listen_backlog, active_runtime, web_runtime_rx).await;
-        });
+        let bound = match metrics::bind(port, listen, listen_backlog) {
+            Ok(bound) => bound,
+            Err(error) => {
+                startup_tracker
+                    .fail_component(
+                        COMPONENT_METRICS_START,
+                        Some(format!("metrics listener bind failed: {error}")),
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
+        metrics::serve(
+            bound,
+            active_runtime,
+            web_runtime_rx,
+            tls_full_cert_budget,
+            control_plane,
+        );
         startup_tracker
             .complete_component(
                 COMPONENT_METRICS_START,
-                Some("metrics task spawned".to_string()),
+                Some("metrics listeners bound and supervised".to_string()),
             )
             .await;
     } else if config.server.metrics_listen.is_none() {
@@ -454,6 +472,7 @@ pub(crate) async fn spawn_metrics_if_configured(
             )
             .await;
     }
+    Ok(())
 }
 
 pub(crate) async fn mark_runtime_ready(startup_tracker: &Arc<StartupTracker>) {

@@ -229,7 +229,7 @@ async fn masking_fallback_down_mimics_timeout() {
 
 #[tokio::test]
 async fn masking_ssrf_resolve_internal_ranges_blocked() {
-    use crate::network::dns_overrides::resolve_socket_addr;
+    use crate::network::dns_overrides::DnsOverrides;
 
     let blocked_ips = [
         "127.0.0.1",
@@ -238,10 +238,11 @@ async fn masking_ssrf_resolve_internal_ranges_blocked() {
         "192.168.1.1",
         "0.0.0.0",
     ];
+    let resolver = DnsOverrides::default();
 
     for ip in blocked_ips {
         assert!(
-            resolve_socket_addr(ip, 80).is_none(),
+            resolver.resolve_socket_addr(ip, 80).is_none(),
             "runtime DNS overrides must not resolve unconfigured literal host targets"
         );
     }

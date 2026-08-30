@@ -8,6 +8,7 @@ use crate::config::ProxyConfig;
 use crate::error::{ProxyError, Result};
 use crate::startup::{COMPONENT_TLS_FRONT_BOOTSTRAP, StartupTracker};
 use crate::tls_front::TlsFrontCache;
+use crate::tls_front::cache::TlsFullCertBudget;
 use crate::tls_front::fetcher::TlsFetchStrategy;
 use crate::transport::UpstreamManager;
 
@@ -109,6 +110,7 @@ pub(crate) async fn bootstrap_tls_front(
     upstream_manager: Arc<UpstreamManager>,
     startup_tracker: &Arc<StartupTracker>,
     task_scope: RuntimeTaskScope,
+    full_cert_budget: Arc<TlsFullCertBudget>,
     policy: TlsBootstrapPolicy,
 ) -> Result<Option<Arc<TlsFrontCache>>> {
     startup_tracker
@@ -128,10 +130,11 @@ pub(crate) async fn bootstrap_tls_front(
         return Ok(None);
     }
 
-    let cache = Arc::new(TlsFrontCache::new(
+    let cache = Arc::new(TlsFrontCache::new_with_full_cert_budget(
         tls_domains,
         config.censorship.fake_cert_len,
         &config.censorship.tls_front_dir,
+        full_cert_budget,
     ));
     cache.load_from_disk().await;
 
@@ -301,6 +304,7 @@ mod tests {
             upstream_manager(&config),
             &tracker,
             scope.clone(),
+            Arc::new(TlsFullCertBudget::new()),
             TlsBootstrapPolicy::RequireReady,
         )
         .await;
@@ -336,6 +340,7 @@ mod tests {
             upstream_manager(&config),
             &tracker,
             scope.clone(),
+            Arc::new(TlsFullCertBudget::new()),
             TlsBootstrapPolicy::RequireReady,
         )
         .await
@@ -364,6 +369,7 @@ mod tests {
             upstream_manager(&config),
             &tracker,
             scope.clone(),
+            Arc::new(TlsFullCertBudget::new()),
             TlsBootstrapPolicy::BestEffort,
         )
         .await

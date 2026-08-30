@@ -9,12 +9,47 @@ use tracing::{debug, info, warn};
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
 
-use super::pool::{MePool, RefillDcKey, RefillEndpointKey, WriterContour};
+use super::pool::{MePool, RefillDcKey, WriterContour};
 
 const ME_FLAP_UPTIME_THRESHOLD_SECS: u64 = 20;
 const ME_FLAP_QUARANTINE_SECS: u64 = 25;
 const ME_FLAP_MIN_UPTIME_MILLIS: u64 = 500;
 const ME_REFILL_TOTAL_ATTEMPT_CAP: u32 = 20;
+
+struct RefillRunGuard {
+    pool: Arc<MePool>,
+    key: RefillDcKey,
+    active: bool,
+}
+
+impl RefillRunGuard {
+    fn next_or_finish(&mut self) -> Option<SocketAddr> {
+        let mut states = self.pool.refill_states.lock();
+        let next = states.get_mut(&self.key).and_then(Option::take);
+        if next.is_some() {
+            self.pool.refill_pending.fetch_sub(1, Ordering::AcqRel);
+            return next;
+        }
+        states.remove(&self.key);
+        self.pool.refill_running.fetch_sub(1, Ordering::AcqRel);
+        self.active = false;
+        None
+    }
+}
+
+impl Drop for RefillRunGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(pending) = self.pool.refill_states.lock().remove(&self.key)
+            && pending.is_some()
+        {
+            self.pool.refill_pending.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.pool.refill_running.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 impl MePool {
     pub(super) async fn sweep_endpoint_quarantine(&self) {
@@ -131,8 +166,7 @@ impl MePool {
     }
 
     pub(super) async fn has_refill_inflight_for_dc_key(&self, key: RefillDcKey) -> bool {
-        let guard = self.refill_inflight_dc.lock().await;
-        guard.contains(&key)
+        self.refill_states.lock().contains_key(&key)
     }
 
     pub(super) async fn connect_endpoints_round_robin(
@@ -327,62 +361,53 @@ impl MePool {
         addr: SocketAddr,
         writer_dc: i32,
     ) {
-        let endpoint_key = RefillEndpointKey {
-            dc: writer_dc,
-            addr,
+        let Some(registration) = self.lifecycle.try_register() else {
+            return;
         };
-        let pre_inserted = if let Ok(mut guard) = self.refill_inflight.try_lock() {
-            if !guard.insert(endpoint_key) {
+        let dc_key = RefillDcKey {
+            dc: writer_dc,
+            family: if addr.is_ipv4() {
+                IpFamily::V4
+            } else {
+                IpFamily::V6
+            },
+        };
+        {
+            let mut states = self.refill_states.lock();
+            if let Some(pending) = states.get_mut(&dc_key) {
+                if pending.is_none() {
+                    self.refill_pending.fetch_add(1, Ordering::AcqRel);
+                }
+                *pending = Some(addr);
                 self.stats.increment_me_refill_skipped_inflight_total();
                 return;
             }
-            true
-        } else {
-            false
-        };
+            states.insert(dc_key, None);
+            self.refill_running.fetch_add(1, Ordering::AcqRel);
+        }
 
         let pool = Arc::clone(self);
-        tokio::spawn(async move {
-            let dc_key = RefillDcKey {
-                dc: writer_dc,
-                family: if addr.is_ipv4() {
-                    IpFamily::V4
-                } else {
-                    IpFamily::V6
-                },
-            };
-
-            if !pre_inserted {
-                let mut guard = pool.refill_inflight.lock().await;
-                if !guard.insert(endpoint_key) {
-                    pool.stats.increment_me_refill_skipped_inflight_total();
-                    return;
+        let mut run_guard = RefillRunGuard {
+            pool: Arc::clone(&pool),
+            key: dc_key,
+            active: true,
+        };
+        self.lifecycle.spawn_registered_producer(registration, async move {
+            let mut current_addr = addr;
+            loop {
+                pool.stats.increment_me_refill_triggered_total();
+                let restored = pool
+                    .refill_writer_after_loss(current_addr, writer_dc)
+                    .await;
+                if !restored {
+                    warn!(%current_addr, dc = writer_dc, "ME immediate refill failed");
                 }
-            }
 
-            {
-                let mut dc_guard = pool.refill_inflight_dc.lock().await;
-                if dc_guard.contains(&dc_key) {
-                    pool.stats.increment_me_refill_skipped_inflight_total();
-                    drop(dc_guard);
-                    let mut guard = pool.refill_inflight.lock().await;
-                    guard.remove(&endpoint_key);
+                let Some(next_addr) = run_guard.next_or_finish() else {
                     return;
-                }
-                dc_guard.insert(dc_key);
+                };
+                current_addr = next_addr;
             }
-
-            pool.stats.increment_me_refill_triggered_total();
-            let restored = pool.refill_writer_after_loss(addr, writer_dc).await;
-            if !restored {
-                warn!(%addr, dc = writer_dc, "ME immediate refill failed");
-            }
-
-            let mut guard = pool.refill_inflight.lock().await;
-            guard.remove(&endpoint_key);
-            drop(guard);
-            let mut dc_guard = pool.refill_inflight_dc.lock().await;
-            dc_guard.remove(&dc_key);
         });
     }
 }

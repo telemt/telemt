@@ -18,6 +18,7 @@ pub(super) struct WebIngressStatus {
 }
 
 impl WebIngressStatus {
+    /// Builds a process-ingress snapshot without probing external TLS termination.
     pub(super) fn new(publication: &WebRuntimePublication, runtime_available: bool) -> Self {
         let configured_listeners = publication.listeners.len();
         let live_acceptors = publication.telemetry.live_acceptors();
@@ -64,6 +65,7 @@ pub(super) struct WebCapacityStatus {
 }
 
 impl WebCapacityStatus {
+    /// Builds a bounded capacity snapshot from non-blocking runtime observations.
     pub(super) fn new(
         publication: &WebRuntimePublication,
         runtime: Option<&WebProcessRuntime>,
@@ -104,6 +106,7 @@ pub(super) struct WebDecoyUpstreamStatus {
 }
 
 impl WebDecoyUpstreamStatus {
+    /// Builds the fixed internal decoy-origin outcome snapshot.
     pub(super) fn new(publication: &WebRuntimePublication) -> Self {
         let last = publication.telemetry.last_decoy();
         Self {

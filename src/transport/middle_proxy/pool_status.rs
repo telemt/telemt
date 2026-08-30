@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::pool::{MePool, WriterContour};
+use super::pool::{MePool, ReinitStatusSnapshot, WriterContour};
 use crate::config::{MeBindStaleMode, MeFloorMode, MeSocksKdfPolicy};
 use crate::transport::upstream::IpPreference;
 
@@ -87,8 +88,11 @@ pub(crate) struct MeApiDcPathSnapshot {
 pub(crate) struct MeApiRuntimeSnapshot {
     pub active_generation: u64,
     pub warm_generation: u64,
+    pub warm_generations: Vec<u64>,
     pub pending_hardswap_generation: u64,
     pub pending_hardswap_age_secs: Option<u64>,
+    pub reinit_inflight: usize,
+    pub reinit_max_concurrency_effective: usize,
     pub hardswap_enabled: bool,
     pub floor_mode: &'static str,
     pub adaptive_floor_idle_secs: u64,
@@ -222,8 +226,16 @@ impl MePool {
     }
 
     pub(crate) async fn api_status_snapshot(&self) -> MeApiStatusSnapshot {
+        let reinit = self.reinit.status.load_full();
+        self.api_status_snapshot_for_reinit(reinit.as_ref()).await
+    }
+
+    async fn api_status_snapshot_for_reinit(
+        &self,
+        reinit: &ReinitStatusSnapshot,
+    ) -> MeApiStatusSnapshot {
         let now_epoch_secs = Self::now_epoch_secs();
-        let active_generation = self.current_generation();
+        let active_generation = reinit.active_generation;
         let drain_ttl_secs = self
             .drain_runtime
             .me_pool_drain_ttl_secs
@@ -440,13 +452,19 @@ impl MePool {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn api_runtime_snapshot(&self) -> MeApiRuntimeSnapshot {
+        let reinit = self.reinit.status.load_full();
+        self.api_runtime_snapshot_for_reinit(reinit.as_ref()).await
+    }
+
+    async fn api_runtime_snapshot_for_reinit(
+        &self,
+        reinit: &ReinitStatusSnapshot,
+    ) -> MeApiRuntimeSnapshot {
         let now = Instant::now();
         let now_epoch_secs = Self::now_epoch_secs();
-        let pending_started_at = self
-            .reinit
-            .pending_hardswap_started_at_epoch_secs
-            .load(Ordering::Relaxed);
+        let pending_started_at = reinit.pending_hardswap_started_at_epoch_secs;
         let pending_hardswap_age_secs =
             (pending_started_at > 0).then_some(now_epoch_secs.saturating_sub(pending_started_at));
 
@@ -486,13 +504,16 @@ impl MePool {
         }
 
         MeApiRuntimeSnapshot {
-            active_generation: self.reinit.active_generation.load(Ordering::Relaxed),
-            warm_generation: self.reinit.warm_generation.load(Ordering::Relaxed),
-            pending_hardswap_generation: self
-                .reinit
-                .pending_hardswap_generation
-                .load(Ordering::Relaxed),
+            active_generation: reinit.active_generation,
+            warm_generation: reinit.warm_generations.last().copied().unwrap_or(0),
+            warm_generations: reinit.warm_generations.clone(),
+            pending_hardswap_generation: reinit.pending_hardswap_generation,
             pending_hardswap_age_secs,
+            reinit_inflight: reinit.inflight,
+            reinit_max_concurrency_effective: self
+                .reinit
+                .max_concurrency_effective
+                .load(Ordering::Acquire),
             hardswap_enabled: self.reinit.hardswap.load(Ordering::Relaxed),
             floor_mode: floor_mode_label(self.floor_mode()),
             adaptive_floor_idle_secs: self
@@ -660,6 +681,23 @@ impl MePool {
             me_socks_kdf_policy: socks_kdf_policy_label(self.socks_kdf_policy()),
             quarantined_endpoints,
             network_path,
+        }
+    }
+
+    pub(crate) async fn api_coherent_snapshots(
+        &self,
+    ) -> (MeApiStatusSnapshot, MeApiRuntimeSnapshot) {
+        let mut attempts = 0usize;
+        loop {
+            let reinit = self.reinit.status.load_full();
+            let status = self.api_status_snapshot_for_reinit(reinit.as_ref()).await;
+            let runtime = self
+                .api_runtime_snapshot_for_reinit(reinit.as_ref())
+                .await;
+            attempts += 1;
+            if Arc::ptr_eq(&reinit, &self.reinit.status.load_full()) || attempts >= 3 {
+                return (status, runtime);
+            }
         }
     }
 }

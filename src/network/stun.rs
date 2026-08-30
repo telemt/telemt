@@ -10,7 +10,7 @@ use tokio::time::{Duration, sleep, timeout};
 
 use crate::crypto::SecureRandom;
 use crate::error::{ProxyError, Result};
-use crate::network::dns_overrides::{resolve, split_host_port};
+use crate::network::dns_overrides::{GenerationDnsResolver, split_host_port};
 
 fn stun_rng() -> &'static SecureRandom {
     static STUN_RNG: OnceLock<SecureRandom> = OnceLock::new();
@@ -81,12 +81,31 @@ pub async fn stun_probe_family_with_bind_and_tcp_fallback(
     bind_ip: Option<IpAddr>,
     tcp_fallback: bool,
 ) -> Result<Option<StunProbeResult>> {
+    stun_probe_family_with_bind_tcp_fallback_and_resolver(
+        stun_addr,
+        family,
+        bind_ip,
+        tcp_fallback,
+        None,
+    )
+    .await
+}
+
+/// Probes one STUN family with an optional generation-owned DNS resolver.
+pub async fn stun_probe_family_with_bind_tcp_fallback_and_resolver(
+    stun_addr: &str,
+    family: IpFamily,
+    bind_ip: Option<IpAddr>,
+    tcp_fallback: bool,
+    dns_resolver: Option<&GenerationDnsResolver>,
+) -> Result<Option<StunProbeResult>> {
     let udp_attempts = if tcp_fallback { 1 } else { 3 };
-    let udp_result = stun_probe_family_udp(stun_addr, family, bind_ip, udp_attempts).await?;
+    let udp_result =
+        stun_probe_family_udp(stun_addr, family, bind_ip, udp_attempts, dns_resolver).await?;
     if udp_result.is_some() || !tcp_fallback {
         return Ok(udp_result);
     }
-    stun_probe_family_tcp(stun_addr, family, bind_ip).await
+    stun_probe_family_tcp(stun_addr, family, bind_ip, dns_resolver).await
 }
 
 async fn stun_probe_family_udp(
@@ -94,6 +113,7 @@ async fn stun_probe_family_udp(
     family: IpFamily,
     bind_ip: Option<IpAddr>,
     max_attempts: u8,
+    dns_resolver: Option<&GenerationDnsResolver>,
 ) -> Result<Option<StunProbeResult>> {
     let bind_addr = match (family, bind_ip) {
         (IpFamily::V4, Some(IpAddr::V4(ip))) => SocketAddr::new(IpAddr::V4(ip), 0),
@@ -111,7 +131,7 @@ async fn stun_probe_family_udp(
         Err(e) => return Err(ProxyError::Proxy(format!("STUN bind failed: {e}"))),
     };
 
-    let target_addr = resolve_stun_addr(stun_addr, family).await?;
+    let target_addr = resolve_stun_addr(stun_addr, family, dns_resolver).await?;
     if let Some(addr) = target_addr {
         match socket.connect(addr).await {
             Ok(()) => {}
@@ -182,8 +202,9 @@ async fn stun_probe_family_tcp(
     stun_addr: &str,
     family: IpFamily,
     bind_ip: Option<IpAddr>,
+    dns_resolver: Option<&GenerationDnsResolver>,
 ) -> Result<Option<StunProbeResult>> {
-    let target_addr = match resolve_stun_addr(stun_addr, family).await? {
+    let target_addr = match resolve_stun_addr(stun_addr, family, dns_resolver).await? {
         Some(addr) => addr,
         None => return Ok(None),
     };
@@ -360,7 +381,11 @@ fn parse_reflected_addr(buf: &[u8], txid: &[u8]) -> Option<SocketAddr> {
     None
 }
 
-async fn resolve_stun_addr(stun_addr: &str, family: IpFamily) -> Result<Option<SocketAddr>> {
+async fn resolve_stun_addr(
+    stun_addr: &str,
+    family: IpFamily,
+    dns_resolver: Option<&GenerationDnsResolver>,
+) -> Result<Option<SocketAddr>> {
     if let Ok(addr) = stun_addr.parse::<SocketAddr>() {
         return Ok(match (addr.is_ipv4(), family) {
             (true, IpFamily::V4) | (false, IpFamily::V6) => Some(addr),
@@ -369,9 +394,9 @@ async fn resolve_stun_addr(stun_addr: &str, family: IpFamily) -> Result<Option<S
     }
 
     if let Some((host, port)) = split_host_port(stun_addr)
-        && let Some(ip) = resolve(&host, port)
+        && let Some(addr) = dns_resolver
+            .and_then(|resolver| resolver.resolve_socket_addr(&host, port))
     {
-        let addr = SocketAddr::new(ip, port);
         return Ok(match (addr.is_ipv4(), family) {
             (true, IpFamily::V4) | (false, IpFamily::V6) => Some(addr),
             _ => None,

@@ -50,7 +50,6 @@ use crate::proxy::handshake::{
 };
 #[cfg(test)]
 use crate::proxy::handshake::{handle_mtproto_handshake, handle_tls_handshake};
-use crate::proxy::masking::handle_bad_client_with_shared;
 #[cfg(test)]
 use crate::proxy::route_mode::RelayRouteMode;
 use crate::proxy::route_mode::RouteRuntimeController;
@@ -247,6 +246,7 @@ fn masking_outcome<R, W>(
     peer: SocketAddr,
     local_addr: SocketAddr,
     config: Arc<ProxyConfig>,
+    upstream_manager: Arc<UpstreamManager>,
     beobachten: Arc<BeobachtenStore>,
     shared: Arc<ProxySharedState>,
 ) -> HandshakeOutcome
@@ -264,7 +264,7 @@ where
         )
         .await;
 
-        handle_bad_client_with_shared(
+        crate::proxy::masking::handle_bad_client_with_shared_resolver(
             reader,
             writer,
             &initial_data,
@@ -273,6 +273,7 @@ where
             &config,
             &beobachten,
             shared.as_ref(),
+            Some(upstream_manager.as_ref()),
         )
         .await;
         Ok(())
@@ -657,6 +658,7 @@ where
                     real_peer,
                     local_addr,
                     config.clone(),
+                    upstream_manager.clone(),
                     beobachten.clone(),
                     shared.clone(),
                 ));
@@ -679,6 +681,7 @@ where
                         real_peer,
                         local_addr,
                         config.clone(),
+                        upstream_manager.clone(),
                         beobachten.clone(),
                         shared.clone(),
                     ));
@@ -698,6 +701,7 @@ where
                     real_peer,
                     local_addr,
                     config.clone(),
+                    upstream_manager.clone(),
                     beobachten.clone(),
                     shared.clone(),
                 ));
@@ -729,6 +733,7 @@ where
                         real_peer,
                         local_addr,
                         config.clone(),
+                        upstream_manager.clone(),
                         beobachten.clone(),
                         shared.clone(),
                     ));
@@ -787,6 +792,7 @@ where
                         real_peer,
                         local_addr,
                         config.clone(),
+                        upstream_manager.clone(),
                         beobachten.clone(),
                         shared.clone(),
                     ));
@@ -817,6 +823,7 @@ where
                     real_peer,
                     local_addr,
                     config.clone(),
+                    upstream_manager.clone(),
                     beobachten.clone(),
                     shared.clone(),
                 ));
@@ -843,6 +850,7 @@ where
                         real_peer,
                         local_addr,
                         config.clone(),
+                        upstream_manager.clone(),
                         beobachten.clone(),
                         shared.clone(),
                     ));
@@ -1279,6 +1287,7 @@ impl RunningClientHandler {
                 peer,
                 local_addr,
                 self.config.clone(),
+                self.upstream_manager.clone(),
                 self.beobachten.clone(),
                 self.shared.clone(),
             ));
@@ -1301,6 +1310,7 @@ impl RunningClientHandler {
                     peer,
                     local_addr,
                     self.config.clone(),
+                    self.upstream_manager.clone(),
                     self.beobachten.clone(),
                     self.shared.clone(),
                 ));
@@ -1321,6 +1331,7 @@ impl RunningClientHandler {
                 peer,
                 local_addr,
                 self.config.clone(),
+                self.upstream_manager.clone(),
                 self.beobachten.clone(),
                 self.shared.clone(),
             ));
@@ -1377,6 +1388,7 @@ impl RunningClientHandler {
                         peer,
                         local_addr,
                         config.clone(),
+                        self.upstream_manager.clone(),
                         self.beobachten.clone(),
                         self.shared.clone(),
                     ));
@@ -1445,6 +1457,7 @@ impl RunningClientHandler {
                     peer,
                     local_addr,
                     config.clone(),
+                    self.upstream_manager.clone(),
                     self.beobachten.clone(),
                     self.shared.clone(),
                 ));
@@ -1493,6 +1506,7 @@ impl RunningClientHandler {
                 peer,
                 local_addr,
                 self.config.clone(),
+                self.upstream_manager.clone(),
                 self.beobachten.clone(),
                 self.shared.clone(),
             ));
@@ -1532,6 +1546,7 @@ impl RunningClientHandler {
                     peer,
                     local_addr,
                     config.clone(),
+                    self.upstream_manager.clone(),
                     self.beobachten.clone(),
                     self.shared.clone(),
                 ));

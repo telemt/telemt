@@ -15,6 +15,8 @@ pub(crate) struct MeApiRefillDcSnapshot {
 pub(crate) struct MeApiRefillSnapshot {
     pub inflight_endpoints_total: usize,
     pub inflight_dc_total: usize,
+    pub running_dc_total: usize,
+    pub pending_dc_total: usize,
     pub by_dc: Vec<MeApiRefillDcSnapshot>,
 }
 
@@ -56,14 +58,21 @@ pub(crate) struct MeApiDrainGateSnapshot {
 
 impl MePool {
     pub(crate) async fn api_refill_snapshot(&self) -> MeApiRefillSnapshot {
-        let inflight_endpoints_total = self.refill_inflight.lock().await.len();
-        let inflight_dc_keys = self
-            .refill_inflight_dc
-            .lock()
-            .await
-            .iter()
+        let refill_states = self.refill_states.lock();
+        let inflight_endpoints_total = refill_states
+            .values()
+            .map(|pending| 1usize + usize::from(pending.is_some()))
+            .sum();
+        let running_dc_total = refill_states.len();
+        let pending_dc_total = refill_states
+            .values()
+            .filter(|pending| pending.is_some())
+            .count();
+        let inflight_dc_keys = refill_states
+            .keys()
             .copied()
             .collect::<Vec<RefillDcKey>>();
+        drop(refill_states);
 
         let mut by_dc_map = HashMap::<(i16, &'static str), usize>::new();
         for key in inflight_dc_keys {
@@ -88,6 +97,8 @@ impl MePool {
         MeApiRefillSnapshot {
             inflight_endpoints_total,
             inflight_dc_total: by_dc.len(),
+            running_dc_total,
+            pending_dc_total,
             by_dc,
         }
     }

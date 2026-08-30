@@ -21,8 +21,11 @@ pub(super) struct SecurityWhitelistData {
 pub(super) struct RuntimeMePoolStateGenerationData {
     pub(super) active_generation: u64,
     pub(super) warm_generation: u64,
+    pub(super) warm_generations: Vec<u64>,
     pub(super) pending_hardswap_generation: u64,
     pub(super) pending_hardswap_age_secs: Option<u64>,
+    pub(super) reinit_inflight: usize,
+    pub(super) reinit_max_concurrency_effective: usize,
     pub(super) draining_generations: Vec<u64>,
 }
 
@@ -67,6 +70,8 @@ pub(super) struct RuntimeMePoolStateRefillDcData {
 pub(super) struct RuntimeMePoolStateRefillData {
     pub(super) inflight_endpoints_total: usize,
     pub(super) inflight_dc_total: usize,
+    pub(super) running_dc_total: usize,
+    pub(super) pending_dc_total: usize,
     pub(super) by_dc: Vec<RuntimeMePoolStateRefillDcData>,
 }
 
@@ -291,8 +296,7 @@ pub(super) async fn build_runtime_me_pool_state_data(shared: &ApiShared) -> Runt
         };
     };
 
-    let status = pool.api_status_snapshot().await;
-    let runtime = pool.api_runtime_snapshot().await;
+    let (status, runtime) = pool.api_coherent_snapshots().await;
     let refill = pool.api_refill_snapshot().await;
 
     let mut draining_generations = BTreeSet::<u64>::new();
@@ -329,8 +333,11 @@ pub(super) async fn build_runtime_me_pool_state_data(shared: &ApiShared) -> Runt
             generations: RuntimeMePoolStateGenerationData {
                 active_generation: runtime.active_generation,
                 warm_generation: runtime.warm_generation,
+                warm_generations: runtime.warm_generations,
                 pending_hardswap_generation: runtime.pending_hardswap_generation,
                 pending_hardswap_age_secs: runtime.pending_hardswap_age_secs,
+                reinit_inflight: runtime.reinit_inflight,
+                reinit_max_concurrency_effective: runtime.reinit_max_concurrency_effective,
                 draining_generations: draining_generations.into_iter().collect(),
             },
             hardswap: RuntimeMePoolStateHardswapData {
@@ -356,6 +363,8 @@ pub(super) async fn build_runtime_me_pool_state_data(shared: &ApiShared) -> Runt
             refill: RuntimeMePoolStateRefillData {
                 inflight_endpoints_total: refill.inflight_endpoints_total,
                 inflight_dc_total: refill.inflight_dc_total,
+                running_dc_total: refill.running_dc_total,
+                pending_dc_total: refill.pending_dc_total,
                 by_dc: refill
                     .by_dc
                     .into_iter()

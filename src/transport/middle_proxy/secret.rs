@@ -108,6 +108,7 @@ pub async fn download_proxy_secret_with_max_len_via_upstream(
     let resp = https_get(
         proxy_secret_url.unwrap_or("https://core.telegram.org/getProxySecret"),
         upstream,
+        max_len,
     )
     .await?;
 

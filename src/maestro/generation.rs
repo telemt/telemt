@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{RwLock, Semaphore, watch};
+use tokio::sync::{Notify, RwLock, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -29,6 +29,7 @@ const SESSION_REGISTRATION_COUNT: usize = SESSION_ADMISSION_CLOSED - 1;
 
 struct SessionAdmission {
     state: AtomicUsize,
+    registrations_drained: Notify,
 }
 
 struct SessionRegistration<'a> {
@@ -39,6 +40,7 @@ impl SessionAdmission {
     fn new() -> Self {
         Self {
             state: AtomicUsize::new(0),
+            registrations_drained: Notify::new(),
         }
     }
 
@@ -73,15 +75,24 @@ impl SessionAdmission {
     }
 
     async fn wait_for_registrations(&self) {
-        while self.state.load(Ordering::Acquire) & SESSION_REGISTRATION_COUNT != 0 {
-            tokio::task::yield_now().await;
+        loop {
+            let notified = self.registrations_drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.state.load(Ordering::Acquire) & SESSION_REGISTRATION_COUNT == 0 {
+                return;
+            }
+            notified.await;
         }
     }
 }
 
 impl Drop for SessionRegistration<'_> {
     fn drop(&mut self) {
-        self.admission.state.fetch_sub(1, Ordering::Release);
+        let previous = self.admission.state.fetch_sub(1, Ordering::AcqRel);
+        if previous & SESSION_REGISTRATION_COUNT == 1 {
+            self.admission.registrations_drained.notify_waiters();
+        }
     }
 }
 
@@ -98,6 +109,7 @@ pub(crate) struct RuntimeWatchState {
 pub(crate) struct RuntimeTaskScope {
     tracker: TaskTracker,
     cancel: CancellationToken,
+    admission: Arc<SessionAdmission>,
 }
 
 impl RuntimeTaskScope {
@@ -106,6 +118,7 @@ impl RuntimeTaskScope {
         Self {
             tracker: TaskTracker::new(),
             cancel: CancellationToken::new(),
+            admission: Arc::new(SessionAdmission::new()),
         }
     }
 
@@ -114,9 +127,13 @@ impl RuntimeTaskScope {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        let Some(_registration) = self.admission.try_register() else {
+            return;
+        };
         let cancel = self.cancel.clone();
         self.tracker.spawn(async move {
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => {}
                 _ = future => {}
             }
@@ -130,6 +147,8 @@ impl RuntimeTaskScope {
 
     /// Cancels the scope and waits within the bounded background-task budget.
     pub(crate) async fn stop(&self) {
+        self.admission.close();
+        self.admission.wait_for_registrations().await;
         self.cancel.cancel();
         self.tracker.close();
         let _ = tokio::time::timeout(BACKGROUND_STOP_TIMEOUT, self.tracker.wait()).await;
@@ -263,6 +282,7 @@ impl RuntimeGeneration {
         let cancel = self.session_cancel.clone();
         self.sessions.spawn(async move {
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => {}
                 _ = future => {}
             }
@@ -273,11 +293,6 @@ impl RuntimeGeneration {
     /// Closes admission while preserving already registered sessions.
     pub(crate) fn stop_accepting_sessions(&self) {
         self.session_admission.close();
-    }
-
-    /// Reopens admission after a candidate activation rolls back.
-    pub(crate) fn resume_accepting_sessions(&self) {
-        self.session_admission.reopen();
     }
 
     /// Waits for registered sessions and cancels them when the deadline expires.
@@ -307,6 +322,27 @@ impl RuntimeGeneration {
     /// Stops all background tasks owned by this generation.
     pub(crate) async fn stop_background_tasks(&self) {
         self.background_tasks.stop().await;
+    }
+
+    /// Terminally stops the generation's Middle-End task and writer scope.
+    pub(crate) async fn stop_middle_end(&self, timeout: Duration) -> bool {
+        let Some(pool) = self.current_me_pool().await else {
+            return true;
+        };
+        pool.shutdown_until(timeout).await
+    }
+}
+
+impl Drop for RuntimeGeneration {
+    fn drop(&mut self) {
+        if let Some(pool) = self.me_pool.as_ref() {
+            pool.begin_shutdown();
+        }
+        if let Ok(pool) = self.me_pool_runtime.try_read()
+            && let Some(pool) = pool.as_ref()
+        {
+            pool.begin_shutdown();
+        }
     }
 }
 
@@ -393,11 +429,31 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_task_scope_joins_cancelled_background_task() {
+        struct DropSignal(Arc<AtomicUsize>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
         let scope = RuntimeTaskScope::new();
-        scope.spawn(std::future::pending());
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let drop_signal = DropSignal(dropped.clone());
+        scope.spawn(async move {
+            let _drop_signal = drop_signal;
+            std::future::pending::<()>().await;
+        });
         tokio::time::timeout(Duration::from_secs(1), scope.stop())
             .await
             .unwrap();
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+
+        let late_drop_signal = DropSignal(dropped.clone());
+        scope.spawn(async move {
+            let _late_drop_signal = late_drop_signal;
+        });
+        assert_eq!(dropped.load(Ordering::Acquire), 2);
     }
 
     #[tokio::test]

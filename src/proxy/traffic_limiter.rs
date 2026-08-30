@@ -355,9 +355,10 @@ impl CidrBucket {
     }
 
     fn acquire_user_share(&self, user: &str) -> Arc<CidrUserShare> {
-        let share = self.users.get_or_insert_with(user, CidrUserShare::new);
-        share.active_conns.fetch_add(1, Ordering::Relaxed);
-        share
+        self.users
+            .get_or_insert_with(user, CidrUserShare::new, |share| {
+                share.active_conns.fetch_add(1, Ordering::Relaxed);
+            })
     }
 
     fn release_user_share(&self, user: &str, share: &Arc<CidrUserShare>) {
@@ -487,15 +488,20 @@ impl<T> ShardedRegistry<T> {
         (hasher.finish() as usize) & self.mask
     }
 
-    fn get_or_insert_with<F>(&self, key: &str, make: F) -> Arc<T>
+    fn get_or_insert_with<F, A>(&self, key: &str, make: F, activate: A) -> Arc<T>
     where
         F: FnOnce() -> T,
+        A: FnOnce(&Arc<T>),
     {
         let shard = &self.shards[self.shard_index(key)];
         match shard.entry(key.to_string()) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                activate(entry.get());
+                Arc::clone(entry.get())
+            }
             dashmap::mapref::entry::Entry::Vacant(slot) => {
                 let value = Arc::new(make());
+                activate(&value);
                 slot.insert(Arc::clone(&value));
                 value
             }
@@ -516,14 +522,7 @@ impl<T> ShardedRegistry<T> {
         F: Fn(&Arc<T>) -> bool,
     {
         let shard = &self.shards[self.shard_index(key)];
-        let should_remove = match shard.get(key) {
-            Some(entry) => predicate(entry.value()),
-            None => false,
-        };
-        if !should_remove {
-            return false;
-        }
-        shard.remove(key).is_some()
+        shard.remove_if(key, |_, value| predicate(value)).is_some()
     }
 }
 
@@ -743,9 +742,10 @@ impl TrafficLimiter {
         if let Some(limit) = policy.user_limits.get(user).copied() {
             let bucket = self
                 .user_buckets
-                .get_or_insert_with(user, || UserBucket::new(limit));
+                .get_or_insert_with(user, || UserBucket::new(limit), |bucket| {
+                    bucket.active_leases.fetch_add(1, Ordering::Relaxed);
+                });
             bucket.set_rates(limit);
-            bucket.active_leases.fetch_add(1, Ordering::Relaxed);
             self.user_scope
                 .active_leases
                 .fetch_add(1, Ordering::Relaxed);
@@ -762,9 +762,10 @@ impl TrafficLimiter {
             };
             let bucket = self
                 .cidr_buckets
-                .get_or_insert_with(key, || CidrBucket::new(limits));
+                .get_or_insert_with(key, || CidrBucket::new(limits), |bucket| {
+                    bucket.active_leases.fetch_add(1, Ordering::Relaxed);
+                });
             bucket.set_rates(limits);
-            bucket.active_leases.fetch_add(1, Ordering::Relaxed);
             self.cidr_scope
                 .active_leases
                 .fetch_add(1, Ordering::Relaxed);

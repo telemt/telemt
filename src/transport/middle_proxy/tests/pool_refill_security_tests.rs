@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
@@ -104,6 +105,7 @@ async fn make_pool() -> Arc<MePool> {
         general.me_route_blocking_send_timeout_ms,
         general.me_route_inline_recovery_attempts,
         general.me_route_inline_recovery_wait_ms,
+        16_384,
     )
 }
 
@@ -158,4 +160,32 @@ async fn connectable_endpoints_releases_quarantine_lock_before_sleep() {
         .expect("connectable_endpoints task timed out")
         .expect("task join failed");
     assert_eq!(endpoints, vec![addr]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn refill_coalesces_one_pending_endpoint_and_cleans_up_before_first_poll() {
+    let pool = make_pool().await;
+    let first = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 21)), 443);
+    let second = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 22)), 443);
+    let latest = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 31, 0, 23)), 443);
+
+    pool.trigger_immediate_refill_for_dc(first, 2);
+    pool.trigger_immediate_refill_for_dc(second, 2);
+    pool.trigger_immediate_refill_for_dc(latest, 2);
+
+    assert_eq!(pool.refill_states.lock().len(), 1);
+    assert_eq!(pool.refill_running.load(Ordering::Acquire), 1);
+    assert_eq!(pool.refill_pending.load(Ordering::Acquire), 1);
+
+    pool.begin_shutdown();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while pool.refill_running.load(Ordering::Acquire) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(pool.refill_states.lock().is_empty());
+    assert_eq!(pool.refill_pending.load(Ordering::Acquire), 0);
 }

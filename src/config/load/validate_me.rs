@@ -143,9 +143,15 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
         ));
     }
 
-    if config.general.me_reinit_trigger_channel == 0 {
+    if !(1..=8).contains(&config.general.me_reinit_max_concurrency) {
         return Err(ProxyError::Config(
-            "general.me_reinit_trigger_channel must be > 0".to_string(),
+            "general.me_reinit_max_concurrency must be within [1, 8]".to_string(),
+        ));
+    }
+
+    if !(1..=4096).contains(&config.general.me_reinit_trigger_channel) {
+        return Err(ProxyError::Config(
+            "general.me_reinit_trigger_channel must be within [1, 4096]".to_string(),
         ));
     }
 

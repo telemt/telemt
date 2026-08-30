@@ -114,12 +114,14 @@ pub(super) fn log_changes(
     }
     if old_hot.me_reinit_every_secs != new_hot.me_reinit_every_secs
         || old_hot.me_reinit_singleflight != new_hot.me_reinit_singleflight
+        || old_hot.me_reinit_max_concurrency != new_hot.me_reinit_max_concurrency
         || old_hot.me_reinit_coalesce_window_ms != new_hot.me_reinit_coalesce_window_ms
     {
         info!(
-            "config reload: me_reinit: interval={}s singleflight={} coalesce={}ms",
+            "config reload: me_reinit: interval={}s singleflight={} max_concurrency={} coalesce={}ms",
             new_hot.me_reinit_every_secs,
             new_hot.me_reinit_singleflight,
+            new_hot.me_reinit_max_concurrency,
             new_hot.me_reinit_coalesce_window_ms
         );
     }

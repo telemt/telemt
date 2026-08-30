@@ -30,7 +30,6 @@ use x509_parser::prelude::FromDer;
 
 use crate::config::TlsFetchProfile;
 use crate::crypto::{SecureRandom, sha256};
-use crate::network::dns_overrides::resolve_socket_addr;
 use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
 };
@@ -901,9 +900,6 @@ async fn connect_with_dns_override(
     port: u16,
     connect_timeout: Duration,
 ) -> Result<TcpStream> {
-    if let Some(addr) = resolve_socket_addr(host, port) {
-        return Ok(timeout(connect_timeout, TcpStream::connect(addr)).await??);
-    }
     Ok(timeout(connect_timeout, TcpStream::connect((host, port))).await??)
 }
 

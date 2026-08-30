@@ -53,6 +53,8 @@ pub(super) async fn reserve_data(
             }
             let notify = runtime.budget_notify();
             let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(budget) = runtime.try_websocket_data_budget(owner, bytes.max(1)) {
                 return Ok(budget);
             }
@@ -104,6 +106,8 @@ pub(super) async fn process_lane(
             }
             let notify = runtime.budget_notify();
             let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             match session.process_websocket_lane(reservation, sequence, body) {
                 Ok(progressed) => return Ok(progressed),
                 Err(ManagerError::Backpressure) => {}
@@ -135,6 +139,8 @@ where
             }
             let notify = runtime.budget_notify();
             let notified = notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             match operation() {
                 Ok(value) => return Ok(value),
                 Err(ManagerError::Backpressure) => {}

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -70,6 +70,15 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) type TokenHash = [u8; TOKEN_BYTES];
 /// Stable non-allocating key used for per-profile quotas.
 pub(crate) type ProfileKey = [u8; TOKEN_BYTES];
+
+/// Stable failure category for accepted-socket capacity admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HttpConnectionAdmissionError {
+    /// The bounded connection plane currently has no free permit.
+    AtCapacity,
+    /// Terminal runtime shutdown closed the connection plane.
+    Closed,
+}
 
 /// WEB manager operation failure category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,27 +303,38 @@ impl WebProcessRuntime {
     }
 
     /// Reserves one accepted HTTP connection.
-    pub(crate) fn try_http_connection(&self) -> Option<OwnedSemaphorePermit> {
-        let permit = Arc::clone(&self.http_connections).try_acquire_owned().ok();
-        if permit.is_none() {
-            self.record_limit_hit();
+    pub(crate) fn try_http_connection(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, HttpConnectionAdmissionError> {
+        match Arc::clone(&self.http_connections).try_acquire_owned() {
+            Ok(permit) => Ok(permit),
+            Err(TryAcquireError::NoPermits) => {
+                self.record_limit_hit();
+                Err(HttpConnectionAdmissionError::AtCapacity)
+            }
+            Err(TryAcquireError::Closed) => Err(HttpConnectionAdmissionError::Closed),
         }
-        permit
     }
 
     /// Waits for one accepted HTTP connection slot after bounded overload admission.
-    pub(crate) async fn acquire_http_connection(&self) -> Option<OwnedSemaphorePermit> {
+    pub(crate) async fn acquire_http_connection(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, HttpConnectionAdmissionError> {
         Arc::clone(&self.http_connections)
             .acquire_owned()
             .await
-            .ok()
+            .map_err(|_| HttpConnectionAdmissionError::Closed)
     }
 
     /// Reserves one accepted socket outside ordinary HTTP connection capacity.
-    pub(crate) fn try_http_overload_connection(&self) -> Option<OwnedSemaphorePermit> {
-        Arc::clone(&self.http_overload_connections)
-            .try_acquire_owned()
-            .ok()
+    pub(crate) fn try_http_overload_connection(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, HttpConnectionAdmissionError> {
+        match Arc::clone(&self.http_overload_connections).try_acquire_owned() {
+            Ok(permit) => Ok(permit),
+            Err(TryAcquireError::NoPermits) => Err(HttpConnectionAdmissionError::AtCapacity),
+            Err(TryAcquireError::Closed) => Err(HttpConnectionAdmissionError::Closed),
+        }
     }
 
     /// Reserves one concurrently executing HTTP request handler.

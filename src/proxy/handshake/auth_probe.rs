@@ -98,7 +98,7 @@ pub(super) fn auth_probe_is_throttled_in(
     };
     if auth_probe_state_expired(&entry, now) {
         drop(entry);
-        state.remove(&peer_ip);
+        state.remove_if(&peer_ip, |_, current| auth_probe_state_expired(current, now));
         return false;
     }
     now < entry.blocked_until
@@ -116,7 +116,7 @@ pub(super) fn auth_probe_saturation_grace_exhausted_in(
     };
     if auth_probe_state_expired(&entry, now) {
         drop(entry);
-        state.remove(&peer_ip);
+        state.remove_if(&peer_ip, |_, current| auth_probe_state_expired(current, now));
         return false;
     }
 
@@ -264,11 +264,19 @@ pub(super) fn auth_probe_record_failure_with_state_in(
                     }
                 }
 
-                let Some((evict_key, _, _)) = eviction_candidate else {
+                let Some((evict_key, evict_fail_streak, evict_last_seen)) = eviction_candidate else {
                     return;
                 };
-                state.remove(&evict_key);
-                break;
+                if state
+                    .remove_if(&evict_key, |_, current| {
+                        current.fail_streak == evict_fail_streak
+                            && current.last_seen == evict_last_seen
+                    })
+                    .is_some()
+                {
+                    break;
+                }
+                continue;
             }
 
             let mut stale_keys = Vec::new();
@@ -334,18 +342,22 @@ pub(super) fn auth_probe_record_failure_with_state_in(
             }
 
             for stale_key in stale_keys {
-                state.remove(&stale_key);
+                state.remove_if(&stale_key, |_, current| {
+                    auth_probe_state_expired(current, now)
+                });
             }
 
             if state.len() < AUTH_PROBE_TRACK_MAX_ENTRIES {
                 break;
             }
 
-            let Some((evict_key, _, _)) = eviction_candidate else {
+            let Some((evict_key, evict_fail_streak, evict_last_seen)) = eviction_candidate else {
                 auth_probe_note_saturation_in(shared, now);
                 return;
             };
-            state.remove(&evict_key);
+            state.remove_if(&evict_key, |_, current| {
+                current.fail_streak == evict_fail_streak && current.last_seen == evict_last_seen
+            });
             auth_probe_note_saturation_in(shared, now);
         }
     }

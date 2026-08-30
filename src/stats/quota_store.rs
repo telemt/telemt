@@ -56,6 +56,10 @@ impl QuotaStore {
         }
     }
 
+    pub(crate) fn remove(&self, user: &str) {
+        self.users.remove(user);
+    }
+
     pub(crate) fn snapshot(&self) -> HashMap<String, UserQuotaSnapshot> {
         let mut out = HashMap::new();
         for entry in self.users.iter() {

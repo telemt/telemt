@@ -9,9 +9,10 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{WebClientIpSource, WebHttpConnectionCapacityAction};
-use crate::web::manager::WebProcessRuntime;
+use crate::web::manager::{HttpConnectionAdmissionError, WebProcessRuntime};
 use crate::web::telemetry::{WebHttpConnectionOverloadOutcome, WebRejectionReason};
 
+/// Exact bounded retryable response emitted before HTTP request parsing.
 pub(super) const SERVICE_UNAVAILABLE_RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nCache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\n\r\n";
 
 /// Handles one accepted WEB socket outside ordinary connection capacity.
@@ -44,25 +45,31 @@ pub(super) async fn serve(
                     return;
                 }
                 permit = tokio::time::timeout(phase_timeout, runtime.acquire_http_connection()) => {
-                    permit.ok().flatten()
+                    permit
                 }
             };
-            let Some(connection_permit) = connection_permit else {
-                if runtime.is_shutdown() {
+            let connection_permit = match connection_permit {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(HttpConnectionAdmissionError::Closed)) => {
+                    runtime
+                        .telemetry()
+                        .record_rejection(WebRejectionReason::RuntimeClosed);
                     runtime
                         .telemetry()
                         .record_overload(WebHttpConnectionOverloadOutcome::ShutdownDrop);
                     return;
                 }
-                let outcome = match respond(stream, &cancellation, phase_timeout).await {
-                    WebHttpConnectionOverloadOutcome::Responded503 => {
-                        WebHttpConnectionOverloadOutcome::WaitTimeout503
-                    }
-                    other => other,
-                };
-                record_final_capacity_rejection(&runtime, outcome);
-                runtime.telemetry().record_overload(outcome);
-                return;
+                Ok(Err(HttpConnectionAdmissionError::AtCapacity)) | Err(_) => {
+                    let outcome = match respond(stream, &cancellation, phase_timeout).await {
+                        WebHttpConnectionOverloadOutcome::Responded503 => {
+                            WebHttpConnectionOverloadOutcome::WaitTimeout503
+                        }
+                        other => other,
+                    };
+                    record_final_capacity_rejection(&runtime, outcome);
+                    runtime.telemetry().record_overload(outcome);
+                    return;
+                }
             };
             runtime
                 .telemetry()

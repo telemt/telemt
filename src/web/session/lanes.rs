@@ -151,6 +151,8 @@ impl WebSession {
         let poll = async {
             loop {
                 let notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 {
                     let mut state = self.state.lock();
                     if state.closed {
@@ -306,6 +308,8 @@ impl WebSession {
         let opened = tokio::time::timeout(deadline, async {
             loop {
                 let notified = self.lane_open_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 {
                     let state = self.state.lock();
                     if state.closed {

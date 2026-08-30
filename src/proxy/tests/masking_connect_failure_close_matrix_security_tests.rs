@@ -1,5 +1,5 @@
 use super::*;
-use crate::network::dns_overrides::install_entries;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::time::{Duration, Instant, timeout};
 
@@ -8,6 +8,7 @@ async fn run_connect_failure_case(
     port: u16,
     timing_normalization_enabled: bool,
     peer: SocketAddr,
+    dns_overrides: Vec<String>,
 ) -> Duration {
     let mut config = ProxyConfig::default();
     config.general.beobachten = false;
@@ -21,6 +22,19 @@ async fn run_connect_failure_case(
 
     let local_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
     let beobachten = BeobachtenStore::new();
+    let upstream_manager = crate::transport::UpstreamManager::new(
+        Vec::new(),
+        1,
+        1,
+        100,
+        1,
+        1,
+        true,
+        Arc::new(crate::stats::Stats::new()),
+    )
+    .with_dns_overrides(&dns_overrides)
+    .unwrap();
+    let shared = ProxySharedState::new();
     let probe = b"CONNECT example.org:443 HTTP/1.1\r\nHost: example.org\r\n\r\n";
 
     let (mut client_writer, client_reader) = duplex(1024);
@@ -28,7 +42,7 @@ async fn run_connect_failure_case(
 
     let started = Instant::now();
     let task = tokio::spawn(async move {
-        handle_bad_client(
+        handle_bad_client_with_shared_resolver(
             client_reader,
             client_visible_writer,
             probe,
@@ -36,6 +50,8 @@ async fn run_connect_failure_case(
             local_addr,
             &config,
             &beobachten,
+            shared.as_ref(),
+            Some(&upstream_manager),
         )
         .await;
     });
@@ -71,8 +87,14 @@ async fn connect_failure_refusal_close_behavior_matrix() {
             .parse()
             .unwrap();
         let elapsed =
-            run_connect_failure_case("127.0.0.1", unused_port, timing_normalization_enabled, peer)
-                .await;
+            run_connect_failure_case(
+                "127.0.0.1",
+                unused_port,
+                timing_normalization_enabled,
+                peer,
+                Vec::new(),
+            )
+            .await;
 
         if timing_normalization_enabled {
             assert!(
@@ -94,9 +116,6 @@ async fn connect_failure_overridden_hostname_close_behavior_matrix() {
     let unused_port = temp_listener.local_addr().unwrap().port();
     drop(temp_listener);
 
-    // Make hostname resolution deterministic in tests so timing ceilings are meaningful.
-    install_entries(&[format!("mask.invalid:{}:127.0.0.1", unused_port)]).unwrap();
-
     for (idx, timing_normalization_enabled) in [false, true].into_iter().enumerate() {
         let peer: SocketAddr = format!("203.0.113.220:{}", 54200 + idx as u16)
             .parse()
@@ -106,6 +125,7 @@ async fn connect_failure_overridden_hostname_close_behavior_matrix() {
             unused_port,
             timing_normalization_enabled,
             peer,
+            vec![format!("mask.invalid:{}:127.0.0.1", unused_port)],
         )
         .await;
 
@@ -121,6 +141,4 @@ async fn connect_failure_overridden_hostname_close_behavior_matrix() {
             );
         }
     }
-
-    install_entries(&[]).unwrap();
 }

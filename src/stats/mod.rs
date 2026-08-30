@@ -18,7 +18,7 @@ mod writer_counters;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 pub(crate) use self::quota_store::QuotaStore;
@@ -27,6 +27,8 @@ pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;
 pub use self::tls_fingerprints::TlsFingerprintSnapshotRow;
 use crate::config::MeWriterPickMode;
+
+const ME_HANDSHAKE_ERROR_CODE_MAX: usize = 64;
 
 #[derive(Clone, Copy)]
 enum RouteConnectionGauge {
@@ -219,6 +221,8 @@ pub struct Stats {
     me_floor_swap_idle_total: AtomicU64,
     me_floor_swap_idle_failed_total: AtomicU64,
     me_handshake_error_codes: DashMap<i32, AtomicU64>,
+    me_handshake_error_code_slots: AtomicUsize,
+    me_handshake_error_code_overflow_total: AtomicU64,
     me_route_drop_no_conn: AtomicU64,
     me_route_drop_channel_closed: AtomicU64,
     me_route_drop_queue_full: AtomicU64,

@@ -4,6 +4,10 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+const LAST_DECOY_OUTCOME_BITS: u32 = 4;
+const LAST_DECOY_OUTCOME_MASK: u64 = (1 << LAST_DECOY_OUTCOME_BITS) - 1;
+const LAST_DECOY_ELAPSED_MAX: u64 = u64::MAX >> LAST_DECOY_OUTCOME_BITS;
+
 /// Stable operational rejection reason recorded at the decision point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -296,8 +300,7 @@ pub(crate) struct WebTelemetry {
     rejections: [AtomicU64; WebRejectionReason::ALL.len()],
     overload_outcomes: [AtomicU64; WebHttpConnectionOverloadOutcome::ALL.len()],
     decoy_outcomes: [AtomicU64; WebDecoyUpstreamOutcome::ALL.len()],
-    last_decoy_outcome: AtomicUsize,
-    last_decoy_elapsed_ms: AtomicU64,
+    last_decoy: AtomicU64,
     sessions_created: AtomicU64,
     sessions_closed: AtomicU64,
     streams_opened: AtomicU64,
@@ -318,8 +321,7 @@ impl WebTelemetry {
             rejections: std::array::from_fn(|_| AtomicU64::new(0)),
             overload_outcomes: std::array::from_fn(|_| AtomicU64::new(0)),
             decoy_outcomes: std::array::from_fn(|_| AtomicU64::new(0)),
-            last_decoy_outcome: AtomicUsize::new(usize::MAX),
-            last_decoy_elapsed_ms: AtomicU64::new(0),
+            last_decoy: AtomicU64::new(0),
             sessions_created: AtomicU64::new(0),
             sessions_closed: AtomicU64::new(0),
             streams_opened: AtomicU64::new(0),
@@ -408,11 +410,13 @@ impl WebTelemetry {
     /// Records one internal plain-HTTP decoy origin outcome.
     pub(crate) fn record_decoy(&self, outcome: WebDecoyUpstreamOutcome) {
         self.decoy_outcomes[outcome as usize].fetch_add(1, Ordering::Relaxed);
-        let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        self.last_decoy_elapsed_ms
-            .store(elapsed_ms.saturating_add(1), Ordering::Relaxed);
-        self.last_decoy_outcome
-            .store(outcome as usize, Ordering::Release);
+        let elapsed_ms = self
+            .started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(LAST_DECOY_ELAPSED_MAX)) as u64;
+        let packed = (elapsed_ms << LAST_DECOY_OUTCOME_BITS) | (outcome as u64 + 1);
+        self.last_decoy.store(packed, Ordering::Release);
     }
 
     /// Returns one fixed internal decoy origin counter.
@@ -433,14 +437,16 @@ impl WebTelemetry {
 
     /// Returns the last decoy outcome and its monotonic age in milliseconds.
     pub(crate) fn last_decoy(&self) -> Option<(&'static str, u64)> {
-        let raw = self.last_decoy_outcome.load(Ordering::Acquire);
-        let outcome = WebDecoyUpstreamOutcome::ALL.get(raw).copied()?;
-        let recorded = self.last_decoy_elapsed_ms.load(Ordering::Relaxed);
-        let now = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        Some((
-            outcome.as_str(),
-            now.saturating_sub(recorded.saturating_sub(1)),
-        ))
+        let packed = self.last_decoy.load(Ordering::Acquire);
+        let outcome_index = (packed & LAST_DECOY_OUTCOME_MASK).checked_sub(1)? as usize;
+        let outcome = WebDecoyUpstreamOutcome::ALL.get(outcome_index).copied()?;
+        let recorded = packed >> LAST_DECOY_OUTCOME_BITS;
+        let now = self
+            .started
+            .elapsed()
+            .as_millis()
+            .min(u128::from(LAST_DECOY_ELAPSED_MAX)) as u64;
+        Some((outcome.as_str(), now.saturating_sub(recorded)))
     }
 
     /// Records one created session incarnation.

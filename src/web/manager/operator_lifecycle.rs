@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -16,12 +16,14 @@ pub(crate) use status::{
     OperatorDrainOutcome, OperatorDrainState, OperatorDrainStatus, OperatorLifecycleState,
     OperatorLifecycleStatus,
 };
+// Admission fencing and registration-drain synchronization.
+mod admission;
+use admission::{OperatorAdmission, OperatorAdmissionRejection};
+pub(super) use admission::OperatorRegistration;
 // Mutable and published lifecycle state storage.
 mod state;
 use state::{ActiveDrain, OperatorLifecycleInner, OperatorSnapshot, WorkCounts};
 
-const OPERATOR_ADMISSION_CLOSED: usize = 1 << (usize::BITS - 1);
-const OPERATOR_REGISTRATION_COUNT: usize = OPERATOR_ADMISSION_CLOSED - 1;
 const DRAIN_REF_VERSION: &str = "wd1";
 
 /// Stable operator-control rejection category.
@@ -33,77 +35,7 @@ pub(crate) enum OperatorLifecycleError {
     OperationInProgress,
 }
 
-struct OperatorAdmission {
-    state: AtomicUsize,
-    registrations_drained: Notify,
-}
-
-pub(super) struct OperatorRegistration<'a> {
-    admission: &'a OperatorAdmission,
-}
-
-impl OperatorAdmission {
-    fn new() -> Self {
-        Self {
-            state: AtomicUsize::new(0),
-            registrations_drained: Notify::new(),
-        }
-    }
-
-    fn try_register(&self) -> Option<OperatorRegistration<'_>> {
-        let mut state = self.state.load(Ordering::Acquire);
-        loop {
-            if state & OPERATOR_ADMISSION_CLOSED != 0
-                || state & OPERATOR_REGISTRATION_COUNT == OPERATOR_REGISTRATION_COUNT
-            {
-                return None;
-            }
-            match self.state.compare_exchange_weak(
-                state,
-                state + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(OperatorRegistration { admission: self }),
-                Err(observed) => state = observed,
-            }
-        }
-    }
-
-    fn close(&self) {
-        self.state
-            .fetch_or(OPERATOR_ADMISSION_CLOSED, Ordering::AcqRel);
-    }
-
-    fn reopen(&self) {
-        self.state
-            .fetch_and(!OPERATOR_ADMISSION_CLOSED, Ordering::AcqRel);
-    }
-
-    fn is_closed(&self) -> bool {
-        self.state.load(Ordering::Acquire) & OPERATOR_ADMISSION_CLOSED != 0
-    }
-
-    async fn wait_for_registrations(&self) {
-        loop {
-            let notified = self.registrations_drained.notified();
-            if self.state.load(Ordering::Acquire) & OPERATOR_REGISTRATION_COUNT == 0 {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-impl Drop for OperatorRegistration<'_> {
-    fn drop(&mut self) {
-        let previous = self.admission.state.fetch_sub(1, Ordering::AcqRel);
-        if previous & OPERATOR_REGISTRATION_COUNT == 1 {
-            self.admission.registrations_drained.notify_waiters();
-        }
-    }
-}
-
+/// Process-owned reversible lifecycle and admission authority.
 pub(super) struct OperatorLifecycle {
     runtime_instance: Arc<str>,
     admission: OperatorAdmission,
@@ -115,6 +47,7 @@ pub(super) struct OperatorLifecycle {
 }
 
 impl OperatorLifecycle {
+    /// Creates a running lifecycle for one immutable process instance.
     pub(super) fn new(runtime_instance: Arc<str>) -> Self {
         let since = Instant::now();
         let snapshot = OperatorSnapshot {
@@ -142,16 +75,21 @@ impl OperatorLifecycle {
         }
     }
 
-    pub(super) fn try_register(&self) -> Option<OperatorRegistration<'_>> {
+    /// Registers one synchronous operator-fenced admission section.
+    pub(super) fn try_register(
+        &self,
+    ) -> Result<OperatorRegistration<'_>, crate::web::telemetry::WebRejectionReason> {
         self.admission.try_register()
     }
 
+    /// Wakes an active drain after tracked work ownership changes.
     pub(super) fn notify_work_changed(&self) {
         if self.admission.is_closed() {
             self.work_changed.notify_waiters();
         }
     }
 
+    /// Returns the lock-free lifecycle snapshot with effective config admission.
     pub(super) fn status(&self, config_enabled: bool) -> OperatorLifecycleStatus {
         let snapshot = self.published.load();
         let admission_open =
@@ -168,30 +106,6 @@ impl OperatorLifecycle {
 
     fn is_terminal(&self) -> bool {
         self.published.load().terminal
-    }
-
-    fn rejection_reason(&self) -> crate::web::telemetry::WebRejectionReason {
-        let inner = self.inner.lock();
-        if inner.terminal {
-            return crate::web::telemetry::WebRejectionReason::RuntimeClosed;
-        }
-        match inner.state {
-            OperatorLifecycleState::Paused => {
-                crate::web::telemetry::WebRejectionReason::OperatorPaused
-            }
-            OperatorLifecycleState::Draining => {
-                crate::web::telemetry::WebRejectionReason::OperatorDraining
-            }
-            OperatorLifecycleState::ForceClosing => {
-                crate::web::telemetry::WebRejectionReason::OperatorForceClosing
-            }
-            OperatorLifecycleState::Drained => {
-                crate::web::telemetry::WebRejectionReason::OperatorDrained
-            }
-            OperatorLifecycleState::Running => {
-                crate::web::telemetry::WebRejectionReason::RuntimeClosed
-            }
-        }
     }
 
     fn publish_locked(&self, inner: &OperatorLifecycleInner) {
@@ -246,6 +160,8 @@ impl OperatorLifecycle {
             return false;
         }
         self.transition_locked(&mut inner, OperatorLifecycleState::ForceClosing);
+        self.admission
+            .close(OperatorAdmissionRejection::ForceClosing);
         let Some(drain) = inner.drain.as_mut() else {
             return false;
         };
@@ -269,6 +185,7 @@ impl OperatorLifecycle {
         }
         inner.active = None;
         self.transition_locked(&mut inner, OperatorLifecycleState::Drained);
+        self.admission.close(OperatorAdmissionRejection::Drained);
         if let Some(drain) = inner.drain.as_mut() {
             drain.state = OperatorDrainState::Completed;
             drain.outcome = Some(if forced {
@@ -286,7 +203,8 @@ impl OperatorLifecycle {
 
     fn close_terminal(&self) {
         let mut inner = self.inner.lock();
-        self.admission.close();
+        self.admission
+            .close(OperatorAdmissionRejection::RuntimeClosed);
         if inner.terminal {
             return;
         }
@@ -321,7 +239,6 @@ impl WebProcessRuntime {
             if inner.terminal || self.shutdown.is_cancelled() {
                 return Err(OperatorLifecycleError::Closed);
             }
-            self.operator_lifecycle.admission.close();
             if matches!(
                 inner.state,
                 OperatorLifecycleState::Running | OperatorLifecycleState::Drained
@@ -329,6 +246,9 @@ impl WebProcessRuntime {
                 self.operator_lifecycle
                     .transition_locked(&mut inner, OperatorLifecycleState::Paused);
             }
+            self.operator_lifecycle.admission.close(
+                OperatorAdmissionRejection::for_state(inner.state),
+            );
             self.operator_lifecycle.publish_locked(&inner);
         }
         self.operator_lifecycle
@@ -355,7 +275,7 @@ impl WebProcessRuntime {
         let started = TokioInstant::now();
         let deadline = started + timeout;
         let started_epoch_millis = crate::web::trace::store_epoch_millis();
-        {
+        let accepted = {
             let mut inner = self.operator_lifecycle.inner.lock();
             if inner.terminal || self.shutdown.is_cancelled() {
                 return Err(OperatorLifecycleError::Closed);
@@ -368,7 +288,6 @@ impl WebProcessRuntime {
             {
                 return Err(OperatorLifecycleError::OperationInProgress);
             }
-            self.operator_lifecycle.admission.close();
             inner.active = Some(ActiveDrain {
                 sequence,
                 cancellation: cancellation.clone(),
@@ -392,26 +311,20 @@ impl WebProcessRuntime {
             });
             self.operator_lifecycle
                 .transition_locked(&mut inner, OperatorLifecycleState::Draining);
+            self.operator_lifecycle
+                .admission
+                .close(OperatorAdmissionRejection::Draining);
+            let runtime = Arc::clone(self);
+            self.spawn_auxiliary(async move {
+                runtime
+                    .run_operator_drain(sequence, deadline, cancellation)
+                    .await;
+            });
             self.operator_lifecycle.publish_locked(&inner);
-        }
-        self.operator_lifecycle
-            .admission
-            .wait_for_registrations()
-            .await;
-        if self.shutdown.is_cancelled() || self.operator_lifecycle.is_terminal() {
-            return Err(OperatorLifecycleError::Closed);
-        }
-        let counts = self.operator_work_counts();
-        if !self.operator_lifecycle.update_counts(sequence, counts) {
-            return Err(OperatorLifecycleError::Closed);
-        }
-        let runtime = Arc::clone(self);
-        self.spawn_auxiliary(async move {
-            runtime
-                .run_operator_drain(sequence, deadline, cancellation)
-                .await;
-        });
-        Ok(self.operator_lifecycle_status())
+            let config_enabled = self.active_generation().config().web.enabled;
+            self.operator_lifecycle.status(config_enabled)
+        };
+        Ok(accepted)
     }
 
     /// Resumes operator admission and invalidates any active drain waiter.
@@ -444,23 +357,25 @@ impl WebProcessRuntime {
         Ok(self.operator_lifecycle_status())
     }
 
+    /// Registers one WEB manager admission commit under the operator fence.
     pub(super) fn try_operator_admission(
         &self,
     ) -> Result<OperatorRegistration<'_>, super::ManagerError> {
         match self.operator_lifecycle.try_register() {
-            Some(registration) => Ok(registration),
-            None => {
-                self.telemetry
-                    .record_rejection(self.operator_lifecycle.rejection_reason());
+            Ok(registration) => Ok(registration),
+            Err(reason) => {
+                self.telemetry.record_rejection(reason);
                 Err(super::ManagerError::AdmissionPaused)
             }
         }
     }
 
+    /// Notifies an active drain that tracked WEB work changed.
     pub(super) fn notify_operator_work_changed(&self) {
         self.operator_lifecycle.notify_work_changed();
     }
 
+    /// Terminally closes operator lifecycle during process shutdown.
     pub(super) fn close_operator_lifecycle(&self) {
         self.operator_lifecycle.close_terminal();
     }
@@ -482,9 +397,16 @@ impl WebProcessRuntime {
         deadline: TokioInstant,
         cancellation: CancellationToken,
     ) {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return,
+            _ = self.operator_lifecycle.admission.wait_for_registrations() => {}
+        }
         let mut forced = false;
         loop {
             let notified = self.operator_lifecycle.work_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let counts = self.operator_work_counts();
             if !self.operator_lifecycle.update_counts(sequence, counts) {
                 return;
@@ -497,14 +419,14 @@ impl WebProcessRuntime {
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => return,
-                    _ = notified => {}
+                    _ = notified.as_mut() => {}
                 }
                 continue;
             }
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return,
-                _ = notified => {},
+                _ = notified.as_mut() => {},
                 _ = tokio::time::sleep_until(deadline) => {
                     let counts = self.operator_work_counts();
                     if counts.is_zero() {

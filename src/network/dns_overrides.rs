@@ -2,23 +2,26 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::{OnceLock, RwLock};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use crate::error::{ProxyError, Result};
 
 type OverrideMap = HashMap<(String, u16), IpAddr>;
+const DNS_OVERRIDE_MAX_ENTRIES: usize = 4096;
 
 /// Immutable DNS override snapshot owned by one runtime generation.
 #[derive(Debug, Clone, Default)]
 pub struct DnsOverrides {
-    entries: std::sync::Arc<OverrideMap>,
+    entries: Arc<OverrideMap>,
 }
 
 impl DnsOverrides {
     /// Parses a validated generation-local override snapshot.
     pub fn from_entries(entries: &[String]) -> Result<Self> {
         Ok(Self {
-            entries: std::sync::Arc::new(parse_entries(entries)?),
+            entries: Arc::new(parse_entries(entries)?),
         })
     }
 
@@ -35,10 +38,31 @@ impl DnsOverrides {
     }
 }
 
-static DNS_OVERRIDES: OnceLock<RwLock<OverrideMap>> = OnceLock::new();
+/// Atomically published DNS override snapshot owned by one runtime generation.
+#[derive(Debug, Default)]
+pub struct GenerationDnsResolver {
+    snapshot: ArcSwap<DnsOverrides>,
+}
 
-fn overrides_store() -> &'static RwLock<OverrideMap> {
-    DNS_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()))
+impl GenerationDnsResolver {
+    /// Creates one resolver from a validated immutable entry set.
+    pub fn from_entries(entries: &[String]) -> Result<Self> {
+        Ok(Self {
+            snapshot: ArcSwap::from_pointee(DnsOverrides::from_entries(entries)?),
+        })
+    }
+
+    /// Validates and atomically publishes a new generation-local snapshot.
+    pub fn apply_entries(&self, entries: &[String]) -> Result<()> {
+        let snapshot = DnsOverrides::from_entries(entries)?;
+        self.snapshot.store(Arc::new(snapshot));
+        Ok(())
+    }
+
+    /// Resolves one configured override without consulting system DNS.
+    pub fn resolve_socket_addr(&self, host: &str, port: u16) -> Option<SocketAddr> {
+        self.snapshot.load().resolve_socket_addr(host, port)
+    }
 }
 
 fn parse_ip_spec(ip_spec: &str) -> Result<IpAddr> {
@@ -111,6 +135,11 @@ fn parse_entry(entry: &str) -> Result<((String, u16), IpAddr)> {
 }
 
 fn parse_entries(entries: &[String]) -> Result<OverrideMap> {
+    if entries.len() > DNS_OVERRIDE_MAX_ENTRIES {
+        return Err(ProxyError::Config(format!(
+            "network.dns_overrides exceeds maximum entry count {DNS_OVERRIDE_MAX_ENTRIES}"
+        )));
+    }
     let mut parsed = HashMap::new();
     for entry in entries {
         let (key, ip) = parse_entry(entry)?;
@@ -123,30 +152,6 @@ fn parse_entries(entries: &[String]) -> Result<OverrideMap> {
 pub fn validate_entries(entries: &[String]) -> Result<()> {
     let _ = parse_entries(entries)?;
     Ok(())
-}
-
-/// Replace runtime DNS overrides with a new validated snapshot.
-pub fn install_entries(entries: &[String]) -> Result<()> {
-    let parsed = parse_entries(entries)?;
-    let mut guard = overrides_store().write().map_err(|_| {
-        ProxyError::Config("network.dns_overrides runtime lock is poisoned".to_string())
-    })?;
-    *guard = parsed;
-    Ok(())
-}
-
-/// Resolve a hostname override for `(host, port)` if present.
-pub fn resolve(host: &str, port: u16) -> Option<IpAddr> {
-    let key = (host.to_ascii_lowercase(), port);
-    overrides_store()
-        .read()
-        .ok()
-        .and_then(|guard| guard.get(&key).copied())
-}
-
-/// Resolve a hostname override and construct a socket address when present.
-pub fn resolve_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
-    resolve(host, port).map(|ip| SocketAddr::new(ip, port))
 }
 
 /// Parse a runtime endpoint in `host:port` format.
@@ -199,12 +204,14 @@ mod tests {
     }
 
     #[test]
-    fn install_and_resolve_are_case_insensitive_for_host() {
+    fn generation_resolver_updates_are_case_insensitive_for_host() {
         let entries = vec!["MyPetrovich.ru:8443:127.0.0.1".to_string()];
-        install_entries(&entries).unwrap();
+        let resolver = GenerationDnsResolver::from_entries(&entries).unwrap();
 
-        let resolved = resolve("mypetrovich.ru", 8443);
-        assert_eq!(resolved, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(
+            resolver.resolve_socket_addr("mypetrovich.ru", 8443),
+            Some("127.0.0.1:8443".parse().unwrap())
+        );
     }
 
     #[test]

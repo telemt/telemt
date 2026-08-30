@@ -124,13 +124,14 @@ fn apply_watch_manifest<W1: Watcher, W2: Watcher>(
 }
 
 /// Load config, validate, diff against current, and broadcast if changed.
-pub(super) fn reload_config(
+fn reload_config_with_resolver(
     config_path: &PathBuf,
     config_tx: &watch::Sender<Arc<ProxyConfig>>,
     log_tx: &watch::Sender<LogLevel>,
     detected_ip_v4: Option<IpAddr>,
     detected_ip_v6: Option<IpAddr>,
     reload_state: &mut ReloadState,
+    dns_resolver: Option<&crate::network::dns_overrides::GenerationDnsResolver>,
 ) -> Option<WatchManifest> {
     let loaded = match ProxyConfig::load_with_metadata(config_path) {
         Ok(loaded) => loaded,
@@ -176,7 +177,8 @@ pub(super) fn reload_config(
     }
 
     if old_hot.dns_overrides != applied_hot.dns_overrides
-        && let Err(e) = crate::network::dns_overrides::install_entries(&applied_hot.dns_overrides)
+        && let Some(dns_resolver) = dns_resolver
+        && let Err(e) = dns_resolver.apply_entries(&applied_hot.dns_overrides)
     {
         error!(
             "config reload: invalid network.dns_overrides: {}; keeping old config",
@@ -198,6 +200,26 @@ pub(super) fn reload_config(
     Some(next_manifest)
 }
 
+#[cfg(test)]
+pub(super) fn reload_config(
+    config_path: &PathBuf,
+    config_tx: &watch::Sender<Arc<ProxyConfig>>,
+    log_tx: &watch::Sender<LogLevel>,
+    detected_ip_v4: Option<IpAddr>,
+    detected_ip_v6: Option<IpAddr>,
+    reload_state: &mut ReloadState,
+) -> Option<WatchManifest> {
+    reload_config_with_resolver(
+        config_path,
+        config_tx,
+        log_tx,
+        detected_ip_v4,
+        detected_ip_v6,
+        reload_state,
+        None,
+    )
+}
+
 /// Spawn the hot-reload watcher task.
 ///
 /// Uses `notify` (inotify on Linux) to detect file changes instantly.
@@ -213,6 +235,7 @@ pub fn spawn_config_watcher(
     detected_ip_v4: Option<IpAddr>,
     detected_ip_v6: Option<IpAddr>,
     cancellation: tokio_util::sync::CancellationToken,
+    dns_resolver: Option<Arc<crate::network::dns_overrides::GenerationDnsResolver>>,
     mut activation: Option<watch::Receiver<bool>>,
 ) -> (
     watch::Receiver<Arc<ProxyConfig>>,
@@ -364,24 +387,26 @@ pub fn spawn_config_watcher(
             tokio::time::sleep(HOT_RELOAD_DEBOUNCE).await;
             while notify_rx.try_recv().is_ok() {}
 
-            let mut next_manifest = reload_config(
+            let mut next_manifest = reload_config_with_resolver(
                 &config_path,
                 &config_tx,
                 &log_tx,
                 detected_ip_v4,
                 detected_ip_v6,
                 &mut reload_state,
+                dns_resolver.as_deref(),
             );
             if next_manifest.is_none() {
                 tokio::time::sleep(HOT_RELOAD_DEBOUNCE).await;
                 while notify_rx.try_recv().is_ok() {}
-                next_manifest = reload_config(
+                next_manifest = reload_config_with_resolver(
                     &config_path,
                     &config_tx,
                     &log_tx,
                     detected_ip_v4,
                     detected_ip_v6,
                     &mut reload_state,
+                    dns_resolver.as_deref(),
                 );
             }
 

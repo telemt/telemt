@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use tokio::sync::{RwLock, watch};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::api;
 use crate::ip_tracker::UserIpTracker;
@@ -15,14 +16,15 @@ use crate::startup::{COMPONENT_API_BOOTSTRAP, COMPONENT_NETWORK_PROBE};
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{QuotaStore, Stats};
 use crate::synlimit_control;
+use crate::tls_front::cache::TlsFullCertBudget;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 use crate::web::control::WebRuntimeControl;
 use crate::web::trace::WebTraceStore;
 
 use super::{
-    bootstrap, generation, listeners, reload, reload_supervisor, runtime_startup, runtime_tasks,
-    shutdown, tls_bootstrap,
+    bootstrap, control_plane, generation, listeners, reload, reload_supervisor, runtime_startup,
+    runtime_tasks, shutdown, tls_bootstrap,
 };
 
 // Shared maestro startup and main loop. `drop_after_bind` runs on Unix after listeners are bound
@@ -45,10 +47,22 @@ pub(super) async fn run_telemt_core(
 
     let quota_store = Arc::new(QuotaStore::default());
     let stats = Arc::new(Stats::with_quota_store(quota_store.clone()));
+    let tls_full_cert_budget = Arc::new(TlsFullCertBudget::new());
+    let process_control_plane = control_plane::ProcessControlPlane::new();
     let runtime_task_scope = generation::RuntimeTaskScope::new();
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
     let quota_state_path = config.general.quota_state_path.clone();
-    crate::quota_state::load_quota_state(&quota_state_path, stats.as_ref()).await;
+    let quota_state = crate::quota_state::QuotaStateOwner::new(
+        quota_state_path,
+        quota_store.clone(),
+    );
+    let configured_quota_users = config
+        .access
+        .users
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    quota_state.load(&configured_quota_users).await;
 
     let upstream_manager = Arc::new(
         UpstreamManager::new(
@@ -136,15 +150,29 @@ pub(super) async fn run_telemt_core(
         let listen = match config.server.api.listen.parse::<SocketAddr>() {
             Ok(listen) => listen,
             Err(error) => {
-                warn!(
-                    error = %error,
-                    listen = %config.server.api.listen,
-                    "Invalid server.api.listen; API is disabled"
+                let message = format!(
+                    "invalid server.api.listen \"{}\": {}",
+                    config.server.api.listen, error
                 );
-                SocketAddr::from(([127, 0, 0, 1], 0))
+                startup_tracker
+                    .fail_component(COMPONENT_API_BOOTSTRAP, Some(message.clone()))
+                    .await;
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, message).into());
             }
         };
         if listen.port() != 0 {
+            let api_listener = match tokio::net::TcpListener::bind(listen).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    startup_tracker
+                        .fail_component(
+                            COMPONENT_API_BOOTSTRAP,
+                            Some(format!("API listener bind failed on {listen}: {error}")),
+                        )
+                        .await;
+                    return Err(error.into());
+                }
+            };
             let stats_api = stats.clone();
             let ip_tracker_api = ip_tracker.clone();
             let me_pool_api = api_me_pool.clone();
@@ -152,7 +180,7 @@ pub(super) async fn run_telemt_core(
             let route_runtime_api = route_runtime.clone();
             let proxy_shared_api = shared_state.clone();
             let config_path_api = config_path.clone();
-            let quota_state_path_api = quota_state_path.clone();
+            let quota_state_api = quota_state.clone();
             let startup_tracker_api = startup_tracker.clone();
             let detected_ips_rx_api = detected_ips_rx.clone();
             let reload_control_api = reload_control.clone();
@@ -160,9 +188,11 @@ pub(super) async fn run_telemt_core(
             let runtime_watch_rx_api = runtime_watch_rx.clone();
             let web_trace_api = web_trace.clone();
             let web_runtime_rx_api = web_runtime_control.subscribe();
-            tokio::spawn(async move {
+            let api_control_plane = process_control_plane.clone();
+            let api_task_control_plane = process_control_plane.clone();
+            let api_task = async move {
                 api::serve(
-                    listen,
+                    api_listener,
                     stats_api,
                     ip_tracker_api,
                     me_pool_api,
@@ -170,7 +200,7 @@ pub(super) async fn run_telemt_core(
                     proxy_shared_api,
                     upstream_manager_api,
                     config_path_api,
-                    quota_state_path_api,
+                    quota_state_api,
                     detected_ips_rx_api,
                     process_started_at_epoch_secs,
                     startup_tracker_api,
@@ -179,13 +209,21 @@ pub(super) async fn run_telemt_core(
                     runtime_watch_rx_api,
                     web_trace_api,
                     web_runtime_rx_api,
+                    api_task_control_plane,
                 )
                 .await;
-            });
+            };
+            if api_control_plane.spawn(api_task).is_err() {
+                let message = "process control-plane task admission closed during API startup";
+                startup_tracker
+                    .fail_component(COMPONENT_API_BOOTSTRAP, Some(message.to_string()))
+                    .await;
+                return Err(std::io::Error::other(message).into());
+            }
             startup_tracker
                 .complete_component(
                     COMPONENT_API_BOOTSTRAP,
-                    Some(format!("api task spawned on {}", listen)),
+                    Some(format!("API listener bound and supervised on {}", listen)),
                 )
                 .await;
         } else {
@@ -219,6 +257,7 @@ pub(super) async fn run_telemt_core(
         upstream_manager.clone(),
         &startup_tracker,
         runtime_task_scope.clone(),
+        tls_full_cert_budget.clone(),
         tls_bootstrap::TlsBootstrapPolicy::BestEffort,
     )
     .await?;
@@ -316,8 +355,10 @@ pub(super) async fn run_telemt_core(
         &startup_tracker,
         active_runtime.clone(),
         web_runtime_control.subscribe(),
+        tls_full_cert_budget.clone(),
+        process_control_plane.clone(),
     )
-    .await;
+    .await?;
 
     runtime_watch_tx.send_replace(Some(active_runtime.load_full().watch_state()));
     active_runtime_tx.send_replace(Some(active_runtime.clone()));
@@ -335,6 +376,7 @@ pub(super) async fn run_telemt_core(
         reload_commands,
         config_path,
         quota_store,
+        tls_full_cert_budget,
         detected_ips_tx,
         runtime_log_filter,
         runtime_watch_tx,
@@ -342,12 +384,17 @@ pub(super) async fn run_telemt_core(
         web_trace,
     );
 
-    shutdown::spawn_signal_handlers(active_runtime.clone(), process_started_at);
+    shutdown::spawn_signal_handlers(
+        active_runtime.clone(),
+        process_started_at,
+        process_control_plane.clone(),
+    );
     shutdown::wait_for_shutdown(
         process_started_at,
         active_runtime,
-        quota_state_path,
+        quota_state,
         reload_supervisor,
+        process_control_plane,
     )
     .await;
 

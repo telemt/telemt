@@ -21,7 +21,8 @@ impl UserIpTracker {
             return;
         }
 
-        let window = self.limit_window();
+        let policy = self.limit_policy.load();
+        let window = Self::limit_window(&policy);
         let now = Instant::now();
         for shard_lock in self.shards.iter() {
             let mut shard = shard_lock.write().await;
@@ -113,7 +114,8 @@ impl UserIpTracker {
         &self,
         users: &[String],
     ) -> HashMap<String, usize> {
-        let window = self.limit_window();
+        let policy = self.limit_policy.load();
+        let window = Self::limit_window(&policy);
         let now = Instant::now();
 
         let mut counts = HashMap::with_capacity(users.len());
@@ -152,7 +154,8 @@ impl UserIpTracker {
 
     pub async fn get_recent_ips_for_users(&self, users: &[String]) -> HashMap<String, Vec<IpAddr>> {
         self.drain_cleanup_queue().await;
-        let window = self.limit_window();
+        let policy = self.limit_policy.load();
+        let window = Self::limit_window(&policy);
         let now = Instant::now();
 
         let mut out = HashMap::with_capacity(users.len());
@@ -202,6 +205,7 @@ impl UserIpTracker {
     }
 
     pub(crate) async fn get_stats_snapshot(&self) -> Vec<(String, usize, usize)> {
+        let policy = self.limit_policy.load();
         let mut active_counts = Vec::new();
         for shard_lock in self.shards.iter() {
             let shard = shard_lock.read().await;
@@ -215,7 +219,7 @@ impl UserIpTracker {
 
         let mut stats = Vec::with_capacity(active_counts.len());
         for (username, active_count) in active_counts {
-            let limit = self.user_limit(&username).unwrap_or(0);
+            let limit = Self::user_limit(&policy, &username).unwrap_or(0);
             stats.push((username, active_count, limit));
         }
 
@@ -273,7 +277,8 @@ impl UserIpTracker {
     }
 
     pub async fn get_user_limit(&self, username: &str) -> Option<usize> {
-        self.user_limit(username)
+        let policy = self.limit_policy.load();
+        Self::user_limit(&policy, username)
     }
 
     pub async fn format_stats(&self) -> String {

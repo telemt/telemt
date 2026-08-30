@@ -13,9 +13,105 @@ use tracing::{debug, info, warn};
 use crate::crypto::SecureRandom;
 use crate::network::IpFamily;
 
-use super::pool::{MeDrainGateReason, MePool, WriterContour};
+use super::pool::{
+    MeDrainGateReason, MePool, ReinitAttemptState, ReinitCoordinatorState, ReinitCore,
+    ReinitPendingState, ReinitStatusSnapshot, WriterContour,
+};
 
 const ME_HARDSWAP_PENDING_TTL_SECS: u64 = 1800;
+
+struct ReinitAttemptGuard {
+    reinit: Arc<ReinitCore>,
+    attempt_id: u64,
+    generation: u64,
+    previous_generation: u64,
+    map_hash: u64,
+    hardswap: bool,
+}
+
+impl Drop for ReinitAttemptGuard {
+    fn drop(&mut self) {
+        let mut state = self.reinit.coordinator.lock();
+        state.attempts.remove(&self.attempt_id);
+        publish_reinit_state(self.reinit.as_ref(), &state);
+    }
+}
+
+struct ReinitReservation {
+    attempt: ReinitAttemptGuard,
+    pending_reused: bool,
+    pending_expired: bool,
+    pending_age_secs: u64,
+}
+
+fn publish_reinit_state(reinit: &ReinitCore, state: &ReinitCoordinatorState) {
+    let mut warm_generations = state
+        .attempts
+        .values()
+        .filter(|attempt| attempt.hardswap && !attempt.committed)
+        .map(|attempt| attempt.generation)
+        .collect::<Vec<_>>();
+    warm_generations.sort_unstable();
+    warm_generations.dedup();
+    let pending = state.pending;
+    let snapshot = ReinitStatusSnapshot {
+        active_generation: state.active_generation,
+        warm_generations,
+        pending_hardswap_generation: pending.map_or(0, |value| value.generation),
+        pending_hardswap_started_at_epoch_secs: pending
+            .map_or(0, |value| value.started_at_epoch_secs),
+        pending_hardswap_map_hash: pending.map_or(0, |value| value.map_hash),
+        inflight: state.attempts.len(),
+    };
+    reinit
+        .active_generation
+        .store(snapshot.active_generation, Ordering::Release);
+    reinit.warm_generation.store(
+        snapshot.warm_generations.last().copied().unwrap_or(0),
+        Ordering::Release,
+    );
+    reinit.pending_hardswap_generation.store(
+        snapshot.pending_hardswap_generation,
+        Ordering::Release,
+    );
+    reinit.pending_hardswap_started_at_epoch_secs.store(
+        snapshot.pending_hardswap_started_at_epoch_secs,
+        Ordering::Release,
+    );
+    reinit
+        .pending_hardswap_map_hash
+        .store(snapshot.pending_hardswap_map_hash, Ordering::Release);
+    reinit.status.store(Arc::new(snapshot));
+}
+
+fn commit_reinit_state(
+    state: &mut ReinitCoordinatorState,
+    attempt_id: u64,
+    generation: u64,
+    map_hash: u64,
+    hardswap: bool,
+) -> bool {
+    let Some(record) = state.attempts.get(&attempt_id).copied() else {
+        return false;
+    };
+    if record.map_hash != state.desired_map_hash || record.map_hash != map_hash {
+        return false;
+    }
+    if hardswap {
+        let pending_matches = state.pending.is_some_and(|pending| {
+            pending.generation == generation && pending.map_hash == map_hash
+        });
+        if !pending_matches || generation < state.active_generation {
+            return false;
+        }
+        state.active_generation = generation;
+        state.pending = None;
+    }
+    if let Some(record) = state.attempts.get_mut(&attempt_id) {
+        record.committed = true;
+    }
+    true
+}
 
 impl MePool {
     fn desired_map_hash(desired_by_dc: &HashMap<i32, HashSet<SocketAddr>>) -> u64 {
@@ -36,36 +132,97 @@ impl MePool {
         hasher.finish()
     }
 
-    fn clear_pending_hardswap_state(&self) {
-        self.reinit
-            .pending_hardswap_generation
-            .store(0, Ordering::Relaxed);
-        self.reinit
-            .pending_hardswap_started_at_epoch_secs
-            .store(0, Ordering::Relaxed);
-        self.reinit
-            .pending_hardswap_map_hash
-            .store(0, Ordering::Relaxed);
-        self.reinit.warm_generation.store(0, Ordering::Relaxed);
+    fn reserve_reinit_attempt(
+        self: &Arc<Self>,
+        hardswap: bool,
+        map_hash: u64,
+        now_epoch_secs: u64,
+    ) -> ReinitReservation {
+        let mut state = self.reinit.coordinator.lock();
+        state.desired_map_hash = map_hash;
+        let previous_generation = state.active_generation;
+        let mut pending_reused = false;
+        let mut pending_expired = false;
+        let mut pending_age_secs = 0;
+
+        let generation = if hardswap {
+            let reusable = state.pending.filter(|pending| {
+                pending_age_secs = now_epoch_secs.saturating_sub(pending.started_at_epoch_secs);
+                pending_expired = pending.started_at_epoch_secs > 0
+                    && pending_age_secs > ME_HARDSWAP_PENDING_TTL_SECS;
+                pending.generation >= previous_generation
+                    && pending.map_hash == map_hash
+                    && !pending_expired
+            });
+            if let Some(pending) = reusable {
+                pending_reused = true;
+                pending.generation
+            } else {
+                let generation = self.reinit.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                state.pending = Some(ReinitPendingState {
+                    generation,
+                    started_at_epoch_secs: now_epoch_secs,
+                    map_hash,
+                });
+                generation
+            }
+        } else {
+            state.pending = None;
+            self.reinit.generation.fetch_add(1, Ordering::AcqRel) + 1
+        };
+
+        let attempt_id = state.next_attempt_id;
+        state.next_attempt_id = state.next_attempt_id.saturating_add(1);
+        state.attempts.insert(
+            attempt_id,
+            ReinitAttemptState {
+                generation,
+                map_hash,
+                hardswap,
+                committed: false,
+            },
+        );
+        publish_reinit_state(self.reinit.as_ref(), &state);
+        ReinitReservation {
+            attempt: ReinitAttemptGuard {
+                reinit: Arc::clone(&self.reinit),
+                attempt_id,
+                generation,
+                previous_generation,
+                map_hash,
+                hardswap,
+            },
+            pending_reused,
+            pending_expired,
+            pending_age_secs,
+        }
     }
 
-    async fn promote_warm_generation_to_active(&self, generation: u64) {
-        self.reinit
-            .active_generation
-            .store(generation, Ordering::Relaxed);
-        self.reinit.warm_generation.store(0, Ordering::Relaxed);
-
-        let ws = self.writers.read().await;
-        for writer in ws.iter() {
-            if writer.draining.load(Ordering::Relaxed) {
-                continue;
-            }
-            if writer.generation == generation {
-                writer
-                    .contour
-                    .store(WriterContour::Active.as_u8(), Ordering::Relaxed);
+    fn commit_reinit_attempt(&self, attempt: &ReinitAttemptGuard) -> bool {
+        let mut state = self.reinit.coordinator.lock();
+        if !commit_reinit_state(
+            &mut state,
+            attempt.attempt_id,
+            attempt.generation,
+            attempt.map_hash,
+            attempt.hardswap,
+        ) {
+            return false;
+        }
+        if attempt.hardswap {
+            let writers = self.writers.snapshot();
+            for writer in writers.iter() {
+                if !writer.draining.load(Ordering::Relaxed)
+                    && writer.generation == attempt.generation
+                {
+                    writer
+                        .contour
+                        .store(WriterContour::Active.as_u8(), Ordering::Release);
+                }
             }
         }
+        publish_reinit_state(self.reinit.as_ref(), &state);
+        true
     }
 
     fn coverage_ratio(
@@ -387,74 +544,32 @@ impl MePool {
         }
 
         let desired_map_hash = Self::desired_map_hash(&desired_by_dc);
-        let previous_generation = self.current_generation();
         let hardswap = self.reinit.hardswap.load(Ordering::Relaxed);
-        let generation = if hardswap {
-            let pending_generation = self
-                .reinit
-                .pending_hardswap_generation
-                .load(Ordering::Relaxed);
-            let pending_started_at = self
-                .reinit
-                .pending_hardswap_started_at_epoch_secs
-                .load(Ordering::Relaxed);
-            let pending_map_hash = self
-                .reinit
-                .pending_hardswap_map_hash
-                .load(Ordering::Relaxed);
-            let pending_age_secs = now_epoch_secs.saturating_sub(pending_started_at);
-            let pending_ttl_expired =
-                pending_started_at > 0 && pending_age_secs > ME_HARDSWAP_PENDING_TTL_SECS;
-            let pending_matches_map = pending_map_hash != 0 && pending_map_hash == desired_map_hash;
-
-            if pending_generation != 0
-                && pending_generation >= previous_generation
-                && pending_matches_map
-                && !pending_ttl_expired
-            {
-                self.stats.increment_me_hardswap_pending_reuse_total();
-                debug!(
-                    previous_generation,
-                    generation = pending_generation,
-                    pending_age_secs,
-                    "ME hardswap continues with pending generation"
-                );
-                pending_generation
-            } else {
-                if pending_generation != 0 && pending_ttl_expired {
-                    self.stats.increment_me_hardswap_pending_ttl_expired_total();
-                    warn!(
-                        previous_generation,
-                        generation = pending_generation,
-                        pending_age_secs,
-                        pending_ttl_secs = ME_HARDSWAP_PENDING_TTL_SECS,
-                        "ME hardswap pending generation expired by TTL; starting fresh generation"
-                    );
-                }
-                let next_generation = self.reinit.generation.fetch_add(1, Ordering::Relaxed) + 1;
-                self.reinit
-                    .pending_hardswap_generation
-                    .store(next_generation, Ordering::Relaxed);
-                self.reinit
-                    .pending_hardswap_started_at_epoch_secs
-                    .store(now_epoch_secs, Ordering::Relaxed);
-                self.reinit
-                    .pending_hardswap_map_hash
-                    .store(desired_map_hash, Ordering::Relaxed);
-                self.reinit
-                    .warm_generation
-                    .store(next_generation, Ordering::Relaxed);
-                next_generation
-            }
-        } else {
-            self.clear_pending_hardswap_state();
-            self.reinit.generation.fetch_add(1, Ordering::Relaxed) + 1
-        };
+        let reservation =
+            self.reserve_reinit_attempt(hardswap, desired_map_hash, now_epoch_secs);
+        let attempt = reservation.attempt;
+        let previous_generation = attempt.previous_generation;
+        let generation = attempt.generation;
+        if reservation.pending_reused {
+            self.stats.increment_me_hardswap_pending_reuse_total();
+            debug!(
+                previous_generation,
+                generation,
+                pending_age_secs = reservation.pending_age_secs,
+                "ME hardswap continues with pending generation"
+            );
+        } else if reservation.pending_expired {
+            self.stats.increment_me_hardswap_pending_ttl_expired_total();
+            warn!(
+                previous_generation,
+                generation,
+                pending_age_secs = reservation.pending_age_secs,
+                pending_ttl_secs = ME_HARDSWAP_PENDING_TTL_SECS,
+                "ME hardswap pending generation expired by TTL; starting fresh generation"
+            );
+        }
 
         if hardswap {
-            self.reinit
-                .warm_generation
-                .store(generation, Ordering::Relaxed);
             self.warmup_generation_for_all_dcs(rng, generation, &desired_by_dc)
                 .await;
         } else {
@@ -542,8 +657,13 @@ impl MePool {
             );
         }
 
-        if hardswap {
-            self.promote_warm_generation_to_active(generation).await;
+        if !self.commit_reinit_attempt(&attempt) {
+            debug!(
+                previous_generation,
+                generation,
+                "ME reinit result discarded after a newer desired-map attempt"
+            );
+            return false;
         }
 
         let desired_addrs: HashSet<(i32, SocketAddr)> = desired_by_dc
@@ -566,9 +686,6 @@ impl MePool {
         drop(writers);
 
         if stale_writer_ids.is_empty() {
-            if hardswap {
-                self.clear_pending_hardswap_state();
-            }
             debug!("ME reinit cycle completed with no stale writers");
             return true;
         }
@@ -606,9 +723,6 @@ impl MePool {
                 self.remove_writer_and_close_clients(writer_id).await;
             }
         }
-        if hardswap {
-            self.clear_pending_hardswap_state();
-        }
         true
     }
 
@@ -622,7 +736,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use super::MePool;
+    use super::{MePool, commit_reinit_state};
+    use crate::transport::middle_proxy::pool::{
+        ReinitAttemptState, ReinitCoordinatorState, ReinitPendingState,
+    };
 
     fn addr(octet: u8, port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, octet)), port)
@@ -672,5 +789,45 @@ mod tests {
 
         assert_eq!(ratio, 0.0);
         assert_eq!(missing_dc, vec![1, 2]);
+    }
+
+    #[test]
+    fn stale_concurrent_attempt_cannot_regress_active_generation() {
+        let mut state = ReinitCoordinatorState {
+            next_attempt_id: 3,
+            active_generation: 1,
+            desired_map_hash: 22,
+            pending: Some(ReinitPendingState {
+                generation: 3,
+                started_at_epoch_secs: 1,
+                map_hash: 22,
+            }),
+            attempts: HashMap::from([
+                (
+                    1,
+                    ReinitAttemptState {
+                        generation: 2,
+                        map_hash: 11,
+                        hardswap: true,
+                        committed: false,
+                    },
+                ),
+                (
+                    2,
+                    ReinitAttemptState {
+                        generation: 3,
+                        map_hash: 22,
+                        hardswap: true,
+                        committed: false,
+                    },
+                ),
+            ]),
+        };
+
+        assert!(commit_reinit_state(&mut state, 2, 3, 22, true));
+        assert_eq!(state.active_generation, 3);
+        assert!(!commit_reinit_state(&mut state, 1, 2, 11, true));
+        assert_eq!(state.active_generation, 3);
+        assert!(state.pending.is_none());
     }
 }

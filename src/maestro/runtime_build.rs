@@ -19,6 +19,7 @@ use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
 use crate::stats::{QuotaStore, ReplayChecker, Stats};
 use crate::stream::BufferPool;
+use crate::tls_front::cache::TlsFullCertBudget;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
@@ -44,6 +45,7 @@ pub(crate) async fn prepare_runtime(
     config_path: &Path,
     quota_store: Arc<QuotaStore>,
     runtime_log_filter: RuntimeLogFilter,
+    tls_full_cert_budget: Arc<TlsFullCertBudget>,
 ) -> Result<PreparedRuntime, String> {
     config
         .validate_web_decoy_listener_separation()
@@ -121,6 +123,7 @@ pub(crate) async fn prepare_runtime(
         upstream_manager.clone(),
         &startup_tracker,
         task_scope.clone(),
+        tls_full_cert_budget,
         tls_bootstrap::TlsBootstrapPolicy::RequireReady,
     )
     .await

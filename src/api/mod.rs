@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
+use std::collections::BTreeSet;
 use std::io::{Error as IoError, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -22,10 +23,12 @@ use tracing::{debug, info, warn};
 
 use crate::config::ApiGrayAction;
 use crate::ip_tracker::UserIpTracker;
+use crate::maestro::control_plane::ProcessControlPlane;
 use crate::maestro::generation::{RuntimeGeneration, RuntimeWatchState};
 use crate::maestro::reload::{ReloadAccepted, ReloadControl, ReloadRequest, ReloadSubmitError};
 use crate::proxy::route_mode::RouteRuntimeController;
 use crate::proxy::shared_state::ProxySharedState;
+use crate::quota_state::QuotaStateOwner;
 use crate::startup::StartupTracker;
 use crate::stats::Stats;
 use crate::transport::UpstreamManager;
@@ -112,7 +115,7 @@ pub(super) struct ApiShared {
     pub(super) me_pool: Arc<RwLock<Option<Arc<MePool>>>>,
     pub(super) upstream_manager: Arc<UpstreamManager>,
     pub(super) config_path: PathBuf,
-    pub(super) quota_state_path: PathBuf,
+    pub(super) quota_state: Arc<QuotaStateOwner>,
     pub(super) detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
     pub(super) mutation_lock: Arc<Mutex<()>>,
     pub(super) minimal_cache: Arc<Mutex<Option<MinimalCacheEntry>>>,
@@ -147,7 +150,7 @@ impl ApiShared {
             me_pool: runtime.me_pool_runtime.clone(),
             upstream_manager: runtime.upstream_manager.clone(),
             config_path: self.config_path.clone(),
-            quota_state_path: self.quota_state_path.clone(),
+            quota_state: self.quota_state.clone(),
             detected_ips_rx: self.detected_ips_rx.clone(),
             mutation_lock: self.mutation_lock.clone(),
             minimal_cache: self.minimal_cache.clone(),
@@ -282,8 +285,9 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
     }
 }
 
-pub async fn serve(
-    listen: SocketAddr,
+/// Serves the API on a process-owned listener and task scope.
+pub(crate) async fn serve(
+    listener: TcpListener,
     stats: Arc<Stats>,
     ip_tracker: Arc<UserIpTracker>,
     me_pool: Arc<RwLock<Option<Arc<MePool>>>>,
@@ -291,7 +295,7 @@ pub async fn serve(
     proxy_shared: Arc<ProxySharedState>,
     upstream_manager: Arc<UpstreamManager>,
     config_path: PathBuf,
-    quota_state_path: PathBuf,
+    quota_state: Arc<QuotaStateOwner>,
     detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
     process_started_at_epoch_secs: u64,
     startup_tracker: Arc<StartupTracker>,
@@ -300,6 +304,7 @@ pub async fn serve(
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
     web_trace: Arc<WebTraceStore>,
     web_runtime_rx: watch::Receiver<WebRuntimePublication>,
+    control_plane: ProcessControlPlane,
 ) {
     let active_runtime = loop {
         if let Some(active_runtime) = active_runtime_rx.borrow().clone() {
@@ -321,19 +326,9 @@ pub async fn serve(
     };
     let config_rx = initial_watch_state.config_rx.clone();
     let admission_rx = initial_watch_state.admission_rx.clone();
-    let listener = match TcpListener::bind(listen).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            warn!(
-                error = %error,
-                listen = %listen,
-                "Failed to bind API listener"
-            );
-            return;
-        }
-    };
+    let listen = listener.local_addr().ok();
 
-    info!("API endpoint: http://{}/v1/* and /web-status", listen);
+    info!(listen = ?listen, "API endpoint ready at /v1/* and /web-status");
 
     let runtime_state = Arc::new(ApiRuntimeState {
         process_started_at_epoch_secs,
@@ -348,7 +343,7 @@ pub async fn serve(
         me_pool,
         upstream_manager,
         config_path,
-        quota_state_path,
+        quota_state,
         detected_ips_rx,
         mutation_lock: Arc::new(Mutex::new(())),
         minimal_cache: Arc::new(Mutex::new(None)),
@@ -373,6 +368,7 @@ pub async fn serve(
         runtime_watch_rx,
         runtime_state.clone(),
         shared.runtime_events.clone(),
+        &control_plane,
     );
 
     let connection_permits = Arc::new(Semaphore::new(API_MAX_CONTROL_CONNECTIONS));
@@ -399,7 +395,7 @@ pub async fn serve(
         };
 
         let shared_conn = shared.clone();
-        tokio::spawn(async move {
+        let _ = control_plane.spawn(async move {
             let _connection_permit = connection_permit;
             let svc = service_fn(move |req: Request<Incoming>| {
                 let shared_req = shared_conn.clone();
@@ -994,6 +990,7 @@ async fn handle(
                         ));
                     }
                     let expected_revision = parse_if_match(req.headers());
+                    let _mutation_guard = shared.mutation_lock.lock().await;
                     let disk_cfg = load_config_from_disk(&shared.config_path).await?;
                     ensure_expected_revision(&shared.config_path, expected_revision.as_deref())
                         .await?;
@@ -1003,12 +1000,16 @@ async fn handle(
                             ApiFailure::new(StatusCode::NOT_FOUND, "not_found", "User not found"),
                         ));
                     }
-                    let snapshot = match crate::quota_state::reset_user_quota(
-                        &shared.quota_state_path,
-                        shared.stats.as_ref(),
-                        user,
-                    )
-                    .await
+                    let configured_users = disk_cfg
+                        .access
+                        .users
+                        .keys()
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    let snapshot = match shared
+                        .quota_state
+                        .reset_user(&configured_users, user)
+                        .await
                     {
                         Ok(snapshot) => snapshot,
                         Err(error) => {

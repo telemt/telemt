@@ -253,10 +253,6 @@ pub(super) async fn bootstrap(
         }
     }
 
-    if let Err(e) = crate::network::dns_overrides::install_entries(&config.network.dns_overrides) {
-        eprintln!("[telemt] Invalid network.dns_overrides: {}", e);
-        std::process::exit(1);
-    }
     set_maestro_colors_enabled(!config.general.disable_colors);
     startup_tracker
         .complete_component(COMPONENT_CONFIG_LOAD, Some("config is ready".to_string()))

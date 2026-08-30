@@ -107,7 +107,7 @@ impl MePool {
             let pool = Arc::clone(self);
             let rng_clone = Arc::clone(rng);
             let dc_addrs_bg = dc_addrs.clone();
-            tokio::spawn(async move {
+            let saturation = async move {
                 let mut join_bg = tokio::task::JoinSet::new();
                 for (dc, addrs) in dc_addrs_bg {
                     if addrs.len() <= 1 {
@@ -135,7 +135,10 @@ impl MePool {
                     current_pool_size = pool.connection_count(),
                     "Background ME saturation warmup finished"
                 );
-            });
+            };
+            if self.lifecycle.spawn_producer(saturation).is_err() {
+                debug!("Background ME saturation skipped: pool lifecycle closed");
+            }
 
             if !self.decision.effective_multipath && self.connection_count() > 0 {
                 break;

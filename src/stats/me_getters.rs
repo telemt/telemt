@@ -10,6 +10,10 @@ impl Stats {
         out.sort_by_key(|(code, _)| *code);
         out
     }
+    pub fn get_me_handshake_error_code_overflow_total(&self) -> u64 {
+        self.me_handshake_error_code_overflow_total
+            .load(Ordering::Relaxed)
+    }
     pub fn get_me_route_drop_no_conn(&self) -> u64 {
         self.me_route_drop_no_conn.load(Ordering::Relaxed)
     }

@@ -2,26 +2,47 @@ use super::*;
 
 impl UserIpTracker {
     pub async fn set_limit_policy(&self, mode: UserMaxUniqueIpsMode, window_secs: u64) {
-        self.limit_mode
-            .store(Self::mode_to_u8(mode), Ordering::Relaxed);
-        self.limit_window_secs
-            .store(window_secs.max(1), Ordering::Relaxed);
+        self.limit_policy.rcu(|current| {
+            Arc::new(UserIpLimitPolicy {
+                mode,
+                window_secs: window_secs.max(1),
+                ..(**current).clone()
+            })
+        });
     }
 
     pub async fn set_user_limit(&self, username: &str, max_ips: usize) {
-        self.max_ips.insert(username.to_string(), max_ips);
+        let username = username.to_string();
+        self.limit_policy.rcu(|current| {
+            let mut limits = current.max_ips.as_ref().clone();
+            limits.insert(username.clone(), max_ips);
+            Arc::new(UserIpLimitPolicy {
+                max_ips: Arc::new(limits),
+                ..(**current).clone()
+            })
+        });
     }
 
     pub async fn remove_user_limit(&self, username: &str) {
-        self.max_ips.remove(username);
+        self.limit_policy.rcu(|current| {
+            let mut limits = current.max_ips.as_ref().clone();
+            limits.remove(username);
+            Arc::new(UserIpLimitPolicy {
+                max_ips: Arc::new(limits),
+                ..(**current).clone()
+            })
+        });
     }
 
     pub async fn load_limits(&self, default_limit: usize, limits: &HashMap<String, usize>) {
-        self.default_max_ips.store(default_limit, Ordering::Relaxed);
-        self.max_ips.clear();
-        for (username, limit) in limits {
-            self.max_ips.insert(username.clone(), *limit);
-        }
+        let limits = Arc::new(limits.clone());
+        self.limit_policy.rcu(|current| {
+            Arc::new(UserIpLimitPolicy {
+                max_ips: Arc::clone(&limits),
+                default_max_ips: default_limit,
+                ..(**current).clone()
+            })
+        });
     }
 
     pub(super) fn prune_recent(
@@ -40,9 +61,10 @@ impl UserIpTracker {
     pub async fn check_and_add(&self, username: &str, ip: IpAddr) -> Result<(), String> {
         self.drain_cleanup_for_user(username).await;
         self.maybe_compact_empty_users().await;
-        let limit = self.user_limit(username);
-        let mode = Self::mode_from_u8(self.limit_mode.load(Ordering::Relaxed));
-        let window = self.limit_window();
+        let policy = self.limit_policy.load();
+        let limit = Self::user_limit(&policy, username);
+        let mode = policy.mode;
+        let window = Self::limit_window(&policy);
         let now = Instant::now();
 
         let shard_idx = Self::shard_idx(username);

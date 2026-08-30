@@ -6,6 +6,7 @@
 // - admission: conditional-cast gate and route mode switching.
 // - bootstrap: configuration and tracing initialization.
 // - connectivity: startup ME/DC connectivity diagnostics.
+// - control_plane: process-owned API, metrics, and signal task lifecycle.
 // - generation: runtime generation state and task ownership.
 // - helpers: CLI and shared startup/runtime helper routines.
 // - listeners: TCP/Unix listener planning, binding, and lifecycle control.
@@ -21,6 +22,7 @@
 mod admission;
 mod bootstrap;
 mod connectivity;
+pub(crate) mod control_plane;
 pub(crate) mod generation;
 mod helpers;
 mod listeners;

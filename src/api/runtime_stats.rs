@@ -84,6 +84,8 @@ pub(super) fn build_zero_all_data(stats: &Stats, configured_users: usize) -> Zer
             reconnect_success_total: stats.get_me_reconnect_success(),
             handshake_reject_total: stats.get_me_handshake_reject_total(),
             handshake_error_codes,
+            handshake_error_code_overflow_total: stats
+                .get_me_handshake_error_code_overflow_total(),
             reader_eof_total: stats.get_me_reader_eof_total(),
             idle_close_by_peer_total: stats.get_me_idle_close_by_peer_total(),
             route_drop_no_conn_total: stats.get_me_route_drop_no_conn(),
@@ -342,8 +344,7 @@ async fn get_minimal_payload_cached(
     }
 
     let pool = shared.me_pool.read().await.clone()?;
-    let status = pool.api_status_snapshot().await;
-    let runtime = pool.api_runtime_snapshot().await;
+    let (status, runtime) = pool.api_coherent_snapshots().await;
     let generated_at_epoch_secs = status.generated_at_epoch_secs;
 
     let me_writers = MeWritersData {
@@ -425,8 +426,11 @@ async fn get_minimal_payload_cached(
     let me_runtime = MinimalMeRuntimeData {
         active_generation: runtime.active_generation,
         warm_generation: runtime.warm_generation,
+        warm_generations: runtime.warm_generations,
         pending_hardswap_generation: runtime.pending_hardswap_generation,
         pending_hardswap_age_secs: runtime.pending_hardswap_age_secs,
+        reinit_inflight: runtime.reinit_inflight,
+        reinit_max_concurrency_effective: runtime.reinit_max_concurrency_effective,
         hardswap_enabled: runtime.hardswap_enabled,
         floor_mode: runtime.floor_mode,
         adaptive_floor_idle_secs: runtime.adaptive_floor_idle_secs,

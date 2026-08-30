@@ -9,7 +9,8 @@ use tracing::{debug, info};
 use crate::error::{ProxyError, Result};
 use crate::network::probe::{detect_public_ipv4_http, is_bogon};
 use crate::network::stun::{
-    IpFamily, stun_probe_dual_with_tcp_fallback, stun_probe_family_with_bind_and_tcp_fallback,
+    IpFamily, stun_probe_dual_with_tcp_fallback,
+    stun_probe_family_with_bind_tcp_fallback_and_resolver,
 };
 
 use super::MePool;
@@ -66,10 +67,12 @@ impl MePool {
         let mut best_by_ip: HashMap<IpAddr, (usize, std::net::SocketAddr)> = HashMap::new();
         let concurrency = self.nat_runtime.nat_probe_concurrency.max(1);
         let tcp_fallback = self.nat_runtime.stun_tcp_fallback;
+        let dns_resolver = self.upstream.as_ref().map(|manager| manager.dns_resolver());
 
         while next_idx < servers.len() || !join_set.is_empty() {
             while next_idx < servers.len() && join_set.len() < concurrency {
                 let stun_addr = servers[next_idx].clone();
+                let dns_resolver = dns_resolver.clone();
                 next_idx += 1;
                 join_set.spawn(async move {
                     let batch_timeout = if tcp_fallback {
@@ -79,11 +82,12 @@ impl MePool {
                     };
                     let res = timeout(
                         batch_timeout,
-                        stun_probe_family_with_bind_and_tcp_fallback(
+                        stun_probe_family_with_bind_tcp_fallback_and_resolver(
                             &stun_addr,
                             family,
                             bind_ip,
                             tcp_fallback,
+                            dns_resolver.as_deref(),
                         ),
                     )
                     .await;

@@ -4,7 +4,6 @@
 
 #![allow(deprecated)]
 
-use arc_swap::ArcSwap;
 use rand::RngExt;
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -21,7 +20,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::config::{UpstreamConfig, UpstreamType};
 use crate::error::{ProxyError, Result};
-use crate::network::dns_overrides::{DnsOverrides, split_host_port};
+use crate::network::dns_overrides::{GenerationDnsResolver, split_host_port};
 use crate::protocol::constants::{TG_DATACENTER_PORT, TG_DATACENTERS_V4, TG_DATACENTERS_V6};
 use crate::stats::Stats;
 use crate::transport::shadowsocks::{
@@ -43,6 +42,7 @@ const HEALTH_CHECK_INTERVAL_SECS: u64 = 30;
 const HEALTH_CHECK_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// Upstream is considered healthy when at least this many DC groups are reachable.
 const MIN_HEALTHY_DC_GROUPS: usize = 3;
+const DNS_RESULT_MAX_ADDRESSES: usize = 64;
 
 // ============= RTT Tracking =============
 
@@ -334,7 +334,7 @@ pub struct UpstreamManager {
     no_upstreams_warn_epoch_ms: Arc<AtomicU64>,
     no_healthy_warn_epoch_ms: Arc<AtomicU64>,
     stats: Arc<Stats>,
-    dns_overrides: Arc<ArcSwap<DnsOverrides>>,
+    dns_resolver: Arc<GenerationDnsResolver>,
 }
 
 impl UpstreamManager {
@@ -376,29 +376,42 @@ impl UpstreamManager {
             no_upstreams_warn_epoch_ms: Arc::new(AtomicU64::new(0)),
             no_healthy_warn_epoch_ms: Arc::new(AtomicU64::new(0)),
             stats,
-            dns_overrides: Arc::new(ArcSwap::from_pointee(DnsOverrides::default())),
+            dns_resolver: Arc::new(GenerationDnsResolver::default()),
         }
     }
 
-    pub(crate) fn with_dns_overrides(mut self, entries: &[String]) -> Result<Self> {
-        self.dns_overrides = Arc::new(ArcSwap::from_pointee(DnsOverrides::from_entries(entries)?));
+    pub(crate) fn with_dns_overrides(self, entries: &[String]) -> Result<Self> {
+        self.dns_resolver.apply_entries(entries)?;
         Ok(self)
     }
 
     pub(crate) fn update_dns_overrides(&self, entries: &[String]) -> Result<()> {
-        let snapshot = DnsOverrides::from_entries(entries)?;
-        self.dns_overrides.store(Arc::new(snapshot));
-        Ok(())
+        self.dns_resolver.apply_entries(entries)
+    }
+
+    pub(crate) fn dns_resolver(&self) -> Arc<GenerationDnsResolver> {
+        Arc::clone(&self.dns_resolver)
+    }
+
+    pub(crate) async fn resolve_all(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        if let Some(addr) = self.dns_resolver.resolve_socket_addr(host, port) {
+            return Ok(vec![addr]);
+        }
+        let addrs = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(ProxyError::Io)?
+            .take(DNS_RESULT_MAX_ADDRESSES)
+            .collect::<Vec<_>>();
+        if addrs.is_empty() {
+            return Err(ProxyError::Proxy(format!(
+                "DNS returned no addresses for {host}:{port}"
+            )));
+        }
+        Ok(addrs)
     }
 
     pub(crate) async fn resolve_hostname(&self, host: &str, port: u16) -> Result<SocketAddr> {
-        if let Some(addr) = self.dns_overrides.load().resolve_socket_addr(host, port) {
-            return Ok(addr);
-        }
-        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(ProxyError::Io)?
-            .collect();
+        let addrs = self.resolve_all(host, port).await?;
         if let Some(addr) = addrs.iter().copied().find(SocketAddr::is_ipv4) {
             return Ok(addr);
         }
@@ -744,7 +757,7 @@ impl UpstreamManager {
         connect_timeout: Duration,
     ) -> Result<TcpStream> {
         if let Some((host, port)) = split_host_port(address)
-            && let Some(addr) = self.dns_overrides.load().resolve_socket_addr(&host, port)
+            && let Some(addr) = self.dns_resolver.resolve_socket_addr(&host, port)
         {
             return match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
                 Ok(Ok(stream)) => Ok(stream),

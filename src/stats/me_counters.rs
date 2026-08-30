@@ -77,11 +77,45 @@ impl Stats {
         if !self.telemetry_me_allows_normal() {
             return;
         }
-        let entry = self
-            .me_handshake_error_codes
-            .entry(code)
-            .or_insert_with(|| AtomicU64::new(0));
-        entry.fetch_add(1, Ordering::Relaxed);
+        if let Some(entry) = self.me_handshake_error_codes.get(&code) {
+            entry.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        let mut slots = self
+            .me_handshake_error_code_slots
+            .load(Ordering::Acquire);
+        loop {
+            if slots >= ME_HANDSHAKE_ERROR_CODE_MAX {
+                if let Some(entry) = self.me_handshake_error_codes.get(&code) {
+                    entry.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.me_handshake_error_code_overflow_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                return;
+            }
+            match self.me_handshake_error_code_slots.compare_exchange_weak(
+                slots,
+                slots + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => slots = observed,
+            }
+        }
+
+        match self.me_handshake_error_codes.entry(code) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                self.me_handshake_error_code_slots
+                    .fetch_sub(1, Ordering::AcqRel);
+                entry.get().fetch_add(1, Ordering::Relaxed);
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(AtomicU64::new(1));
+            }
+        }
     }
     pub fn increment_me_reader_eof_total(&self) {
         if self.telemetry_me_allows_normal() {
@@ -438,5 +472,46 @@ impl Stats {
             self.me_d2c_batch_timeout_fired_total
                 .fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn handshake_error_code_cardinality_is_bounded_under_concurrency() {
+        const WORKERS: usize = 8;
+        const CODES_PER_WORKER: usize = 128;
+
+        let stats = Arc::new(Stats::new());
+        std::thread::scope(|scope| {
+            for worker in 0..WORKERS {
+                let stats = stats.clone();
+                scope.spawn(move || {
+                    for code in 0..CODES_PER_WORKER {
+                        stats.increment_me_handshake_error_code(
+                            (worker * CODES_PER_WORKER + code) as i32,
+                        );
+                    }
+                });
+            }
+        });
+
+        let counts = stats.get_me_handshake_error_code_counts();
+        assert!(counts.len() <= ME_HANDSHAKE_ERROR_CODE_MAX);
+        assert_eq!(
+            counts.iter().map(|(_, total)| *total).sum::<u64>()
+                + stats.get_me_handshake_error_code_overflow_total(),
+            (WORKERS * CODES_PER_WORKER) as u64
+        );
+        assert_eq!(
+            stats
+                .me_handshake_error_code_slots
+                .load(Ordering::Acquire),
+            counts.len()
+        );
     }
 }

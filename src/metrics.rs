@@ -17,12 +17,13 @@ use tracing::{debug, info, warn};
 
 use crate::config::ProxyConfig;
 use crate::ip_tracker::UserIpTracker;
+use crate::maestro::control_plane::ProcessControlPlane;
 use crate::maestro::generation::RuntimeGeneration;
 use crate::proxy::shared_state::ProxySharedState;
 use crate::stats::Stats;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::tls_front::TlsFrontCache;
-use crate::tls_front::cache;
+use crate::tls_front::cache::TlsFullCertBudget;
 use crate::tls_front::fetcher;
 use crate::transport::{ListenOptions, create_listener};
 
@@ -36,84 +37,89 @@ const TLS_FRONT_PROFILE_HEALTH_MAX_DOMAINS: usize = 256;
 const METRICS_MAX_CONTROL_CONNECTIONS: usize = 512;
 const METRICS_HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub async fn serve(
+/// Bound process-owned metrics listeners ready for supervised serving.
+pub(crate) struct BoundMetricsListeners {
+    listeners: Vec<(TcpListener, SocketAddr)>,
+}
+
+/// Binds every configured metrics socket before process readiness is published.
+pub(crate) fn bind(
     port: u16,
     listen: Option<String>,
     listen_backlog: u32,
-    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
-    web_runtime_rx: tokio::sync::watch::Receiver<crate::web::control::WebRuntimePublication>,
-) {
-    // If `metrics_listen` is set, bind on that single address only.
+) -> std::io::Result<BoundMetricsListeners> {
     if let Some(ref listen_addr) = listen {
-        let addr: SocketAddr = match listen_addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(error = %e, "Invalid metrics_listen address: {}", listen_addr);
-                return;
-            }
-        };
+        let addr: SocketAddr = listen_addr.parse().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid metrics_listen address {listen_addr}: {error}"),
+            )
+        })?;
         // Match `server.api.listen`: `[::]:port` is a dual-stack wildcard
         // on Linux when `net.ipv6.bindv6only=0`.
         let ipv6_only = addr.is_ipv6() && !addr.ip().is_unspecified();
-        match bind_metrics_listener(addr, ipv6_only, listen_backlog) {
-            Ok(listener) => {
-                info!("Metrics endpoint: http://{}/metrics and /beobachten", addr);
-                serve_listener(listener, active_runtime, web_runtime_rx).await;
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to bind metrics on {}", addr);
-            }
-        }
-        return;
+        let listener = bind_metrics_listener(addr, ipv6_only, listen_backlog)?;
+        return Ok(BoundMetricsListeners {
+            listeners: vec![(listener, addr)],
+        });
     }
 
-    // Fallback: keep metrics local unless an explicit metrics_listen is configured.
-    let mut listener_v4 = None;
-    let mut listener_v6 = None;
+    let mut listeners = Vec::with_capacity(2);
+    let mut last_error = None;
 
     let addr_v4 = SocketAddr::from(([127, 0, 0, 1], port));
     match bind_metrics_listener(addr_v4, false, listen_backlog) {
-        Ok(listener) => {
-            info!(
-                "Metrics endpoint: http://{}/metrics and /beobachten",
-                addr_v4
-            );
-            listener_v4 = Some(listener);
-        }
+        Ok(listener) => listeners.push((listener, addr_v4)),
         Err(e) => {
             warn!(error = %e, "Failed to bind metrics on {}", addr_v4);
+            last_error = Some(e);
         }
     }
 
     let addr_v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port));
     match bind_metrics_listener(addr_v6, true, listen_backlog) {
-        Ok(listener) => {
-            info!(
-                "Metrics endpoint: http://[::1]:{}/metrics and /beobachten",
-                port
-            );
-            listener_v6 = Some(listener);
-        }
+        Ok(listener) => listeners.push((listener, addr_v6)),
         Err(e) => {
             warn!(error = %e, "Failed to bind metrics on {}", addr_v6);
+            last_error = Some(e);
         }
     }
 
-    match (listener_v4, listener_v6) {
-        (None, None) => {
-            warn!("Metrics listener is unavailable on both IPv4 and IPv6");
-        }
-        (Some(listener), None) | (None, Some(listener)) => {
-            serve_listener(listener, active_runtime, web_runtime_rx).await;
-        }
-        (Some(listener4), Some(listener6)) => {
-            let active_runtime_v6 = active_runtime.clone();
-            let web_runtime_rx_v6 = web_runtime_rx.clone();
-            tokio::spawn(async move {
-                serve_listener(listener6, active_runtime_v6, web_runtime_rx_v6).await;
-            });
-            serve_listener(listener4, active_runtime, web_runtime_rx).await;
-        }
+    if listeners.is_empty() {
+        return Err(last_error.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "metrics listener is unavailable on both IPv4 and IPv6",
+            )
+        }));
+    }
+    Ok(BoundMetricsListeners { listeners })
+}
+
+/// Starts supervised accept loops for previously bound metrics sockets.
+pub(crate) fn serve(
+    bound: BoundMetricsListeners,
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    web_runtime_rx: tokio::sync::watch::Receiver<crate::web::control::WebRuntimePublication>,
+    tls_full_cert_budget: Arc<TlsFullCertBudget>,
+    control_plane: ProcessControlPlane,
+) {
+    for (listener, addr) in bound.listeners {
+        info!("Metrics endpoint: http://{}/metrics and /beobachten", addr);
+        let active_runtime = active_runtime.clone();
+        let web_runtime_rx = web_runtime_rx.clone();
+        let tls_full_cert_budget = Arc::clone(&tls_full_cert_budget);
+        let listener_scope = control_plane.clone();
+        let _ = control_plane.spawn(async move {
+            serve_listener(
+                listener,
+                active_runtime,
+                web_runtime_rx,
+                tls_full_cert_budget,
+                listener_scope,
+            )
+            .await;
+        });
     }
 }
 
@@ -136,6 +142,8 @@ async fn serve_listener(
     listener: TcpListener,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     web_runtime_rx: tokio::sync::watch::Receiver<crate::web::control::WebRuntimePublication>,
+    tls_full_cert_budget: Arc<TlsFullCertBudget>,
+    control_plane: ProcessControlPlane,
 ) {
     let connection_permits = Arc::new(Semaphore::new(METRICS_MAX_CONTROL_CONNECTIONS));
 
@@ -175,12 +183,22 @@ async fn serve_listener(
 
         let active_runtime = active_runtime.clone();
         let web_runtime_rx = web_runtime_rx.clone();
-        tokio::spawn(async move {
+        let tls_full_cert_budget = Arc::clone(&tls_full_cert_budget);
+        let _ = control_plane.spawn(async move {
             let _connection_permit = connection_permit;
             let svc = service_fn(move |req| {
                 let runtime = active_runtime.load_full();
                 let web_publication = web_runtime_rx.borrow().clone();
-                async move { handle(req, &runtime, &web_publication).await }
+                let tls_full_cert_budget = Arc::clone(&tls_full_cert_budget);
+                async move {
+                    handle(
+                        req,
+                        &runtime,
+                        &web_publication,
+                        tls_full_cert_budget.as_ref(),
+                    )
+                    .await
+                }
             });
             match timeout(
                 METRICS_HTTP_CONNECTION_TIMEOUT,
@@ -208,6 +226,7 @@ async fn handle<B>(
     req: Request<B>,
     runtime: &RuntimeGeneration,
     web_publication: &crate::web::control::WebRuntimePublication,
+    tls_full_cert_budget: &TlsFullCertBudget,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let stats = &runtime.stats;
     let beobachten = &runtime.beobachten;
@@ -223,6 +242,7 @@ async fn handle<B>(
             &config,
             ip_tracker,
             tls_cache,
+            tls_full_cert_budget,
             web_publication,
         )
         .await;
@@ -437,6 +457,7 @@ async fn render_metrics(
     config: &ProxyConfig,
     ip_tracker: &UserIpTracker,
     tls_cache: Option<&TlsFrontCache>,
+    tls_full_cert_budget: &TlsFullCertBudget,
     web_publication: &crate::web::control::WebRuntimePublication,
 ) -> String {
     use std::fmt::Write;
@@ -644,17 +665,17 @@ async fn render_metrics(
     );
     let _ = writeln!(
         out,
-        "# HELP telemt_tls_front_full_cert_budget_ips Current IP entries tracked by TLS full-cert budget"
+        "# HELP telemt_tls_front_full_cert_budget_entries Current domain and IP entries tracked by the process-owned TLS full-cert budget"
     );
-    let _ = writeln!(out, "# TYPE telemt_tls_front_full_cert_budget_ips gauge");
+    let _ = writeln!(out, "# TYPE telemt_tls_front_full_cert_budget_entries gauge");
     let _ = writeln!(
         out,
-        "telemt_tls_front_full_cert_budget_ips {}",
-        cache::full_cert_sent_ips_for_metrics()
+        "telemt_tls_front_full_cert_budget_entries {}",
+        tls_full_cert_budget.entries_for_metrics()
     );
     let _ = writeln!(
         out,
-        "# HELP telemt_tls_front_full_cert_budget_cap_drops_total New IPs denied full-cert budget tracking because the cap was reached"
+        "# HELP telemt_tls_front_full_cert_budget_cap_drops_total New domain and IP entries denied full-cert budget tracking because a bound was reached"
     );
     let _ = writeln!(
         out,
@@ -663,7 +684,7 @@ async fn render_metrics(
     let _ = writeln!(
         out,
         "telemt_tls_front_full_cert_budget_cap_drops_total {}",
-        cache::full_cert_sent_cap_drops_for_metrics()
+        tls_full_cert_budget.cap_drops_for_metrics()
     );
     render_tls_front_profile_health(&mut out, config, tls_cache).await;
 
@@ -1559,6 +1580,11 @@ async fn render_metrics(
                 error_code, count
             );
         }
+        let _ = writeln!(
+            out,
+            "telemt_me_handshake_error_code_total{{error_code=\"overflow\"}} {}",
+            stats.get_me_handshake_error_code_overflow_total()
+        );
     }
 
     let _ = writeln!(
@@ -3955,6 +3981,7 @@ mod tests {
             &config,
             &tracker,
             None,
+            &TlsFullCertBudget::new(),
             &test_web_publication(),
         )
         .await;
@@ -4091,6 +4118,7 @@ mod tests {
             &config,
             &tracker,
             Some(&cache),
+            &TlsFullCertBudget::new(),
             &test_web_publication(),
         )
         .await;
@@ -4136,6 +4164,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_tls_budget_metrics_survive_a_generation_without_tls_cache() {
+        let stats = Stats::new();
+        let shared_state = ProxySharedState::new();
+        let tracker = UserIpTracker::new();
+        let config = ProxyConfig::default();
+        let budget = Arc::new(TlsFullCertBudget::new());
+        let cache = TlsFrontCache::new_with_full_cert_budget(
+            &["example.com".to_string()],
+            1024,
+            "tlsfront-test-cache",
+            Arc::clone(&budget),
+        );
+        assert!(
+            cache
+                .take_full_cert_budget_for_ip(
+                    "example.com",
+                    "127.0.0.1".parse().unwrap(),
+                    Duration::from_secs(60),
+                )
+                .await
+        );
+
+        let output = render_metrics(
+            &stats,
+            &shared_state,
+            &config,
+            &tracker,
+            None,
+            budget.as_ref(),
+            &test_web_publication(),
+        )
+        .await;
+
+        assert!(output.contains("telemt_tls_front_full_cert_budget_entries 1"));
+    }
+
+    #[tokio::test]
     async fn test_render_empty_stats() {
         let stats = Stats::new();
         let shared_state = ProxySharedState::new();
@@ -4147,6 +4212,7 @@ mod tests {
             &config,
             &tracker,
             None,
+            &TlsFullCertBudget::new(),
             &test_web_publication(),
         )
         .await;
@@ -4179,6 +4245,7 @@ mod tests {
             &config,
             &tracker,
             None,
+            &TlsFullCertBudget::new(),
             &test_web_publication(),
         )
         .await;
@@ -4199,6 +4266,7 @@ mod tests {
             &config,
             &tracker,
             None,
+            &TlsFullCertBudget::new(),
             &test_web_publication(),
         )
         .await;
@@ -4246,7 +4314,7 @@ mod tests {
         assert!(output.contains("# TYPE telemt_ip_tracker_cap_rejects_total counter"));
         assert!(output.contains("# TYPE telemt_tls_fetch_profile_cache_entries gauge"));
         assert!(output.contains("# TYPE telemt_tls_fetch_profile_cache_cap_drops_total counter"));
-        assert!(output.contains("# TYPE telemt_tls_front_full_cert_budget_ips gauge"));
+        assert!(output.contains("# TYPE telemt_tls_front_full_cert_budget_entries gauge"));
         assert!(
             output.contains("# TYPE telemt_tls_front_full_cert_budget_cap_drops_total counter")
         );
@@ -4271,12 +4339,15 @@ mod tests {
         config.general.beobachten_minutes = 10;
         let runtime = crate::maestro::generation::test_runtime_generation(1, config);
         let web_publication = test_web_publication();
+        let tls_full_cert_budget = TlsFullCertBudget::new();
         runtime.stats.increment_connects_all();
         runtime.stats.increment_connects_all();
         runtime.stats.increment_connects_all();
 
         let req = Request::builder().uri("/metrics").body(()).unwrap();
-        let resp = handle(req, &runtime, &web_publication).await.unwrap();
+        let resp = handle(req, &runtime, &web_publication, &tls_full_cert_budget)
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(
@@ -4299,7 +4370,14 @@ mod tests {
             Duration::from_secs(600),
         );
         let req_beob = Request::builder().uri("/beobachten").body(()).unwrap();
-        let resp_beob = handle(req_beob, &runtime, &web_publication).await.unwrap();
+        let resp_beob = handle(
+            req_beob,
+            &runtime,
+            &web_publication,
+            &tls_full_cert_budget,
+        )
+        .await
+        .unwrap();
         assert_eq!(resp_beob.status(), StatusCode::OK);
         let body_beob = resp_beob.into_body().collect().await.unwrap().to_bytes();
         let beob_text = std::str::from_utf8(body_beob.as_ref()).unwrap();
@@ -4307,7 +4385,9 @@ mod tests {
         assert!(beob_text.contains("203.0.113.10-1"));
 
         let req404 = Request::builder().uri("/other").body(()).unwrap();
-        let resp404 = handle(req404, &runtime, &web_publication).await.unwrap();
+        let resp404 = handle(req404, &runtime, &web_publication, &tls_full_cert_budget)
+            .await
+            .unwrap();
         assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
     }
 }

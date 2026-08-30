@@ -448,7 +448,10 @@ mod tests {
         tokio::task::yield_now().await;
         let drain = runtime.begin_shutdown();
 
-        assert!(runtime.try_http_connection().is_none());
+        assert_eq!(
+            runtime.try_http_connection().unwrap_err(),
+            super::super::HttpConnectionAdmissionError::Closed
+        );
         assert!(runtime.try_http_handler().is_none());
         assert!(runtime.try_lane_poll(false).is_none());
         assert_eq!(

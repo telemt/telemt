@@ -8,10 +8,10 @@ use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
+use arc_swap::ArcSwap;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::config::UserMaxUniqueIpsMode;
@@ -39,6 +39,25 @@ struct CleanupShard {
     queue: Mutex<HashMap<String, HashMap<IpAddr, usize>>>,
 }
 
+#[derive(Debug, Clone)]
+struct UserIpLimitPolicy {
+    max_ips: Arc<HashMap<String, usize>>,
+    default_max_ips: usize,
+    mode: UserMaxUniqueIpsMode,
+    window_secs: u64,
+}
+
+impl Default for UserIpLimitPolicy {
+    fn default() -> Self {
+        Self {
+            max_ips: Arc::new(HashMap::new()),
+            default_max_ips: 0,
+            mode: UserMaxUniqueIpsMode::ActiveWindow,
+            window_secs: 30,
+        }
+    }
+}
+
 /// Tracks active and recent client IPs for per-user admission control.
 #[derive(Debug, Clone)]
 pub struct UserIpTracker {
@@ -48,10 +67,7 @@ pub struct UserIpTracker {
     active_cap_rejects: Arc<AtomicU64>,
     recent_cap_rejects: Arc<AtomicU64>,
     cleanup_deferred_releases: Arc<AtomicU64>,
-    max_ips: Arc<DashMap<String, usize>>,
-    default_max_ips: Arc<AtomicUsize>,
-    limit_mode: Arc<AtomicU8>,
-    limit_window_secs: Arc<AtomicU64>,
+    limit_policy: Arc<ArcSwap<UserIpLimitPolicy>>,
     last_compact_epoch_secs: Arc<AtomicU64>,
     cleanup_queue_len: Arc<AtomicU64>,
     cleanup_shards: Arc<Box<[CleanupShard]>>,
@@ -102,12 +118,7 @@ impl UserIpTracker {
             active_cap_rejects: Arc::new(AtomicU64::new(0)),
             recent_cap_rejects: Arc::new(AtomicU64::new(0)),
             cleanup_deferred_releases: Arc::new(AtomicU64::new(0)),
-            max_ips: Arc::new(DashMap::new()),
-            default_max_ips: Arc::new(AtomicUsize::new(0)),
-            limit_mode: Arc::new(AtomicU8::new(Self::mode_to_u8(
-                UserMaxUniqueIpsMode::ActiveWindow,
-            ))),
-            limit_window_secs: Arc::new(AtomicU64::new(30)),
+            limit_policy: Arc::new(ArcSwap::from_pointee(UserIpLimitPolicy::default())),
             last_compact_epoch_secs: Arc::new(AtomicU64::new(0)),
             cleanup_queue_len: Arc::new(AtomicU64::new(0)),
             cleanup_shards: Arc::new(cleanup_shards),
@@ -117,41 +128,23 @@ impl UserIpTracker {
         }
     }
 
-    pub(super) fn mode_to_u8(mode: UserMaxUniqueIpsMode) -> u8 {
-        match mode {
-            UserMaxUniqueIpsMode::ActiveWindow => 0,
-            UserMaxUniqueIpsMode::TimeWindow => 1,
-            UserMaxUniqueIpsMode::Combined => 2,
-        }
-    }
-
-    pub(super) fn mode_from_u8(raw: u8) -> UserMaxUniqueIpsMode {
-        match raw {
-            1 => UserMaxUniqueIpsMode::TimeWindow,
-            2 => UserMaxUniqueIpsMode::Combined,
-            _ => UserMaxUniqueIpsMode::ActiveWindow,
-        }
-    }
-
     pub(super) fn shard_idx(username: &str) -> usize {
         let mut hasher = DefaultHasher::new();
         username.hash(&mut hasher);
         (hasher.finish() as usize) & USER_IP_TRACKER_SHARD_MASK
     }
 
-    pub(super) fn limit_window(&self) -> Duration {
-        Duration::from_secs(self.limit_window_secs.load(Ordering::Relaxed).max(1))
+    fn limit_window(policy: &UserIpLimitPolicy) -> Duration {
+        Duration::from_secs(policy.window_secs)
     }
 
-    pub(super) fn user_limit(&self, username: &str) -> Option<usize> {
-        self.max_ips
+    fn user_limit(policy: &UserIpLimitPolicy, username: &str) -> Option<usize> {
+        policy
+            .max_ips
             .get(username)
-            .map(|limit| *limit)
+            .copied()
             .filter(|limit| *limit > 0)
-            .or_else(|| {
-                let default_limit = self.default_max_ips.load(Ordering::Relaxed);
-                (default_limit > 0).then_some(default_limit)
-            })
+            .or_else(|| (policy.default_max_ips > 0).then_some(policy.default_max_ips))
     }
 
     pub(super) fn decrement_counter(counter: &AtomicU64, amount: usize) {

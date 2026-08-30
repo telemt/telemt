@@ -64,6 +64,8 @@ impl WebSession {
         let poll = async {
             loop {
                 let notified = self.down_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 {
                     let mut state = self.state.lock();
                     if state.down_epoch != epoch {

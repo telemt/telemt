@@ -77,6 +77,8 @@ impl WebSession {
     pub(crate) async fn wait(&self) {
         loop {
             let notified = self.tasks_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.tasks_live.load(Ordering::Acquire) == 0 {
                 return;
             }

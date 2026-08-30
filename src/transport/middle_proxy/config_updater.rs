@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::transport::UpstreamManager;
 
 use super::MePool;
-use super::http_fetch::https_get;
+use super::http_fetch::{HTTPS_RESPONSE_BODY_MAX_BYTES, https_get};
 use super::rotation::{MeReinitTrigger, enqueue_reinit_trigger};
 use super::secret::download_proxy_secret_with_max_len_via_upstream;
 use super::selftest::record_timeskew_sample;
@@ -106,7 +106,7 @@ pub async fn fetch_proxy_config_with_raw_via_upstream(
     url: &str,
     upstream: Option<Arc<UpstreamManager>>,
 ) -> Result<(ProxyConfigData, String)> {
-    let resp = https_get(url, upstream).await?;
+    let resp = https_get(url, upstream, HTTPS_RESPONSE_BODY_MAX_BYTES).await?;
     let http_status = resp.status;
 
     if let Some(date_str) = resp.date_header.as_deref()

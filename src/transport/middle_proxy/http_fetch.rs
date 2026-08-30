@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Empty, Limited};
 use hyper::header::{CONNECTION, DATE, HOST, USER_AGENT};
 use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
@@ -12,11 +12,19 @@ use tokio_rustls::TlsConnector;
 use tracing::debug;
 
 use crate::error::{ProxyError, Result};
-use crate::network::dns_overrides::resolve_socket_addr;
 use crate::transport::{UpstreamManager, UpstreamStream};
 
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub(super) const HTTPS_RESPONSE_BODY_MAX_BYTES: usize = 1024 * 1024;
+
+struct HttpsConnectionDriver(tokio::task::JoinHandle<()>);
+
+impl Drop for HttpsConnectionDriver {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 pub(crate) struct HttpsGetResponse {
     pub(crate) status: u16,
@@ -81,14 +89,6 @@ async fn connect_https_transport(
             });
     }
 
-    if let Some(addr) = resolve_socket_addr(host, port) {
-        let stream = timeout(HTTP_CONNECT_TIMEOUT, TcpStream::connect(addr))
-            .await
-            .map_err(|_| ProxyError::Proxy(format!("connect timeout for {host}:{port}")))?
-            .map_err(|e| ProxyError::Proxy(format!("connect failed for {host}:{port}: {e}")))?;
-        return Ok(UpstreamStream::Tcp(stream));
-    }
-
     let stream = timeout(HTTP_CONNECT_TIMEOUT, TcpStream::connect((host, port)))
         .await
         .map_err(|_| ProxyError::Proxy(format!("connect timeout for {host}:{port}")))?
@@ -99,7 +99,14 @@ async fn connect_https_transport(
 pub(crate) async fn https_get(
     url: &str,
     upstream: Option<Arc<UpstreamManager>>,
+    max_body_bytes: usize,
 ) -> Result<HttpsGetResponse> {
+    if max_body_bytes == 0 {
+        return Err(ProxyError::Proxy(
+            "HTTPS response body limit must be greater than zero".to_string(),
+        ));
+    }
+    let max_body_bytes = max_body_bytes.min(HTTPS_RESPONSE_BODY_MAX_BYTES);
     let (host, port, path_and_query) = extract_host_port_path(url)?;
     let stream = connect_https_transport(&host, port, upstream).await?;
 
@@ -115,11 +122,11 @@ pub(crate) async fn https_get(
         .await
         .map_err(|e| ProxyError::Proxy(format!("HTTP handshake failed for {host}:{port}: {e}")))?;
 
-    tokio::spawn(async move {
+    let _connection_driver = HttpsConnectionDriver(tokio::spawn(async move {
         if let Err(e) = connection.await {
             debug!(error = %e, "HTTPS fetch connection task failed");
         }
-    });
+    }));
 
     let host_header = if port == 443 {
         host.clone()
@@ -148,10 +155,17 @@ pub(crate) async fn https_get(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
 
-    let body = timeout(HTTP_REQUEST_TIMEOUT, response.into_body().collect())
+    let body = timeout(
+        HTTP_REQUEST_TIMEOUT,
+        Limited::new(response.into_body(), max_body_bytes).collect(),
+    )
         .await
         .map_err(|_| ProxyError::Proxy(format!("HTTP body read timeout for {url}")))?
-        .map_err(|e| ProxyError::Proxy(format!("HTTP body read failed for {url}: {e}")))?
+        .map_err(|e| {
+            ProxyError::Proxy(format!(
+                "HTTP body read failed or exceeded {max_body_bytes} bytes for {url}: {e}"
+            ))
+        })?
         .to_bytes()
         .to_vec();
 
@@ -160,4 +174,17 @@ pub(crate) async fn https_get(
         date_header,
         body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn limited_body_rejects_payload_above_caller_bound() {
+        let body = http_body_util::Full::new(bytes::Bytes::from_static(b"12345"));
+        let result = Limited::new(body, 4).collect().await;
+
+        assert!(result.is_err());
+    }
 }

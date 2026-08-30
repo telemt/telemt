@@ -1,5 +1,6 @@
 use super::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 fn test_ipv4(oct1: u8, oct2: u8, oct3: u8, oct4: u8) -> IpAddr {
@@ -230,6 +231,55 @@ async fn test_load_limits_replaces_previous_map() {
 
     assert_eq!(tracker.get_user_limit("user1").await, None);
     assert_eq!(tracker.get_user_limit("user2").await, Some(5));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_policy_replacement_never_exposes_partial_limit_map() {
+    const USER_COUNT: usize = 4_096;
+    const REPLACEMENTS: usize = 32;
+
+    let tracker = Arc::new(UserIpTracker::new());
+    let first = (0..USER_COUNT)
+        .map(|index| (format!("user-{index}"), 3usize))
+        .collect::<HashMap<_, _>>();
+    let second = (0..USER_COUNT)
+        .map(|index| (format!("user-{index}"), 5usize))
+        .collect::<HashMap<_, _>>();
+    tracker.load_limits(7, &first).await;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let writer_tracker = Arc::clone(&tracker);
+    let writer_running = Arc::clone(&running);
+    let writer = tokio::spawn(async move {
+        for _ in 0..REPLACEMENTS {
+            writer_tracker.load_limits(7, &second).await;
+            tokio::task::yield_now().await;
+            writer_tracker.load_limits(7, &first).await;
+            tokio::task::yield_now().await;
+        }
+        writer_running.store(false, Ordering::Release);
+    });
+
+    let mut readers = Vec::new();
+    for reader in 0..3usize {
+        let reader_tracker = Arc::clone(&tracker);
+        let reader_running = Arc::clone(&running);
+        readers.push(tokio::spawn(async move {
+            let mut index = reader;
+            while reader_running.load(Ordering::Acquire) {
+                let username = format!("user-{}", index % USER_COUNT);
+                let limit = reader_tracker.get_user_limit(&username).await;
+                assert!(matches!(limit, Some(3 | 5)), "partial policy: {limit:?}");
+                index = index.wrapping_add(17);
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+
+    writer.await.unwrap();
+    for reader in readers {
+        reader.await.unwrap();
+    }
 }
 
 #[tokio::test]

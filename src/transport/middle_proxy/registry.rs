@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,6 +119,38 @@ pub struct ConnRegistry {
     route_backpressure_high_timeout_ms: AtomicU64,
     route_backpressure_high_watermark_pct: AtomicU8,
     route_byte_permits_per_conn: usize,
+    cleanup_tx: mpsc::Sender<u64>,
+    cleanup_rx: StdMutex<Option<mpsc::Receiver<u64>>>,
+}
+
+/// Cancellation-safe ownership of one registered ME client route.
+pub(crate) struct ConnLease {
+    registry: Arc<ConnRegistry>,
+    conn_id: u64,
+    cleanup_permit: Option<mpsc::OwnedPermit<u64>>,
+}
+
+impl ConnLease {
+    /// Returns the stable connection identifier owned by this lease.
+    pub(crate) fn conn_id(&self) -> u64 {
+        self.conn_id
+    }
+
+    /// Completes asynchronous registry cleanup and disarms drop cleanup.
+    pub(crate) async fn unregister(mut self) {
+        self.registry.unregister(self.conn_id).await;
+        self.cleanup_permit.take();
+    }
+}
+
+impl Drop for ConnLease {
+    fn drop(&mut self) {
+        let Some(permit) = self.cleanup_permit.take() else {
+            return;
+        };
+        self.registry.remove_route_now(self.conn_id);
+        permit.send(self.conn_id);
+    }
 }
 
 impl ConnRegistry {
@@ -133,15 +166,30 @@ impl ConnRegistry {
         Self::with_route_limits(
             route_channel_capacity,
             Self::route_byte_permit_budget(route_channel_capacity),
+            16_384,
+        )
+    }
+
+    pub(crate) fn with_route_and_cleanup_capacity(
+        route_channel_capacity: usize,
+        connection_cleanup_capacity: usize,
+    ) -> Self {
+        let route_channel_capacity = route_channel_capacity.max(1);
+        Self::with_route_limits(
+            route_channel_capacity,
+            Self::route_byte_permit_budget(route_channel_capacity),
+            connection_cleanup_capacity,
         )
     }
 
     fn with_route_limits(
         route_channel_capacity: usize,
         route_byte_permits_per_conn: usize,
+        connection_cleanup_capacity: usize,
     ) -> Self {
         let start = rand::random::<u64>() | 1;
         let route_channel_capacity = route_channel_capacity.max(1);
+        let (cleanup_tx, cleanup_rx) = mpsc::channel(connection_cleanup_capacity.max(1));
         Self {
             routing: RoutingTable {
                 map: DashMap::new(),
@@ -168,6 +216,8 @@ impl ConnRegistry {
                 ROUTE_BACKPRESSURE_HIGH_WATERMARK_PCT,
             ),
             route_byte_permits_per_conn: route_byte_permits_per_conn.max(1),
+            cleanup_tx,
+            cleanup_rx: StdMutex::new(Some(cleanup_rx)),
         }
     }
 
@@ -199,7 +249,7 @@ impl ConnRegistry {
         route_channel_capacity: usize,
         route_byte_permits_per_conn: usize,
     ) -> Self {
-        Self::with_route_limits(route_channel_capacity, route_byte_permits_per_conn)
+        Self::with_route_limits(route_channel_capacity, route_byte_permits_per_conn, 16_384)
     }
 
     pub fn update_route_backpressure_policy(
@@ -220,6 +270,29 @@ impl ConnRegistry {
     }
 
     pub async fn register(&self) -> (u64, mpsc::Receiver<MeResponse>) {
+        self.register_route()
+    }
+
+    pub(crate) async fn register_leased(
+        self: &Arc<Self>,
+    ) -> Option<(ConnLease, mpsc::Receiver<MeResponse>)> {
+        let cleanup_permit = self.cleanup_tx.clone().reserve_owned().await.ok()?;
+        let (conn_id, rx) = self.register_route();
+        Some((
+            ConnLease {
+                registry: Arc::clone(self),
+                conn_id,
+                cleanup_permit: Some(cleanup_permit),
+            },
+            rx,
+        ))
+    }
+
+    pub(super) fn take_cleanup_receiver(&self) -> Option<mpsc::Receiver<u64>> {
+        self.cleanup_rx.lock().ok()?.take()
+    }
+
+    fn register_route(&self) -> (u64, mpsc::Receiver<MeResponse>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(self.route_channel_capacity);
         self.routing.map.insert(id, tx);
@@ -228,6 +301,12 @@ impl ConnRegistry {
             Arc::new(Semaphore::new(self.route_byte_permits_per_conn)),
         );
         (id, rx)
+    }
+
+    fn remove_route_now(&self, id: u64) {
+        self.routing.map.remove(&id);
+        self.routing.byte_budget.remove(&id);
+        self.hot_binding.map.remove(&id);
     }
 }
 

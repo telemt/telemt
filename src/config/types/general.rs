@@ -441,6 +441,9 @@ pub struct GeneralConfig {
     /// Serialize ME reinit cycles across all trigger sources.
     #[serde(default = "default_me_reinit_singleflight")]
     pub me_reinit_singleflight: bool,
+    /// Maximum concurrent ME reinit warmups when single-flight mode is disabled.
+    #[serde(default = "default_me_reinit_max_concurrency")]
+    pub me_reinit_max_concurrency: usize,
     /// Trigger queue capacity for reinit scheduler.
     #[serde(default = "default_me_reinit_trigger_channel")]
     pub me_reinit_trigger_channel: usize,

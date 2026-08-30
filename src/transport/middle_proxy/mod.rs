@@ -22,6 +22,7 @@ mod ping;
 mod pool;
 mod pool_config;
 mod pool_init;
+mod pool_lifecycle;
 mod pool_nat;
 mod pool_refill;
 #[cfg(test)]
@@ -60,6 +61,7 @@ pub use ping::{
     MePingFamily, MePingReport, MePingSample, format_me_route, format_sample_line, run_me_ping,
 };
 pub use pool::MePool;
+pub(crate) use registry::ConnLease;
 #[allow(unused_imports)]
 pub use pool_nat::{detect_public_ip, stun_probe};
 pub use registry::ConnRegistry;

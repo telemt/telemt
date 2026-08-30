@@ -345,6 +345,7 @@ pub(crate) async fn initialize_me_pool(
                     config.general.me_route_blocking_send_timeout_ms,
                     config.general.me_route_inline_recovery_attempts,
                     config.general.me_route_inline_recovery_wait_ms,
+                    (config.server.max_connections as usize).saturating_add(128),
                 );
                 startup_tracker
                     .complete_component(

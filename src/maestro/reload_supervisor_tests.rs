@@ -53,6 +53,7 @@ async fn fixture(request: ReloadRequest) -> ReloadFixture {
         commands,
         config_path: PathBuf::new(),
         quota_store: Arc::new(QuotaStore::default()),
+        tls_full_cert_budget: Arc::new(crate::tls_front::cache::TlsFullCertBudget::new()),
         detected_ips_tx,
         runtime_log_filter: runtime_log_filter(),
         runtime_watch_tx,
@@ -131,7 +132,6 @@ async fn revision_rollback_keeps_old_generation_and_cleans_candidate() {
             fixture.old_runtime.clone(),
             prepared_runtime(fixture.new_runtime),
             RevisionGateAction::Rollback("revision changed".to_string()),
-            |_| -> Result<(), String> { panic!("DNS activation must not run on rollback") },
         )
         .await;
 
@@ -152,44 +152,6 @@ async fn revision_rollback_keeps_old_generation_and_cleans_candidate() {
     let status = fixture.control.status(1).await.unwrap();
     assert_eq!(status.state, ReloadPhase::RolledBack);
     fixture.old_runtime.stop_sessions().await;
-}
-
-#[tokio::test]
-async fn dns_failure_policy_controls_rollback_or_keep_new() {
-    for policy in [ReloadFailurePolicy::Rollback, ReloadFailurePolicy::KeepNew] {
-        let fixture = fixture(ReloadRequest {
-            failure_policy: policy,
-            ..ReloadRequest::default()
-        })
-        .await;
-        fixture
-            .supervisor
-            .activate_prepared(
-                fixture.command,
-                fixture.old_runtime.clone(),
-                prepared_runtime(fixture.new_runtime.clone()),
-                RevisionGateAction::Proceed,
-                |_| Err("invalid DNS entry".to_string()),
-            )
-            .await;
-
-        let status = fixture.control.status(1).await.unwrap();
-        match policy {
-            ReloadFailurePolicy::Rollback => {
-                assert_eq!(fixture.supervisor.active_runtime.load().id, 1);
-                assert_eq!(status.state, ReloadPhase::RolledBack);
-                assert!(fixture.old_runtime.spawn_session(async {}));
-                fixture.old_runtime.stop_sessions().await;
-            }
-            ReloadFailurePolicy::KeepNew => {
-                assert_eq!(fixture.supervisor.active_runtime.load().id, 2);
-                assert_eq!(status.state, ReloadPhase::Succeeded);
-                assert_eq!(status.warnings.len(), 1);
-                assert!(!fixture.old_runtime.spawn_session(async {}));
-                fixture.new_runtime.stop_sessions().await;
-            }
-        }
-    }
 }
 
 #[tokio::test]
@@ -220,7 +182,6 @@ async fn drain_publishes_new_generation_before_old_sessions_finish() {
                 old_runtime,
                 prepared_runtime(new_runtime),
                 RevisionGateAction::Proceed,
-                |_| Ok(()),
             )
             .await;
     });
@@ -273,7 +234,6 @@ async fn drain_timeout_cancels_old_sessions_and_records_one_warning() {
                 old_runtime,
                 prepared_runtime(new_runtime),
                 RevisionGateAction::Proceed,
-                |_| Ok(()),
             )
             .await;
     });
@@ -304,6 +264,7 @@ async fn quiesce_joins_idle_supervisor_and_rejects_later_submissions() {
         commands,
         PathBuf::new(),
         Arc::new(QuotaStore::default()),
+        Arc::new(crate::tls_front::cache::TlsFullCertBudget::new()),
         detected_ips_tx,
         runtime_log_filter(),
         runtime_watch_tx,

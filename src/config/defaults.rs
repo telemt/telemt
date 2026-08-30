@@ -780,6 +780,10 @@ pub(crate) fn default_me_reinit_singleflight() -> bool {
     true
 }
 
+pub(crate) fn default_me_reinit_max_concurrency() -> usize {
+    2
+}
+
 pub(crate) fn default_me_reinit_trigger_channel() -> usize {
     64
 }

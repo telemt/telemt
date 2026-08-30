@@ -6,6 +6,8 @@ use serde_json::Value;
 
 use crate::config::ProxyConfig;
 
+const HEALTHCHECK_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HealthcheckMode {
     Liveness,
@@ -73,10 +75,7 @@ fn run_inner(config_path: &str, mode: HealthcheckMode) -> Result<(), String> {
         .flush()
         .map_err(|error| format!("request flush failed: {error}"))?;
 
-    let mut raw_response = Vec::new();
-    stream
-        .read_to_end(&mut raw_response)
-        .map_err(|error| format!("response read failed: {error}"))?;
+    let raw_response = read_response_bounded(&mut stream)?;
     let response =
         String::from_utf8(raw_response).map_err(|_| "response is not valid UTF-8".to_string())?;
 
@@ -87,6 +86,18 @@ fn run_inner(config_path: &str, mode: HealthcheckMode) -> Result<(), String> {
 
     validate_payload(mode, body)?;
     Ok(())
+}
+
+fn read_response_bounded(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+    let mut raw_response = Vec::new();
+    reader
+        .take(HEALTHCHECK_RESPONSE_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut raw_response)
+        .map_err(|error| format!("response read failed: {error}"))?;
+    if raw_response.len() as u64 > HEALTHCHECK_RESPONSE_MAX_BYTES {
+        return Err("response exceeds the 64 KiB healthcheck limit".to_string());
+    }
+    Ok(raw_response)
 }
 
 fn probe_target(listen: SocketAddr) -> SocketAddr {
@@ -180,7 +191,10 @@ fn validate_payload(mode: HealthcheckMode, body: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HealthcheckMode, parse_status_code, split_response, validate_payload};
+    use super::{
+        HEALTHCHECK_RESPONSE_MAX_BYTES, HealthcheckMode, parse_status_code,
+        read_response_bounded, split_response, validate_payload,
+    };
 
     #[test]
     fn parse_status_code_reads_http_200() {
@@ -207,5 +221,12 @@ mod tests {
         let body = "{\"ok\":true,\"data\":{\"ready\":false}}";
         let result = validate_payload(HealthcheckMode::Ready, body);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_health_response() {
+        let payload = vec![b'x'; HEALTHCHECK_RESPONSE_MAX_BYTES as usize + 1];
+
+        assert!(read_response_bounded(&mut payload.as_slice()).is_err());
     }
 }

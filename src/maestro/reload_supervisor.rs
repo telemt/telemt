@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::stats::QuotaStore;
+use crate::tls_front::cache::TlsFullCertBudget;
 use crate::web::trace::WebTraceStore;
 
 use super::generation::{RuntimeGeneration, RuntimeWatchState};
@@ -26,6 +27,7 @@ pub(crate) struct ReloadSupervisor {
     commands: ReloadCommandReceiver,
     config_path: PathBuf,
     quota_store: Arc<QuotaStore>,
+    tls_full_cert_budget: Arc<TlsFullCertBudget>,
     detected_ips_tx: watch::Sender<(Option<std::net::IpAddr>, Option<std::net::IpAddr>)>,
     runtime_log_filter: RuntimeLogFilter,
     runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
@@ -81,12 +83,7 @@ fn revision_gate_action(
 
 async fn stop_background_and_middle_end(generation: &RuntimeGeneration) -> bool {
     generation.stop_background_tasks().await;
-    let Some(pool) = generation.current_me_pool().await else {
-        return false;
-    };
-    tokio::time::timeout(Duration::from_secs(2), pool.shutdown_send_close_conn_all())
-        .await
-        .is_err()
+    !generation.stop_middle_end(Duration::from_secs(5)).await
 }
 
 async fn cleanup_candidate(generation: &RuntimeGeneration) -> bool {
@@ -103,6 +100,7 @@ impl ReloadSupervisor {
         commands: ReloadCommandReceiver,
         config_path: PathBuf,
         quota_store: Arc<QuotaStore>,
+        tls_full_cert_budget: Arc<TlsFullCertBudget>,
         detected_ips_tx: watch::Sender<(Option<std::net::IpAddr>, Option<std::net::IpAddr>)>,
         runtime_log_filter: RuntimeLogFilter,
         runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
@@ -116,6 +114,7 @@ impl ReloadSupervisor {
             commands,
             config_path,
             quota_store,
+            tls_full_cert_budget,
             detected_ips_tx,
             runtime_log_filter,
             runtime_watch_tx,
@@ -171,6 +170,7 @@ impl ReloadSupervisor {
             &self.config_path,
             self.quota_store.clone(),
             self.runtime_log_filter.clone(),
+            self.tls_full_cert_budget.clone(),
         )
         .await
         {
@@ -207,25 +207,18 @@ impl ReloadSupervisor {
             prepared,
             listener_transition,
             revision_action,
-            |entries| {
-                crate::network::dns_overrides::install_entries(entries)
-                    .map_err(|error| error.to_string())
-            },
         )
         .await;
     }
 
     #[cfg(test)]
-    async fn activate_prepared<InstallDns>(
+    async fn activate_prepared(
         &self,
         command: ReloadCommand,
         old_runtime: Arc<RuntimeGeneration>,
         prepared: PreparedRuntime,
         revision_action: RevisionGateAction,
-        install_dns: InstallDns,
-    ) where
-        InstallDns: FnOnce(&[String]) -> Result<(), String>,
-    {
+    ) {
         let listener_transition = match self
             .listener_manager
             .lock()
@@ -245,22 +238,18 @@ impl ReloadSupervisor {
             prepared,
             listener_transition,
             revision_action,
-            install_dns,
         )
         .await;
     }
 
-    async fn activate_prepared_with_transition<InstallDns>(
+    async fn activate_prepared_with_transition(
         &self,
         command: ReloadCommand,
         old_runtime: Arc<RuntimeGeneration>,
         prepared: PreparedRuntime,
         listener_transition: Option<PreparedListenerTransition>,
         revision_action: RevisionGateAction,
-        install_dns: InstallDns,
-    ) where
-        InstallDns: FnOnce(&[String]) -> Result<(), String>,
-    {
+    ) {
         match revision_action {
             RevisionGateAction::Proceed => {}
             RevisionGateAction::Warn(warning) => {
@@ -283,18 +272,6 @@ impl ReloadSupervisor {
             detected_ips,
             config_watcher_activation,
         } = prepared;
-        if let Err(error) = install_dns(&new_runtime.config().network.dns_overrides) {
-            let message = format!("runtime DNS activation failed: {}", error);
-            if command.request.failure_policy == ReloadFailurePolicy::Rollback {
-                old_runtime.resume_accepting_sessions();
-                let _ = cleanup_candidate(&new_runtime).await;
-                self.runtime_log_filter
-                    .apply_reload(&old_runtime.config().general.log_level);
-                self.control.rolled_back(command.reload_id, message).await;
-                return;
-            }
-            self.control.add_warning(command.reload_id, message).await;
-        }
         let pending_listener_transition = if let Some(listener_transition) = listener_transition {
             match self
                 .listener_manager
@@ -367,7 +344,7 @@ impl ReloadSupervisor {
 
         if stop_background_and_middle_end(&replaced).await {
             let warning = format!(
-                "generation {} Middle-End close broadcast timed out",
+                "generation {} Middle-End lifecycle shutdown timed out",
                 replaced.id
             );
             warn!(reload_id = command.reload_id, warning = %warning);

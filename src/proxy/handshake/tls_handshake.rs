@@ -266,11 +266,11 @@ where
         return HandshakeResult::BadClient { reader, writer };
     }
 
+    let selected_tls_domain =
+        matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
     let cached_entry = if config.censorship.tls_emulation {
         if let Some(cache) = tls_cache.as_ref() {
-            let selected_domain =
-                matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
-            let cached_entry = cache.get(selected_domain).await;
+            let cached_entry = cache.get(selected_tls_domain).await;
             Some(cached_entry)
         } else {
             None
@@ -322,6 +322,7 @@ where
             if let Some(cache) = tls_cache.as_ref() {
                 cache
                     .take_full_cert_budget_for_ip(
+                        selected_tls_domain,
                         peer.ip(),
                         Duration::from_secs(config.censorship.tls_full_cert_ttl_secs),
                     )

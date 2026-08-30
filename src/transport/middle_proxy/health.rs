@@ -71,6 +71,40 @@ struct FamilyReconnectOutcome {
     endpoint_count: usize,
 }
 
+struct ScheduledReconnects<'a> {
+    inflight: &'a mut HashMap<(i32, IpFamily), usize>,
+    keys: Vec<(i32, IpFamily)>,
+}
+
+impl ScheduledReconnects<'_> {
+    fn current(&self, key: &(i32, IpFamily)) -> usize {
+        self.inflight.get(key).copied().unwrap_or(0)
+    }
+
+    fn reserve(&mut self, key: (i32, IpFamily)) {
+        self.keys.push(key);
+        *self.inflight.entry(key).or_insert(0) += 1;
+    }
+}
+
+impl Drop for ScheduledReconnects<'_> {
+    fn drop(&mut self) {
+        for key in self.keys.drain(..) {
+            let std::collections::hash_map::Entry::Occupied(mut entry) =
+                self.inflight.entry(key)
+            else {
+                continue;
+            };
+            let remaining = entry.get().saturating_sub(1);
+            if remaining == 0 {
+                entry.remove();
+            } else {
+                *entry.get_mut() = remaining;
+            }
+        }
+    }
+}
+
 pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize) {
     let mut backoff: HashMap<(i32, IpFamily), u64> = HashMap::new();
     let mut next_attempt: HashMap<(i32, IpFamily), Instant> = HashMap::new();
@@ -437,6 +471,10 @@ async fn check_family(
     let writer_idle_since = Arc::new(writer_idle_since);
     let bound_clients_by_writer = Arc::new(bound_clients_by_writer);
     let mut reconnect_set = JoinSet::<FamilyReconnectOutcome>::new();
+    let mut scheduled_reconnects = ScheduledReconnects {
+        inflight,
+        keys: Vec::new(),
+    };
 
     for (dc, endpoints) in dc_endpoints {
         if endpoints.is_empty() {
@@ -562,7 +600,7 @@ async fn check_family(
             .reconnect_runtime
             .me_reconnect_max_concurrent_per_dc
             .max(1) as usize;
-        if *inflight.get(&key).unwrap_or(&0) >= max_concurrent {
+        if scheduled_reconnects.current(&key) >= max_concurrent {
             continue;
         }
         if pool
@@ -579,7 +617,7 @@ async fn check_family(
             );
             continue;
         }
-        *inflight.entry(key).or_insert(0) += 1;
+        scheduled_reconnects.reserve(key);
         let pool_for_reconnect = pool.clone();
         let rng_for_reconnect = rng.clone();
         let reconnect_sem_for_dc = reconnect_sem.clone();
@@ -739,9 +777,6 @@ async fn check_family(
                     "DC writer floor is below required level during startup, scheduled reconnect"
                 );
             }
-        }
-        if let Some(v) = inflight.get_mut(&outcome.key) {
-            *v = v.saturating_sub(1);
         }
     }
 
@@ -1701,14 +1736,34 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    use super::reap_draining_writers;
+    use super::{ScheduledReconnects, reap_draining_writers};
     use crate::config::{GeneralConfig, MeRouteNoWriterMode, MeSocksKdfPolicy, MeWriterPickMode};
     use crate::crypto::SecureRandom;
     use crate::network::probe::NetworkDecision;
+    use crate::network::IpFamily;
     use crate::stats::Stats;
     use crate::transport::middle_proxy::codec::WriterCommand;
     use crate::transport::middle_proxy::pool::{MePool, MeWriter, WriterContour};
     use crate::transport::middle_proxy::registry::ConnMeta;
+
+    #[test]
+    fn reconnect_batch_releases_every_reserved_key_after_join_failures() {
+        let retained = (1, IpFamily::V4);
+        let removed = (2, IpFamily::V6);
+        let mut inflight = HashMap::from([(retained, 1)]);
+
+        {
+            let mut scheduled = ScheduledReconnects {
+                inflight: &mut inflight,
+                keys: Vec::new(),
+            };
+            scheduled.reserve(retained);
+            scheduled.reserve(removed);
+        }
+
+        assert_eq!(inflight.get(&retained), Some(&1));
+        assert!(!inflight.contains_key(&removed));
+    }
 
     async fn make_pool(me_pool_drain_threshold: u64) -> Arc<MePool> {
         let general = GeneralConfig {
@@ -1812,6 +1867,7 @@ mod tests {
             general.me_route_blocking_send_timeout_ms,
             general.me_route_inline_recovery_attempts,
             general.me_route_inline_recovery_wait_ms,
+            16_384,
         )
     }
 
