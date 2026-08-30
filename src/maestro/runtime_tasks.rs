@@ -305,7 +305,13 @@ pub(crate) async fn spawn_runtime_tasks(
 
     let beobachten_writer = beobachten.clone();
     let config_rx_beobachten = config_rx.clone();
+    let beobachten_startup_tracker = startup_tracker.clone();
     task_scope.spawn(async move {
+        // The first snapshot must not be written before the runtime is ready:
+        // with --run-as-user the privilege drop happens after listeners are
+        // bound, and a file created before that is owned by root and cannot be
+        // rewritten by the unprivileged process later.
+        beobachten_startup_tracker.wait_ready().await;
         loop {
             let cfg = config_rx_beobachten.borrow().clone();
             let sleep_secs = cfg.general.beobachten_flush_secs.max(1);
