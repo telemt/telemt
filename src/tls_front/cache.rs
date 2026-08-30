@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
@@ -41,6 +41,20 @@ pub struct TlsFrontCache {
     full_cert_sent_shards: Vec<RwLock<HashMap<IpAddr, Instant>>>,
     full_cert_sent_last_sweep_epoch_secs: AtomicU64,
     disk_path: PathBuf,
+    /// Disk writes are allowed only while this watch reads `true`.
+    ///
+    /// During startup the gate stays closed until the runtime is ready, i.e.
+    /// until listeners are bound and privileges (if requested) are dropped.
+    /// Files created earlier would belong to root and could never be
+    /// refreshed by the unprivileged process.
+    disk_gate: watch::Receiver<bool>,
+    /// Domains whose on-disk persistence was deferred while the gate was closed.
+    deferred_persist: Mutex<HashSet<String>>,
+}
+
+fn open_disk_gate() -> watch::Receiver<bool> {
+    let (_, gate) = watch::channel(true);
+    gate
 }
 
 /// Read-only health view for one configured TLS front domain.
@@ -124,7 +138,18 @@ impl TlsFrontCache {
                 .collect(),
             full_cert_sent_last_sweep_epoch_secs: AtomicU64::new(0),
             disk_path: disk_path.as_ref().to_path_buf(),
+            disk_gate: open_disk_gate(),
+            deferred_persist: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Defers on-disk persistence until `gate` reads `true`.
+    ///
+    /// Entries fetched while the gate is closed are kept in memory and written
+    /// out by [`TlsFrontCache::flush_deferred_persist`] once the gate opens.
+    pub fn with_disk_gate(mut self, gate: watch::Receiver<bool>) -> Self {
+        self.disk_gate = gate;
+        self
     }
 
     pub async fn get(&self, sni: &str) -> Arc<CachedTlsData> {
@@ -331,10 +356,10 @@ impl TlsFrontCache {
     }
 
     pub async fn load_from_disk(&self) {
+        // Read-only: the cache directory is created lazily by the first
+        // persist, which runs only after the runtime is ready (privileges
+        // dropped), so it ends up owned by the user the proxy runs as.
         let path = self.disk_path.clone();
-        if tokio::fs::create_dir_all(&path).await.is_err() {
-            return;
-        }
         let mut loaded = 0usize;
         if let Ok(mut dir) = tokio::fs::read_dir(&path).await {
             while let Ok(Some(entry)) = dir.next_entry().await {
@@ -392,6 +417,21 @@ impl TlsFrontCache {
     }
 
     async fn persist(&self, domain: &str, data: &CachedTlsData) {
+        if !*self.disk_gate.borrow() {
+            self.deferred_persist
+                .lock()
+                .await
+                .insert(domain.to_string());
+            // Re-check after queueing: if the gate opened meanwhile, the
+            // flusher may already have drained the set, so write directly.
+            if !*self.disk_gate.borrow() {
+                return;
+            }
+        }
+        self.write_to_disk(domain, data).await;
+    }
+
+    async fn write_to_disk(&self, domain: &str, data: &CachedTlsData) {
         if tokio::fs::create_dir_all(&self.disk_path).await.is_err() {
             return;
         }
@@ -400,6 +440,27 @@ impl TlsFrontCache {
         if let Ok(json) = serde_json::to_vec_pretty(data) {
             // best-effort write
             let _ = tokio::fs::write(path, json).await;
+        }
+    }
+
+    /// Waits for the disk gate to open, then persists every entry whose
+    /// write was deferred while it was closed. Returns immediately (as a
+    /// no-op) when the gate is already open and nothing was deferred.
+    pub async fn flush_deferred_persist(self: Arc<Self>) {
+        let mut gate = self.disk_gate.clone();
+        if gate.wait_for(|open| *open).await.is_err() {
+            return;
+        }
+        let deferred: Vec<String> = std::mem::take(&mut *self.deferred_persist.lock().await)
+            .into_iter()
+            .collect();
+        for domain in deferred {
+            let entry = self.memory.read().await.get(&domain).cloned();
+            if let Some(entry) = entry
+                && !Arc::ptr_eq(&entry, &self.default)
+            {
+                self.write_to_disk(&domain, &entry).await;
+            }
         }
     }
 
@@ -556,6 +617,49 @@ mod tests {
     fn cert_info_domain_match_rejects_multi_label_wildcard_san() {
         let cached = cached_with_cert_info("deep.api.b.com", None, vec!["*.b.com"]);
         assert!(!cert_info_matches_domain(&cached));
+    }
+
+    #[tokio::test]
+    async fn load_from_disk_does_not_create_cache_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk_path = dir.path().join("tlsfront");
+        let cache = TlsFrontCache::new(&["a.com".to_string()], 1024, &disk_path);
+
+        cache.load_from_disk().await;
+
+        assert!(!disk_path.exists());
+    }
+
+    #[tokio::test]
+    async fn persist_is_deferred_until_disk_gate_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk_path = dir.path().join("tlsfront");
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let cache = Arc::new(
+            TlsFrontCache::new(&["a.com".to_string()], 1024, &disk_path).with_disk_gate(gate_rx),
+        );
+        let entry = cached_with_cert_info("a.com", None, vec!["a.com"]);
+        cache.set("a.com", entry.clone()).await;
+
+        cache.persist("a.com", &entry).await;
+        assert!(
+            !disk_path.exists(),
+            "nothing may touch the disk while the gate is closed"
+        );
+
+        let flusher = tokio::spawn(cache.clone().flush_deferred_persist());
+        tokio::task::yield_now().await;
+        assert!(!flusher.is_finished());
+
+        gate_tx.send_replace(true);
+        flusher.await.unwrap();
+        assert!(disk_path.join("a.com.json").is_file());
+
+        // With the gate open, writes are immediate again.
+        let entry = cached_with_cert_info("b.com", None, vec!["b.com"]);
+        cache.set("b.com", entry.clone()).await;
+        cache.persist("b.com", &entry).await;
+        assert!(disk_path.join("b.com.json").is_file());
     }
 
     #[tokio::test]

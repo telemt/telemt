@@ -128,12 +128,19 @@ pub(crate) async fn bootstrap_tls_front(
         return Ok(None);
     }
 
-    let cache = Arc::new(TlsFrontCache::new(
-        tls_domains,
-        config.censorship.fake_cert_len,
-        &config.censorship.tls_front_dir,
-    ));
+    let cache = Arc::new(
+        TlsFrontCache::new(
+            tls_domains,
+            config.censorship.fake_cert_len,
+            &config.censorship.tls_front_dir,
+        )
+        // Nothing may be written to `tls_front_dir` before the runtime is
+        // ready: with --run-as-user the privilege drop happens after the TLS
+        // bootstrap, and files created by root would be unwritable later.
+        .with_disk_gate(startup_tracker.ready_watch()),
+    );
     cache.load_from_disk().await;
+    task_scope.spawn(cache.clone().flush_deferred_persist());
 
     let tls_fetch = config.censorship.tls_fetch.clone();
     let fetch_context = TlsFetchContext {
