@@ -446,8 +446,12 @@ fn unknown_dc_open_append_rejects_symlink_target_with_nofollow() {
         .expect_err("O_NOFOLLOW open must fail for symlink target");
     assert_eq!(
         err.raw_os_error(),
-        Some(libc::ELOOP),
-        "symlink target must be rejected with ELOOP when O_NOFOLLOW is applied"
+        Some(if cfg!(target_os = "freebsd") {
+            libc::EMLINK
+        } else {
+            libc::ELOOP
+        }),
+        "symlink target must be rejected with the platform O_NOFOLLOW errno"
     );
 }
 
@@ -474,8 +478,12 @@ fn unknown_dc_open_append_rejects_broken_symlink_target_with_nofollow() {
         .expect_err("O_NOFOLLOW open must fail for broken symlink target");
     assert_eq!(
         err.raw_os_error(),
-        Some(libc::ELOOP),
-        "broken symlink target must be rejected with ELOOP when O_NOFOLLOW is applied"
+        Some(if cfg!(target_os = "freebsd") {
+            libc::EMLINK
+        } else {
+            libc::ELOOP
+        }),
+        "broken symlink target must be rejected with the platform O_NOFOLLOW errno"
     );
 }
 
@@ -717,8 +725,12 @@ fn adversarial_check_then_symlink_flip_is_blocked_by_nofollow_open() {
         .expect_err("nofollow open must fail after symlink flip between check and open");
     assert_eq!(
         err.raw_os_error(),
-        Some(libc::ELOOP),
-        "symlink flip in check/open window must be neutralized by O_NOFOLLOW"
+        Some(if cfg!(target_os = "freebsd") {
+            libc::EMLINK
+        } else {
+            libc::ELOOP
+        }),
+        "symlink flip must be rejected with the platform O_NOFOLLOW errno"
     );
 }
 
@@ -784,7 +796,7 @@ fn adversarial_parent_swap_after_check_is_blocked_by_anchored_open() {
     assert!(
         matches!(
             raw,
-            Some(libc::ELOOP) | Some(libc::ENOTDIR) | Some(libc::ENOENT)
+            Some(libc::ELOOP) | Some(libc::EMLINK) | Some(libc::ENOTDIR) | Some(libc::ENOENT)
         ),
         "anchored open must fail closed on parent swap race, got raw_os_error={raw:?}"
     );
@@ -965,8 +977,12 @@ fn anchored_open_rejects_existing_symlink_target() {
         .expect_err("anchored open must reject symlinked filename target");
     assert_eq!(
         err.raw_os_error(),
-        Some(libc::ELOOP),
-        "anchored open should fail closed with ELOOP on symlinked target"
+        Some(if cfg!(target_os = "freebsd") {
+            libc::EMLINK
+        } else {
+            libc::ELOOP
+        }),
+        "anchored open must reject a symlink with the platform O_NOFOLLOW errno"
     );
 }
 
