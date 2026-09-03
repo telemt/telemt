@@ -796,10 +796,7 @@ fn adversarial_parent_swap_after_check_is_blocked_by_anchored_open() {
     assert!(
         matches!(
             raw,
-            Some(libc::ELOOP)
-                | Some(libc::EMLINK)
-                | Some(libc::ENOTDIR)
-                | Some(libc::ENOENT)
+            Some(libc::ELOOP) | Some(libc::EMLINK) | Some(libc::ENOTDIR) | Some(libc::ENOENT)
         ),
         "anchored open must fail closed on parent swap race, got raw_os_error={raw:?}"
     );
