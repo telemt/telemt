@@ -2638,7 +2638,7 @@ These process-wide ceilings make every WEB registry, queue, request body, static
 | `max_static_bytes` | `usize` | `67108864` | Static snapshot bytes across all vhosts. |
 | `debug_records_capacity` | `usize` | `65536` | Maximum retained WEB debug record count. |
 | `debug_bytes_global` | `usize` | `67108864` | Retained plus in-flight WEB debug byte ceiling; minimum 4096. |
-| `memory_envelope_bytes` | `usize` | `1342177280` | Declared envelope for HTTP heads, bodies, shared queues/WebSocket I/O, lane state, carrier learning, static snapshots, and bounded debug/status buffers; maximum 4 GiB. |
+| `memory_envelope_bytes` | `usize` | `1342177280` | Declared envelope for HTTP heads, bodies, shared queues/WebSocket I/O, lane state, carrier learning, static snapshots, and bounded debug/status buffers; reservations must fit the configured envelope, with checked arithmetic bounded by the target platform's `usize`. |
 | `new_bootstraps_per_minute` | `u32` | `1200` | Sustained process-wide bootstrap issuance rate. |
 | `new_bootstraps_burst` | `u32` | `256` | Process-wide bootstrap issuance burst. |
 | `new_sessions_per_minute` | `u32` | `600` | Sustained process-wide session creation rate. |
