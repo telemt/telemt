@@ -78,12 +78,8 @@ pub(super) fn validate(limits: &WebLimitsConfig) -> Result<()> {
         .and_then(|value| value.checked_add(lane_state_reservation))
         .and_then(|value| value.checked_add(http_header_reservation))
         .ok_or_else(|| ProxyError::Config("web.limits byte ceilings overflow usize".to_string()))?;
-    if reserved > limits.memory_envelope_bytes
-        || limits.memory_envelope_bytes > MAX_WEB_MEMORY_ENVELOPE_BYTES
-    {
-        return config_error(
-            "web.limits memory reservations must fit memory_envelope_bytes within 4 GiB",
-        );
+    if reserved > limits.memory_envelope_bytes {
+        return config_error("web.limits memory reservations must fit memory_envelope_bytes");
     }
     Ok(())
 }
@@ -91,6 +87,45 @@ pub(super) fn validate(limits: &WebLimitsConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn operator_budget_above_four_gib_is_accepted() {
+        let limits = WebLimitsConfig {
+            pending_bytes_global: 5 * 1024 * 1024 * 1024,
+            memory_envelope_bytes: 8 * 1024 * 1024 * 1024,
+            ..WebLimitsConfig::default()
+        };
+        assert!(validate(&limits).is_ok());
+    }
+
+    #[test]
+    fn configured_envelope_still_rejects_overcommit() {
+        let defaults = WebLimitsConfig::default();
+        let limits = WebLimitsConfig {
+            pending_bytes_global: defaults.memory_envelope_bytes,
+            ..defaults
+        };
+        assert!(matches!(
+            validate(&limits),
+            Err(ProxyError::Config(message))
+                if message == "web.limits memory reservations must fit memory_envelope_bytes"
+        ));
+    }
+
+    #[test]
+    fn configured_envelope_still_rejects_overflow() {
+        let limits = WebLimitsConfig {
+            pending_bytes_global: usize::MAX,
+            memory_envelope_bytes: usize::MAX,
+            ..WebLimitsConfig::default()
+        };
+        assert!(matches!(
+            validate(&limits),
+            Err(ProxyError::Config(message))
+                if message == "web.limits byte ceilings overflow usize"
+        ));
+    }
 
     #[test]
     fn default_envelope_includes_bounded_lane_and_learning_metadata() {

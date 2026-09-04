@@ -2638,7 +2638,7 @@ Diese prozessweiten Obergrenzen begrenzen alle WEB-Register, Warteschlangen, Req
 | `max_static_bytes` | `usize` | `67108864` | Bytes statischer Snapshots über alle vhosts. |
 | `debug_records_capacity` | `usize` | `65536` | Maximale Zahl gespeicherter WEB-Debugdatensätze. |
 | `debug_bytes_global` | `usize` | `67108864` | Globale Byte-Obergrenze für gespeicherte und in Verarbeitung befindliche WEB-Debugdaten; mindestens 4096. |
-| `memory_envelope_bytes` | `usize` | `1342177280` | Deklarierter Rahmen für HTTP-Heads, Bodys, gemeinsame Queues/WebSocket-I/O, Lane-Zustand, Carrier-Learning, statische Snapshots und begrenzte Debug-/Statuspuffer; maximal 4 GiB. |
+| `memory_envelope_bytes` | `usize` | `1342177280` | Deklarierter Rahmen für HTTP-Heads, Bodys, gemeinsame Queues/WebSocket-I/O, Lane-Zustand, Carrier-Learning, statische Snapshots und begrenzte Debug-/Statuspuffer. |
 | `new_bootstraps_per_minute` | `u32` | `1200` | Nachhaltige prozessweite Ausgaberate für Bootstraps. |
 | `new_bootstraps_burst` | `u32` | `256` | Prozessweiter Burst für die Bootstrap-Ausgabe. |
 | `new_sessions_per_minute` | `u32` | `600` | Nachhaltige prozessweite Erstellungsrate für Sitzungen. |

@@ -2564,7 +2564,7 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `max_static_bytes` | `usize` | `67108864` | Размер static snapshots всех vhosts. |
 | `debug_records_capacity` | `usize` | `65536` | Максимальное число сохранённых WEB debug records. |
 | `debug_bytes_global` | `usize` | `67108864` | Глобальная байтовая граница сохранённых и находящихся в обработке WEB debug данных; минимум 4096. |
-| `memory_envelope_bytes` | `usize` | `1342177280` | Заявленный envelope для HTTP heads, bodies, общих queues/WebSocket I/O, состояния lanes, carrier learning, static snapshots и bounded debug/status buffers; максимум 4 GiB. |
+| `memory_envelope_bytes` | `usize` | `1342177280` | Заявленный envelope для HTTP heads, bodies, общих queues/WebSocket I/O, состояния lanes, carrier learning, static snapshots и bounded debug/status buffers. |
 | `new_bootstraps_per_minute` | `u32` | `1200` | Устойчивая process-wide скорость выдачи bootstrap. |
 | `new_bootstraps_burst` | `u32` | `256` | Process-wide burst выдачи bootstrap. |
 | `new_sessions_per_minute` | `u32` | `600` | Устойчивая process-wide скорость создания сессий. |

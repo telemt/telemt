@@ -23,7 +23,6 @@ const MAX_WEB_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_WEB_FRAMES_PER_BODY: usize = 4096;
 const MAX_WEB_TOMBSTONES_PER_SESSION: usize = 4096;
-const MAX_WEB_MEMORY_ENVELOPE_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
 /// Validates WEB policy and resource bounds before building runtime state.
 pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
