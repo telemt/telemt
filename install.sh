@@ -447,9 +447,9 @@ check_port_availability() {
     port_info=""
 
     if command -v ss >/dev/null 2>&1; then
-        port_info=$($SUDO ss -tulnp 2>/dev/null | grep -E ":${SERVER_PORT}([[:space:]]|$)" || true)
+        port_info=$($SUDO ss -tlnp 2>/dev/null | grep -E ":${SERVER_PORT}([[:space:]]|$)" || true)
     elif command -v netstat >/dev/null 2>&1; then
-        port_info=$($SUDO netstat -tulnp 2>/dev/null | grep -E ":${SERVER_PORT}([[:space:]]|$)" || true)
+        port_info=$($SUDO netstat -tlnp 2>/dev/null | grep -E ":${SERVER_PORT}([[:space:]]|$)" || true)
     elif command -v lsof >/dev/null 2>&1; then
         port_info=$($SUDO lsof -i :${SERVER_PORT} 2>/dev/null | grep LISTEN || true)
     else
