@@ -243,7 +243,7 @@ fn normalize_pid_path(path: &Path) -> PathBuf {
 }
 
 fn open_file_at(anchor: &AnchoredPath, name: &OsStr, flags: OFlag, mode: u32) -> io::Result<File> {
-    let descriptor = openat(anchor.parent(), name, flags, Mode::from_bits_truncate(mode))
+    let descriptor = openat(anchor.parent(), name, flags, Mode::from_bits_truncate(mode as libc::mode_t))
         .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
     Ok(File::from(descriptor))
 }

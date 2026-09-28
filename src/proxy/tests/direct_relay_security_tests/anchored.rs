@@ -102,11 +102,12 @@ fn adversarial_intermediate_parent_swap_is_blocked_by_component_walk() {
     let err = open_unknown_dc_log_append_anchored(&sanitized)
         .expect_err("anchored open must reject a swapped intermediate component");
     let raw = err.raw_os_error();
+    // FreeBSD reports EMLINK when O_NOFOLLOW rejects a symbolic link.
     assert!(
         matches!(
             raw,
             Some(libc::ELOOP) | Some(libc::ENOTDIR) | Some(libc::ENOENT)
-        ),
+        ) || (cfg!(target_os = "freebsd") && raw == Some(libc::EMLINK)),
         "component walk must fail closed on intermediate swap, got raw_os_error={raw:?}"
     );
     assert!(
