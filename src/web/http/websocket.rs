@@ -52,7 +52,10 @@ impl ConnectionIo {
         {
             return Ok(());
         }
-        self.stream.readable().await
+        // Readiness can remain set after a complete frame is drained. Confirm
+        // actual input without consuming it before reserving a message budget.
+        let mut byte = [0u8; 1];
+        self.stream.peek(&mut byte).await.map(|_| ())
     }
 
     fn enable_websocket(&mut self, buffered: Bytes) {
