@@ -174,7 +174,7 @@ fn open_dir_components(
         let next = match openat(&current, name.as_os_str(), DIRECTORY_FLAGS, Mode::empty()) {
             Ok(descriptor) => descriptor,
             Err(nix::errno::Errno::ENOENT) if create_mode.is_some() => {
-                let mode = Mode::from_bits_truncate(create_mode.unwrap_or(0o750));
+                let mode = Mode::from_bits_truncate(create_mode.unwrap_or(0o750) as libc::mode_t);
                 match mkdirat(&current, name.as_os_str(), mode) {
                     Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
                     Err(error) => return Err(errno_to_io(error)),

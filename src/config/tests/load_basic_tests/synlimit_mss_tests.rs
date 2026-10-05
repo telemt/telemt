@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn synlimit_synfix_defaults_are_loaded_for_listener() {
     let cfg = load_config_from_temp_toml(
