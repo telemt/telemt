@@ -265,6 +265,8 @@ impl WebProcessRuntime {
     ) -> Arc<Self> {
         let initial_generation = active_runtime.load_full();
         let config = initial_generation.config();
+        // Hot reload can enable WEB without replacing the runtime generation.
+        crate::web::bridge::prepare_templates();
         let token_authenticator = TokenAuthenticator::new(&initial_generation.rng);
         trace.apply_policy(initial_generation.id, &config.web.debug);
         let limits = config.web.limits.clone();

@@ -14,16 +14,25 @@ use crate::proxy::user_admission::UserSessionRegistration;
 use crate::web::session::WebSession;
 use crate::web::telemetry::WebCarrierSelectionDisposition;
 
+// Expiry sweeps preserve admission accounting while skipping maps with no due entries.
+mod expiry;
+pub(super) use expiry::remove_expired_locked;
+
 const WEB_PROFILE_OWNER_CONTEXT: &[u8] = b"telemt-web-profile-owner-v1\0";
 
+/// Manager-owned carrier progress used to fence provisional replacement.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CarrierChainPhase {
+    /// No carrier has committed verified application traffic yet.
     Provisional,
+    /// A committed carrier still awaits the health observation window.
     CommittedPendingHealth,
+    /// The committed carrier has satisfied the health observation window.
     Healthy,
 }
 
 impl CarrierChainPhase {
+    /// Returns the stable carrier-state token exposed in negotiation responses.
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Provisional => "provisional",
@@ -167,6 +176,8 @@ pub(super) struct StreamAdmissionState {
 pub(super) struct ManagerState {
     /// Bootstrap credentials indexed by their SHA-256 token hash.
     pub(super) bootstraps: HashMap<TokenHash, Bootstrap>,
+    /// Conservative earliest expiry; deletion and frozen-TTL renewal may leave it early.
+    pub(super) bootstrap_expiry: Option<Instant>,
     /// Unused bootstrap ownership counts by forwarded client address.
     pub(super) bootstraps_per_ip: HashMap<IpAddr, usize>,
     /// Live sessions indexed by bearer-token hash.
@@ -179,6 +190,8 @@ pub(super) struct ManagerState {
     pub(super) closed_session_order: VecDeque<u64>,
     /// Recently closed token hashes retained for idempotent DELETE semantics.
     pub(super) closed_tokens: HashMap<TokenHash, ClosedToken>,
+    /// Conservative earliest expiry, lowered on every insertion or overwrite.
+    pub(super) closed_token_expiry: Option<Instant>,
     /// Live session counts by forwarded client address.
     pub(super) sessions_per_ip: HashMap<IpAddr, usize>,
     /// Live session counts by stable profile key.
@@ -196,15 +209,18 @@ pub(super) struct ManagerState {
 }
 
 impl ManagerState {
+    /// Initializes empty process-owned registries with a generation-fenced issuance policy.
     pub(super) fn new(issuance_generation: u64, issuance_enabled: bool) -> Self {
         Self {
             bootstraps: HashMap::new(),
+            bootstrap_expiry: None,
             bootstraps_per_ip: HashMap::new(),
             sessions: HashMap::new(),
             session_index: BTreeMap::new(),
             closed_sessions: HashMap::new(),
             closed_session_order: VecDeque::new(),
             closed_tokens: HashMap::new(),
+            closed_token_expiry: None,
             sessions_per_ip: HashMap::new(),
             sessions_per_profile: HashMap::new(),
             bootstrap_rate: RateState::default(),
@@ -215,6 +231,7 @@ impl ManagerState {
         }
     }
 
+    /// Applies only policies at least as recent as the last published generation.
     pub(super) fn apply_issuance_policy(&mut self, generation: u64, enabled: bool) {
         if generation >= self.issuance_generation {
             self.issuance_generation = generation;
@@ -326,38 +343,6 @@ pub(super) fn evict_oldest_unused_bootstrap(state: &mut ManagerState) -> Option<
     Some(bootstrap)
 }
 
-/// Removes expired bootstrap and closed-token entries while the manager lock is held.
-pub(super) fn remove_expired_locked(state: &mut ManagerState, now: Instant) -> usize {
-    let expired = state
-        .bootstraps
-        .iter()
-        .filter_map(|(hash, bootstrap)| {
-            (now > bootstrap.expires_at).then_some((*hash, bootstrap.recovery && !bootstrap.used))
-        })
-        .collect::<Vec<_>>();
-    let recovery_unused = expired
-        .iter()
-        .filter(|(_, recovery_unused)| *recovery_unused)
-        .count();
-    for (hash, _) in expired {
-        remove_bootstrap_locked(state, hash);
-    }
-    state
-        .closed_tokens
-        .retain(|_, closed| now <= closed.expires_at);
-    while state
-        .closed_session_order
-        .front()
-        .and_then(|trace_session_id| state.closed_sessions.get(trace_session_id))
-        .is_some_and(|closed| now > closed.expires_at)
-    {
-        if let Some(trace_session_id) = state.closed_session_order.pop_front() {
-            state.closed_sessions.remove(&trace_session_id);
-        }
-    }
-    recovery_unused
-}
-
 /// Removes one bootstrap and releases its per-address issuance quota when unused.
 pub(super) fn remove_bootstrap_locked(state: &mut ManagerState, hash: TokenHash) {
     let Some(bootstrap) = state.bootstraps.remove(&hash) else {
@@ -377,10 +362,17 @@ pub(super) fn remember_closed_token_locked(
     lifetime: Duration,
     capacity: usize,
 ) {
+    let expires_at = Instant::now() + lifetime;
+    state.closed_token_expiry = Some(
+        state
+            .closed_token_expiry
+            .unwrap_or(expires_at)
+            .min(expires_at),
+    );
     state.closed_tokens.insert(
         hash,
         ClosedToken {
-            expires_at: Instant::now() + lifetime,
+            expires_at,
             host: host.to_string(),
             carrier,
         },

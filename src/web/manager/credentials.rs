@@ -166,11 +166,13 @@ impl WebProcessRuntime {
         let bridge_diagnostics_enabled = config.web.debug.bridge_diagnostics_enabled();
         let (user_agent, user_agent_id) = bounded_user_agent(user_agent);
         let issued_profile = Arc::clone(&profile);
+        let expires_at = now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs);
+        state.bootstrap_expiry = Some(state.bootstrap_expiry.unwrap_or(expires_at).min(expires_at));
         state.bootstraps.insert(
             hash,
             Bootstrap {
                 user_registration,
-                expires_at: now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs),
+                expires_at,
                 issued_at: now,
                 issuance_ip: client_ip,
                 profile,
