@@ -10,6 +10,7 @@ use crate::api;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, resolve_direct_buffer_hard_limit};
+use crate::proxy::pending_handshake::PendingHandshakeLimiter;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
 use crate::proxy::traffic_limiter::TrafficLimiter;
@@ -126,10 +127,13 @@ pub(super) async fn run_telemt_core(
         config.access.user_rate_limits.clone(),
         config.access.cidr_rate_limits.clone(),
     );
+    // Process-owned: every later runtime generation shares this limiter.
+    let pending_handshakes = Arc::new(PendingHandshakeLimiter::default());
     let shared_state = ProxySharedState::new_with_process_authorities(
         direct_buffer_budget.clone(),
         traffic_limiter,
         user_admission,
+        pending_handshakes,
     );
     let _ = shared_state.activate_user_config_source(
         1,

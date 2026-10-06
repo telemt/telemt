@@ -68,6 +68,7 @@ pub mod direct_relay;
 pub mod handshake;
 pub mod masking;
 pub mod middle_relay;
+pub(crate) mod pending_handshake;
 pub mod relay;
 pub mod route_mode;
 pub mod session_eviction;
@@ -92,6 +93,10 @@ mod test_harness_common;
 #[cfg(test)]
 #[path = "tests/proxy_shared_state_isolation_tests.rs"]
 mod proxy_shared_state_isolation_tests;
+
+#[cfg(test)]
+#[path = "tests/pending_handshake_limit_tests.rs"]
+mod pending_handshake_limit_tests;
 
 #[cfg(test)]
 #[path = "tests/proxy_shared_state_parallel_execution_tests.rs"]

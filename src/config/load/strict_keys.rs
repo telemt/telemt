@@ -208,6 +208,8 @@ const SERVER_CONFIG_KEYS: &[&str] = &[
     "listen_backlog",
     "max_connections",
     "accept_permit_timeout_ms",
+    "max_pending_handshakes_per_ip",
+    "pending_handshakes_per_ip_dry_run",
     "conntrack_control",
 ];
 

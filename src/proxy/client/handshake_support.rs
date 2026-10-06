@@ -240,6 +240,42 @@ pub(super) fn record_beobachten_class(
     beobachten.record(class, peer_ip, beobachten_ttl(config));
 }
 
+/// Takes a pending-handshake slot for `peer` (see
+/// `server.max_pending_handshakes_per_ip`). Returns `Err(())` when the address
+/// is over the limit and the connection must be closed. The returned guard,
+/// if any, must be dropped as soon as the handshake outcome is known so that
+/// an authenticated session never holds a slot.
+pub(super) fn admit_pending_handshake(
+    shared: &ProxySharedState,
+    config: &ProxyConfig,
+    stats: &Stats,
+    beobachten: &BeobachtenStore,
+    peer: SocketAddr,
+) -> std::result::Result<Option<PendingHandshakeGuard>, ()> {
+    match shared.pending_handshakes.try_acquire(
+        peer.ip(),
+        config.server.max_pending_handshakes_per_ip,
+        config.server.pending_handshakes_per_ip_dry_run,
+    ) {
+        PendingHandshakeAdmission::Disabled => Ok(None),
+        PendingHandshakeAdmission::Admitted(guard) => Ok(Some(guard)),
+        PendingHandshakeAdmission::Observed(guard) => {
+            stats.increment_pending_handshake_per_ip_observed_total();
+            Ok(Some(guard))
+        }
+        PendingHandshakeAdmission::Rejected => {
+            stats.increment_pending_handshake_per_ip_rejected_total();
+            debug!(
+                peer = %peer,
+                limit = config.server.max_pending_handshakes_per_ip,
+                "Too many pending handshakes from this IP, closing"
+            );
+            record_beobachten_class(beobachten, config, peer.ip(), "pending_limit");
+            Err(())
+        }
+    }
+}
+
 pub(super) fn tls_fingerprint_collection_enabled(config: &ProxyConfig) -> bool {
     config.general.beobachten || config.server.api.runtime_edge_enabled
 }

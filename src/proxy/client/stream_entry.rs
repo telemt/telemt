@@ -208,6 +208,11 @@ where
         }
     };
 
+    // Per-IP limit on concurrent unauthenticated handshakes, see
+    // server.max_pending_handshakes_per_ip. Taken inside the handshake below,
+    // released right after the handshake outcome is known, before the relay.
+    let mut pending_handshake = None;
+
     let handshake_timeout = handshake_timeout_with_mask_grace(&config);
     let stats_for_timeout = stats.clone();
     let config_for_timeout = config.clone();
@@ -219,11 +224,23 @@ where
         let mut first_bytes = [0u8; 5];
         if let Some(first_byte) = first_byte {
             first_bytes[0] = first_byte;
-            stream.read_exact(&mut first_bytes[1..]).await?;
         } else {
-            stream.read_exact(&mut first_bytes).await?;
+            // client_first_byte_idle_secs = 0 skips the idle wait, but the
+            // first byte is still read here, inside the handshake deadline.
+            stream.read_exact(&mut first_bytes[..1]).await?;
         }
 
+        // The pending-handshake slot is taken only once the client has
+        // actually sent a byte, so idle and preconnected connections are never
+        // counted, whatever client_first_byte_idle_secs is.
+        match admit_pending_handshake(&shared, &config, &stats, &beobachten, real_peer) {
+            Ok(guard) => pending_handshake = guard,
+            Err(()) => return Ok(None),
+        }
+
+        stream.read_exact(&mut first_bytes[1..]).await?;
+
+        let handshake: std::result::Result<HandshakeOutcome, ProxyError> = async {
         let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
         debug!(peer = %real_peer, is_tls = is_tls, "Handshake type detected");
 
@@ -470,8 +487,14 @@ where
                 )
             )))
         }
+        }
+        .await;
+
+        handshake.map(Some)
     }).await {
-        Ok(Ok(outcome)) => outcome,
+        Ok(Ok(Some(outcome))) => outcome,
+        // Over the per-IP pending-handshake limit: close quietly.
+        Ok(Ok(None)) => return Ok(()),
         Ok(Err(e)) => {
             debug!(peer = %peer, error = %e, "Handshake failed");
             stats_for_timeout.increment_handshake_failure_class(classify_handshake_failure_class(&e));
@@ -496,6 +519,7 @@ where
             return Err(ProxyError::TgHandshakeTimeout);
         }
     };
+    drop(pending_handshake);
 
     // Phase 2: relay (WITHOUT handshake timeout — relay has its own activity timeouts)
     match outcome {

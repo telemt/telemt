@@ -187,6 +187,8 @@ impl ReloadSupervisor {
             old_runtime.proxy_shared.traffic_limiter.clone(),
             old_runtime.proxy_shared.direct_buffer_budget.clone(),
             old_runtime.max_connections.clone(),
+            // Process-owned: handshakes of the draining generation still count.
+            old_runtime.proxy_shared.pending_handshakes.clone(),
         )
         .await
         {

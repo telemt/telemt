@@ -1939,6 +1939,8 @@
 | [`listeners`](#serverlisteners) | `Table[]` | выводится из legacy listener-полей | `✘` |
 | [`max_connections`](#max_connections) | `u32` | `10000` | `✘` |
 | [`accept_permit_timeout_ms`](#accept_permit_timeout_ms) | `u64` | `250` | `✘` |
+| [`max_pending_handshakes_per_ip`](#max_pending_handshakes_per_ip) | `u32` | `0` | `✘` |
+| [`pending_handshakes_per_ip_dry_run`](#pending_handshakes_per_ip_dry_run) | `bool` | `false` | `✘` |
 | [`listen_backlog`](#listen_backlog) | `u32` | `1024` | `✘` |
 | [`conntrack_control`](#serverconntrack_control) | `Table` | встроенные значения | `✘` |
 
@@ -2107,6 +2109,27 @@
     ```toml
     [server]
     accept_permit_timeout_ms = 250
+    ```
+
+## max_pending_handshakes_per_ip
+  - **Ограничения / валидация**: `0..=65535`. `0` - лимит выключен.
+  - **Описание**: Максимальное число одновременных непроверенных рукопожатий с одного IP-адреса клиента (при включённом PROXY protocol - настоящего адреса). Слот занимается после первого байта клиента, поэтому простаивающие соединения из пула не учитываются, и освобождается сразу по окончании рукопожатия: при успехе, ошибке, `timeouts.client_handshake` или уходе в маскировку. Аутентифицированные сессии не учитываются, поэтому пачки коротких соединений для медиа не затрагиваются. Лишние рукопожатия закрываются без маскировки и учитываются в `telemt_pending_handshake_per_ip_limit_total{action="rejected"}`. Защищает обработку рукопожатий от одного адреса, который открывает сотни соединений и не завершает их. Клиенты за NAT оператора делят один адрес - подбирайте значение сначала с `pending_handshakes_per_ip_dry_run`.
+  - **Пример**:
+
+    ```toml
+    [server]
+    max_pending_handshakes_per_ip = 32
+    ```
+
+## pending_handshakes_per_ip_dry_run
+  - **Ограничения / валидация**: `bool`.
+  - **Описание**: Наблюдать `max_pending_handshakes_per_ip`, не применяя его: лишние рукопожатия пропускаются и учитываются в `telemt_pending_handshake_per_ip_limit_total{action="observed"}`. Позволяет измерить реальную одновременность по адресам до включения лимита.
+  - **Пример**:
+
+    ```toml
+    [server]
+    max_pending_handshakes_per_ip = 32
+    pending_handshakes_per_ip_dry_run = true
     ```
 
 

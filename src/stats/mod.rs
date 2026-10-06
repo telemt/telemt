@@ -145,6 +145,8 @@ pub struct Stats {
     route_cutover_parked_middle_total: AtomicU64,
     handshake_timeouts: AtomicU64,
     accept_permit_timeout_total: AtomicU64,
+    pending_handshake_per_ip_rejected_total: AtomicU64,
+    pending_handshake_per_ip_observed_total: AtomicU64,
     conntrack_control_enabled_gauge: AtomicBool,
     conntrack_control_available_gauge: AtomicBool,
     conntrack_pressure_active_gauge: AtomicBool,

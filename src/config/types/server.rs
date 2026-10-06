@@ -303,6 +303,18 @@ pub struct ServerConfig {
     #[serde(default = "default_accept_permit_timeout_ms")]
     pub accept_permit_timeout_ms: u64,
 
+    /// Maximum number of concurrent unauthenticated handshakes from one client
+    /// IP address. A slot is held only while the handshake is in progress and
+    /// is released on success, failure, timeout or masking fallback, so
+    /// authenticated sessions are never counted. `0` disables the limit.
+    #[serde(default = "default_max_pending_handshakes_per_ip")]
+    pub max_pending_handshakes_per_ip: u32,
+
+    /// Observe `max_pending_handshakes_per_ip` without enforcing it: excess
+    /// handshakes are admitted and only counted in metrics.
+    #[serde(default)]
+    pub pending_handshakes_per_ip_dry_run: bool,
+
     /// Runtime conntrack control and pressure policy.
     #[serde(default)]
     pub conntrack_control: ConntrackControlConfig,
@@ -330,6 +342,8 @@ impl Default for ServerConfig {
             listen_backlog: default_listen_backlog(),
             max_connections: default_server_max_connections(),
             accept_permit_timeout_ms: default_accept_permit_timeout_ms(),
+            max_pending_handshakes_per_ip: default_max_pending_handshakes_per_ip(),
+            pending_handshakes_per_ip_dry_run: false,
             conntrack_control: ConntrackControlConfig::default(),
         }
     }

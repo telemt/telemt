@@ -1937,6 +1937,8 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`listeners`](#serverlisteners) | `Table[]` | derived from legacy listener fields | `✘` |
 | [`max_connections`](#max_connections) | `u32` | `10000` | `✘` |
 | [`accept_permit_timeout_ms`](#accept_permit_timeout_ms) | `u64` | `250` | `✘` |
+| [`max_pending_handshakes_per_ip`](#max_pending_handshakes_per_ip) | `u32` | `0` | `✘` |
+| [`pending_handshakes_per_ip_dry_run`](#pending_handshakes_per_ip_dry_run) | `bool` | `false` | `✘` |
 | [`listen_backlog`](#listen_backlog) | `u32` | `1024` | `✘` |
 | [`conntrack_control`](#serverconntrack_control) | `Table` | built-in defaults | `✘` |
 
@@ -2106,6 +2108,27 @@ This document lists all configuration keys accepted by `config.toml`.
     ```toml
     [server]
     accept_permit_timeout_ms = 250
+    ```
+
+## max_pending_handshakes_per_ip
+  - **Constraints / validation**: `0..=65535`. `0` disables the limit.
+  - **Description**: Maximum number of concurrent unauthenticated handshakes from one client IP address (the real address from PROXY protocol when it is enabled). A slot is taken after the first client byte, so idle pooled connections are not counted, and is released as soon as the handshake ends: on success, failure, `timeouts.client_handshake` or masking fallback. Authenticated sessions are never counted, so bursts of short media connections are not affected. Excess handshakes are closed without masking and counted in `telemt_pending_handshake_per_ip_limit_total{action="rejected"}`. Protects handshake capacity from one address that opens hundreds of connections and never completes them. Clients behind a carrier-grade NAT share an address; choose the value with `pending_handshakes_per_ip_dry_run` first.
+  - **Example**:
+
+    ```toml
+    [server]
+    max_pending_handshakes_per_ip = 32
+    ```
+
+## pending_handshakes_per_ip_dry_run
+  - **Constraints / validation**: `bool`.
+  - **Description**: Observe `max_pending_handshakes_per_ip` without enforcing it: excess handshakes are admitted and counted in `telemt_pending_handshake_per_ip_limit_total{action="observed"}`. Use it to measure real per-address concurrency before enabling the limit.
+  - **Example**:
+
+    ```toml
+    [server]
+    max_pending_handshakes_per_ip = 32
+    pending_handshakes_per_ip_dry_run = true
     ```
 
 
