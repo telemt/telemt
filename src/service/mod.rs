@@ -222,7 +222,16 @@ reload() {{
 /// Generates a FreeBSD rc.d script.
 fn generate_freebsd_rc_script(opts: &ServiceOptions) -> String {
     let user = opts.user.unwrap_or("root");
-    let group = opts.group.unwrap_or("wheel");
+    let group = opts.group.unwrap_or("");
+    // The shared PID default cannot support cleanup after dropping privileges.
+    let pid_file = match opts.pid_file {
+        "/var/run/telemt.pid" => "/var/run/telemt/telemt.pid",
+        path => path,
+    };
+    let working_dir = match opts.working_dir {
+        None | Some("/var/lib/telemt") => "/var/db/telemt",
+        Some(path) => path,
+    };
 
     format!(
         r#"#!/bin/sh
@@ -237,8 +246,10 @@ fn generate_freebsd_rc_script(opts: &ServiceOptions) -> String {
 # The configuration path can be overridden in rc.conf.
 # telemt_config="/etc/telemt/config.toml"
 # The service user and group can be overridden in rc.conf.
-# telemt_user="telemt"
-# telemt_group="telemt"
+# telemt_uid="telemt"
+# telemt_gid="telemt"
+# Legacy telemt_user/telemt_group settings remain supported as aliases.
+# Custom telemt_pidfile parents must already be writable by the service user.
 #
 
 . /etc/rc.subr
@@ -251,27 +262,41 @@ load_rc_config $name
 
 : ${{telemt_enable:="NO"}}
 : ${{telemt_config:="{config}"}}
-: ${{telemt_user:="{user}"}}
-: ${{telemt_group:="{group}"}}
+: ${{telemt_uid:="${{telemt_user:-{user}}}"}}
+: ${{telemt_gid:="${{telemt_group:-{group}}}"}}
 : ${{telemt_pidfile:="{pid_file}"}}
+: ${{telemt_data_dir:="{working_dir}"}}
+
+# An unspecified group follows the selected account, never an implicit wheel grant.
+if [ -z "${{telemt_gid}}" ]; then
+    telemt_gid="$(id -gn "${{telemt_uid}}")" || exit 1
+fi
+
+# rc.subr must not drop privileges before Telemt binds privileged sockets.
+unset telemt_user telemt_group
 
 pidfile="${{telemt_pidfile}}"
 command="{exe}"
-command_args="--daemon --syslog --pid-file ${{telemt_pidfile}} ${{telemt_config}}"
+command_args="--daemon --syslog --working-dir \"${{telemt_data_dir}}\" --pid-file \"${{telemt_pidfile}}\""
+# Root startup must retain privileged network setup without a drop request.
+if [ "${{telemt_uid}}" != "root" ]; then
+    command_args="${{command_args}} --run-as-user \"${{telemt_uid}}\" --run-as-group \"${{telemt_gid}}\""
+fi
+command_args="${{command_args}} \"${{telemt_config}}\""
 
 start_precmd="telemt_prestart"
 reload_cmd="telemt_reload"
 extra_commands="reload"
 
 telemt_prestart() {{
-    install -d -o ${{telemt_user}} -g ${{telemt_group}} -m 755 /var/run
-    install -d -o ${{telemt_user}} -g ${{telemt_group}} -m 755 /var/lib/telemt
+    install -d -o "${{telemt_uid}}" -g "${{telemt_gid}}" -m 755 /var/run/telemt || return $?
+    install -d -o "${{telemt_uid}}" -g "${{telemt_gid}}" -m 755 "${{telemt_data_dir}}" || return $?
 }}
 
 telemt_reload() {{
     if [ -f "${{pidfile}}" ]; then
         echo "Reloading ${{name}} configuration."
-        kill -HUP $(cat ${{pidfile}})
+        kill -HUP "$(cat "${{pidfile}}")"
     else
         echo "${{name}} is not running."
         return 1
@@ -283,7 +308,8 @@ run_rc_command "$1"
         description = opts.description,
         exe = opts.exe_path.display(),
         config = opts.config_path.display(),
-        pid_file = opts.pid_file,
+        pid_file = pid_file,
+        working_dir = working_dir,
         user = user,
         group = group,
     )
@@ -342,6 +368,10 @@ You may need to create a service file manually or run telemt directly:
         }
     }
 }
+
+#[cfg(all(test, unix))]
+// Executable shell checks for the generated FreeBSD service lifecycle.
+mod freebsd_tests;
 
 #[cfg(test)]
 mod tests {
