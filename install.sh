@@ -316,6 +316,7 @@ show_help() {
         say "  -a, --ad-tag Set ad_tag"
         say "  -l, --lang   Set output language (1/en or 2/ru)"
     fi
+    say "  --port updates an existing [server].port; explicit listener ports are preserved."
     exit 0
 }
 
@@ -616,14 +617,24 @@ install_config() {
 
         tmp_conf="${TEMP_DIR}/config.tmp"
         $SUDO cat "$CONFIG_FILE" > "$tmp_conf"
+        : > "${tmp_conf}.port"
 
         escaped_domain="$(printf '%s\n' "$TLS_DOMAIN" | tr -d '[:cntrl:]' | sed 's/\\/\\\\/g; s/"/\\"/g')"
 
         awk -v port="$SERVER_PORT" -v secret="$USER_SECRET" -v domain="$escaped_domain" -v ad_tag="$AD_TAG" \
+            -v port_updated_file="${tmp_conf}.port" \
             -v flag_p="$PORT_PROVIDED" -v flag_s="$SECRET_PROVIDED" -v flag_d="$DOMAIN_PROVIDED" -v flag_a="$AD_TAG_PROVIDED" '
         BEGIN { ad_tag_handled = 0 }
 
-        flag_p == "1" && /^[ \t]*port[ \t]*=/ { print "port = " port; next }
+        # Explicit listener ports override the server default and must remain independent.
+        /^[ \t]*\[/ {
+            in_server = ($0 ~ /^[ \t]*\[[ \t]*(server|"server"|\047server\047)[ \t]*\][ \t]*(#.*)?$/)
+        }
+        flag_p == "1" && in_server && /^[ \t]*port[ \t]*=/ {
+            print "port = " port
+            print port > port_updated_file
+            next
+        }
         flag_s == "1" && /^[ \t]*hello[ \t]*=/ { print "hello = \"" secret "\""; next }
         flag_d == "1" && /^[ \t]*tls_domain[ \t]*=/ { print "tls_domain = \"" domain "\""; next }
 
@@ -646,13 +657,19 @@ install_config() {
         { print }
         ' "$tmp_conf" > "${tmp_conf}.new" && mv "${tmp_conf}.new" "$tmp_conf"
 
-        [ "$PORT_PROVIDED" -eq 1 ] && say "  -> $L_INFO_UPD_PORT $SERVER_PORT"
+        if [ "$PORT_PROVIDED" -eq 1 ]; then
+            if [ -s "${tmp_conf}.port" ]; then
+                say "  -> $L_INFO_UPD_PORT $SERVER_PORT"
+            else
+                say "[WARNING] No existing [server].port was updated; edit the configuration to change explicit listener ports."
+            fi
+        fi
         [ "$SECRET_PROVIDED" -eq 1 ] && say "  -> $L_INFO_UPD_SEC"
         [ "$DOMAIN_PROVIDED" -eq 1 ] && say "  -> $L_INFO_UPD_DOM $TLS_DOMAIN"
         [ "$AD_TAG_PROVIDED" -eq 1 ] && say "  -> $L_INFO_UPD_TAG"
 
         write_root "$CONFIG_FILE" < "$tmp_conf"
-        rm -f "$tmp_conf"
+        rm -f "$tmp_conf" "${tmp_conf}.port"
         return 0
     fi
 
@@ -858,12 +875,12 @@ case "$ACTION" in
                         printf '[ERROR] %s\n' "$L_ERR_PORT_RANGE" >&2; continue
                     fi
                     SERVER_PORT="$port_num"
+                    PORT_PROVIDED=1
                     break
                 done
             else
                 say "[WARNING] $L_WARN_NO_TTY $SERVER_PORT"
             fi
-            PORT_PROVIDED=1
         fi
 
         if [ "$DOMAIN_PROVIDED" -eq 0 ]; then
