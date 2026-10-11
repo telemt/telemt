@@ -9,7 +9,7 @@ use nix::unistd::{UnlinkatFlags, fsync, unlinkat};
 
 use super::path::{AnchoredPath, errno_to_io};
 
-fn open_regular_at(anchored: &AnchoredPath, flags: OFlag, mode: u32) -> io::Result<std::fs::File> {
+fn open_regular_at(anchored: &AnchoredPath, flags: OFlag, mode: libc::mode_t) -> io::Result<std::fs::File> {
     let descriptor = openat(
         anchored.parent(),
         anchored.name(),
@@ -91,7 +91,7 @@ fn same_file_version(left: &std::fs::Metadata, right: &std::fs::Metadata) -> boo
 }
 
 /// Opens an append-only regular file without following path components or hard links.
-pub(crate) fn open_append_regular(path: &Path, mode: u32) -> io::Result<std::fs::File> {
+pub(crate) fn open_append_regular(path: &Path, mode: libc::mode_t) -> io::Result<std::fs::File> {
     let anchored = AnchoredPath::open_creating_parents(path, 0o750)?;
     open_regular_at(
         &anchored,
@@ -104,7 +104,7 @@ pub(crate) fn open_append_regular(path: &Path, mode: u32) -> io::Result<std::fs:
 pub(crate) fn open_append_regular_at<Fd: AsFd>(
     parent: Fd,
     name: &OsStr,
-    mode: u32,
+    mode: libc::mode_t,
 ) -> io::Result<std::fs::File> {
     if Path::new(name).components().count() != 1 {
         return Err(io::Error::new(
@@ -138,7 +138,7 @@ pub(crate) fn open_append_regular_at<Fd: AsFd>(
 }
 
 /// Durably replaces a file through a same-directory descriptor-anchored rename.
-pub(crate) fn atomic_replace(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+pub(crate) fn atomic_replace(path: &Path, contents: &[u8], mode: libc::mode_t) -> io::Result<()> {
     let anchored = AnchoredPath::open_creating_parents(path, 0o750)?;
     atomic_replace_anchored(&anchored, contents, mode)
 }
@@ -147,14 +147,14 @@ pub(crate) fn atomic_replace(path: &Path, contents: &[u8], mode: u32) -> io::Res
 pub(crate) async fn atomic_replace_async(
     path: std::path::PathBuf,
     contents: Vec<u8>,
-    mode: u32,
+    mode: libc::mode_t,
 ) -> io::Result<()> {
     tokio::task::spawn_blocking(move || atomic_replace(&path, &contents, mode))
         .await
         .map_err(|error| io::Error::other(format!("secure writer task failed: {error}")))?
 }
 
-fn atomic_replace_anchored(anchored: &AnchoredPath, contents: &[u8], mode: u32) -> io::Result<()> {
+fn atomic_replace_anchored(anchored: &AnchoredPath, contents: &[u8], mode: libc::mode_t) -> io::Result<()> {
     let temp_name = format!(".telemt.tmp-{}", rand::random::<u64>());
     let descriptor = openat(
         anchored.parent(),
@@ -197,7 +197,7 @@ fn write_and_publish(
 pub(super) fn atomic_replace_after_anchor(
     anchored: &AnchoredPath,
     contents: &[u8],
-    mode: u32,
+    mode: libc::mode_t,
 ) -> io::Result<()> {
     atomic_replace_anchored(anchored, contents, mode)
 }

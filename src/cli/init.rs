@@ -218,7 +218,7 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_init_file(path: &Path, contents: &str, mode: u32) -> std::io::Result<()> {
+fn write_init_file(path: &Path, contents: &str, mode: libc::mode_t) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         crate::util::secure_fs::atomic_replace(path, contents.as_bytes(), mode)

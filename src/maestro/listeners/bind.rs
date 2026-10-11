@@ -255,6 +255,18 @@ fn verify_bound_unix_socket(path: &Path, expected: (u64, u64)) -> std::io::Resul
     ))
 }
 
+#[cfg(unix)]
+fn parse_unix_socket_permissions(value: &str) -> std::io::Result<nix::sys::stat::Mode> {
+    let mode = libc::mode_t::from_str_radix(value, 8)
+        .map_err(|error| IoError::new(ErrorKind::InvalidInput, error))?;
+    nix::sys::stat::Mode::from_bits(mode).ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidInput,
+            "Unix socket permissions contain unsupported bits",
+        )
+    })
+}
+
 /// Binds every eligible configured listener or fails without a partial inventory.
 pub(crate) async fn bind_listeners(
     config: &Arc<ProxyConfig>,
@@ -299,15 +311,15 @@ pub(crate) async fn bind_listeners(
         }
         let socket_identity = unix_path_identity(&socket_metadata);
         if let Some(perm_str) = &config.server.listen_unix_sock_perm {
-            match u32::from_str_radix(perm_str.trim_start_matches('0'), 8) {
+            match parse_unix_socket_permissions(perm_str) {
                 Ok(mode) => {
-                    use nix::sys::stat::{FchmodatFlags, Mode, fchmodat};
+                    use nix::sys::stat::{FchmodatFlags, fchmodat};
 
                     verify_bound_unix_socket(unix_path, socket_identity)?;
                     if let Err(error_value) = fchmodat(
                         anchored_path.parent(),
                         anchored_path.name(),
-                        Mode::from_bits_truncate(mode),
+                        mode,
                         FchmodatFlags::NoFollowSymlink,
                     ) {
                         error!(
@@ -364,6 +376,42 @@ mod tests {
     use std::os::unix::net::UnixListener as StdUnixListener;
 
     use super::*;
+
+    #[test]
+    fn unix_socket_permissions_preserve_all_supported_bits() {
+        for expected in 0..=0o7777u32 {
+            for value in [format!("{expected:o}"), format!("{expected:04o}")] {
+                let mode = parse_unix_socket_permissions(&value).unwrap();
+                let actual: u32 = mode.bits() as _;
+                assert_eq!(actual, expected, "permissions: {value}");
+            }
+        }
+        assert_eq!(
+            parse_unix_socket_permissions("+0600").unwrap().bits(),
+            0o600
+        );
+    }
+
+    #[test]
+    fn unix_socket_permissions_reject_every_unsupported_bit() {
+        for bit in 12..32 {
+            for supported in [0, 1, 0o7777u32] {
+                let value = format!("{:o}", supported | (1u32 << bit));
+                let error = parse_unix_socket_permissions(&value).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::InvalidInput, "permissions: {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn unix_socket_permissions_reject_invalid_octal_input() {
+        for value in [
+            "", "8", "0788", "0o600", "-1", " 600", "600 ", "000+600", "100000000000",
+        ] {
+            let error = parse_unix_socket_permissions(value).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidInput, "permissions: {value}");
+        }
+    }
 
     #[test]
     fn unix_socket_cleanup_refuses_regular_file_and_symlink() {

@@ -25,7 +25,7 @@ impl AnchoredPath {
     }
 
     /// Creates missing parent directories while traversing without symbolic links.
-    pub(crate) fn open_creating_parents(path: &Path, mode: u32) -> io::Result<Self> {
+    pub(crate) fn open_creating_parents(path: &Path, mode: libc::mode_t) -> io::Result<Self> {
         Self::open_with_parent_creation(path, Some(mode))
     }
 
@@ -42,7 +42,7 @@ impl AnchoredPath {
     }
 
     /// Creates missing parents and opens a chain protected from untrusted renames.
-    pub(crate) fn open_trusted_parent_or_create(path: &Path, mode: u32) -> io::Result<Self> {
+    pub(crate) fn open_trusted_parent_or_create(path: &Path, mode: libc::mode_t) -> io::Result<Self> {
         let name = path
             .file_name()
             .filter(|name| !name.is_empty())
@@ -56,7 +56,7 @@ impl AnchoredPath {
     /// Anchors a runtime parent, applying trusted traversal only when explicitly requested.
     pub(crate) fn open_runtime_parent(
         path: &Path,
-        create_mode: Option<u32>,
+        create_mode: Option<libc::mode_t>,
         strict_runtime_paths: bool,
     ) -> io::Result<Self> {
         if strict_runtime_paths {
@@ -75,7 +75,7 @@ impl AnchoredPath {
         Ok(Self { parent, name })
     }
 
-    fn open_with_parent_creation(path: &Path, create_mode: Option<u32>) -> io::Result<Self> {
+    fn open_with_parent_creation(path: &Path, create_mode: Option<libc::mode_t>) -> io::Result<Self> {
         let name = path
             .file_name()
             .filter(|name| !name.is_empty())
@@ -105,22 +105,22 @@ pub(crate) fn open_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
     open_dir_components(path, None, false)
 }
 
-fn open_or_create_dir_nofollow(path: &Path, mode: u32) -> io::Result<OwnedFd> {
+fn open_or_create_dir_nofollow(path: &Path, mode: libc::mode_t) -> io::Result<OwnedFd> {
     open_dir_components(path, Some(mode), false)
 }
 
 /// Opens a directory after securely creating any missing components.
-pub(crate) fn open_dir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<OwnedFd> {
+pub(crate) fn open_dir_nofollow_or_create(path: &Path, mode: libc::mode_t) -> io::Result<OwnedFd> {
     open_or_create_dir_nofollow(path, mode)
 }
 
 /// Opens or creates a directory chain protected from untrusted entry replacement.
-pub(crate) fn open_trusted_dir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<OwnedFd> {
+pub(crate) fn open_trusted_dir_nofollow_or_create(path: &Path, mode: libc::mode_t) -> io::Result<OwnedFd> {
     open_dir_components(path, Some(mode), true)
 }
 
 /// Follows parent-directory symlinks without imposing ownership or permission policy.
-pub(crate) fn open_compatible_dir(path: &Path, create_mode: Option<u32>) -> io::Result<OwnedFd> {
+pub(crate) fn open_compatible_dir(path: &Path, create_mode: Option<libc::mode_t>) -> io::Result<OwnedFd> {
     let path = if path.as_os_str().is_empty() {
         Path::new(".")
     } else {
@@ -129,7 +129,7 @@ pub(crate) fn open_compatible_dir(path: &Path, create_mode: Option<u32>) -> io::
     if let Some(mode) = create_mode {
         std::fs::DirBuilder::new()
             .recursive(true)
-            .mode(mode)
+            .mode(mode as _)
             .create(path)?;
     }
     // Retain the resolved directory inode so subsequent file operations do not rewalk the path.
@@ -143,7 +143,7 @@ fn open_trusted_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
 
 fn open_dir_components(
     path: &Path,
-    create_mode: Option<u32>,
+    create_mode: Option<libc::mode_t>,
     require_trusted: bool,
 ) -> io::Result<OwnedFd> {
     let mut names = Vec::new();
@@ -212,7 +212,7 @@ fn validate_trusted_directory(descriptor: &OwnedFd, allow_sticky_parent: bool) -
 }
 
 /// Creates missing components and changes cwd to the exact opened directory inode.
-pub(crate) fn chdir_nofollow_or_create(path: &Path, mode: u32) -> io::Result<()> {
+pub(crate) fn chdir_nofollow_or_create(path: &Path, mode: libc::mode_t) -> io::Result<()> {
     let descriptor = open_dir_nofollow_or_create(path, mode)?;
     nix::unistd::fchdir(&descriptor).map_err(errno_to_io)
 }
