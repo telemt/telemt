@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rand::RngExt;
 
+#[cfg(unix)]
 use crate::util::trusted_command::trusted_helper_command;
 
 /// Options for the fire-and-forget init command.
@@ -166,9 +167,12 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[+] Service started");
 
                 std::thread::sleep(std::time::Duration::from_secs(1));
+                #[cfg(unix)]
                 let status = trusted_helper_command("systemctl").and_then(|mut command| {
                     command.args(["is-active", "telemt.service"]).output().ok()
                 });
+                #[cfg(not(unix))]
+                let status: Option<std::process::Output> = None;
                 match status {
                     Some(out) if out.status.success() => {
                         eprintln!("[+] Service is running");
@@ -330,19 +334,27 @@ weight = 10
 }
 
 fn run_cmd(cmd: &str, args: &[&str]) {
-    let Some(mut command) = trusted_helper_command(cmd) else {
+    #[cfg(not(unix))]
+    {
+        let _ = args;
         eprintln!("[!] Refusing unavailable or untrusted command: {}", cmd);
-        return;
-    };
-    match command.args(args).output() {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("[!] {} {} failed: {}", cmd, args.join(" "), stderr.trim());
+    }
+    #[cfg(unix)]
+    {
+        let Some(mut command) = trusted_helper_command(cmd) else {
+            eprintln!("[!] Refusing unavailable or untrusted command: {}", cmd);
+            return;
+        };
+        match command.args(args).output() {
+            Ok(output) => {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("[!] {} {} failed: {}", cmd, args.join(" "), stderr.trim());
+                }
             }
-        }
-        Err(e) => {
-            eprintln!("[!] Failed to run {} {}: {}", cmd, args.join(" "), e);
+            Err(e) => {
+                eprintln!("[!] Failed to run {} {}: {}", cmd, args.join(" "), e);
+            }
         }
     }
 }

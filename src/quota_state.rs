@@ -180,6 +180,8 @@ async fn read_state_file(path: &Path) -> std::io::Result<Option<QuotaStateFile>>
     };
     #[cfg(not(unix))]
     let payload = {
+        use tokio::io::AsyncReadExt;
+
         let file = match tokio::fs::File::open(path).await {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
