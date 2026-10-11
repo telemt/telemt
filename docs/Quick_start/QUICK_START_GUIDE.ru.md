@@ -187,7 +187,7 @@ hello = "00000000000000000000000000000000"
 **2. Создайте пользователя для telemt**
 
 ```bash
-useradd -d /opt/telemt -m -r -U telemt
+useradd -d /opt/telemt -m -r -U -s "$(command -v nologin)" telemt
 chown -R telemt:telemt /etc/telemt
 ```
 

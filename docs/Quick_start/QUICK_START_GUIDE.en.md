@@ -188,7 +188,7 @@ then Ctrl+S -> Ctrl+X to save
 **2. Create telemt user**
 
 ```bash
-useradd -d /opt/telemt -m -r -U telemt
+useradd -d /opt/telemt -m -r -U -s "$(command -v nologin)" telemt
 chown -R telemt:telemt /etc/telemt
 ```
 
