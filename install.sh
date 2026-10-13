@@ -558,7 +558,9 @@ install_binary() {
 
     $SUDO sh -c '[ -x "$1" ]' _ "$bin_dst" || die "$L_ERR_BIN_EXEC $bin_dst"
 
-    if command -v setcap >/dev/null 2>&1; then
+    # File capabilities clear systemd's ambient set and leave firewall helpers unprivileged.
+    # The replaced binary must inherit its capabilities from the service unit instead.
+    if [ "$(get_svc_mgr)" != "systemd" ] && command -v setcap >/dev/null 2>&1; then
         $SUDO setcap cap_net_bind_service,cap_net_admin=+ep "$bin_dst" 2>/dev/null || true
     fi
 }
