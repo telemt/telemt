@@ -2,51 +2,14 @@ use super::*;
 
 // Bounded C2ME sender and downstream writer tasks.
 mod tasks;
-// Child-task ownership aborts relay tasks when the parent future is cancelled.
+// Child-task and connection ownership release resources when the relay exits.
 mod children;
 // Conntrack close classification.
 mod close_reason;
 
-use children::RelayChildTasks;
+use children::{RelayChildTasks, RelayConnLease};
 use close_reason::classify_conntrack_close_reason;
 use tasks::{run_c2me_sender, run_me_writer};
-
-struct RelayConnLease {
-    connection: Option<ConnLease>,
-    conn_id: u64,
-    shared: Arc<ProxySharedState>,
-}
-
-impl RelayConnLease {
-    fn new(connection: ConnLease, shared: Arc<ProxySharedState>) -> Self {
-        let conn_id = connection.conn_id();
-        Self {
-            connection: Some(connection),
-            conn_id,
-            shared,
-        }
-    }
-
-    fn conn_id(&self) -> u64 {
-        self.conn_id
-    }
-
-    async fn unregister(mut self) {
-        let Some(connection) = self.connection.take() else {
-            return;
-        };
-        clear_relay_idle_candidate_in(self.shared.as_ref(), connection.conn_id());
-        connection.unregister().await;
-    }
-}
-
-impl Drop for RelayConnLease {
-    fn drop(&mut self) {
-        if let Some(connection) = self.connection.as_ref() {
-            clear_relay_idle_candidate_in(self.shared.as_ref(), connection.conn_id());
-        }
-    }
-}
 
 /// Runs Middle-End relay with explicit kernel-conntrack close publication policy.
 pub(crate) async fn handle_via_middle_proxy_with_conntrack<R, W>(
@@ -243,6 +206,8 @@ where
     let mut frame_counter: u64 = 0;
     let mut route_watch_open = true;
     let mut seen_pressure_seq = relay_pressure_event_seq_in(shared.as_ref());
+    let mut sender_joined = None;
+    let mut writer_joined = None;
     loop {
         if shared.conntrack_pressure_active() && !pressure_caps_applied {
             relay_idle_policy.apply_pressure_caps(config.server.conntrack_control.profile);
@@ -303,6 +268,14 @@ where
         }
 
         tokio::select! {
+            joined = &mut child_tasks.c2me_sender => {
+                sender_joined = Some(joined);
+                break;
+            }
+            joined = &mut child_tasks.me_writer => {
+                writer_joined = Some(joined);
+                break;
+            }
             _ = session_cancel.cancelled() => {
                 warn!(
                     user = %user,
@@ -464,7 +437,12 @@ where
     }
 
     drop(c2me_tx);
-    let c2me_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.c2me_sender).await {
+    // A completed child is consumed once; pending children retain bounded cleanup.
+    let sender_join = match sender_joined {
+        Some(joined) => Ok(joined),
+        None => timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.c2me_sender).await,
+    };
+    let c2me_result = match sender_join {
         Ok(joined) => {
             joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME sender join error: {e}"))))
         }
@@ -480,7 +458,11 @@ where
     if let Some(stop_tx) = child_tasks.stop_tx.take() {
         let _ = stop_tx.send(());
     }
-    let mut writer_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.me_writer).await {
+    let writer_join = match writer_joined {
+        Some(joined) => Ok(joined),
+        None => timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.me_writer).await,
+    };
+    let mut writer_result = match writer_join {
         Ok(joined) => {
             joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))))
         }

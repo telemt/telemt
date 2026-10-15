@@ -1565,7 +1565,7 @@ async fn idle_pooled_connection_closes_cleanly_in_generic_stream_path() {
     assert_eq!(stats.get_connects_bad(), 0);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn idle_pooled_connection_closes_cleanly_in_client_handler_path() {
     let front_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let front_addr = front_listener.local_addr().unwrap();
@@ -1644,12 +1644,8 @@ async fn idle_pooled_connection_closes_cleanly_in_client_handler_path() {
 
     let _client = TcpStream::connect(front_addr).await.unwrap();
 
-    // Let the accepted connection reach the idle wait before advancing paused time.
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(2)).await;
-    tokio::task::yield_now().await;
-
-    let result = tokio::time::timeout(Duration::from_secs(1), server_task)
+    // Real TCP readiness must not race an automatically advanced virtual timeout.
+    let result = tokio::time::timeout(Duration::from_secs(3), server_task)
         .await
         .unwrap()
         .unwrap();

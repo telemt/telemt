@@ -97,10 +97,16 @@ impl MePool {
                     missing_dcs.push(*dc);
                 }
             }
-            if !missing_dcs.is_empty() {
+            if !missing_dcs.is_empty() && !self.admission_ready_conditional_cast().await {
                 return Err(ProxyError::Proxy(format!(
                     "ME init incomplete: no live writers for DC groups {missing_dcs:?}"
                 )));
+            }
+            if !missing_dcs.is_empty() {
+                warn!(
+                    missing_dcs = ?missing_dcs,
+                    "ME started with partial coverage; missing DCs recover in background"
+                );
             }
 
             // Stage 2: continue saturating multi-endpoint DC groups in background.

@@ -601,7 +601,10 @@ async fn mtproto_pure_entropy_fuzzing_no_panics() {
     let shared = ProxySharedState::new();
     clear_auth_probe_state_for_testing_in_shared(shared.as_ref());
 
-    let config = test_config_with_secret_hex("8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e");
+    let mut config = test_config_with_secret_hex("8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e8e");
+    // This corpus checks classification, not the separately tested timing policy.
+    config.censorship.server_hello_delay_min_ms = 0;
+    config.censorship.server_hello_delay_max_ms = 0;
     let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
     let peer: SocketAddr = "192.0.2.110:12345".parse().unwrap();
 

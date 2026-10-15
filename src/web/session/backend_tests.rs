@@ -322,6 +322,8 @@ async fn delayed_valid_handshake_reaches_the_authenticated_relay() {
         Ok(2)
     );
 
+    // Keep the delayed-data scenario virtual, but wait for real TCP with real time.
+    tokio::time::resume();
     let accepted = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
     assert!(
         accepted.is_ok(),

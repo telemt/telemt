@@ -21,6 +21,10 @@ use crate::stream::{BufferPool, CryptoReader, CryptoWriter};
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
+#[cfg(test)]
+#[path = "authenticated/strict_me_tests.rs"]
+mod strict_me_tests;
+
 /// Immutable dependency snapshot pinned by one authenticated client stream.
 #[derive(Clone)]
 pub(crate) struct ClientRuntimeDeps {
@@ -118,6 +122,15 @@ where
     } else {
         None
     };
+
+    if deps.config.general.use_middle_proxy
+        && !deps.config.general.me2dc_fallback
+        && selected_me_pool.is_none()
+    {
+        return Err(ProxyError::Proxy(
+            "Required Middle-End route is unavailable".into(),
+        ));
+    }
 
     let relay_result = if deps.config.general.use_middle_proxy
         && matches!(route_snapshot.mode, RelayRouteMode::Middle)

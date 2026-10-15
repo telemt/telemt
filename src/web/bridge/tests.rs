@@ -1,5 +1,36 @@
 use super::*;
 
+fn has_template_placeholders(page: &BridgePage) -> bool {
+    let nonce = page
+        .content_security_policy
+        .split_once("script-src 'nonce-")
+        .expect("rendered page must declare its script nonce")
+        .1
+        .split_once('\'')
+        .expect("script nonce must be terminated")
+        .0;
+    let attribute = format!("nonce=\"{nonce}\"");
+    assert!(
+        page.body.contains(&attribute),
+        "page must use the policy nonce"
+    );
+    // URL-safe nonce entropy may contain double underscores without being a template token.
+    page.body
+        .replace(&attribute, "nonce=\"test\"")
+        .contains("__")
+}
+
+#[test]
+fn placeholder_check_allows_nonce_entropy_but_rejects_unresolved_templates() {
+    let mut page = BridgePage {
+        body: "<script nonce=\"AA__BBBBBBBBBBBBBBBBBBBB\">resolved</script>".into(),
+        content_security_policy: "script-src 'nonce-AA__BBBBBBBBBBBBBBBBBBBB'".into(),
+    };
+    assert!(!has_template_placeholders(&page));
+    page.body.push_str("__RUNTIME__");
+    assert!(has_template_placeholders(&page));
+}
+
 #[test]
 fn carrier_method_is_page_owned_and_used_by_every_https_request() {
     for method in [WebCarrierMethod::Post, WebCarrierMethod::Put] {
@@ -25,7 +56,7 @@ fn carrier_method_is_page_owned_and_used_by_every_https_request() {
             method,
             &SecureRandom::new(),
         );
-        assert!(!page.body.contains("__"));
+        assert!(!has_template_placeholders(&page));
         assert!(
             page.body
                 .contains(&format!("const carrierMethod='{}';", method.as_str()))
@@ -112,7 +143,7 @@ fn render_diagnostic_page(bootstrap: &str) -> BridgePage {
 #[test]
 fn rendered_page_contains_bounded_negotiation_contract() {
     let page = render_page("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 4);
-    assert!(!page.body.contains("__"));
+    assert!(!has_template_placeholders(&page));
     assert!(!page.body.contains("bridge="));
     assert!(page.body.contains("X-Carrier-Capabilities"));
     assert!(page.body.contains("X-Carrier-Attempt"));
@@ -395,7 +426,7 @@ fn bridge_diagnostic_sideband_is_absent_by_default() {
 fn enabled_bridge_diagnostics_use_the_https_sideband_only() {
     let page = render_diagnostic_page("JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ");
 
-    assert!(!page.body.contains("__"));
+    assert!(!has_template_placeholders(&page));
     assert!(page.body.contains("fetch(relayBase+'/api/v1/diagnostic'"));
     assert!(page.body.contains("JSON.stringify({v:1,event})"));
     assert!(page.body.contains("'Content-Type':'application/json'"));

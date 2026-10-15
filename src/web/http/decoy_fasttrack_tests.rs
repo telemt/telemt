@@ -4,6 +4,7 @@ use crate::config::WebDecoyFastTrackMode;
 use crate::web::telemetry::WebDecoyFastTrackDisposition;
 
 const RECOVERY_TYPE: &str = "application/vnd.telemt.web-recovery+json";
+const ORIGIN_DATE: &str = "Thu, 15 Oct 2026 00:00:00 GMT";
 
 struct Observation {
     response: Vec<u8>,
@@ -51,10 +52,11 @@ async fn capture_origin_request(listener: &TcpListener) -> Vec<u8> {
             break;
         }
     }
-    stream
-        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin")
-        .await
-        .unwrap();
+    // Keep the origin response stable across modes and wall-clock seconds.
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\nDate: {ORIGIN_DATE}\r\n\r\norigin"
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
     captured
 }
 
@@ -79,6 +81,9 @@ async fn observe_http_origin(
         request(&listener, &runtime, request_bytes),
         capture_origin_request(origin)
     );
+    let (headers, body) = split_response(&response);
+    assert_eq!(response_header(headers, "date"), ORIGIN_DATE);
+    assert_eq!(body, b"origin");
     let counters = WebDecoyFastTrackDisposition::ALL
         .map(|disposition| runtime.telemetry().decoy_fasttrack_total(disposition));
 

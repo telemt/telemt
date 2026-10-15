@@ -295,11 +295,19 @@ async fn client_delete_during_drain_completes_naturally() {
     stop_runtime(runtime, generation).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn deadline_force_closes_all_sessions_and_requires_explicit_resume() {
     let (runtime, generation, listener) = live_runtime().await;
     let bootstrap = issue_bootstrap(&runtime);
-    let (_, token) = create_session(&listener, &runtime, &bootstrap).await;
+    let (_, token) = tokio::time::timeout(
+        Duration::from_secs(3),
+        create_session(&listener, &runtime, &bootstrap),
+    )
+    .await
+    .unwrap();
+
+    // Real TCP setup must finish before Tokio can auto-advance virtual time.
+    tokio::time::pause();
 
     let accepted = runtime
         .drain_operator(Duration::from_secs(30))
@@ -313,7 +321,19 @@ async fn deadline_force_closes_all_sessions_and_requires_explicit_resume() {
         runtime.drain_operator(Duration::from_secs(30)).await,
         Err(OperatorLifecycleError::OperationInProgress)
     ));
-    tokio::time::advance(Duration::from_secs(30)).await;
+    tokio::time::advance(Duration::from_secs(29)).await;
+    assert_eq!(
+        serde_json::to_value(runtime.operator_lifecycle_status()).unwrap()["state"],
+        "draining"
+    );
+    assert!(
+        runtime
+            .get_session(token_hash(&token), "proxy.example.com")
+            .is_ok()
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    // Let rounded timer deadlines and cleanup progress under a real-time bound.
+    tokio::time::resume();
     let completed = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let status = runtime.operator_lifecycle_status();

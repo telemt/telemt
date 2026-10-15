@@ -33,14 +33,11 @@ impl MePool {
             }
         }
 
-        for dc in endpoints_by_dc.keys() {
-            let alive = live_writers_by_dc.get(dc).copied().unwrap_or(0);
-            if alive == 0 {
-                return false;
-            }
-        }
-
-        true
+        // A missing DC must not close healthy routes or force a global cutover.
+        // The send path still requires a writer for the exact requested DC.
+        endpoints_by_dc
+            .keys()
+            .any(|dc| live_writers_by_dc.get(dc).copied().unwrap_or(0) > 0)
     }
 
     #[allow(dead_code)]

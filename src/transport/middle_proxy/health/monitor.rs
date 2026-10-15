@@ -32,7 +32,14 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
                     .values()
                     .any(|entry| entry.alive < entry.target_required);
                 if health_tick {
-                    update_family_runtime_state(&pool, family, family_degraded);
+                    // Suppression applies to a family outage, not one missing DC.
+                    let family_unavailable = !observation.floor.by_dc.is_empty()
+                        && observation
+                            .floor
+                            .by_dc
+                            .values()
+                            .all(|entry| entry.alive == 0);
+                    update_family_runtime_state(&pool, family, family_unavailable);
                 }
                 degraded |= family_degraded;
                 target_total += observation

@@ -1,5 +1,46 @@
 use super::*;
 
+/// Owns the registered ME connection and its relay-idle bookkeeping.
+pub(super) struct RelayConnLease {
+    connection: Option<ConnLease>,
+    conn_id: u64,
+    shared: Arc<ProxySharedState>,
+}
+
+impl RelayConnLease {
+    /// Pins connection ownership to the relay scope.
+    pub(super) fn new(connection: ConnLease, shared: Arc<ProxySharedState>) -> Self {
+        let conn_id = connection.conn_id();
+        Self {
+            connection: Some(connection),
+            conn_id,
+            shared,
+        }
+    }
+
+    /// Returns the pinned connection identifier.
+    pub(super) fn conn_id(&self) -> u64 {
+        self.conn_id
+    }
+
+    /// Clears relay bookkeeping before explicitly unregistering the connection.
+    pub(super) async fn unregister(mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        clear_relay_idle_candidate_in(self.shared.as_ref(), connection.conn_id());
+        connection.unregister().await;
+    }
+}
+
+impl Drop for RelayConnLease {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.as_ref() {
+            clear_relay_idle_candidate_in(self.shared.as_ref(), connection.conn_id());
+        }
+    }
+}
+
 pub(super) struct RelayChildTasks {
     pub(super) c2me_sender: AbortOnDropHandle<Result<()>>,
     pub(super) me_writer: AbortOnDropHandle<Result<()>>,
