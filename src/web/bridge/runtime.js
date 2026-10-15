@@ -40,7 +40,7 @@ const buffers=bufferSupport.create({
  buffered:()=>{let total=socket?socket.bufferedAmount:0;for(const value of lanes.values())if(value.socket)total+=value.socket.bufferedAmount;return total},
  pending:()=>pending,laneMode:()=>carrier==='https-lanes'||carrier==='websocket-lanes',maxStreams:()=>maxStreams,failure
 });
-const {reserve,release,releasePending,frameBound,splitFrames,acceptNativeFrames,observeServerFrames,findProbe,consumeProbe,takeBatch,closeFrame,retireStream,retireAllStreams,clearStreams}=buffers;
+const {reserve,release,releasePending,frameBound,splitFrames,acceptNativeFrames,observeServerFrames,findProbe,consumeProbe,canSendCandidate,takeBatch,closeFrame,retireStream,retireAllStreams,clearStreams}=buffers;
 function detachLease(lease){if(lease.lane){if(lease.lane.upLease===lease)lease.lane.upLease=null}else if(upLease===lease)upLease=null}
 function settleBatch(lease){if(!buffers.settleBatch(lease))return false;detachLease(lease);return true}
 function cancelBatch(lease){if(!lease||lease.settled)return;buffers.cancelBatch(lease);detachLease(lease)}
@@ -141,13 +141,15 @@ function armCarrierDeadline(epoch){
  carrierTimer=setTimeout(()=>advanceCarrier('timeout',epoch),Math.max(0,remaining));
 }
 function clearProbeTimer(){if(probeTimer){clearTimeout(probeTimer.timer);probeTimer=null}}
+function clearCandidateRetry(next){const state=next&&next.telemt;if(state&&state.retryTimer){clearTimeout(state.retryTimer);state.retryTimer=null}}
+function retryCandidateSocket(next){const state=next.telemt;if(!state||state.retryTimer||closed||carrierCommitted)return;state.retryTimer=setTimeout(()=>{state.retryTimer=null;sendCandidateSocket(next)},10)}
 function resetCandidate(){
  stopHttp(true);upWindow=1;
  clearProbeTimer();
- if(socket){const previous=socket;socket=null;previous.close()}socketReady=false;
+ if(socket){const previous=socket;socket=null;clearCandidateRetry(previous);previous.close()}socketReady=false;
  cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
-  if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket)lane.socket.close();
+  if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket){clearCandidateRetry(lane.socket);lane.socket.close()}
  }
  lanes.clear();closedLanes.clear();closedLaneOrder.length=0;upSequence=1;downCursor='0';upRunning=false;
  sessionToken='';carrier='';candidateRunning=false;currentAttempt=null;
@@ -200,7 +202,7 @@ function startCandidate(probe,epoch){
  else advanceCarrier('protocol',epoch);
 }
 function maybeStartCandidate(){
- if(closed||carrierCommitted||!sessionToken)return;if(candidateRunning){try{flushHttpPending()}catch(error){fail(failureReason(error,'protocol'))}return}const epoch=attemptEpoch;
+ if(closed||carrierCommitted||!sessionToken)return;if(candidateRunning){try{if(carrier==='https'||carrier==='https-lanes')flushHttpPending();else if(carrier==='websocket')sendCandidateSocket(socket);else if(carrier==='websocket-lanes')for(const lane of lanes.values())if(lane.socket&&lane.socket.telemt&&lane.socket.telemt.epoch===attemptEpoch){sendCandidateSocket(lane.socket);break}}catch(error){fail(failureReason(error,'protocol'))}return}const epoch=attemptEpoch;
  let probe;try{probe=findProbe(true)}catch(error){fail('protocol');return}if(!probe)return;
  if(!probeCoalesceMs||probe.hasData){startCandidate(probe,epoch);return}
  if(probeTimer)return;const owner={epoch,timer:null};
@@ -274,16 +276,34 @@ function queueCarrier(data){
  }catch(error){fail('protocol')}
 }
 function sendCandidateSocket(next){
- const state=next.telemt;if(!state||state.sent||next.readyState!==WebSocket.OPEN||!state.probe)return;
+ const state=next.telemt;if(!state||state.epoch!==attemptEpoch||next.readyState!==WebSocket.OPEN||!state.probe)return;
+ if(state.lane?state.lane.socket!==next:socket!==next)return;
+ clearCandidateRetry(next);
+ if(state.sent){
+  if(!negotiationEnabled||carrierCommitted)return;
+  try{
+   const fresh=findProbe(false,state.sentSpans,state.probe.id,2,true);if(!fresh)return;
+   const allowed=canSendCandidate(state.lane?state.probe.id:null,next.bufferedAmount,fresh.data.byteLength);
+   if(allowed==='capacity'){fail('capacity');return}if(allowed==='reserved')return;if(allowed!==true){retryCandidateSocket(next);return}
+   next.send(fresh.data);port.postMessage({t:'traffic',up:fresh.data.byteLength,down:0});state.probe.spans.push(...fresh.spans);state.sentSpans.push(...fresh.spans);if(fresh.more)retryCandidateSocket(next);
+  }catch(error){advanceCarrier('upgrade',state.epoch)}
+  return;
+ }
  let probe=state.probe;
- try{const fresh=findProbe(true);if(fresh&&fresh.id===probe.id)probe=fresh;next.send(probe.data)}catch(error){advanceCarrier('upgrade',state.epoch);return}
- state.probe=probe;state.sent=true;if(!negotiationEnabled){if(state.openTimer)clearTimeout(state.openTimer);state.openTimer=null;commitCarrier(probe,state.epoch)}
+ try{
+  const fresh=findProbe(true);if(fresh&&fresh.id===probe.id)probe=fresh;
+  let allowed=canSendCandidate(state.lane?probe.id:null,next.bufferedAmount,probe.data.byteLength);
+  if(allowed!==true){probe=findProbe(false);if(!probe)return;allowed=canSendCandidate(state.lane?probe.id:null,next.bufferedAmount,probe.data.byteLength)}
+  if(allowed==='capacity'||allowed==='reserved'){fail('capacity');return}if(allowed!==true){retryCandidateSocket(next);return}
+  next.send(probe.data)
+ }catch(error){advanceCarrier('upgrade',state.epoch);return}
+ state.probe=probe;state.sent=true;state.sentSpans=probe.spans.slice();if(!negotiationEnabled){if(state.openTimer)clearTimeout(state.openTimer);state.openTimer=null;commitCarrier(probe,state.epoch)}else sendCandidateSocket(next)
 }
 function openCandidateSocket(probe,laneID,epoch){
  let lane=laneID===null?null:ensureLane(laneID),next=lane?lane.socket:socket;
  if(next){if(!next.telemt||next.telemt.epoch!==epoch){advanceCarrier('protocol',epoch);return}if(probe)next.telemt.probe=probe;sendCandidateSocket(next);return}
  const token=sessionToken,protocol=laneID===null?(negotiationEnabled?'tproxy-auto-v1.':'tproxy-v1.')+token:(negotiationEnabled?'tproxy-auto-lane-v1.':'tproxy-lane-v1.')+token+'.'+String(laneID);
- next=new WebSocket(socketURL(),protocol);next.binaryType='arraybuffer';next.telemt={epoch,lane,probe,opened:false,sent:false,openTimer:null};
+ next=new WebSocket(socketURL(),protocol);next.binaryType='arraybuffer';next.telemt={epoch,lane,probe,opened:false,sent:false,sentSpans:[],openTimer:null,retryTimer:null};
  next.telemt.openTimer=setTimeout(()=>{
   const state=next.telemt;if(closed||state.epoch!==attemptEpoch)return;
   next.close();advanceCarrier('timeout',state.epoch);
@@ -295,6 +315,7 @@ function openCandidateSocket(probe,laneID,epoch){
  };
  next.onmessage=event=>{
   const state=next.telemt;if(closed||state.epoch!==attemptEpoch||!(event.data instanceof ArrayBuffer))return;
+  clearCandidateRetry(next);
   if(state.openTimer)clearTimeout(state.openTimer);state.openTimer=null;
   if(!carrierCommitted){if(!state.sent||event.data.byteLength!==0){advanceCarrier('protocol',state.epoch);return}commitCarrier(state.probe,state.epoch);return}
   try{
@@ -305,7 +326,7 @@ function openCandidateSocket(probe,laneID,epoch){
  };
  next.onerror=()=>{};
  next.onclose=()=>{
-  const state=next.telemt;if(state.openTimer)clearTimeout(state.openTimer);state.openTimer=null;if(state.epoch!==attemptEpoch||closed)return;
+  const state=next.telemt;if(state.openTimer)clearTimeout(state.openTimer);state.openTimer=null;clearCandidateRetry(next);if(state.epoch!==attemptEpoch||closed)return;
   if(!carrierCommitted){advanceCarrier(state.opened?'network':'upgrade',state.epoch);return}
   if(state.lane){state.lane.ready=false;state.lane.socket=null;finishLane(state.lane,true)}else{socketReady=false;recoveryController.recover('network',null)}
  };
@@ -384,9 +405,9 @@ function deleteSession(){
 }
 function close(notifyServer){
  if(closed)return;closed=true;stopHttp(false);if(recoveryController)recoveryController.cancel();rejectRecoveryCommit(failure('network','bridge closed'));if(helloTimer)clearTimeout(helloTimer);helloTimer=null;if(carrierTimer)clearTimeout(carrierTimer);clearProbeTimer();if(schedulerTimer)clearTimeout(schedulerTimer);schedulerTimer=null;if(attemptController)attemptController.abort();
- if(socket)socket.close();cancelBatch(upLease);releasePending(upPending,null);
+ if(socket){clearCandidateRetry(socket);socket.close()}cancelBatch(upLease);releasePending(upPending,null);
  for(const lane of lanes.values()){
-  if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket)lane.socket.close();
+  if(lane.controller)lane.controller.abort();cancelBatch(lane.upLease);releasePending(lane.pending,lane);if(lane.socket){clearCandidateRetry(lane.socket);lane.socket.close()}
  }
  if(notifyServer)deleteSession();releasePending(pending,null);releasePending(recoveryPending,null);lanes.clear();clearStreams();if(port)port.close();
  buffers.assertEmpty();

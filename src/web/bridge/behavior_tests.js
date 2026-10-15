@@ -4,14 +4,35 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
 
-function renderedPage(){
- if(process.argv.includes('--stdin'))return fs.readFileSync(0,'utf8');
- let page=fs.readFileSync(path.join(__dirname,'document.html'),'utf8');
+let stdinRenderedPage;
+function applyRenderedOverrides(page,overrides){
+ const declarations={
+  NEGOTIATION_ENABLED:[/(\blet negotiationEnabled=)(true|false)(,candidateCount=)/,2],
+  BATCH_LIMIT:[/(\blet batchLimit=)(\d+)(,queueLimit=)/,2],
+  QUEUE_LIMIT:[/(\bqueueLimit=)(\d+)(,queueItemLimit=)/,2],
+  QUEUE_ITEMS:[/(\bqueueItemLimit=)(\d+)(,maxStreams=)/,2]
+ };
+ for(const [key,value] of Object.entries(overrides)){
+  const declaration=declarations[key];if(!declaration)continue;
+  const [pattern,valueGroup]=declaration,match=pattern.exec(page);
+  if(!match)throw new Error('cannot override rendered '+key+' declaration');
+  const replacement=match.slice(1);replacement[valueGroup-1]=String(value);
+  page=page.slice(0,match.index)+replacement.join('')+page.slice(match.index+match[0].length);
+ }
+ return page;
+}
+function renderedPage(sources={},overrides={}){
+ if(process.argv.includes('--stdin')){
+  stdinRenderedPage??=fs.readFileSync(0,'utf8');
+  return applyRenderedOverrides(stdinRenderedPage,overrides);
+ }
+ const read=(name)=>sources[name]===undefined?fs.readFileSync(path.join(__dirname,name),'utf8'):sources[name];
+ let page=read('document.html');
  const modules={RESPONSE:'response',REQUEST:'request',BUFFER:'buffers',RECOVERY:'recovery',CONVEYOR:'conveyor',DOWNLINK:'downlink'};
  page=page.replace('__DIAGNOSTIC_RUNTIME__','');
- for(const [key,file] of Object.entries(modules))if(page.includes('__'+key+'_RUNTIME__'))page=page.replace('__'+key+'_RUNTIME__',()=>fs.readFileSync(path.join(__dirname,file+'.js'),'utf8'));
- page=page.replace('__RUNTIME__',()=>fs.readFileSync(path.join(__dirname,'runtime.js'),'utf8'));
- const values={BOOTSTRAP:'A'.repeat(43),HOST:'proxy.example.com',BASE_PREFIX:'',CARRIER_METHOD:'POST',NEGOTIATION_ENABLED:'true',CANDIDATE_COUNT:4,CARRIER_DEADLINES:'3,5,8,12',LONG_POLL_SECS:25,BRIDGE_REQUEST_SECS:10,BRIDGE_RETRY_SECS:90,BRIDGE_RECOVERY_SECS:15,WEBSOCKET_OPEN_SECS:15,RECONNECT_GRACE_SECS:120,CARRIER_PROBE_COALESCE_MS:0,BATCH_LIMIT:2097152,QUEUE_LIMIT:33554432,QUEUE_ITEMS:16384,MAX_STREAMS:1024,STATUS_FUNCTION:"state=>{if(port&&!closed)port.postMessage({t:'status',state})}",HELLO_TIMEOUT_CALLBACK:"()=>fail('timeout')",PAGEHIDE_CALLBACK:'()=>close(true)'};
+ for(const [key,file] of Object.entries(modules))if(page.includes('__'+key+'_RUNTIME__'))page=page.replace('__'+key+'_RUNTIME__',()=>read(file+'.js'));
+ page=page.replace('__RUNTIME__',()=>read('runtime.js'));
+ const values={BOOTSTRAP:'A'.repeat(43),HOST:'proxy.example.com',BASE_PREFIX:'',CARRIER_METHOD:'POST',NEGOTIATION_ENABLED:'true',CANDIDATE_COUNT:4,CARRIER_DEADLINES:'3,5,8,12',LONG_POLL_SECS:25,BRIDGE_REQUEST_SECS:10,BRIDGE_RETRY_SECS:90,BRIDGE_RECOVERY_SECS:15,WEBSOCKET_OPEN_SECS:15,RECONNECT_GRACE_SECS:120,CARRIER_PROBE_COALESCE_MS:0,BATCH_LIMIT:2097152,QUEUE_LIMIT:33554432,QUEUE_ITEMS:16384,MAX_STREAMS:1024,STATUS_FUNCTION:"state=>{if(port&&!closed)port.postMessage({t:'status',state})}",HELLO_TIMEOUT_CALLBACK:"()=>fail('timeout')",PAGEHIDE_CALLBACK:'()=>close(true)',...overrides};
  return page.replace(/__([A-Z_]+)__/g,(all,key)=>key.startsWith('DIAGNOSTIC_')?'':String(values[key]??''));
 }
 function frame(type,id=0,payload=[]){
@@ -21,14 +42,21 @@ function frame(type,id=0,payload=[]){
 function join(...frames){const data=new Uint8Array(frames.reduce((n,f)=>n+f.byteLength,0));let offset=0;for(const f of frames){data.set(new Uint8Array(f),offset);offset+=f.byteLength}return data.buffer}
 async function flush(){for(let i=0;i<40;i++)await Promise.resolve()}
 function environment(page,android=false){
- let now=1000,nextTimer=1;const timers=new Map(),events=new Map(),requests=[],received=[];
+ let now=1000,nextTimer=1;const timers=new Map(),events=new Map(),requests=[],received=[],webSockets=[];
  const port={onmessage:null,start(){},close(){},postMessage(value,transfer){received.push(structuredClone(value,{transfer:transfer||[]}))}};
  const context={ArrayBuffer,Uint8Array,DataView,TextDecoder,TextEncoder,URL,Headers,AbortController,ReadableStream,structuredClone,console,
   location:{hash:android?'#android='+'A'.repeat(43):'',pathname:'/',search:'?bridge=test'},history:{replaceState(){}},parent:{},
   performance:{now:()=>now},Date:class extends Date{static now(){return now}},document:{visibilityState:'visible',addEventListener(){}},
   addEventListener:(name,fn)=>events.set(name,fn),setTimeout:(fn,delay)=>{const id=nextTimer++;timers.set(id,{fn,at:now+delay});return id},clearTimeout:id=>timers.delete(id),
   fetch:(url,options)=>new Promise((resolve,reject)=>{const request={url,options,resolve,reject};requests.push(request);options.signal?.addEventListener('abort',()=>reject(new Error('aborted')),{once:true})}),
-  WebSocket:class {static OPEN=1;static CLOSING=2;constructor(){throw new Error('unexpected websocket')}}
+  WebSocket:class {
+   static CONNECTING=0;static OPEN=1;static CLOSING=2;static CLOSED=3;
+   constructor(url,protocol){this.url=url;this.protocol=protocol;this.readyState=0;this.bufferedAmount=0;this.sent=[];webSockets.push(this)}
+   open(){if(this.readyState!==0)return;this.readyState=1;if(this.onopen)this.onopen()}
+   send(data){if(this.readyState!==1)throw new Error('websocket is not open');if(this.throwOnSend===this.sent.length+1)throw new Error('synthetic send failure');this.sent.push(data.slice(0));this.bufferedAmount+=data.byteLength}
+   message(data){if(this.onmessage)this.onmessage({data:data.slice(0)})}
+   close(){if(this.readyState===3)return;this.readyState=3;if(this.onclose)this.onclose()}
+  }
  };
  if(android)context.TelegramWebProxy={onmessage:null,postMessage(value){received.push(typeof value==='string'?JSON.parse(value):structuredClone(value))}};
  vm.createContext(context);
@@ -37,7 +65,7 @@ function environment(page,android=false){
  const send=data=>android?context.TelegramWebProxy.onmessage({data}):port.onmessage({data});
  const pending=suffix=>requests.filter(r=>r.url.endsWith(suffix)&&!r.answered);
  const answer=(request,status,body=null,headers={})=>{request.answered=true;request.resolve({status,headers:new Headers(headers),body:body===null?null:new ReadableStream({start(c){c.enqueue(new Uint8Array(body));c.close()}})})};
- return {context,send,pending,answer,received,requests,async tick(ms){const until=now+ms;for(;;){const entry=[...timers].filter(([,t])=>t.at<=until).sort((a,b)=>a[1].at-b[1].at)[0];if(!entry)break;now=entry[1].at;timers.delete(entry[0]);entry[1].fn();await flush()}now=until;await flush()},close(){events.get('pagehide')();}};
+ return {context,send,pending,answer,received,requests,webSockets,now:()=>now,schedule:(fn,delay)=>context.setTimeout(fn,delay),async tick(ms){const until=now+ms;for(;;){const entry=[...timers].filter(([,t])=>t.at<=until).sort((a,b)=>a[1].at-b[1].at)[0];if(!entry)break;now=entry[1].at;timers.delete(entry[0]);entry[1].fn();await flush()}now=until;await flush()},close(){events.get('pagehide')();}};
 }
 async function session(page,carrier='https',window=1,android=false){
  const env=environment(page,android);env.send(frame(16,0,[1]));await flush();
@@ -57,6 +85,141 @@ function streaming(env,request,next='1',length=null){
 test('already queued OPEN and DATA share the zero-wait startup request',async page=>{
  const env=await session(page);const body=join(frame(1,1),frame(2,1,[7,8]));env.send(body);await flush();
  assert.equal(env.pending('/api/v1/up')[0].options.body.byteLength,body.byteLength);env.close();await flush();
+});
+test('negotiated WebSocket candidates send later DATA before the empty ACK',async page=>{
+ for(const android of [false,true])for(const carrier of ['websocket','websocket-lanes']){
+  const env=await session(page,carrier,4,android);env.send(frame(1,1));await flush();
+  const socket=env.webSockets[0];assert.ok(socket,carrier+' candidate socket');socket.open();
+  assert.equal(socket.sent.length,1,'OPEN probe sent first');
+  const upTraffic=()=>env.received.filter(value=>value&&value.t==='traffic'&&value.up>0);
+  assert.equal(upTraffic().length,0,'initial OPEN probe keeps existing traffic accounting behavior');
+  const first=frame(2,1,[9]),second=frame(2,1,[10]);env.send(first);await flush();env.send(second);await flush();
+  assert.equal(socket.sent.length,3,carrier+' DATA must not wait for the commit ACK');
+  assert.deepEqual(new Uint8Array(socket.sent[1]),new Uint8Array(first));
+  assert.deepEqual(new Uint8Array(socket.sent[2]),new Uint8Array(second));
+  assert.deepEqual(upTraffic().map(value=>value.up),[first.byteLength,second.byteLength],'successful speculative DATA writes are counted exactly once');
+  assert.ok(!env.received.some(value=>value&&value.t==='status'&&value.state==='connected'),'ACK remains the commit fence');
+  assert.equal(env.webSockets.length,1,'no extra socket before commit');
+  socket.message(new ArrayBuffer(0));await flush();
+  assert.equal(socket.sent.length,3,'commit drain must not resend speculative DATA');
+  assert.deepEqual(upTraffic().map(value=>value.up),[first.byteLength,second.byteLength],'ACK commit does not count the DATA again');
+  assert.ok(env.received.some(value=>value&&value.t==='status'&&value.state==='connected'));
+  env.close();await flush();
+ }
+});
+test('candidate pipeline preserves mixed frame order and lane ownership',async page=>{
+ for(const carrier of ['websocket','websocket-lanes']){
+  const env=await session(page,carrier);env.send(frame(1,1));await flush();const socket=env.webSockets[0];socket.open();
+  const mixed=join(frame(1,2),frame(2,2,[2]),frame(2,1,[1]),frame(2,1,[3]));env.send(mixed);await flush();
+  assert.equal(env.webSockets.length,1,'other lanes do not open a socket before ACK');
+  if(carrier==='websocket'){
+   assert.deepEqual(new Uint8Array(socket.sent[1]),new Uint8Array(join(frame(1,2),frame(2,2,[2]),frame(2,1,[1]),frame(2,1,[3]))));
+  }else{
+   assert.deepEqual(new Uint8Array(socket.sent[1]),new Uint8Array(join(frame(2,1,[1]),frame(2,1,[3]))));
+  }
+  socket.message(new ArrayBuffer(0));await flush();
+  if(carrier==='websocket'){
+   assert.equal(socket.sent.length,2,'ACK drain does not duplicate any precommit frame');
+   const sent=[];for(const body of socket.sent)for(let offset=0;offset<body.byteLength;){const view=new DataView(body,offset);sent.push([new Uint8Array(body)[offset],new Uint8Array(body)[offset+3]]);offset+=8+view.getUint32(4)}
+   assert.deepEqual(sent,[[1,1],[1,2],[2,2],[2,1],[2,1]],'multiplexed frame order is stable and DATA is sent once');
+  }else{
+  assert.equal(env.webSockets.length,2,'non-candidate lane opens only after ACK');
+   const other=env.webSockets[1];other.open();
+   await flush();
+   assert.deepEqual(new Uint8Array(other.sent[0]),new Uint8Array(join(frame(1,2),frame(2,2,[2]))));
+  }
+  env.close();await flush();
+ }
+});
+test('precommit native DATA batches are sent once in bounded selections',async page=>{
+ for(const carrier of ['websocket','websocket-lanes']){
+  const env=await session(page,carrier);env.send(frame(1,1));await flush();const socket=env.webSockets[0];socket.open();
+  const frames=Array.from({length:1000},(_,index)=>frame(2,1,[index&255]));const batch=join(...frames),started=process.hrtime.bigint();
+  env.send(batch);await flush();const elapsedMs=Number(process.hrtime.bigint()-started)/1e6;
+  assert.equal(socket.sent.length,2,carrier+' combines an eligible native batch into one pre-ACK WebSocket send');
+  assert.equal(socket.sent[1].byteLength,batch.byteLength);
+  assert.ok(elapsedMs<500,carrier+' processes a legal 1000-frame batch without a long synchronous stall: '+elapsedMs.toFixed(1)+'ms');
+  socket.message(new ArrayBuffer(0));await flush();assert.equal(socket.sent.length,2,'ACK does not resend the batch');env.close();await flush();
+ }
+});
+test('pre-ACK continuation advances valid aggregate queues beyond one frame batch',async page=>{
+ const env=await session(page,'websocket');env.send(frame(1,1));await flush();const socket=env.webSockets[0];
+ const makeBatch=offset=>join(...Array.from({length:3000},(_,index)=>frame(2,1,[(offset+index)&255])));
+ env.send(makeBatch(0));await flush();env.send(makeBatch(3000));await flush();socket.open();await flush();await env.tick(10);
+ let dataFrames=0;for(const body of socket.sent){const bytes=new Uint8Array(body);for(let offset=0;offset<bytes.byteLength;){const view=new DataView(body,offset);if(bytes[offset]===2)dataFrames++;offset+=8+view.getUint32(4)}}
+ assert.equal(dataFrames,6000,'all retained DATA reaches the candidate socket in bounded FIFO batches');
+ assert.ok(socket.sent.length<=4,'frame and byte bounds cap each continuation send');
+ socket.message(new ArrayBuffer(0));await flush();assert.equal(socket.sent.length<=4,true,'commit consumes sent spans without replay');env.close();await flush();
+});
+test('invalid and lost candidate ACKs and send failures stay fail-closed on replacement 409',async page=>{
+ for(const failure of ['invalid-ack','lost-ack','send-throws','initial-send-throws']){
+  const env=await session(page,'websocket');env.send(frame(1,1));await flush();const socket=env.webSockets[0];
+  if(failure==='initial-send-throws')socket.throwOnSend=1;socket.open();
+  if(failure!=='initial-send-throws'){const data=frame(2,1,[6]);if(failure==='send-throws')socket.throwOnSend=2;env.send(data);await flush()}
+  assert.equal(socket.sent.length,failure==='initial-send-throws'?0:failure==='send-throws'?1:2);
+  assert.equal(env.received.filter(value=>value&&value.t==='traffic'&&value.up>0).length,failure==='send-throws'||failure==='initial-send-throws'?0:1,'failed speculative send is not counted; successful sends count once');
+  if(failure==='invalid-ack')socket.message(frame(2,1,[1]));else if(failure==='lost-ack')await env.tick(3000);else if(failure!=='initial-send-throws')socket.close();
+  await flush();const replacement=env.pending('/api/v1/session')[0];assert.ok(replacement,'replacement attempt requested');
+  env.answer(replacement,409,null,{'X-Carrier-Mode':'websocket','X-Carrier-Attempt':'2','X-Carrier-Candidate-Count':'4','X-Carrier-Deadline':'12','X-Carrier-State':'committed'});await flush();
+  assert.equal(env.webSockets.length,1,'committed predecessor data is never replayed into a new socket');
+  assert.equal(socket.sent.length,failure==='initial-send-throws'?0:failure==='send-throws'?1:2);assert.ok(env.received.some(value=>value&&value.t==='close'));
+  assert.ok(!env.received.some(value=>value&&value.t==='status'&&value.state==='connected'));
+ }
+});
+test('legacy WebSocket commits its OPEN probe without negotiated ACK behavior',async()=>{
+ const env=environment(renderedPage({}, {NEGOTIATION_ENABLED:'false'}));env.send(frame(16,0,[1]));await flush();
+ const request=env.pending('/api/v1/session')[0];env.answer(request,200,frame(17),{'X-Session-Token':'B'.repeat(43),'X-Down-Cursor':'0','X-Carrier-Mode':'websocket','X-Telemt-Up-Window':'4'});await flush();
+ env.send(frame(1,1));await flush();const socket=env.webSockets[0];socket.open();assert.equal(socket.sent.length,1);
+ assert.ok(env.received.some(value=>value&&value.t==='status'&&value.state==='connected'));
+ env.send(frame(2,1,[3]));await flush();assert.equal(socket.sent.length,2,'legacy WSS keeps normal direct DATA writes');
+ env.close();await flush();
+});
+test('stale candidate callbacks and precommit close cannot commit or leak reservations',async page=>{
+ const env=await session(page,'websocket-lanes');env.send(frame(1,1));await flush();const socket=env.webSockets[0],staleMessage=socket.message.bind(socket);socket.open();
+ env.send(frame(2,1,[5]));await flush();const staleOpen=socket.onopen;socket.close();await flush();
+ const replacement=env.pending('/api/v1/session')[0];assert.ok(replacement);env.answer(replacement,200,frame(17),{'X-Session-Token':'C'.repeat(43),'X-Down-Cursor':'0','X-Carrier-Mode':'websocket-lanes','X-Carrier-Attempt':'2','X-Carrier-Candidate-Count':'4','X-Carrier-Deadline':'12','X-Carrier-State':'provisional','X-Telemt-Up-Window':'4'});await flush();
+ const successor=env.webSockets[1];assert.ok(successor);successor.open();await flush();staleOpen();staleMessage(new ArrayBuffer(0));await flush();
+ assert.ok(!env.received.some(value=>value&&value.t==='status'&&value.state==='connected'));
+ successor.message(new ArrayBuffer(0));await flush();assert.ok(env.received.some(value=>value&&value.t==='status'&&value.state==='connected'));
+ env.send({t:'close'});await flush();assert.equal(env.requests.filter(request=>request.options.method==='DELETE').length,1);env.close();await flush();
+});
+test('precommit WebSocket capacity includes buffered bytes and releases on close',async page=>{
+ const env=await session(page,'websocket');env.send(frame(1,1));await flush();const socket=env.webSockets[0];socket.open();
+ socket.bufferedAmount=33554432-25;const data=frame(2,1,[4]);env.send(data);await flush();
+ assert.equal(socket.sent.length,1,'send-time capacity check prevents an unbounded speculative copy');
+  assert.equal(env.received.filter(value=>value&&value.t==='traffic'&&value.up>0).length,0,'deferred DATA is not counted before a successful send');
+ socket.bufferedAmount=0;await env.tick(10);assert.equal(socket.sent.length,2,'bounded retry resumes when buffered bytes drain');
+  assert.deepEqual(env.received.filter(value=>value&&value.t==='traffic'&&value.up>0).map(value=>value.up),[data.byteLength],'buffer-drain retry accounts DATA once');
+ assert.deepEqual(new Uint8Array(socket.sent[1]),new Uint8Array(data));socket.message(new ArrayBuffer(0));await flush();
+ socket.bufferedAmount=33554432;env.send(frame(2,1,[5]));await flush();
+ assert.equal(socket.sent.length,2,'queue reservation rejects data at the global buffer limit');
+ assert.ok(env.received.some(value=>value&&value.t==='close'));
+ const laneEnv=await session(page,'websocket-lanes');laneEnv.send(frame(1,1));await flush();const laneSocket=laneEnv.webSockets[0];laneSocket.open();
+ laneSocket.bufferedAmount=8388608-20;const laneData=frame(2,1,[6]);laneEnv.send(laneData);await flush();
+ assert.equal(laneSocket.sent.length,1,'per-lane send limit includes the WebSocket buffered amount');
+ laneSocket.bufferedAmount=0;await laneEnv.tick(10);assert.equal(laneSocket.sent.length,2,'per-lane retry resumes after drain');
+ laneSocket.message(new ArrayBuffer(0));await flush();laneEnv.close();await flush();
+});
+test('precommit retained queue exhaustion fails promptly instead of retrying forever',async()=>{
+ for(const carrier of ['websocket','websocket-lanes']){
+  const page=renderedPage({}, {QUEUE_LIMIT:128,BATCH_LIMIT:128}),env=await session(page,carrier);env.send(frame(1,1));await flush();
+  env.send(frame(2,1,new Array(112).fill(1)));await flush();const socket=env.webSockets[0];socket.open();await flush();
+  assert.equal(socket.sent.length,0,carrier+' does not exceed queue capacity to send the retained OPEN');
+  assert.ok(env.received.some(value=>value&&value.t==='close'),'permanent precommit capacity shortage fails promptly');
+  await env.tick(1000);assert.equal(socket.sent.length,0,'no futile retry remains scheduled');
+ }
+ const page=renderedPage({}, {QUEUE_ITEMS:2}),env=await session(page,'websocket-lanes');env.send(frame(1,1));await flush();
+ env.send(join(frame(2,1,[1]),frame(2,1,[2])));await flush();env.webSockets[0].open();await flush();
+ assert.ok(env.received.some(value=>value&&value.t==='close'),'lane frame-item limit includes precommit retained DATA');
+ assert.equal(env.webSockets[0].sent.length,0);
+});
+test('when only speculative copy headroom is exhausted OPEN still commits and drains once',async()=>{
+ const page=renderedPage({}, {QUEUE_LIMIT:128,BATCH_LIMIT:128}),env=await session(page,'websocket');env.send(frame(1,1));await flush();
+ const data=frame(2,1,new Array(64).fill(3));env.send(data);await flush();const socket=env.webSockets[0];socket.open();await flush();
+ assert.equal(socket.sent.length,1,'OPEN-only progress avoids copying retained DATA over the queue cap');
+ assert.ok(!env.received.some(value=>value&&value.t==='close'));
+ socket.message(new ArrayBuffer(0));await flush();assert.equal(socket.sent.length,2,'ACK releases the probe reservation and regular carrier drain sends DATA');
+ assert.deepEqual(new Uint8Array(socket.sent[1]),new Uint8Array(data));env.close();await flush();
 });
 test('negotiated conveyor sends DATA before the OPEN acknowledgement',async page=>{
  for(const android of [false,true])for(const carrier of ['https','https-lanes']){
@@ -262,4 +425,5 @@ test('native close cancels every HTTP request and pagehide cannot repeat cleanup
  }
 });
 
-(async()=>{const page=renderedPage();let failed=0;for(const {name,run} of tests){let timer;try{await Promise.race([run(page),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('test made no bounded progress')),5000)})]);console.log('ok - '+name)}catch(error){failed++;console.error('not ok - '+name+'\n'+error.stack)}finally{clearTimeout(timer)}}if(failed)process.exitCode=1})();
+module.exports={renderedPage,frame,join,flush,environment,session};
+if(!process.argv.includes('--benchmark-module'))(async()=>{const page=renderedPage();let failed=0;for(const {name,run} of tests){let timer;try{await Promise.race([run(page),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('test made no bounded progress')),5000)})]);console.log('ok - '+name)}catch(error){failed++;console.error('not ok - '+name+'\n'+error.stack)}finally{clearTimeout(timer)}}if(failed)process.exitCode=1})();

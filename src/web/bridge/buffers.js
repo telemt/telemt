@@ -64,31 +64,53 @@ function create(settings){
  function observeServerFrames(data){
   for(const value of splitFrames(data))if(value.type===3){activeStreams.delete(value.id);rememberStreamRetired(value.id)}
  }
- function probeFrames(){
-  const result=[];let scanned=0,pending=settings.pending(),batchLimit=settings.limits().batchBytes;
+ function probeFrames(excludedRanges){
+  const result=[];let scanned=0,pending=settings.pending(),batchLimit=settings.limits().batchBytes,more=false;
   for(let index=0;index<pending.length;index++){
-   const source=pending[index],view=new DataView(source);let start=0;
+   const source=pending[index],view=new DataView(source),ranges=excludedRanges.get(source)||[];let start=0,rangeIndex=0;
    while(start<source.byteLength){
-    if(source.byteLength-start<8||result.length>=4096)throw new Error('invalid frame batch');
+    while(rangeIndex<ranges.length&&ranges[rangeIndex].end<=start)rangeIndex++;
+    if(rangeIndex<ranges.length&&ranges[rangeIndex].start===start){start=ranges[rangeIndex++].end;continue}
+    if(source.byteLength-start<8)throw new Error('invalid frame batch');
     const type=view.getUint8(start),id=(view.getUint8(start+1)<<16)|(view.getUint8(start+2)<<8)|view.getUint8(start+3);
     const size=view.getUint32(start+4),end=start+8+size,bytes=end-start;
     if((type===2&&!size)||size>1048576||end>source.byteLength)throw new Error('invalid frame');
-    if(scanned+bytes>batchLimit)return result;
-    result.push({source,index,start,end,type,id});scanned+=bytes;start=end;
+    const frame={source,index,start,end,type,id};start=end;
+    if(result.length>=4096||scanned+bytes>batchLimit){more=true;return {frames:result,more}}
+    result.push(frame);scanned+=bytes;
    }
   }
-  return result;
+  return {frames:result,more};
  }
- function findProbe(includeData){
-  const frames=probeFrames(),first=frames.findIndex(frame=>frame.type===1||frame.type===2);if(first<0)return null;
-  const laneMode=settings.laneMode(),selected=[];let hasData=frames[first].type===2;
-  if(laneMode){
+ function findProbe(includeData,excludeSpans,targetID,targetType,collectAll){
+  const excludedRanges=new Map();
+  for(const span of excludeSpans||[]){const ranges=excludedRanges.get(span.source)||[];ranges.push(span);excludedRanges.set(span.source,ranges)}
+  const scanned=probeFrames(excludedRanges),frames=scanned.frames;
+  let first;const selected=[];let hasData;
+  if(targetID!==undefined){
+   first=frames.findIndex(frame=>frame.id===targetID&&frame.type===(targetType===undefined?2:targetType));
+   if(first<0){
+    if(!scanned.more)return null;
+    const laneMode=settings.laneMode();for(const frame of frames)if(!laneMode||frame.id===targetID)selected.push(frame);
+    if(!selected.length)return null;
+    first=frames.indexOf(selected[0]);
+   }
+   let last=first;
+   if(collectAll)for(let index=first+1;index<frames.length;index++)if(frames[index].id===targetID&&frames[index].type===(targetType===undefined?2:targetType))last=index;
+   const laneMode=settings.laneMode();
+   if(selected.length===0)for(let index=0;index<=last;index++)if(!laneMode||frames[index].id===targetID)selected.push(frames[index]);
+   hasData=selected.some(frame=>frame.type===2);
+  }else{
+   first=frames.findIndex(frame=>frame.type===1||frame.type===2);if(first<0)return null;
+   hasData=frames[first].type===2;
+   if(settings.laneMode()){
    selected.push(frames[first]);
    if(includeData&&!hasData)for(let index=first+1;index<frames.length;index++)if(frames[index].id===frames[first].id){selected.push(frames[index]);if(frames[index].type===2){hasData=true;break}}
-  }else{
-   let last=first;
-   if(includeData&&!hasData)for(let index=first+1;index<frames.length;index++){if(frames[index].id===frames[first].id&&frames[index].type===2){last=index;hasData=true;break}}
-   for(let index=0;index<=(hasData?last:first);index++)selected.push(frames[index]);
+   }else{
+    let last=first;
+    if(includeData&&!hasData)for(let index=first+1;index<frames.length;index++){if(frames[index].id===frames[first].id&&frames[index].type===2){last=index;hasData=true;break}}
+    for(let index=0;index<=(hasData?last:first);index++)selected.push(frames[index]);
+   }
   }
   const spans=[];let total=0;
   for(const frame of selected){
@@ -98,7 +120,7 @@ function create(settings){
   }
   const joined=new Uint8Array(total);let offset=0;
   for(const span of spans){const part=new Uint8Array(span.source,span.start,span.end-span.start);joined.set(part,offset);offset+=part.byteLength}
-  return {spans,id:frames[first].id,data:joined.buffer,hasData};
+  return {spans,id:frames[first].id,data:joined.buffer,hasData,more:scanned.more};
  }
  function consumeProbe(probe){
   const pending=settings.pending(),groups=new Map();
@@ -112,6 +134,24 @@ function create(settings){
    for(const span of spans){merged.set(new Uint8Array(source,offset,span.start-offset),write);write+=span.start-offset;offset=span.end}
    merged.set(new Uint8Array(source,offset),write);pending[index]=merged.buffer;release(removed,0,null);
   }
+ }
+ function canSendCandidate(laneID,socketBuffered,sendBytes){
+  const limits=settings.limits();if(queuedBytes>limits.queueBytes)return 'capacity';
+  if(queuedBytes+sendBytes>limits.queueBytes)return 'reserved';
+  if(queuedBytes+settings.buffered()+sendBytes>limits.queueBytes)return 'buffered';
+  if(laneID===null)return true;
+  let laneBytes=0,laneItems=0;
+  for(const source of settings.pending()){
+   const view=new DataView(source);let offset=0;
+   while(offset<source.byteLength){
+    const id=(view.getUint8(offset+1)<<16)|(view.getUint8(offset+2)<<8)|view.getUint8(offset+3),size=view.getUint32(offset+4),end=offset+8+size;
+    if(end>source.byteLength)throw new Error('invalid frame');
+    if(id===laneID){laneBytes+=end-offset;laneItems++}offset=end;
+   }
+  }
+  if(laneItems>limits.laneItems||laneBytes>limits.laneBytes)return 'capacity';
+  if(laneBytes+sendBytes>limits.laneBytes)return 'reserved';
+  return laneBytes+socketBuffered+sendBytes<=limits.laneBytes?true:'buffered';
  }
  function joinPending(values,lane){
   const batchLimit=settings.limits().batchBytes;let total=0,count=0,frames=0;
@@ -137,7 +177,7 @@ function create(settings){
  function retireAllStreams(){const ids=Array.from(activeStreams);activeStreams.clear();for(const id of ids)rememberStreamRetired(id);return ids}
  function clearStreams(){activeStreams.clear();retiredStreams.clear();retiredStreamOrder.length=0}
  function assertEmpty(){if(queuedBytes!==0||queuedItems!==0)throw new Error('queue accounting leak')}
- return Object.freeze({reserve,release,releasePending,frameBound,splitFrames,acceptNativeFrames,observeServerFrames,findProbe,consumeProbe,takeBatch,settleBatch,cancelBatch,closeFrame,retireStream,retireAllStreams,clearStreams,assertEmpty});
+ return Object.freeze({reserve,release,releasePending,frameBound,splitFrames,acceptNativeFrames,observeServerFrames,findProbe,consumeProbe,canSendCandidate,takeBatch,settleBatch,cancelBatch,closeFrame,retireStream,retireAllStreams,clearStreams,assertEmpty});
 }
 globalThis.TelemtBridgeBuffers=Object.freeze({create});
 })();

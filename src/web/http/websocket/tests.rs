@@ -24,6 +24,9 @@ use crate::web::manager::{
 #[path = "tests/base_path.rs"]
 mod base_path;
 
+#[path = "tests/pre_ack.rs"]
+mod pre_ack;
+
 fn request(protocol: &str) -> Request<()> {
     Request::builder()
         .method(Method::GET)
