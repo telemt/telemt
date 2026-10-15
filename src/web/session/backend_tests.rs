@@ -66,20 +66,22 @@ fn test_runtime_with_dc(
 ) -> TestRuntime {
     let profile = Arc::new(WebRuntimeProfile {
         host: "proxy.example.com".to_string(),
-        public_addr: "203.0.113.10:443".parse().unwrap(),
-        user: "default".to_string(),
-        secret_mode: WebSecretMode::Plain,
-        carrier,
-        carrier_negotiation_enabled: false,
-        carrier_learning: true,
-        carriers: Arc::from([carrier]),
-        carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [7; 32],
-        credential_id: [0; 16],
-        key_fingerprint: "0000000000000000".to_string(),
-        max_sessions: 4,
-        max_streams: 16,
-        max_streams_per_session: 4,
+        shared: Arc::new(crate::config::WebRuntimeProfileShared {
+            public_addr: "203.0.113.10:443".parse().unwrap(),
+            user: "default".to_string(),
+            secret_mode: WebSecretMode::Plain,
+            carrier,
+            carrier_negotiation_enabled: false,
+            carrier_learning: true,
+            carriers: Arc::from([carrier]),
+            carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
+            credential_id: [0; 16],
+            key_fingerprint: "0000000000000000".to_string(),
+            max_sessions: 4,
+            max_streams: 16,
+            max_streams_per_session: 4,
+        }),
     });
     let mut config = ProxyConfig::default();
     config.web.enabled = true;
@@ -415,16 +417,16 @@ async fn cancellation_while_waiting_for_data_releases_stream_ownership() {
         .manager
         .try_acquire_stream(
             runtime.session.profile_key,
-            runtime.session.profile.max_streams,
+            runtime.session.profile.shared.max_streams,
             runtime.session.client_ip,
-            runtime.session.profile.public_addr,
+            runtime.session.profile.shared.public_addr,
         )
         .unwrap();
     assert_eq!(peer_port, 1);
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
-        runtime.session.profile.public_addr,
+        runtime.session.profile.shared.public_addr,
         peer_port,
     );
     runtime.shutdown().await;

@@ -46,7 +46,7 @@ where
             .boxed_unsync()
     };
     let request = Request::from_parts(parts, body);
-    match &vhost.decoy {
+    match vhost.decoy.as_ref() {
         WebRuntimeDecoy::StaticDirectory(site) => {
             let mut response = serve_static(request, site);
             if sanitize_transport {

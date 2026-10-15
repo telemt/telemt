@@ -136,7 +136,7 @@ impl WebProcessRuntime {
         };
         let Some(mut user_publication) = generation
             .proxy_shared
-            .claim_authenticated_user(&profile.user, profile.credential_id)
+            .claim_authenticated_user(&profile.shared.user, profile.shared.credential_id)
         else {
             self.telemetry
                 .record_rejection(WebRejectionReason::UserDisabled);

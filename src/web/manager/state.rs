@@ -275,9 +275,9 @@ pub(super) fn profile_key(profile: &WebRuntimeProfile) -> ProfileKey {
     digest.update(WEB_PROFILE_OWNER_CONTEXT);
     digest.update((profile.host.len() as u64).to_be_bytes());
     digest.update(profile.host.as_bytes());
-    digest.update((profile.user.len() as u64).to_be_bytes());
-    digest.update(profile.user.as_bytes());
-    digest.update([match profile.secret_mode {
+    digest.update((profile.shared.user.len() as u64).to_be_bytes());
+    digest.update(profile.shared.user.as_bytes());
+    digest.update([match profile.shared.secret_mode {
         crate::config::WebSecretMode::Plain => 0,
         crate::config::WebSecretMode::Dd => 1,
     }]);
@@ -294,18 +294,19 @@ pub(super) fn matching_profile(
         .iter()
         .find(|profile| {
             profile.host == expected.host
-                && profile.public_addr == expected.public_addr
-                && profile.user == expected.user
-                && profile.credential_id == expected.credential_id
-                && profile.secret_mode == expected.secret_mode
-                && profile.carrier == expected.carrier
-                && profile.carrier_negotiation_enabled == expected.carrier_negotiation_enabled
-                && profile.carrier_learning == expected.carrier_learning
-                && profile.carriers == expected.carriers
-                && profile.carrier_negotiation_deadlines_secs
-                    == expected.carrier_negotiation_deadlines_secs
+                && profile.shared.public_addr == expected.shared.public_addr
+                && profile.shared.user == expected.shared.user
+                && profile.shared.credential_id == expected.shared.credential_id
+                && profile.shared.secret_mode == expected.shared.secret_mode
+                && profile.shared.carrier == expected.shared.carrier
+                && profile.shared.carrier_negotiation_enabled
+                    == expected.shared.carrier_negotiation_enabled
+                && profile.shared.carrier_learning == expected.shared.carrier_learning
+                && profile.shared.carriers == expected.shared.carriers
+                && profile.shared.carrier_negotiation_deadlines_secs
+                    == expected.shared.carrier_negotiation_deadlines_secs
                 && profile.capability == expected.capability
-                && profile.key_fingerprint == expected.key_fingerprint
+                && profile.shared.key_fingerprint == expected.shared.key_fingerprint
         })
         .cloned()
 }

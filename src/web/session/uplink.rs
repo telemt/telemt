@@ -342,7 +342,7 @@ impl WebSession {
         effects: &mut DeferredSessionEffects,
     ) -> Option<u16> {
         let manager = self.manager.upgrade()?;
-        if state.active_peer_ports.len() >= self.profile.max_streams_per_session {
+        if state.active_peer_ports.len() >= self.profile.shared.max_streams_per_session {
             manager.record_stream_rejected_reason(
                 crate::web::telemetry::WebRejectionReason::StreamSessionCapacity,
             );
@@ -350,9 +350,9 @@ impl WebSession {
         }
         let (peer_port, notify) = manager.try_acquire_stream_quiet(
             self.profile_key,
-            self.profile.max_streams,
+            self.profile.shared.max_streams,
             self.client_ip,
-            self.profile.public_addr,
+            self.profile.shared.public_addr,
         );
         if let Some(notify) = notify {
             effects.notify(notify);
@@ -364,7 +364,7 @@ impl WebSession {
         if let Some(notify) = manager.release_stream_quiet(
             self.profile_key,
             self.client_ip,
-            self.profile.public_addr,
+            self.profile.shared.public_addr,
             peer_port,
         ) {
             effects.notify(notify);

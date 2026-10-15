@@ -83,7 +83,7 @@ pub(super) fn response(
             carrier_batch_bytes: limits.carrier_batch_bytes,
             pending_bytes_per_session: limits.pending_bytes_per_session,
             pending_items_per_session: limits.pending_items_per_session,
-            max_streams_per_session: profile.max_streams_per_session,
+            max_streams_per_session: profile.shared.max_streams_per_session,
         },
         timeouts: RecoveryTimeouts {
             long_poll_secs: timeouts.long_poll_secs,
@@ -94,9 +94,9 @@ pub(super) fn response(
             reconnect_grace_secs: timeouts.reconnect_grace_secs,
         },
         negotiation: RecoveryNegotiation {
-            enabled: profile.carrier_negotiation_enabled,
-            candidate_count: profile.carriers.len(),
-            deadlines_secs: profile.carrier_negotiation_deadlines_secs,
+            enabled: profile.shared.carrier_negotiation_enabled,
+            candidate_count: profile.shared.carriers.len(),
+            deadlines_secs: profile.shared.carrier_negotiation_deadlines_secs,
             carrier_probe_coalesce_ms: timeouts.carrier_probe_coalesce_ms,
         },
     };

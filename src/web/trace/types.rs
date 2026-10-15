@@ -155,8 +155,8 @@ impl TraceIdentity {
     ) -> Self {
         Self {
             session_id,
-            user: Some(profile.user.clone()),
-            key_fingerprint: Some(profile.key_fingerprint.clone()),
+            user: Some(profile.shared.user.clone()),
+            key_fingerprint: Some(profile.shared.key_fingerprint.clone()),
         }
     }
 }

@@ -463,3 +463,7 @@ mod conveyor_tests;
 #[cfg(test)]
 #[path = "config_edit/decoy_dns_tests.rs"]
 mod decoy_dns_tests;
+
+// Exact host groups retain the source shape and process-deferred limit checks.
+#[cfg(test)]
+mod host_list_tests;

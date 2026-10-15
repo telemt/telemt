@@ -76,3 +76,7 @@ mod carrier_method_tests;
 #[cfg(test)]
 #[path = "hot_reload/conveyor_tests.rs"]
 mod conveyor_tests;
+
+// Host groups are validated and published as one complete immutable snapshot.
+#[cfg(test)]
+mod host_list_tests;

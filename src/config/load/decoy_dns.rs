@@ -191,8 +191,8 @@ impl ProxyConfig {
                 .runtime
                 .iter()
                 .flat_map(|runtime| runtime.vhosts.iter())
-                .filter_map(|(host, vhost)| match vhost.decoy {
-                    WebRuntimeDecoy::HttpUpstream { addr, .. } => Some((host, addr)),
+                .filter_map(|(host, vhost)| match vhost.decoy.as_ref() {
+                    WebRuntimeDecoy::HttpUpstream { addr, .. } => Some((host, *addr)),
                     WebRuntimeDecoy::StaticDirectory(_) => None,
                 })
         }

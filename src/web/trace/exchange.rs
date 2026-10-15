@@ -150,17 +150,18 @@ impl HttpTraceExchange {
     /// Binds non-secret profile and process session identity.
     pub(crate) fn bind_profile(&self, profile: &WebRuntimeProfile, session_id: u64) {
         let dynamic = profile
+            .shared
             .user
             .len()
-            .saturating_add(profile.key_fingerprint.len());
+            .saturating_add(profile.shared.key_fingerprint.len());
         let mut state = self.state.lock();
         if state.phase != ExchangePhase::Open {
             return;
         }
         state.identity.session_id = Some(session_id);
         if self.reserve_locked(&mut state, dynamic) {
-            state.identity.user = Some(profile.user.clone());
-            state.identity.key_fingerprint = Some(profile.key_fingerprint.clone());
+            state.identity.user = Some(profile.shared.user.clone());
+            state.identity.key_fingerprint = Some(profile.shared.key_fingerprint.clone());
         }
     }
 

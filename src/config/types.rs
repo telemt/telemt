@@ -58,8 +58,8 @@ pub use web::{
     WebSecretMode, WebTimeoutsConfig, WebVhostConfig,
 };
 pub(crate) use web::{
-    WebDecoyDnsSnapshot, WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeVhost,
-    WebStaticAsset, WebStaticSite,
+    WebDecoyDnsSnapshot, WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile,
+    WebRuntimeProfileShared, WebRuntimeVhost, WebStaticAsset, WebStaticSite,
 };
 pub(crate) use web_carrier::WEB_CARRIER_LEARNING_MIN_ENTRIES;
 #[allow(unused_imports)]

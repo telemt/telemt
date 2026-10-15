@@ -73,19 +73,23 @@ pub enum WebDecoyConfig {
     },
 }
 
-/// One externally visible WEB hostname and its explicit access profiles.
+/// Exact WEB hostnames sharing one immutable decoy and explicit profile policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebVhostConfig {
-    /// Canonical lowercase ACE hostname used by Telegram Desktop.
-    pub host: String,
+    /// Legacy single hostname selector, mutually exclusive with `hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Non-empty exact hostname list, normalized to lowercase ACE during validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
     /// Optional canonical WEB endpoint prefix without surrounding slashes.
     #[serde(default)]
     pub base_path: String,
     /// Stable public destination tuple used by inner relay routing and KDF metadata.
     pub public_addr: SocketAddr,
-    /// Ordinary-site fallback for this hostname.
+    /// Ordinary-site fallback shared by every hostname in this group.
     pub decoy: WebDecoyConfig,
-    /// Access users and exact secret modes enabled for this hostname.
+    /// Access profiles whose limits apply independently to each hostname.
     #[serde(default)]
     pub profiles: Vec<WebProfileConfig>,
 }
@@ -192,19 +196,19 @@ pub struct WebLimitsConfig {
     /// Live bootstrap credential ceiling for one forwarded client address.
     #[serde(default = "default_web_max_bootstraps_per_ip")]
     pub max_bootstraps_per_ip: usize,
-    /// Maximum configured WEB virtual-host count.
+    /// Maximum concrete hostname count across all WEB groups.
     #[serde(default = "default_web_max_vhosts")]
     pub max_vhosts: usize,
-    /// Maximum configured WEB access-profile count across all virtual hosts.
+    /// Maximum expanded hostname/profile binding count across all WEB groups.
     #[serde(default = "default_web_max_profiles")]
     pub max_profiles: usize,
-    /// Maximum static snapshot entry count across all virtual hosts.
+    /// Maximum static snapshot entry count, charged once per source group.
     #[serde(default = "default_web_max_static_files")]
     pub max_static_files: usize,
     /// Maximum bytes read from one static snapshot file.
     #[serde(default = "default_web_max_static_file_bytes")]
     pub max_static_file_bytes: usize,
-    /// Maximum static snapshot bytes across all virtual hosts.
+    /// Maximum static snapshot bytes, charged once per source group.
     #[serde(default = "default_web_max_static_bytes")]
     pub max_static_bytes: usize,
     /// Maximum retained WEB debug record count.
@@ -454,7 +458,7 @@ pub struct WebConfig {
     /// WEB lifecycle deadlines.
     #[serde(default)]
     pub timeouts: WebTimeoutsConfig,
-    /// Public hostnames served by WEB listeners.
+    /// Exact hostname groups served by WEB listeners.
     #[serde(default)]
     pub vhosts: Vec<WebVhostConfig>,
     /// Validated immutable runtime snapshot built during configuration loading.
@@ -511,6 +515,6 @@ impl Default for WebConfig {
 // Immutable runtime WEB configuration consumed by hot paths.
 mod runtime;
 pub(crate) use runtime::{
-    WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeVhost, WebStaticAsset,
-    WebStaticSite,
+    WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeProfileShared, WebRuntimeVhost,
+    WebStaticAsset, WebStaticSite,
 };

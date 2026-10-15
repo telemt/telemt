@@ -23,7 +23,7 @@ pub(super) fn admit_initial(
             .get(&profile_key)
             .copied()
             .unwrap_or(0)
-            >= profile.max_sessions
+            >= profile.shared.max_sessions
     {
         runtime.record_limit_hit();
         runtime

@@ -45,7 +45,7 @@ async fn prepared(answers: &[&str]) -> LoadedConfig {
 
 fn endpoint(config: &ProxyConfig) -> (SocketAddr, &str) {
     let runtime = config.web.runtime.as_ref().unwrap();
-    match &runtime.vhosts["proxy.example.com"].decoy {
+    match runtime.vhosts["proxy.example.com"].decoy.as_ref() {
         WebRuntimeDecoy::HttpUpstream { addr, authority } => (*addr, authority),
         _ => panic!("expected HTTP decoy"),
     }
@@ -55,7 +55,7 @@ fn endpoint(config: &ProxyConfig) -> (SocketAddr, &str) {
 async fn decoy_dns_snapshot_deduplicates_normalized_origins_and_preserves_order() {
     let mut parsed = source(SOURCE);
     let mut second = parsed.config.web.vhosts[0].clone();
-    second.host = "bsi.bund.de".to_string();
+    second.host = Some("bsi.bund.de".to_string());
     second.decoy = WebDecoyConfig::HttpUpstream {
         upstream: "http://example.com:18081/".to_string(),
         resolve: WebDecoyResolve::Startup,
@@ -327,4 +327,33 @@ async fn decoy_dns_default_port_authority_and_evidence_port_fence() {
             .contains("port mismatch")
     );
     assert!(config.rebuild_runtime_web().is_err());
+}
+
+#[tokio::test]
+async fn grouped_hosts_share_one_resolved_origin_and_endpoint_inventory() {
+    let mut parsed = source(&SOURCE.replace(
+        "host = \"proxy.example.com\"",
+        "hosts = [\"proxy.example.com\", \"other.example.com\"]",
+    ));
+    let calls = AtomicUsize::new(0);
+    prepare(&mut parsed.config, |_, _| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        std::future::ready(Ok(vec!["127.0.0.2:18081".parse().unwrap()]))
+    })
+    .await
+    .unwrap();
+    let loaded = pipeline::finish(parsed).unwrap();
+    let runtime = loaded.config.web.runtime.as_ref().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(Arc::ptr_eq(
+        &runtime.vhosts["proxy.example.com"].decoy,
+        &runtime.vhosts["other.example.com"].decoy
+    ));
+    let mut reordered = loaded.config.clone();
+    reordered.web.vhosts[0].hosts.as_mut().unwrap().reverse();
+    reordered.rebuild_runtime_web().unwrap();
+    assert!(loaded.config.web_decoy_endpoints_equal(&reordered));
+    reordered.web.vhosts[0].hosts.as_mut().unwrap().pop();
+    reordered.rebuild_runtime_web().unwrap();
+    assert!(!loaded.config.web_decoy_endpoints_equal(&reordered));
 }

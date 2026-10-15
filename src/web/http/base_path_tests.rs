@@ -401,10 +401,10 @@ async fn prefixed_decoy_request_keeps_its_original_path_and_query() {
         host: "proxy.example.com".to_string(),
         base: "/relay/".to_string(),
         decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
-        decoy: WebRuntimeDecoy::HttpUpstream {
+        decoy: Arc::new(WebRuntimeDecoy::HttpUpstream {
             addr: site_addr,
             authority: "decoy.internal".to_string(),
-        },
+        }),
         decoy_header_secs: 1,
         profiles: vec![Arc::clone(&profile)],
         capabilities: vec![capability].into_boxed_slice(),

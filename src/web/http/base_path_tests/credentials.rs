@@ -66,10 +66,10 @@ async fn every_authentic_credential_placement_stays_out_of_the_upstream() {
             host: "proxy.example.com".to_string(),
             base: "/relay/".to_string(),
             decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
-            decoy: WebRuntimeDecoy::HttpUpstream {
+            decoy: Arc::new(WebRuntimeDecoy::HttpUpstream {
                 addr: site_addr,
                 authority: "decoy.internal".to_string(),
-            },
+            }),
             decoy_header_secs: 1,
             profiles: vec![profile.clone()],
             capabilities: vec![capability].into_boxed_slice(),
@@ -81,10 +81,10 @@ async fn every_authentic_credential_placement_stays_out_of_the_upstream() {
             host: "other.example.com".to_string(),
             base: "/other/".to_string(),
             decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
-            decoy: WebRuntimeDecoy::HttpUpstream {
+            decoy: Arc::new(WebRuntimeDecoy::HttpUpstream {
                 addr: site_addr,
                 authority: "decoy.internal".to_string(),
-            },
+            }),
             decoy_header_secs: 1,
             profiles: Vec::new(),
             capabilities: Vec::new().into_boxed_slice(),
