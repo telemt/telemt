@@ -22,7 +22,7 @@
 //! `server.port`, `censorship.*`, `network.*`, `use_middle_proxy`) are **not**
 //! applied; a warning is emitted. SYN limiter rules are process-owned and are
 //! reconciled only during privileged startup.
-//! `web.decoy_fasttrack_mode` is also restart-only so one process never mixes
+//! `web.allow_wildcard_hosts, web.decoy_fasttrack_mode` is also restart-only so one process never mixes
 //! capability timing policies or process-lifetime counter semantics.
 //! Non-hot changes are never mixed into the runtime config snapshot.
 

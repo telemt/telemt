@@ -13,6 +13,7 @@ fn session(carrier: WebCarrier, deadline: Instant) -> Arc<WebSession> {
         host: "proxy.example.com".to_string(),
         capability: [0; 32],
         shared: Arc::new(crate::config::WebRuntimeProfileShared {
+            derivation_context: [0; 32],
             public_addr: SocketAddr::from(([203, 0, 113, 10], 443)),
             user: "alice".to_string(),
             secret_mode: WebSecretMode::Plain,

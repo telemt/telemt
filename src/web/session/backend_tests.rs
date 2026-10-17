@@ -68,6 +68,7 @@ fn test_runtime_with_dc(
         host: "proxy.example.com".to_string(),
         capability: [7; 32],
         shared: Arc::new(crate::config::WebRuntimeProfileShared {
+            derivation_context: [0; 32],
             public_addr: "203.0.113.10:443".parse().unwrap(),
             user: "default".to_string(),
             secret_mode: WebSecretMode::Plain,
@@ -111,6 +112,9 @@ fn test_runtime_with_dc(
         });
     }
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
+        snapshot_id: 0,
+        wildcards: Default::default(),
+        catch_all: None,
         vhosts: BTreeMap::new(),
         profiles: vec![Arc::clone(&profile)],
         capabilities: vec![[7; 32]].into_boxed_slice(),

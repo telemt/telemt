@@ -398,6 +398,7 @@ async fn prefixed_decoy_request_keeps_its_original_path_and_query() {
     let mut config = runtime_config_with_base(capability, WebCarrier::Https, "/relay/");
     let profile = Arc::clone(&config.web.runtime.as_ref().unwrap().profiles[0]);
     let vhost = Arc::new(WebRuntimeVhost {
+        wildcard: None,
         host: "proxy.example.com".to_string(),
         base: "/relay/".to_string(),
         decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
@@ -412,6 +413,9 @@ async fn prefixed_decoy_request_keeps_its_original_path_and_query() {
     let mut vhosts = BTreeMap::new();
     vhosts.insert("proxy.example.com".to_string(), vhost);
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
+        snapshot_id: 0,
+        wildcards: Default::default(),
+        catch_all: None,
         vhosts,
         profiles: vec![profile],
         capabilities: vec![capability].into_boxed_slice(),

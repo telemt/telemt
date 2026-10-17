@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::request::{bearer_token_hash, compatible_cookie_header};
 use super::response::{full_response, insert_header};
 use super::{HttpResponse, RequestBody};
-use crate::config::{WebRuntimeProfile, WebRuntimeVhost};
+use crate::config::WebRuntimeProfile;
 use crate::web::manager::{BootstrapResult, TokenHash};
 
 pub(super) const MEDIA_TYPE: &str = "application/vnd.telemt.web-recovery+json";
@@ -71,7 +71,7 @@ pub(super) fn has_media_type(request: &Request<RequestBody>) -> bool {
 /// Builds the bounded no-store recovery representation.
 pub(super) fn response(
     bootstrap: &BootstrapResult,
-    vhost: &WebRuntimeVhost,
+    host: &str,
     profile: &WebRuntimeProfile,
     limits: &crate::config::WebLimitsConfig,
     timeouts: &crate::config::WebTimeoutsConfig,
@@ -101,7 +101,7 @@ pub(super) fn response(
         },
     };
     let body = serde_json::to_vec(&document).ok()?;
-    if body.len() > MAX_RESPONSE_BYTES || profile.host != vhost.host {
+    if body.len() > MAX_RESPONSE_BYTES || profile.host != host {
         return None;
     }
     let mut response = full_response(StatusCode::OK, Bytes::from(body));

@@ -78,30 +78,48 @@ impl HttpTraceExchange {
         let started_epoch_millis = epoch_millis();
         let dynamic = request_dynamic_bytes(request, &policy);
         let dynamic_reserved = store.try_reserve(dynamic);
-        let (method, path, user_agent, request_headers, redactions) = if dynamic_reserved {
-            (
-                request.method().as_str().to_string(),
-                request.uri().path().to_string(),
-                request
+        let (mut method, mut path, mut user_agent, request_headers, redactions) =
+            if dynamic_reserved {
+                (
+                    request.method().as_str().to_string(),
+                    request.uri().path().to_string(),
+                    request
+                        .headers()
+                        .get(hyper::header::USER_AGENT)
+                        .map(|value| bounded_text(value.as_bytes(), USER_AGENT_MAX_BYTES)),
+                    if policy.capture_headers {
+                        sanitized_headers(request.headers(), store.wildcard_redaction)
+                    } else {
+                        Vec::new()
+                    },
+                    sensitive_values(request.headers(), request.uri().query()),
+                )
+            } else {
+                (
+                    bounded_text(request.method().as_str().as_bytes(), 32),
+                    bounded_text(request.uri().path().as_bytes(), 512),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+            };
+        if store.wildcard_redaction {
+            super::wildcard::scrub_text(
+                &mut method,
+                !dynamic_reserved && request.method().as_str().len() > 32,
+            );
+            super::wildcard::scrub_text(
+                &mut path,
+                !dynamic_reserved && request.uri().path().len() > 512,
+            );
+            if let Some(user_agent) = &mut user_agent {
+                let truncated = request
                     .headers()
                     .get(hyper::header::USER_AGENT)
-                    .map(|value| bounded_text(value.as_bytes(), USER_AGENT_MAX_BYTES)),
-                if policy.capture_headers {
-                    sanitized_headers(request.headers())
-                } else {
-                    Vec::new()
-                },
-                sensitive_values(request.headers(), request.uri().query()),
-            )
-        } else {
-            (
-                bounded_text(request.method().as_str().as_bytes(), 32),
-                bounded_text(request.uri().path().as_bytes(), 512),
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
-        };
+                    .is_some_and(|value| value.len() > USER_AGENT_MAX_BYTES);
+                super::wildcard::scrub_text(user_agent, truncated);
+            }
+        }
         Arc::new(Self {
             store,
             epoch,
@@ -209,7 +227,8 @@ impl HttpTraceExchange {
         let reserved = self.reserve_locked(&mut state, dynamic);
         state.status = Some(response.status().as_u16());
         if self.policy.capture_headers && reserved {
-            state.response_headers = sanitized_headers(response.headers());
+            state.response_headers =
+                sanitized_headers(response.headers(), self.store.wildcard_redaction);
         }
         if reserved {
             state
@@ -394,6 +413,18 @@ impl HttpTraceExchange {
         let redactions = std::mem::take(&mut state.redactions);
         scrub_body(&mut state.request_body.captured, &redactions);
         scrub_body(&mut state.response_body.captured, &redactions);
+        if self.store.wildcard_redaction {
+            super::wildcard::scrub_bytes(
+                &mut state.request_body.captured,
+                state.request_body.truncated
+                    || state.request_body.state != Some(TraceBodyState::Complete),
+            );
+            super::wildcard::scrub_bytes(
+                &mut state.response_body.captured,
+                state.response_body.truncated
+                    || state.response_body.state != Some(TraceBodyState::Complete),
+            );
+        }
         let request_body = body_snapshot(&self.policy, &mut state.request_body);
         let response_body = body_snapshot(&self.policy, &mut state.response_body);
         TraceRecord {

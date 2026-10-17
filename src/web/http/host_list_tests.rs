@@ -348,3 +348,7 @@ async fn alias_recovery_cannot_retire_a_foreign_session() {
     assert!(runtime.get_session(token_hash(&b), HOSTS[1]).is_ok());
     stop(runtime, &[generation]).await;
 }
+
+// Automatic hosts share policies but retain exact-host authentication and quotas.
+#[path = "host_list_tests/wildcard.rs"]
+mod wildcard;

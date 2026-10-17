@@ -21,6 +21,8 @@ use crate::web::telemetry::{WebRejectionReason, WebTelemetry};
 use crate::web::trace::WebTraceStore;
 // Credential maps, quotas, and token-bucket helpers remain private to the manager.
 mod state;
+/// Wildcard derivation and positive containment are bounded independently of session quotas.
+pub(crate) mod wildcard;
 // Carrier attempt metadata remains explicit and independent from HTTP parsing.
 mod negotiation;
 // Bounded process-local carrier evidence is isolated from session registries.
@@ -221,6 +223,8 @@ pub(crate) struct WebProcessRuntime {
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     trace: Arc<WebTraceStore>,
     token_authenticator: TokenAuthenticator,
+    /// Process-frozen optional wildcard derivation and retention state.
+    pub(crate) wildcard: Option<wildcard::WildcardState>,
     limits: WebLimitsConfig,
     state: Mutex<ManagerState>,
     stream_admission: Mutex<StreamAdmissionState>,
@@ -253,7 +257,11 @@ impl WebProcessRuntime {
     #[cfg(test)]
     pub(crate) fn start(active_runtime: Arc<ArcSwap<RuntimeGeneration>>) -> Arc<Self> {
         let config = active_runtime.load().config();
-        let trace = WebTraceStore::new(config.web.debug.clone(), &config.web.limits);
+        let trace = WebTraceStore::new_with_wildcards(
+            config.web.debug.clone(),
+            &config.web.limits,
+            config.web.allow_wildcard_hosts,
+        );
         Self::start_with_trace(active_runtime, trace, WebTelemetry::new())
     }
 
@@ -295,6 +303,10 @@ impl WebProcessRuntime {
             active_runtime,
             trace,
             token_authenticator,
+            wildcard: config
+                .web
+                .allow_wildcard_hosts
+                .then(|| wildcard::WildcardState::new(limits.wildcard.clone())),
             http_connections: Arc::new(Semaphore::new(limits.max_http_connections)),
             http_overload_connections: Arc::new(Semaphore::new(
                 limits.max_http_overload_connections,

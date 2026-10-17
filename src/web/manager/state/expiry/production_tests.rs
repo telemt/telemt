@@ -18,6 +18,9 @@ fn generation(id: u64, lifetime: u64) -> Arc<RuntimeGeneration> {
     config.web.limits.new_bootstraps_burst = 4096;
     config.web.limits.new_sessions_burst = 4096;
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
+        snapshot_id: 0,
+        wildcards: Default::default(),
+        catch_all: None,
         vhosts: BTreeMap::new(),
         profiles: vec![Arc::clone(&fixture.profile)],
         capabilities: vec![fixture.profile.capability].into_boxed_slice(),

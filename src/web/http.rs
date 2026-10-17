@@ -28,6 +28,8 @@ mod activity;
 mod body;
 // Canonical capability parsing and complete scans remain isolated from HTTP routing.
 mod capability;
+// Lazy wildcard derivation shares one table between containment and bridge authentication.
+mod wildcard;
 // Authentic credential containment stays independent from carrier routing.
 mod secrets;
 // Decoy routing and upstream proxying are isolated from carrier authentication.
@@ -184,13 +186,30 @@ async fn handle_request(
     let Some(web_runtime) = config.web.runtime.as_ref() else {
         return generic_not_found();
     };
-    let Some(host) = canonical_request_host(&request) else {
+    let mut host_storage = [0u8; 253];
+    // Keep the header owner independent from the moved request on the legacy path.
+    let host_header = request.headers().get(header::HOST).cloned();
+    let host = if config.web.allow_wildcard_hosts {
+        let Some(host) = request::wildcard_request_host(&request, &mut host_storage) else {
+            return generic_not_found();
+        };
+        host
+    } else {
+        if canonical_request_host(&request).is_none() {
+            return generic_not_found();
+        }
+        let Some(value) = host_header.as_ref().and_then(|value| value.to_str().ok()) else {
+            return generic_not_found();
+        };
+        value.strip_suffix(":443").unwrap_or(value)
+    };
+    let Some(vhost) = web_runtime.route(host).cloned() else {
         return generic_not_found();
     };
-    let Some(vhost) = web_runtime.vhosts.get(host).cloned() else {
-        return generic_not_found();
+    let table = match wildcard::prepare(&mut request, &config, &vhost, host, &runtime) {
+        Ok(table) => table,
+        Err(()) => return service_unavailable(),
     };
-    secrets::mark_internal_credential(&mut request, web_runtime, &runtime);
     let suffix = request.uri().path().strip_prefix(&vhost.base);
     if suffix == Some(WEBSOCKET_SUFFIX) {
         return websocket::handle(
@@ -200,6 +219,7 @@ async fn handle_request(
             trusted_proxy_cidrs,
             runtime,
             vhost,
+            host,
         )
         .await;
     }
@@ -211,6 +231,7 @@ async fn handle_request(
             trusted_proxy_cidrs,
             runtime,
             vhost,
+            host,
         )
         .await;
     }
@@ -223,6 +244,9 @@ async fn handle_request(
             runtime,
             generation,
             vhost,
+            host,
+            table,
+            web_runtime.snapshot_id,
         )
         .await;
     }
@@ -241,6 +265,9 @@ async fn handle_root(
     runtime: Arc<WebProcessRuntime>,
     generation: Arc<RuntimeGeneration>,
     vhost: Arc<WebRuntimeVhost>,
+    host: &str,
+    table: Option<crate::web::manager::wildcard::CapabilityTable>,
+    snapshot_id: u64,
 ) -> HttpResponse {
     let representation = recovery::classify(&request);
     if matches!(representation, recovery::RootRepresentation::Invalid) {
@@ -279,7 +306,8 @@ async fn handle_root(
                 .record_decoy_fasttrack(WebDecoyFastTrackDisposition::EnforceCandidateFullScan);
         }
     }
-    let matched_profile = match_profile(&vhost, candidate.scan_bytes());
+    let matched_profile =
+        wildcard::match_profile(&vhost, host, table.as_ref(), candidate.scan_bytes());
     let recovery_requested = matches!(representation, recovery::RootRepresentation::Recovery(_));
     let profile = matched_profile.filter(|_| canonical && request.method() == Method::GET);
     let Some(profile) = profile else {
@@ -302,7 +330,7 @@ async fn handle_root(
         .and_then(|value| value.to_str().ok());
     let recovery_session = match representation {
         recovery::RootRepresentation::Recovery(Some(hash)) => {
-            runtime.bridge_recovery_session(hash, &vhost.host, &profile)
+            runtime.bridge_recovery_session(hash, host, &profile)
         }
         _ => None,
     };
@@ -341,6 +369,17 @@ async fn handle_root(
             return serve_decoy(request, vhost, true, &runtime).await;
         }
     };
+    if let (Some(cache), Some(table)) = (&runtime.wildcard, table) {
+        cache.publish(snapshot_id, &vhost, host, table, || {
+            runtime
+                .active_generation()
+                .config()
+                .web
+                .runtime
+                .as_ref()
+                .is_some_and(|current| current.snapshot_id == snapshot_id)
+        });
+    }
     if let Some(trace) = request_trace(&request) {
         trace.bind_profile(&profile, bootstrap.trace_session_id);
         trace.register_redaction(bootstrap.token.as_bytes());
@@ -363,7 +402,7 @@ async fn handle_root(
         }
         let Some(response) = recovery::response(
             &bootstrap,
-            &vhost,
+            host,
             &profile,
             &config.web.limits,
             &config.web.timeouts,
@@ -374,7 +413,7 @@ async fn handle_root(
         return response;
     }
     let page = bridge::render(
-        &vhost.host,
+        host,
         &vhost.base,
         &bootstrap.token,
         config.web.limits.carrier_batch_bytes,
@@ -435,6 +474,7 @@ async fn handle_api(
     trusted_proxy_cidrs: &[IpNetwork],
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
+    host: &str,
 ) -> HttpResponse {
     if request.uri().query().is_some() || !compatible_cookie_header(&request) {
         return serve_decoy(request, vhost, true, &runtime).await;
@@ -450,12 +490,12 @@ async fn handle_api(
     };
     match request.uri().path().strip_prefix(&vhost.base) {
         Some("api/v1/session") => {
-            handle_session(request, runtime, vhost, token_hash, client_ip).await
+            handle_session(request, runtime, vhost, host, token_hash, client_ip).await
         }
-        Some("api/v1/up") => handle_up(request, runtime, vhost, token_hash).await,
-        Some("api/v1/down") => handle_down(request, runtime, vhost, token_hash).await,
+        Some("api/v1/up") => handle_up(request, runtime, vhost, host, token_hash).await,
+        Some("api/v1/down") => handle_down(request, runtime, vhost, host, token_hash).await,
         Some("api/v1/diagnostic") => {
-            diagnostic::handle(request, runtime, vhost, token_hash, client_ip).await
+            diagnostic::handle(request, runtime, vhost, host, token_hash, client_ip).await
         }
         _ => serve_decoy(request, vhost, true, &runtime).await,
     }

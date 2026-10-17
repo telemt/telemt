@@ -66,3 +66,7 @@ secret_mode = "dd"
         }
     }
 }
+
+// The watcher must enforce the same effective opt-in as API reconciliation.
+#[path = "wildcard_tests.rs"]
+mod wildcard_tests;

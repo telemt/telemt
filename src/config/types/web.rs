@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use super::web_carrier::{WebCarrier, WebCarrierMethod, WebCarriers};
 use super::web_debug::WebDebugConfig;
 
+// Wildcard policy is restart-frozen independently of reloadable routing rules.
+mod wildcard;
+pub use wildcard::WebWildcardLimitsConfig;
+
 // Serialized WEB defaults remain separate from the runtime data model.
 mod defaults;
 use defaults::*;
@@ -73,13 +77,13 @@ pub enum WebDecoyConfig {
     },
 }
 
-/// Exact WEB hostnames sharing one immutable decoy and explicit profile policy.
+/// WEB hostname selectors sharing one immutable decoy and explicit profile policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebVhostConfig {
-    /// Legacy single hostname selector, mutually exclusive with `hosts`.
+    /// Single exact or opted-in wildcard selector, mutually exclusive with `hosts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// Non-empty exact hostname list, normalized to lowercase ACE during validation.
+    /// Non-empty selector list, normalized to lowercase ACE during validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<String>>,
     /// Optional canonical WEB endpoint prefix without surrounding slashes.
@@ -97,6 +101,9 @@ pub struct WebVhostConfig {
 /// Hard process and protocol limits for WEB ingress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebLimitsConfig {
+    /// Bounds automatic wildcard derivation and positive capability retention.
+    #[serde(default)]
+    pub wildcard: WebWildcardLimitsConfig,
     /// Maximum bytes accepted while parsing one HTTP request head.
     #[serde(default = "default_web_max_header_bytes")]
     pub max_header_bytes: usize,
@@ -199,7 +206,7 @@ pub struct WebLimitsConfig {
     /// Maximum concrete hostname count across all WEB groups.
     #[serde(default = "default_web_max_vhosts")]
     pub max_vhosts: usize,
-    /// Maximum expanded hostname/profile binding count across all WEB groups.
+    /// Maximum exact bindings plus one shared profile set per wildcard group.
     #[serde(default = "default_web_max_profiles")]
     pub max_profiles: usize,
     /// Maximum static snapshot entry count, charged once per source group.
@@ -243,6 +250,7 @@ pub struct WebLimitsConfig {
 impl Default for WebLimitsConfig {
     fn default() -> Self {
         Self {
+            wildcard: WebWildcardLimitsConfig::default(),
             max_header_bytes: default_web_max_header_bytes(),
             max_body_bytes: default_web_max_body_bytes(),
             max_frame_payload_bytes: default_web_max_frame_payload_bytes(),
@@ -422,6 +430,9 @@ pub enum WebCarrierNegotiationAggressiveness {
 /// WEB ingress, carrier, fallback, and lifecycle configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebConfig {
+    /// Restart-only opt-in to automatic suffix and catch-all hostname selectors.
+    #[serde(default)]
+    pub allow_wildcard_hosts: bool,
     /// Enables issuance of new WEB bridge and session credentials.
     #[serde(default)]
     pub enabled: bool,
@@ -458,7 +469,7 @@ pub struct WebConfig {
     /// WEB lifecycle deadlines.
     #[serde(default)]
     pub timeouts: WebTimeoutsConfig,
-    /// Exact hostname groups served by WEB listeners.
+    /// Exact hostname and opted-in wildcard groups served by WEB listeners.
     #[serde(default)]
     pub vhosts: Vec<WebVhostConfig>,
     /// Validated immutable runtime snapshot built during configuration loading.
@@ -494,6 +505,7 @@ impl Default for WebConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            allow_wildcard_hosts: false,
             carrier: WebCarrier::default(),
             carrier_method: WebCarrierMethod::default(),
             conveyor: default_web_conveyor(),
@@ -516,5 +528,5 @@ impl Default for WebConfig {
 mod runtime;
 pub(crate) use runtime::{
     WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeProfileShared, WebRuntimeVhost,
-    WebStaticAsset, WebStaticSite,
+    WebRuntimeWildcard, WebStaticAsset, WebStaticSite,
 };

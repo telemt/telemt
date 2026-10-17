@@ -287,8 +287,35 @@ pub(super) fn profile_key(profile: &WebRuntimeProfile) -> ProfileKey {
 /// Re-resolves an issued profile against the active generation without weakening identity.
 pub(super) fn matching_profile(
     runtime: &WebRuntimeConfig,
-    expected: &WebRuntimeProfile,
+    expected: &Arc<WebRuntimeProfile>,
 ) -> Option<Arc<WebRuntimeProfile>> {
+    if let Some(group) = runtime
+        .route(&expected.host)
+        .and_then(|vhost| vhost.wildcard.as_ref())
+    {
+        let shared = group.profiles.iter().find(|shared| {
+            shared.derivation_context == expected.shared.derivation_context
+                && shared.public_addr == expected.shared.public_addr
+                && shared.user == expected.shared.user
+                && shared.credential_id == expected.shared.credential_id
+                && shared.secret_mode == expected.shared.secret_mode
+                && shared.carrier == expected.shared.carrier
+                && shared.carrier_negotiation_enabled == expected.shared.carrier_negotiation_enabled
+                && shared.carrier_learning == expected.shared.carrier_learning
+                && shared.carriers == expected.shared.carriers
+                && shared.carrier_negotiation_deadlines_secs
+                    == expected.shared.carrier_negotiation_deadlines_secs
+                && shared.key_fingerprint == expected.shared.key_fingerprint
+        })?;
+        if Arc::ptr_eq(shared, &expected.shared) {
+            return Some(Arc::clone(expected));
+        }
+        return Some(Arc::new(WebRuntimeProfile {
+            host: expected.host.clone(),
+            capability: expected.capability,
+            shared: Arc::clone(shared),
+        }));
+    }
     runtime
         .profiles
         .iter()

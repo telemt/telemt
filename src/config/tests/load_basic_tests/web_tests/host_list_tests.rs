@@ -239,3 +239,7 @@ fn grouped_static_snapshot_is_loaded_and_charged_once() {
     std::fs::write(directory.path().join("index.html"), b"longer").unwrap();
     assert!(load_config_error_from_temp_toml(&format!("{source}{limits}")).contains("max_static"));
 }
+
+// Wildcard admission remains opt-in and independently bounded.
+#[path = "wildcard_tests.rs"]
+mod wildcard_tests;

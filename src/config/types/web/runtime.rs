@@ -1,20 +1,28 @@
 use super::*;
 
 /// Precomputed WEB configuration consumed by listener hot paths.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct WebRuntimeConfig {
+    /// Process-unique immutable WEB snapshot identity, including same-generation reloads.
+    pub(crate) snapshot_id: u64,
+    /// Suffix index without the leading wildcard and dot.
+    pub(crate) wildcards: BTreeMap<String, Arc<WebRuntimeVhost>>,
+    /// Lowest-priority whole-group fallback.
+    pub(crate) catch_all: Option<Arc<WebRuntimeVhost>>,
     /// Canonical host lookup used by HTTP request routing.
     pub(crate) vhosts: BTreeMap<String, Arc<WebRuntimeVhost>>,
     /// Flat profile inventory used by startup link emission.
     pub(crate) profiles: Vec<Arc<WebRuntimeProfile>>,
-    /// Complete active capability table used to contain misplaced credentials.
+    /// Finite exact-host capability table used to contain misplaced credentials.
     pub(crate) capabilities: Box<[[u8; 32]]>,
 }
 
 /// Precomputed immutable virtual-host data.
 #[derive(Debug)]
 pub(crate) struct WebRuntimeVhost {
-    /// Canonical lowercase ACE hostname.
+    /// Shared automatic-host policy; exact hosts keep their precomputed bindings.
+    pub(crate) wildcard: Option<WebRuntimeWildcard>,
+    /// Canonical lowercase ACE hostname; empty for a wildcard template.
     pub(crate) host: String,
     /// Exact slash-delimited endpoint base, including the trailing slash.
     pub(crate) base: String,
@@ -24,13 +32,13 @@ pub(crate) struct WebRuntimeVhost {
     pub(crate) decoy: Arc<WebRuntimeDecoy>,
     /// Upstream connect and response-head deadline.
     pub(crate) decoy_header_secs: u64,
-    /// Exact capability profiles accepted by this host.
+    /// Precomputed exact-host profiles; wildcard policies live in `wildcard`.
     pub(crate) profiles: Vec<Arc<WebRuntimeProfile>>,
     /// Contiguous capability table aligned one-to-one with `profiles`.
     pub(crate) capabilities: Box<[[u8; 32]]>,
 }
 
-/// Precomputed exact-user capability entry.
+/// Authenticated exact-host profile binding.
 #[derive(Debug)]
 pub(crate) struct WebRuntimeProfile {
     /// Canonical host that owns this profile.
@@ -45,6 +53,8 @@ pub(crate) struct WebRuntimeProfile {
 /// Limits still apply to each binding's exact host/user/mode quota owner.
 #[derive(Debug)]
 pub(crate) struct WebRuntimeProfileShared {
+    /// Full domain-separated secret, protocol-version, and endpoint identity.
+    pub(crate) derivation_context: [u8; 32],
     /// Stable public destination tuple supplied to relay routing.
     pub(crate) public_addr: SocketAddr,
     /// Exact access user authenticated by logical streams.
@@ -105,4 +115,28 @@ pub(crate) struct WebStaticAsset {
     pub(crate) content_type: &'static str,
     /// Strong SHA-256 entity tag.
     pub(crate) etag: String,
+}
+
+/// Host-independent wildcard group, never a session or quota owner.
+#[derive(Debug)]
+pub(crate) struct WebRuntimeWildcard {
+    /// Source-group identity local to the immutable WEB snapshot.
+    pub(crate) group_id: usize,
+    /// Ordered shared policies aligned with cold capability derivation.
+    pub(crate) profiles: Vec<Arc<WebRuntimeProfileShared>>,
+}
+
+impl WebRuntimeConfig {
+    /// Selects exactly one group: exact, longest suffix, then catch-all.
+    pub(crate) fn route(&self, host: &str) -> Option<&Arc<WebRuntimeVhost>> {
+        if let Some(vhost) = self.vhosts.get(host) {
+            return Some(vhost);
+        }
+        for (offset, _) in host.match_indices('.') {
+            if let Some(vhost) = self.wildcards.get(&host[offset + 1..]) {
+                return Some(vhost);
+            }
+        }
+        self.catch_all.as_ref()
+    }
 }

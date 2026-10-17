@@ -55,11 +55,11 @@ pub use server::{
 pub use web::{
     WebCarrierNegotiationAggressiveness, WebConfig, WebDecoyConfig, WebDecoyFastTrackMode,
     WebDecoyResolve, WebHttpConnectionCapacityAction, WebLimitsConfig, WebProfileConfig,
-    WebSecretMode, WebTimeoutsConfig, WebVhostConfig,
+    WebSecretMode, WebTimeoutsConfig, WebVhostConfig, WebWildcardLimitsConfig,
 };
 pub(crate) use web::{
     WebDecoyDnsSnapshot, WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile,
-    WebRuntimeProfileShared, WebRuntimeVhost, WebStaticAsset, WebStaticSite,
+    WebRuntimeProfileShared, WebRuntimeVhost, WebRuntimeWildcard, WebStaticAsset, WebStaticSite,
 };
 pub(crate) use web_carrier::WEB_CARRIER_LEARNING_MIN_ENTRIES;
 #[allow(unused_imports)]

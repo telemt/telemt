@@ -137,3 +137,7 @@ async fn grouped_hosts_cannot_bypass_frozen_process_limits() {
     }
     assert_eq!(active.web.runtime.as_ref().unwrap().vhosts.len(), 1);
 }
+
+// Effective process policy must reject patterns until the explicit restart has happened.
+#[path = "wildcard_tests.rs"]
+mod wildcard_tests;

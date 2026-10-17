@@ -23,6 +23,7 @@ fn fixture(
         host: "proxy.example.com".into(),
         capability: [0; 32],
         shared: Arc::new(crate::config::WebRuntimeProfileShared {
+            derivation_context: [0; 32],
             public_addr: "203.0.113.10:443".parse().unwrap(),
             user: "default".into(),
             secret_mode: WebSecretMode::Plain,

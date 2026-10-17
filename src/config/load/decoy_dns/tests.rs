@@ -357,3 +357,32 @@ async fn grouped_hosts_share_one_resolved_origin_and_endpoint_inventory() {
     reordered.rebuild_runtime_web().unwrap();
     assert!(!loaded.config.web_decoy_endpoints_equal(&reordered));
 }
+
+#[tokio::test]
+async fn wildcard_dns_only_endpoint_changes_are_visible_without_source_changes() {
+    for selector in ["*.example.com", "*"] {
+        let text = SOURCE
+            .replace("[web]", "[web]\nallow_wildcard_hosts = true")
+            .replace(
+                "host = \"proxy.example.com\"",
+                &format!("host = \"{selector}\""),
+            )
+            + "\n[web.limits]\nmemory_envelope_bytes = 1610612736\n";
+        let mut snapshots = Vec::new();
+        for addr in ["127.0.0.2:18081", "127.0.0.3:18081"] {
+            let mut parsed = source(&text);
+            prepare(&mut parsed.config, |_, _| {
+                std::future::ready(Ok(vec![addr.parse().unwrap()]))
+            })
+            .await
+            .unwrap();
+            snapshots.push(pipeline::finish(parsed).unwrap().config);
+        }
+        assert_eq!(
+            serde_json::to_value(&snapshots[0]).unwrap(),
+            serde_json::to_value(&snapshots[1]).unwrap()
+        );
+        assert!(!snapshots[0].web_decoy_endpoints_equal(&snapshots[1]));
+        assert!(snapshots[0].web_decoy_endpoints_equal(&snapshots[0]));
+    }
+}

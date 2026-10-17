@@ -21,6 +21,7 @@ impl Fixture {
                 host: "proxy.example.com".to_string(),
                 capability: [7; 32],
                 shared: Arc::new(crate::config::WebRuntimeProfileShared {
+                    derivation_context: [0; 32],
                     public_addr: "203.0.113.10:443".parse().unwrap(),
                     user: "alice".to_string(),
                     secret_mode: WebSecretMode::Plain,

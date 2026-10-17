@@ -54,12 +54,21 @@ pub(super) fn response_dynamic_bytes<B>(
 }
 
 /// Copies header names and only allowlisted bounded values.
-pub(super) fn sanitized_headers(headers: &hyper::HeaderMap) -> Vec<TraceHeader> {
+pub(super) fn sanitized_headers(headers: &hyper::HeaderMap, wildcard: bool) -> Vec<TraceHeader> {
     headers
         .iter()
-        .map(|(name, value)| TraceHeader {
-            name: name.as_str().to_string(),
-            value: header_value_allowed(name).then(|| bounded_text(value.as_bytes(), 4096)),
+        .map(|(name, value)| {
+            let mut copied = TraceHeader {
+                name: name.as_str().to_string(),
+                value: header_value_allowed(name).then(|| bounded_text(value.as_bytes(), 4096)),
+            };
+            if wildcard {
+                super::wildcard::scrub_text(&mut copied.name, false);
+                if let Some(text) = &mut copied.value {
+                    super::wildcard::scrub_text(text, value.len() > 4096);
+                }
+            }
+            copied
         })
         .collect()
 }

@@ -20,6 +20,7 @@ pub(super) async fn handle_down(
     request: Request<RequestBody>,
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
+    host: &str,
     token_hash: TokenHash,
 ) -> HttpResponse {
     if !matches!(*request.method(), hyper::Method::POST | hyper::Method::PUT)
@@ -30,7 +31,7 @@ pub(super) async fn handle_down(
     let Some(cursor) = canonical_u64_header(&request, "x-down-cursor") else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
-    let Ok(session) = runtime.get_session(token_hash, &vhost.host) else {
+    let Ok(session) = runtime.get_session(token_hash, host) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
     if session.carrier().uses_websocket() {

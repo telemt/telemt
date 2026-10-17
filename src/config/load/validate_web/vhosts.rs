@@ -1,25 +1,45 @@
 use super::*;
 
-/// Bounds expanded routing tables before normalizing exact hostname selectors.
+/// Bounds exact bindings and wildcard rules before normalizing hostname selectors.
 pub(super) fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
     let limits = &config.web.limits;
     let mut host_count = 0usize;
+    let mut rule_count = 0usize;
     let mut profile_count = 0usize;
     for (vhost_idx, vhost) in config.web.vhosts.iter().enumerate() {
-        let count = match (&vhost.host, &vhost.hosts) {
-            (Some(_), None) => 1,
-            (None, Some(hosts)) if !hosts.is_empty() => hosts.len(),
+        match (&vhost.host, &vhost.hosts) {
+            (Some(_), None) => {}
+            (None, Some(hosts)) if !hosts.is_empty() => {}
             _ => {
                 return config_error(&format!(
                     "web.vhosts[{vhost_idx}] requires exactly one of host or non-empty hosts"
                 ));
             }
-        };
+        }
+        let selectors = vhost.host.iter().chain(vhost.hosts.iter().flatten());
+        let patterns = selectors
+            .clone()
+            .filter(|host| host.trim().starts_with('*'))
+            .count();
+        let exact = selectors.count() - patterns;
+        rule_count = rule_count.checked_add(patterns).ok_or_else(|| {
+            ProxyError::Config("WEB wildcard rule count overflowed usize".to_string())
+        })?;
+        if patterns > 0
+            && (!config.web.allow_wildcard_hosts
+                || rule_count > limits.wildcard.max_rules
+                || vhost.profiles.len() > limits.wildcard.max_profiles_per_request)
+        {
+            return config_error(&format!(
+                "web.vhosts[{vhost_idx}] wildcard selectors require allow_wildcard_hosts and must fit web.limits.wildcard bounds"
+            ));
+        }
         host_count = host_count
-            .checked_add(count)
+            .checked_add(exact)
             .ok_or_else(|| ProxyError::Config("WEB hostname count overflowed usize".to_string()))?;
-        profile_count = count
-            .checked_mul(vhost.profiles.len())
+        profile_count = exact
+            .checked_add(usize::from(patterns > 0))
+            .and_then(|count| count.checked_mul(vhost.profiles.len()))
             .and_then(|expanded| profile_count.checked_add(expanded))
             .ok_or_else(|| ProxyError::Config("WEB profile count overflowed usize".to_string()))?;
         if host_count > limits.max_vhosts {
@@ -43,7 +63,16 @@ pub(super) fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
             } else {
                 format!("web.vhosts[{vhost_idx}].hosts[{host_idx}]")
             };
-            *host = normalize_web_host(host, &field)?;
+            *host = if config.web.allow_wildcard_hosts && host.trim() == "*" {
+                "*".to_string()
+            } else if config.web.allow_wildcard_hosts
+                && let Some(suffix) = host.trim().strip_prefix("*.")
+            {
+                let normalized = normalize_web_host(&format!("x.{suffix}"), &field)?;
+                format!("*.{}", &normalized[2..])
+            } else {
+                normalize_web_host(host, &field)?
+            };
             if !hosts.insert(host.clone()) {
                 return config_error(&format!("duplicate WEB vhost host `{host}` at {field}"));
             }

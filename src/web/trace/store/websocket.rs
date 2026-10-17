@@ -27,10 +27,19 @@ impl WebTraceStore {
         if !self.enabled.load(Ordering::Acquire) || !self.policy.load().enabled {
             return None;
         }
-        let user_agent = request
+        let mut user_agent = request
             .headers()
             .get(hyper::header::USER_AGENT)
             .map(|value| super::super::sanitize::bounded_text(value.as_bytes(), 512));
+        if self.wildcard_redaction
+            && let Some(text) = &mut user_agent
+        {
+            let truncated = request
+                .headers()
+                .get(hyper::header::USER_AGENT)
+                .is_some_and(|value| value.len() > 512);
+            super::super::wildcard::scrub_text(text, truncated);
+        }
         Some(TraceWebSocketContext {
             connection_id,
             peer_ip,
@@ -94,12 +103,18 @@ impl WebTraceStore {
         if !self.try_reserve_record(reservation) {
             return;
         }
-        let body = (policy.body_capture != WebDebugBodyCapture::Off).then(|| TraceBodySnapshot {
-            observed_bytes: payload.len() as u64,
-            captured: payload[..capture_bytes].to_vec(),
-            truncated: capture_limit != 0 && capture_bytes < payload.len(),
-            state: TraceBodyState::Complete,
-        });
+        let mut body =
+            (policy.body_capture != WebDebugBodyCapture::Off).then(|| TraceBodySnapshot {
+                observed_bytes: payload.len() as u64,
+                captured: payload[..capture_bytes].to_vec(),
+                truncated: capture_limit != 0 && capture_bytes < payload.len(),
+                state: TraceBodyState::Complete,
+            });
+        if self.wildcard_redaction
+            && let Some(body) = &mut body
+        {
+            super::super::wildcard::scrub_bytes(&mut body.captured, body.truncated);
+        }
         let frames = if policy.capture_frames && message_type == "binary" {
             websocket_frames(direction, payload, &self.frame_limits)
         } else {

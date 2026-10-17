@@ -143,7 +143,11 @@ pub(super) async fn run_telemt_core(
         config.server.max_connections as usize
     };
     let max_connections = Arc::new(Semaphore::new(max_connections_limit));
-    let web_trace = WebTraceStore::new(config.web.debug.clone(), &config.web.limits);
+    let web_trace = WebTraceStore::new_with_wildcards(
+        config.web.debug.clone(),
+        &config.web.limits,
+        config.web.allow_wildcard_hosts,
+    );
     let web_runtime_control = WebRuntimeControl::new();
 
     let (detected_ips_tx, detected_ips_rx) = watch::channel((None::<IpAddr>, None::<IpAddr>));
