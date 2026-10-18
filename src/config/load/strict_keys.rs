@@ -455,6 +455,7 @@ const ACCESS_CONFIG_KEYS: &[&str] = &[
     "user_max_tcp_conns_global_each",
     "user_expirations",
     "user_data_quota",
+    "user_quota_periods",
     "user_rate_limits",
     "cidr_rate_limits",
     "user_max_unique_ips",

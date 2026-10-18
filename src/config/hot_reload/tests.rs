@@ -372,6 +372,8 @@ async fn candidate_watcher_waits_for_activation_and_reconciles_disk() {
         cancellation.clone(),
         None,
         Some(activation_rx),
+        None,
+        None,
     );
     let watcher = tokio::spawn(watcher);
 

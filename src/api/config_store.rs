@@ -29,6 +29,8 @@ pub(super) enum AccessSection {
     UserMaxTcpConns,
     UserExpirations,
     UserDataQuota,
+    /// Per-user recurring UTC calendar settings.
+    UserQuotaPeriods,
     UserRateLimits,
     UserMaxUniqueIps,
 }
@@ -42,6 +44,7 @@ impl AccessSection {
             Self::UserMaxTcpConns => "access.user_max_tcp_conns",
             Self::UserExpirations => "access.user_expirations",
             Self::UserDataQuota => "access.user_data_quota",
+            Self::UserQuotaPeriods => "access.user_quota_periods",
             Self::UserRateLimits => "access.user_rate_limits",
             Self::UserMaxUniqueIps => "access.user_max_unique_ips",
         }

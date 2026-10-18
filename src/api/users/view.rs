@@ -51,6 +51,7 @@ pub(in crate::api) async fn users_from_config(
                 .get(&username)
                 .map(chrono::DateTime::<chrono::Utc>::to_rfc3339),
             data_quota_bytes: cfg.access.user_data_quota.get(&username).copied(),
+            quota_period: cfg.access.user_quota_periods.get(&username).copied(),
             rate_limit_up_bps: cfg
                 .access
                 .user_rate_limits
@@ -102,7 +103,12 @@ pub(in crate::api) fn build_user_quota_list(cfg: &ProxyConfig, stats: &Stats) ->
             .map(|entry| (entry.used_bytes, entry.last_reset_epoch_secs))
             .unwrap_or((0, 0));
         users.push(UserQuotaEntry {
-            username,
+            username: username.clone(),
+            quota_period: cfg.access.user_quota_periods.get(&username).copied(),
+            schedule: crate::stats::QuotaScheduleStatus {
+                quota_schedule_state: "disabled",
+                ..Default::default()
+            },
             data_quota_bytes,
             used_bytes,
             last_reset_epoch_secs,

@@ -231,6 +231,10 @@ pub(super) fn render_access_section(
                 .collect();
             serialize_table_body(&rows)?
         }
+        AccessSection::UserQuotaPeriods => {
+            let rows: BTreeMap<_, _> = cfg.access.user_quota_periods.iter().collect();
+            serialize_table_body(&rows)?
+        }
         AccessSection::UserRateLimits => {
             let rows: BTreeMap<String, RateLimitBps> = cfg
                 .access
@@ -269,6 +273,7 @@ fn access_section_is_empty(cfg: &ProxyConfig, section: AccessSection) -> bool {
         AccessSection::UserMaxTcpConns => cfg.access.user_max_tcp_conns.is_empty(),
         AccessSection::UserExpirations => cfg.access.user_expirations.is_empty(),
         AccessSection::UserDataQuota => cfg.access.user_data_quota.is_empty(),
+        AccessSection::UserQuotaPeriods => cfg.access.user_quota_periods.is_empty(),
         AccessSection::UserRateLimits => cfg.access.user_rate_limits.is_empty(),
         AccessSection::UserMaxUniqueIps => cfg.access.user_max_unique_ips.is_empty(),
     }

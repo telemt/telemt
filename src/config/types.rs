@@ -22,6 +22,8 @@ mod links;
 mod logging;
 mod network;
 mod policies;
+// UTC quota calendar tokens have no process-local timezone dependency.
+mod quota_period;
 mod server;
 mod web;
 // WEB carrier tokens and fixed-slot policy helpers remain independent from bulky config types.
@@ -44,6 +46,7 @@ pub use policies::{
     MeBindStaleMode, MeFloorMode, MeRouteNoWriterMode, MeSocksKdfPolicy, MeTelemetryLevel,
     MeWriterPickMode, RstOnCloseMode, TelemetryConfig, UserMaxUniqueIpsMode,
 };
+pub use quota_period::UserQuotaPeriod;
 #[allow(unused_imports)]
 pub use server::{
     CLIENT_MSS_2IN8, CLIENT_MSS_EXTREME_LOW, CLIENT_MSS_MAX, CLIENT_MSS_MIN, CLIENT_MSS_TSPU,

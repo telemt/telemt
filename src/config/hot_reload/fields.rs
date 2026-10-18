@@ -84,6 +84,8 @@ pub struct HotFields {
     pub user_max_tcp_conns_global_each: usize,
     pub user_expirations: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     pub user_data_quota: std::collections::HashMap<String, u64>,
+    /// Recurring UTC calendars accepted by the active runtime source.
+    pub user_quota_periods: std::collections::HashMap<String, crate::config::UserQuotaPeriod>,
     pub user_rate_limits: std::collections::HashMap<String, crate::config::RateLimitBps>,
     pub cidr_rate_limits: std::collections::HashMap<CidrRateLimitKey, crate::config::RateLimitBps>,
     pub user_max_unique_ips: std::collections::HashMap<String, usize>,
@@ -215,6 +217,7 @@ impl HotFields {
             user_max_tcp_conns_global_each: cfg.access.user_max_tcp_conns_global_each,
             user_expirations: cfg.access.user_expirations.clone(),
             user_data_quota: cfg.access.user_data_quota.clone(),
+            user_quota_periods: cfg.access.user_quota_periods.clone(),
             user_rate_limits: cfg.access.user_rate_limits.clone(),
             cidr_rate_limits: cfg.access.cidr_rate_limits.clone(),
             user_max_unique_ips: cfg.access.user_max_unique_ips.clone(),
@@ -228,6 +231,7 @@ impl HotFields {
 
 pub(super) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     let mut cfg = old.clone();
+    cfg.quota_source_read_at = new.quota_source_read_at;
 
     cfg.general.log_level = new.general.log_level.clone();
     cfg.general.ad_tag = new.general.ad_tag.clone();
@@ -336,6 +340,7 @@ pub(super) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyC
     cfg.access.user_max_tcp_conns_global_each = new.access.user_max_tcp_conns_global_each;
     cfg.access.user_expirations = new.access.user_expirations.clone();
     cfg.access.user_data_quota = new.access.user_data_quota.clone();
+    cfg.access.user_quota_periods = new.access.user_quota_periods.clone();
     cfg.access.user_rate_limits = new.access.user_rate_limits.clone();
     cfg.access.cidr_rate_limits = new.access.cidr_rate_limits.clone();
     cfg.access.user_max_unique_ips = new.access.user_max_unique_ips.clone();

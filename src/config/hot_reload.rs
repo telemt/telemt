@@ -80,3 +80,6 @@ mod conveyor_tests;
 // Host groups are validated and published as one complete immutable snapshot.
 #[cfg(test)]
 mod host_list_tests;
+
+#[cfg(test)]
+mod quota_period_tests;

@@ -30,6 +30,10 @@ pub struct AccessConfig {
     #[serde(default)]
     pub user_data_quota: HashMap<String, u64>,
 
+    /// Optional UTC calendar for users with a positive data quota.
+    #[serde(default)]
+    pub user_quota_periods: HashMap<String, UserQuotaPeriod>,
+
     /// Per-user transport rate limits in bits-per-second.
     ///
     /// Each entry supports independent upload (`up_bps`) and download
@@ -90,6 +94,7 @@ impl Default for AccessConfig {
             user_max_tcp_conns_global_each: default_user_max_tcp_conns_global_each(),
             user_expirations: HashMap::new(),
             user_data_quota: HashMap::new(),
+            user_quota_periods: HashMap::new(),
             user_rate_limits: HashMap::new(),
             cidr_rate_limits: HashMap::new(),
             user_source_deny: HashMap::new(),
@@ -105,6 +110,28 @@ impl Default for AccessConfig {
 }
 
 impl AccessConfig {
+    /// Validates the opt-in calendar against the bounded durable quota inventory.
+    pub(crate) fn validate_quota_periods(&self) -> crate::error::Result<()> {
+        if !self.user_quota_periods.is_empty() && self.users.len() > 65_536 {
+            return Err(crate::error::ProxyError::Config(
+                "quota periods support at most 65536 configured users".to_string(),
+            ));
+        }
+        for user in self.user_quota_periods.keys() {
+            if !self.users.contains_key(user)
+                || !self
+                    .user_data_quota
+                    .get(user)
+                    .is_some_and(|quota| *quota > 0)
+            {
+                return Err(crate::error::ProxyError::Config(format!(
+                    "access.user_quota_periods.{user} requires an existing user with a positive data quota"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn is_user_enabled(&self, username: &str) -> bool {
         self.user_enabled.get(username).copied().unwrap_or(true)
     }
