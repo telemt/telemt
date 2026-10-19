@@ -22,14 +22,14 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
-/// First policy attachment fence for an API-created account.
+/// Latest API intent awaiting a matching or demonstrably newer policy source.
 #[derive(Clone)]
 pub(super) struct FreshSchedule {
     /// Snapshot visible at creation; preparation can publish another older snapshot later.
     pub(super) source: Weak<ProxyConfig>,
     /// Monotonic commit time, independent from quota calendar wall time.
     pub(super) created_at: std::time::Instant,
-    /// Latest committed credential until first policy attachment.
+    /// Latest committed credential while a policy source is pending.
     pub(super) credential: UserCredentialId,
     /// Latest committed desired calendar.
     pub(super) period: Option<UserQuotaPeriod>,
@@ -50,8 +50,12 @@ pub(super) struct QuotaSchedule {
     pub(super) pending: bool,
     /// Reports the last unsuccessful attempt without modifying the durable cursor.
     pub(super) failed: bool,
-    /// Rejects pre-creation policies until a matching or newer source arrives.
+    /// Rejects pre-mutation policies until a matching or newer source arrives.
     pub(super) fresh: Option<FreshSchedule>,
+    /// Latest accepted source read or API commit; survives policy attachment.
+    pub(super) policy_fence_at: Option<std::time::Instant>,
+    /// Requests new read evidence after rejection without changing calendar status.
+    pub(super) needs_source_refresh: bool,
 }
 
 /// Bounded replacement index: a username owns at most one deadline and dirty entry.
@@ -99,7 +103,7 @@ impl QuotaStore {
         self.schedule_notify.notified().await;
     }
 
-    /// Detects accounts still awaiting first policy attachment on a cold reload.
+    /// Detects API fences or rejected snapshots needing new source evidence.
     pub(crate) fn has_fresh_schedules(&self) -> bool {
         self.users.iter().any(|entry| {
             entry
@@ -108,7 +112,10 @@ impl QuotaStore {
                 .lock()
                 .current
                 .as_ref()
-                .is_some_and(|account| account.counters.schedule.lock().fresh.is_some())
+                .is_some_and(|account| {
+                    let schedule = account.counters.schedule.lock();
+                    schedule.fresh.is_some() || schedule.needs_source_refresh
+                })
         })
     }
 
@@ -190,25 +197,36 @@ impl QuotaStore {
         });
     }
 
-    /// Updates an unconsumed creation fence after another committed API mutation.
+    /// Fences committed API intent for both existing and newly created accounts.
     pub(crate) fn refresh_fresh_schedule(&self, user: &str, config: &ProxyConfig) {
         let Some(target) = self.current_handle(user) else {
             return;
         };
         let mut schedule = target.counters.schedule.lock();
-        let Some(fresh) = schedule.fresh.as_mut() else {
-            return;
-        };
         if let Some(credential) = config
             .access
             .users
             .get(user)
             .and_then(|secret| crate::proxy::user_admission::credential_id_from_hex(secret))
         {
-            fresh.credential = credential;
-            fresh.period = config.access.user_quota_periods.get(user).copied();
-            fresh.quota = config.access.user_data_quota.get(user).copied();
-            fresh.created_at = std::time::Instant::now();
+            let created_at = std::time::Instant::now();
+            let period = config.access.user_quota_periods.get(user).copied();
+            schedule.policy_fence_at = schedule.policy_fence_at.max(Some(created_at));
+            // An unchanged policy needs a barrier, but no new attachment or file event.
+            if schedule.fresh.is_none() && schedule.requested == period {
+                return;
+            }
+            schedule.fresh = Some(FreshSchedule {
+                source: schedule
+                    .fresh
+                    .as_ref()
+                    .map(|fresh| fresh.source.clone())
+                    .unwrap_or_default(),
+                created_at,
+                credential,
+                period,
+                quota: config.access.user_data_quota.get(user).copied(),
+            });
         }
     }
 
@@ -239,8 +257,22 @@ impl QuotaStore {
             {
                 return;
             }
+            // A matching API intent may arrive with an old admission epoch. Accept it
+            // without discarding the commit barrier that protects later publications.
+            schedule.policy_fence_at = schedule.policy_fence_at.max(Some(fresh.created_at));
             schedule.fresh = None;
+        } else if schedule.policy_fence_at.is_some_and(|fence| {
+            config
+                .quota_source_read_at
+                .is_none_or(|read_at| read_at < fence)
+        }) {
+            // The active runtime may already contain the latest disk bytes. Ask the
+            // watcher for new evidence even when those bytes are otherwise unchanged.
+            schedule.needs_source_refresh = true;
+            return;
         }
+        schedule.policy_fence_at = schedule.policy_fence_at.max(config.quota_source_read_at);
+        schedule.needs_source_refresh = false;
         if schedule.requested != period {
             schedule.requested = period;
             schedule.accepted_at = now;

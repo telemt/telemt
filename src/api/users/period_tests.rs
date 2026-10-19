@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::sync::{Mutex, watch};
 
+// Period-only mutations must fence already attached accounts as well as new ones.
+mod freshness;
+
 struct Fixture {
     _dir: tempfile::TempDir,
     shared: ApiShared,

@@ -7,6 +7,10 @@ use crate::proxy::user_admission::{
 use crate::quota_state::QuotaStateOwner;
 use crate::stats::Stats;
 
+// Quota policy freshness is independent of admission epoch changes.
+#[path = "reload_supervisor_quota_freshness_tests.rs"]
+mod freshness;
+
 const OLD_SECRET: &str = "00112233445566778899aabbccddeeff";
 const NEW_SECRET: &str = "ffeeddccbbaa99887766554433221100";
 

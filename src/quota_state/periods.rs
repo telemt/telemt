@@ -36,7 +36,7 @@ impl QuotaStateOwner {
             .fence_fresh_schedule(user, source, credential, period, quota);
     }
 
-    /// Retains first-attachment fencing through API edits and secret rotation.
+    /// Fences committed API edits and secret rotation throughout the account lifetime.
     pub(crate) fn refresh_fresh_schedule(&self, user: &str, config: &ProxyConfig) {
         self.store.refresh_fresh_schedule(user, config);
     }

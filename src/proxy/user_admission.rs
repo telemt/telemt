@@ -121,7 +121,7 @@ impl UserAdmissionAuthority {
         })
     }
 
-    /// Requests source-evidence refresh only while a fresh account is fenced.
+    /// Requests source evidence for pending API intent or a rejected quota snapshot.
     pub(crate) fn has_fresh_quota_schedules(&self) -> bool {
         self.quota_store.has_fresh_schedules()
     }
