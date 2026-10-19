@@ -290,11 +290,11 @@ impl MePool {
             None
         };
         // BND describes the SOCKS egress to ME, whose family can differ from
-        // the local TCP connection to the SOCKS server.
-        let socks_family = if peer_addr.is_ipv4() {
-            IpFamily::V4
-        } else {
-            IpFamily::V6
+        // the local TCP connection to the SOCKS server. Match KDF classification
+        // so IPv4-mapped destinations require an IPv4 egress tuple.
+        let socks_family = match extract_ip_material(peer_addr) {
+            IpMaterial::V4(_) => IpFamily::V4,
+            IpMaterial::V6(_) => IpFamily::V6,
         };
         let socks_bound_addr = Self::select_socks_bound_addr(socks_family, upstream_egress);
         let bnd_addr_status = if !is_socks_route {

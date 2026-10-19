@@ -149,7 +149,8 @@ async fn accept_handshake(
         .write_all(&build_rpc_frame(-2, &nonce, RpcChecksumMode::Crc32))
         .await
         .unwrap();
-    let split = |ip: IpAddr| match ip {
+    // The ME peer derives mapped destinations as IPv4 independently of client selection.
+    let split = |ip: IpAddr| match ip.to_canonical() {
         IpAddr::V4(ip) => {
             let mut octets = ip.octets();
             octets.reverse();
@@ -257,5 +258,73 @@ async fn strict_socks_rejects_wrong_me_family_and_incomplete_bnd() {
         ("127.0.0.1:0", V6_ME, "[2606:4700:4700::1111]:0"),
     ] {
         check_socks_handshake(transport, target, bound, MeSocksKdfPolicy::Strict, false).await;
+    }
+}
+
+#[tokio::test]
+async fn b12_ipv4_mapped_me_strict_preserves_bnd_tuple() {
+    for transport in ["127.0.0.1:0", "[::1]:0"] {
+        check_socks_handshake(
+            transport,
+            "[::ffff:149.154.167.50]:8888",
+            V4_BND,
+            MeSocksKdfPolicy::Strict,
+            true,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn b12_ipv4_mapped_me_compat_preserves_bnd_tuple() {
+    for transport in ["127.0.0.1:0", "[::1]:0"] {
+        check_socks_handshake(
+            transport,
+            "[::ffff:149.154.167.50]:8888",
+            V4_BND,
+            MeSocksKdfPolicy::Compat,
+            true,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn b12_ipv4_mapped_me_strict_retains_bnd_validation() {
+    for transport in ["127.0.0.1:0", "[::1]:0"] {
+        for bound in [
+            V6_BND,
+            "10.0.0.1:45678",
+            "0.0.0.0:45678",
+            "91.108.56.1:0",
+            "[::ffff:91.108.56.1]:45678",
+        ] {
+            check_socks_handshake(
+                transport,
+                "[::ffff:149.154.167.50]:8888",
+                bound,
+                MeSocksKdfPolicy::Strict,
+                false,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn b12_ipv4_compatible_destination_remains_ipv6() {
+    // IPv4-compatible IPv6 is not IPv4-mapped and must keep native IPv6 KDF material.
+    for transport in ["127.0.0.1:0", "[::1]:0"] {
+        for policy in [MeSocksKdfPolicy::Strict, MeSocksKdfPolicy::Compat] {
+            check_socks_handshake(transport, "[::149.154.167.50]:8888", V6_BND, policy, true).await;
+        }
+        check_socks_handshake(
+            transport,
+            "[::149.154.167.50]:8888",
+            V4_BND,
+            MeSocksKdfPolicy::Strict,
+            false,
+        )
+        .await;
     }
 }
