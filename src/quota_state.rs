@@ -11,6 +11,10 @@ use crate::stats::{QuotaScheduleCheckpoint, QuotaStore, UserQuotaSnapshot};
 
 // UTC period transactions share the existing bounded durable checkpoint owner.
 mod periods;
+// Account creation must retire durable state before publishing new credentials.
+mod recreation;
+#[cfg(test)]
+mod recreation_tests;
 #[cfg(test)]
 mod test_io;
 

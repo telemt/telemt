@@ -13,6 +13,8 @@ use tokio::sync::{Mutex, watch};
 
 // Period-only mutations must fence already attached accounts as well as new ones.
 mod freshness;
+// Recreation must remove retired durable state before committing a new account.
+mod recreation;
 
 struct Fixture {
     _dir: tempfile::TempDir,

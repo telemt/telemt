@@ -1,5 +1,6 @@
 use super::*;
 
+/// Completes an accepted user creation even if the requesting client disconnects.
 pub(in crate::api) async fn create_user(
     body: CreateUserRequest,
     expected_revision: Option<String>,
@@ -147,6 +148,12 @@ async fn create_user_to_completion(
         touched_sections.push(AccessSection::UserEnabled);
     }
 
+    // Clear any retired durable identity before the username can survive restart.
+    let quota_guard = shared
+        .quota_state
+        .prepare_user_creation_locked(&body.username, quota_guard)
+        .await
+        .map_err(|error| ApiFailure::internal(format!("failed to prepare user quota: {error}")))?;
     let revision = save_access_sections_to_disk_if_revision(
         &shared.config_path,
         &cfg,
