@@ -331,3 +331,7 @@ impl ConnRegistry {
 
 #[cfg(test)]
 mod tests;
+
+// Cleanup reservations must remain cancellation-safe under capacity pressure.
+#[cfg(test)]
+mod lease_capacity_tests;
