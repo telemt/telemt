@@ -2091,7 +2091,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```
 ## max_connections
   - **Einschränkungen / Validierung**: `u32`. `0` bedeutet unbegrenzt.
-  - **Beschreibung**: Maximale Anzahl gleichzeitiger Clientverbindungen.
+  - **Beschreibung**: Maximale Anzahl gleichzeitiger Clientverbindungen, einschließlich der ME-Clientsitzungen. Bei `0` gilt keine zusätzliche Obergrenze für ME-Sitzungen; die verfügbaren Betriebssystemressourcen und andere konfigurierte Limits gelten weiterhin. Änderungen erfordern einen Neustart des Prozesses. Dieser Parameter legt nicht die Anzahl der ausgehenden TCP-Verbindungen des ME-Pools fest.
   - **Beispiel**:
 
     ```toml
