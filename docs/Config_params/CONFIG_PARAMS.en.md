@@ -27,6 +27,7 @@ This document lists all configuration keys accepted by `config.toml`.
  - [web](#web)
  - [web.debug](#webdebug)
  - [web.limits](#weblimits)
+ - [web.limits.wildcard](#weblimitswildcard)
  - [web.timeouts](#webtimeouts)
  - [web.vhosts](#webvhosts)
  - [web.vhosts.decoy](#webvhostsdecoy)
@@ -332,6 +333,7 @@ This document lists all configuration keys accepted by `config.toml`.
     data_path = "/var/lib/telemt"
     ```
 ## quota_state_path
+  - **Recurring quotas**: This file also stores per-user UTC calendar watermarks. When [`user_quota_periods`](#user_quota_periods) is nonempty, invalid existing state is a startup error; a missing file starts fresh.
   - **Constraints / validation**: `Path`. Relative paths are resolved from the process working directory.
   - **Description**: JSON state file used to persist runtime per-user quota consumption.
   - **Example**:
@@ -2091,7 +2093,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## max_connections
   - **Constraints / validation**: `u32`. `0` means unlimited.
-  - **Description**: Maximum number of concurrent client connections.
+  - **Description**: Maximum number of concurrent client connections, including ME client routes. Zero does not impose a separate ME session cap; operating-system resources and other configured limits still apply. Changes require a process restart. This setting does not control the number of upstream ME TCP writers.
   - **Example**:
 
     ```toml
@@ -2589,6 +2591,7 @@ WEB mode carries Telegram Desktop MTProxy traffic through HTTPS terminated by an
 | Key | Type | Default | Hot-Reload |
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | `✔` |
+| `allow_wildcard_hosts` | `bool` | `false` | `✘` |
 | `carrier` | `"https"`, `"https-lanes"`, `"websocket"`, or `"websocket-lanes"` | `"https"` | `✔` |
 | `carriers` | `false` or a non-empty array of unique carriers | `false` | `✔` |
 | `carrier_learning` | `bool` | `true` | `✔` |
@@ -2673,11 +2676,11 @@ These process-wide ceilings make every WEB registry, queue, request body, capabi
 | `control_bytes_global` | `usize` | `16777216` | Process-wide byte reserve available only to control frames. |
 | `max_bootstraps_global` | `usize` | `512` | Live bootstrap credentials process-wide. |
 | `max_bootstraps_per_ip` | `usize` | `64` | Live bootstrap credentials per client IP. |
-| `max_vhosts` | `usize` | `8` | Configured WEB virtual hosts. |
-| `max_profiles` | `usize` | `32` | WEB profiles across all vhosts. |
-| `max_static_files` | `usize` | `4096` | Static snapshot entries across all vhosts. |
+| `max_vhosts` | `usize` | `8` | Concrete WEB hostnames across all groups; each `hosts` entry counts separately. |
+| `max_profiles` | `usize` | `32` | Exact host/profile bindings plus one shared profile set per wildcard source group. |
+| `max_static_files` | `usize` | `4096` | Static snapshot entries across all groups; a shared group snapshot counts once. |
 | `max_static_file_bytes` | `usize` | `8388608` | Maximum bytes in one static file. |
-| `max_static_bytes` | `usize` | `67108864` | Static snapshot bytes across all vhosts. |
+| `max_static_bytes` | `usize` | `67108864` | Static snapshot bytes across all groups; a shared group snapshot counts once. |
 | `debug_records_capacity` | `usize` | `65536` | Maximum retained WEB debug record count. |
 | `debug_bytes_global` | `usize` | `67108864` | Retained plus in-flight WEB debug byte ceiling; minimum 4096. |
 | `memory_envelope_bytes` | `usize` | `1342177280` | Declared envelope for HTTP heads, bodies, shared queues/WebSocket I/O, capability indexes, lane state, carrier learning, static snapshots, and bounded debug/status buffers; maximum 4 GiB. |
@@ -2719,17 +2722,43 @@ Unless a row states otherwise, timeouts are measured in seconds and must be with
 | `shutdown_secs` | `u64` | `15` | `✔` | One absolute process-shutdown budget shared by all listener acceptors and connections plus WEB session and auxiliary-task drains. The active value is captured once when shutdown starts. |
 | `decoy_header_secs` | `u64` | `30` | `✔` | Connect and response-head deadline for an HTTP decoy. |
 
+# [web.limits.wildcard]
+
+These process-frozen limits apply to automatic wildcard hosts. See the
+[deployment and security contract](../WEB/WEB_PROXY.en.md#automatic-wildcard-hosts).
+The frontend must restrict Host values; unknown/evicted foreign capabilities can
+reach decoys. Diagnostic copies alone use conservative shape-based redaction.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `max_rules` | `usize` | `32` | Total suffix/catch-all selectors. |
+| `max_profiles_per_request` | `usize` | `256` | Complete wildcard group scan and cold HMAC cost ceiling. |
+| `cache_hosts` | `usize` | `256` | Positive FIFO entries; `0` disables retention. |
+| `cache_bytes` | `usize` | `8388608` | Charged entries/indexes, including evicted entries still borrowed. |
+| `cold_hmac_per_minute` | `u32` | `1000000` | Sustained process-wide cold HMAC evaluation budget. |
+| `cold_hmac_burst` | `u32` | `65536` | Evaluation burst, at least `max_profiles_per_request`. |
+
+Except for `cache_hosts`, bounds must be positive when wildcard mode is enabled.
+Cold requests reserve the entire selected profile count atomically; exhaustion
+returns HTTP 503 without waiting. Successful bootstrap issuance alone populates
+the cache. Established carriers bypass this cache and cold budget. Eviction never
+changes quotas. Runtime snapshots fence cache hits across all forms of reload.
+Additional checked memory reservations apply only in wildcard mode; standard
+limits need at least 1290 MiB rather than the legacy 1280 MiB envelope. Setting
+`memory_envelope_bytes = 1610612736` gives a 1536 MiB envelope for the example.
+
 # [[web.vhosts]]
 
 | Key | Type | Required | Hot-Reload | Description |
 | --- | --- | --- | --- | --- |
-| `host` | `String` | yes | `✔` | Unique, canonical lowercase ACE FQDN without port, path, credentials, or trailing dot. |
+| `host` | `String` | one selector | `✔` | Exact hostname or opted-in wildcard selector; mutually exclusive with `hosts`. |
+| `hosts` | `String[]` | one selector | `✔` | Non-empty selector list sharing profiles, decoy, `base_path`, and `public_addr`. |
 | `base_path` | `String` | no | `✔` | Exact case-sensitive WEB prefix without leading or trailing slash; empty by default. At most 128 ASCII bytes in slash-separated `[A-Za-z0-9][A-Za-z0-9_-]*` segments. |
 | `public_addr` | `SocketAddr` | yes | `✔` | Concrete public IP on port `443`; used in the inner relay destination tuple. |
 | `decoy` | table | yes | `✔` | Ordinary-site fallback for unauthenticated or invalid traffic. |
-| `profiles` | array of tables | when enabled | `✔` | Explicit users and client secret modes exposed by this hostname. |
+| `profiles` | array of tables | when enabled | `✔` | Explicit users and client secret modes exposed independently by every hostname in this group. |
 
-The hostname must be accepted by Telegram Desktop and is normalized during validation. An empty `base_path` keeps the root v1 capability and legacy hexadecimal link secret. A non-empty path uses the v2 host/path capability and a Telegram Desktop path link with percent-encoded `HOST/BASE` plus the `0x70` base64url secret marker. Routing requires the exact slash-terminated prefix and never redirects, normalizes, or strips it. A bootstrap is a bearer credential: its client address and address family may change before session creation. An unused bootstrap remains valid across a configuration reload only while the same profile identity is still active.
+Exactly one of `host` or `hosts` is required, including when WEB is disabled. Empty selectors and simultaneous selectors are rejected. Each hostname must be a non-IP FQDN accepted by Telegram Desktop, without a port, path, credentials, or trailing dot; it is normalized to lowercase ACE during validation. Canonical duplicates within or across groups are rejected. `*.suffix` and `*` require the restart-only `web.allow_wildcard_hosts = true` opt-in. Exact selectors win, then the longest suffix, then catch-all; suffixes match any descendant depth but exclude the apex. Embedded wildcards and regexes remain unsupported. The normalized configuration preserves the chosen selector; lists are not expanded when serialized. An empty `base_path` keeps the root v1 capability and legacy hexadecimal link secret. A non-empty path uses the v2 host/path capability and a Telegram Desktop path link with percent-encoded `HOST/BASE` plus the `0x70` base64url secret marker. Routing requires the exact slash-terminated prefix and never redirects, normalizes, or strips it. A bootstrap is a bearer credential: its client address and address family may change before session creation. An unused bootstrap remains valid across a configuration reload only while the same profile identity is still active.
 
 # [web.vhosts.decoy]
 
@@ -2746,18 +2775,18 @@ Exactly one decoy mode is required:
 | --- | --- | --- | --- | --- |
 | `user` | `String` | yes | — | Existing 1–64-byte key from `[access.users]`; the bound keeps runtime status and filters bounded. |
 | `secret_mode` | `"plain"` or `"dd"` | yes | — | Exact Telegram Desktop secret representation. `ee` is not supported. |
-| `max_sessions` | `usize` | no | `web.limits.max_sessions_global` | Live sessions for this profile. |
-| `max_streams` | `usize` | no | `web.limits.max_streams_global` | Live logical streams for this profile. |
+| `max_sessions` | `usize` | no | `web.limits.max_sessions_global` | Live sessions for this profile on each concrete hostname. |
+| `max_streams` | `usize` | no | `web.limits.max_streams_global` | Live logical streams for this profile on each concrete hostname. |
 | `max_streams_per_session` | `usize` | no | `web.limits.max_streams_per_session` | Live logical streams in one profile session. |
 
-Profile limits must be non-zero and no greater than their corresponding global limits. Duplicate `(user, secret_mode)` profiles in one vhost are rejected.
+Profile limits must be non-zero and no greater than their corresponding global limits. Duplicate `(user, secret_mode)` profiles in one group are rejected. Each concrete hostname retains its own quota identity; process-wide, IP, and access-user restrictions still apply. Configured profile ceilings do not preallocate live sessions or streams. A group shares immutable policy and one decoy snapshot, while host-bound capabilities and their bounded containment indexes remain separate.
 
 ## WEB lifecycle and API management
 
 - The config watcher and generation reload apply `web.enabled`, carrier and negotiation policy, `web.debug`, `web.timeouts`, vhosts, profiles, and decoy snapshots without a process restart. One immutable expanded source snapshot is validated and activated; a candidate generation's watcher starts only after that generation becomes active. Existing sessions and in-flight negotiation chains keep their issuance-time carrier candidates, limits, timeouts, and absolute deadlines; newly issued bridge sessions use one pinned active generation.
 - Changing `base_path` atomically replaces both the new-request route and derived capability. Reissue links and drain affected live sessions first: established WebSockets and already routed exchanges continue; later old-base requests carrying a process-authentic bootstrap or session token receive a local no-store `404`, while the now-inactive old capability follows ordinary decoy handling.
-- WEB listener inventory and trust policy under `server.listeners`, and every `web.limits` value, are process-owned and restart-required.
-- `GET /v1/config` returns the complete authored `[web]` tree except the derived `web.runtime` snapshot. `PATCH /v1/config` accepts a sparse `web` object, deep-merges tables, replaces arrays wholesale, validates the complete candidate, and reports `web.limits` in `deferred_process_fields` until restart.
+- WEB listener inventory and trust policy under `server.listeners`, `web.allow_wildcard_hosts`, and every `web.limits` value, are process-owned and restart-required.
+- `GET /v1/config` returns the complete authored `[web]` tree except the derived `web.runtime` snapshot. `PATCH /v1/config` accepts a sparse `web` object, deep-merges tables, replaces arrays wholesale, validates the complete candidate, and reports `web.allow_wildcard_hosts` and `web.limits` in `deferred_process_fields` until restart. Staging the flag does not authorize patterns in the active process; such updates fail atomically until restart.
 - `GET /v1/runtime/web/status`, `/sessions`, `/sessions/{session_ref}`, and `/operations/{operation_id}` expose bounded non-secret runtime state. POST controls close selected sessions, clear debug data, or reset carrier learning and require the current random `runtime_instance`.
 - `web.enabled = false` stops new bootstrap/session issuance after activation but does not close live sessions. For close-all, wait until status reports `manager.issuance_enabled = false`, submit the asynchronous `all` selector, and poll its operation.
 - Existing access users can be created, changed, rotated, enabled, disabled, and deleted through `/v1/users`. Creating a user does not add a WEB profile. Disabling a user immediately updates admission and cancels that user's active sessions.
@@ -3439,6 +3468,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
 | [`user_max_tcp_conns_global_each`](#user_max_tcp_conns_global_each) | `usize` | `0` | `✔` |
 | [`user_expirations`](#user_expirations) | `Map<String, DateTime<Utc>>` | `{}` | `✔` |
 | [`user_data_quota`](#user_data_quota) | `Map<String, u64>` | `{}` | `✔` |
+| [`user_quota_periods`](#user_quota_periods) | `Map<String, "daily" / "weekly" / "monthly">` | `{}` | `✔` |
 | [`user_max_unique_ips`](#user_max_unique_ips) | `Map<String, usize>` | `{}` | `✔` |
 | [`user_max_unique_ips_global_each`](#user_max_unique_ips_global_each) | `usize` | `0` | `✔` |
 | [`user_max_unique_ips_mode`](#user_max_unique_ips_mode) | `"active_window"`, `"time_window"`, or `"combined"` | `"active_window"` | `✔` |
@@ -3524,6 +3554,26 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     # Alice receives a 1 GiB quota.
     alice = 1073741824
     ```
+## user_quota_periods
+  - **Constraints / validation**: Each key must name an existing `access.users` entry with a positive `access.user_data_quota`. Values are exactly `"daily"`, `"weekly"`, or `"monthly"`. When this map is nonempty, the complete configured user inventory must not exceed 65,536 users.
+  - **Default**: Empty. Users without a period retain the existing manual/lifetime quota behavior.
+  - **Calendar**: All boundaries are UTC: daily at midnight, weekly on Monday at midnight, monthly on the first day at midnight. A month is a calendar month, not a fixed number of days.
+  - **Activation**: Enabling or changing a period preserves consumption and starts automatic resets at the next boundary. Removing a period preserves consumption and the durable calendar watermark. Hot reload applies the policy without changing the secret or restarting the process.
+  - **Lifecycle**: Secret rotation preserves consumption and calendar state. Disabled and expired accounts continue their calendar but remain disabled/expired. Deleting and recreating an account starts fresh. Manual `reset-quota` does not shift UTC cadence. A clock rollback cannot repeat an already processed boundary, including after removing and restoring a period.
+  - **Persistence**: The worker checkpoints the complete reset batch before publishing new counters. On write failure, live consumption and cursors stay unchanged; retries use monotonic delays of 1, 2, 4, 8, 16, 32, then 60 seconds. Delayed or restarted workers reset once to the latest due period, rather than replaying every missed interval. Successful metadata-only activation does not overwrite traffic accumulated during the write.
+  - **Startup**: With periods configured, an existing unreadable, invalid, oversized, or unsupported calendar checkpoint fails startup. A missing file initializes fresh state; a valid legacy file preserves consumption while acquiring calendar metadata. The checkpoint remains limited to 16 MiB and 65,536 rows. Keep `general.quota_state_path` on persistent writable storage.
+  - **Accounting**: Resets replace the existing accounting generation; reservations already held by relays retain their original generation. Refunding an old reservation cannot reduce new-period consumption. Lifetime traffic telemetry is unchanged. This feature does not add a traffic write-ahead log: consumption since the last checkpoint retains the existing crash-loss window.
+  - **API**: User create/PATCH accepts `quota_period`; quota status distinguishes desired configuration from the effective durable calendar. See the [API contract](../Architecture/API/API.md#recurring-quota-periods).
+  - **Example**:
+
+    ```toml
+    [access.user_data_quota]
+    alice = 1073741824
+
+    [access.user_quota_periods]
+    alice = "monthly"
+    ```
+
 ## user_max_unique_ips
   - **Constraints / validation**: `Map<String, usize>`.
   - **Description**: Per-user unique source IP limits.
