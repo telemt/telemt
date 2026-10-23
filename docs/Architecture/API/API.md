@@ -116,6 +116,7 @@ Notes:
 | `POST` | `/v1/runtime/web/lifecycle/resume` | `RuntimeInstanceRequest` | `200` | `OperatorLifecycleStatus` |
 | `GET` | `/v1/stats/users/active-ips` | none | `200` | `UserActiveIps[]` |
 | `GET` | `/v1/stats/users` | none | `200` | `UserInfo[]` |
+| `GET` | `/v1/stats/users/quota` | none | `200` | User quota counters and recurring schedule status in `data.users`. |
 | `GET` | `/v1/config` | none | `200` | `ConfigData` |
 | `PATCH` | `/v1/config` | sparse JSON object; optional reload query | `200` or `202` | `PatchConfigResponse` |
 | `POST` | `/v1/system/reload` | `ReloadRequest` or empty body | `202` | `ReloadAccepted` |
@@ -255,6 +256,7 @@ Notes:
 | `max_tcp_conns` | `usize` | no | Per-user concurrent TCP limit. |
 | `expiration_rfc3339` | `string` | no | RFC3339 expiration timestamp. |
 | `data_quota_bytes` | `u64` | no | Per-user traffic quota. |
+| `quota_period` | `string` or `null` | no | `daily`, `weekly`, or `monthly`; requires a positive quota. Missing/null means no recurring reset. |
 | `rate_limit_up_bps` | `u64` | no | Per-user upload rate limit in bits per second. |
 | `rate_limit_down_bps` | `u64` | no | Per-user download rate limit in bits per second. |
 | `max_unique_ips` | `usize` | no | Per-user unique source IP limit. |
@@ -267,7 +269,8 @@ Notes:
 | `user_ad_tag` | `string` or `null` | no | Exactly 32 hex chars; `null` removes the per-user ad tag. |
 | `max_tcp_conns` | `usize` or `null` | no | Per-user concurrent TCP limit; `null` removes the per-user override. |
 | `expiration_rfc3339` | `string` or `null` | no | RFC3339 expiration timestamp; `null` removes the expiration. |
-| `data_quota_bytes` | `u64` or `null` | no | Per-user traffic quota; `null` removes the per-user quota. |
+| `data_quota_bytes` | `u64` or `null` | no | Per-user traffic quota; `null` removes the per-user quota. Remove `quota_period` in the same request if one is configured. |
+| `quota_period` | `string` or `null` | no | `daily`, `weekly`, or `monthly`. Omitted preserves the setting; `null` removes it. Requires a positive resulting quota. |
 | `rate_limit_up_bps` | `u64` or `null` | no | Per-user upload rate limit in bits per second; `null` removes the upload direction limit. |
 | `rate_limit_down_bps` | `u64` or `null` | no | Per-user download rate limit in bits per second; `null` removes the download direction limit. |
 | `max_unique_ips` | `usize` or `null` | no | Per-user unique source IP limit; `null` removes the per-user override. |
@@ -328,7 +331,7 @@ Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the 
 | `censorship` | `object` | Complete normalized `[censorship]` section, including defaults. |
 | `upstreams` | `object[]` | Complete normalized upstream array. When no upstream is authored, the loader inserts one enabled direct upstream. |
 | `dc_overrides` | `object` | Complete normalized DC override map, including the synthesized DC 203 endpoint when it is not authored. |
-| `web` | `object` | Complete normalized `[web]` section, including defaults. Each `web.vhosts[]` item includes `base_path` (empty string when omitted in TOML). The derived runtime-only `web.runtime` field is excluded. |
+| `web` | `object` | Complete normalized `[web]` section, including defaults. Each `web.vhosts[]` item preserves either `host` or `hosts` and includes `base_path` (empty string when omitted in TOML); hostname lists remain grouped. The derived runtime-only `web.runtime` field is excluded. |
 | `server` | `object?` | Partial `[server]` view when editable nested fields are present. Currently only `listeners` may appear; `api`/`admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
 
 The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed, and an empty listener array is omitted. Changes under `[web.limits]` are valid desired configuration but remain process-deferred; the patch response reports `web.limits` in `deferred_process_fields` until restart.
@@ -1456,6 +1459,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `max_tcp_conns` | `usize?` | Optional max concurrent TCP limit. |
 | `expiration_rfc3339` | `string?` | Optional expiration timestamp. |
 | `data_quota_bytes` | `u64?` | Optional data quota. |
+| `quota_period` | `string?` | Desired recurring period from configuration; effective calendar state is available in the quota endpoint. |
 | `rate_limit_up_bps` | `u64?` | Optional upload rate limit in bits per second. |
 | `rate_limit_down_bps` | `u64?` | Optional download rate limit in bits per second. |
 | `max_unique_ips` | `usize?` | Optional unique IP limit. |
@@ -1475,7 +1479,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 
 #### `UserLinks`
 
-`UserLinks` contains only native MTProxy links. It never contains a WEB `tg://webproxy` link; WEB links use a separate startup-only derivation contract based on `web.vhosts[].host`, `base_path`, and profile secret mode.
+`UserLinks` contains only native MTProxy links. It never contains a WEB `tg://webproxy` link; WEB links use a separate startup-only derivation contract based on every concrete hostname selected by `web.vhosts[].host` or `hosts`, `base_path`, and profile secret mode.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -1520,6 +1524,61 @@ Link generation uses active config and enabled modes:
 | `username` | `string` | User whose runtime quota counter was reset. |
 | `used_bytes` | `u64` | Current used bytes after reset; always `0` on success. |
 | `last_reset_epoch_secs` | `u64` | Unix timestamp of the reset operation. |
+
+### Recurring quota periods
+
+`quota_period` is persisted in `[access.user_quota_periods]` through the existing
+user create/PATCH routes and include-owner write rules. Generic `PATCH /v1/config`
+continues to reject `access`. Invalid periods, missing/nonpositive quota amounts,
+and inventories above 65,536 users with any period configured are rejected before
+writing. A metadata-only change does not cancel sessions or rotate secrets.
+
+`GET /v1/stats/users/quota` returns `data.users` entries with the existing `username`,
+`data_quota_bytes`, `used_bytes`, and `last_reset_epoch_secs`, plus:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `quota_period` | `string?` | Desired `daily`, `weekly`, or `monthly` policy from configuration. |
+| `active_quota_period` | `string?` | Effective durable calendar; null while runtime policy reconciliation awaits its checkpoint. |
+| `quota_period_start_epoch_secs` | `u64?` | UTC boundary containing the effective monotonic calendar cursor. |
+| `quota_next_reset_epoch_secs` | `u64?` | First boundary strictly after that cursor; may be in the past while overdue. |
+| `quota_schedule_state` | `string` | `disabled`, `pending`, `active`, `overdue`, or `error`. |
+
+`pending` covers unapplied desired configuration and accepted policies awaiting
+durable publication. Before the runtime accepts a desired change, the old active
+period can still be returned with `pending`. After acceptance, its active period
+and boundary fields are null until the new metadata is durable. `error` means a
+calendar/checkpoint attempt failed; live usage is unchanged. `overdue` means the
+next boundary has arrived and the durable reset has not completed. Status reads
+share the quota mutation gate, so an in-flight commit can delay the response.
+
+All periods use UTC: daily midnight, Monday midnight, or the first day of the
+month. Enabling/changing a period preserves current usage. Removing a period
+retains its watermark to prevent repeated resets after clock rollback. A manual
+`POST /v1/users/{username}/reset-quota` advances the watermark through the accepted
+reset time without changing cadence. Secret rotation preserves it; deletion and
+recreation start fresh. Disabled or expired users still rotate quotas but are not
+reenabled by a reset.
+
+Before CREATE persists a new username, it durably removes any retired quota row
+for that name. An unreadable checkpoint or failed durable write returns HTTP 500
+without creating the user in configuration or live admission; retry after fixing
+storage. The existing quota gate spans this cleanup and config publication. Other
+users' persisted consumption and calendar metadata are preserved.
+
+One process worker checkpoints due users as a batch before resetting live
+accounting generations. Existing reservations stay in their original generation;
+late refunds cannot subtract new-period usage. No TLS, MTProto, KDF, relay limit,
+or lifetime telemetry semantics change. I/O failures retain live usage and retry
+at 1, 2, 4, 8, 16, 32, then 60 seconds. After downtime, only the latest due period is
+applied. The worker finishes accepted writes cooperatively before final shutdown
+persistence. Config and quota-state files remain separate durable writes, not a
+cross-file transaction.
+
+With recurring policies, invalid existing quota state fails startup. Missing state
+initializes fresh counters; legacy state migrates without resetting consumption.
+The existing 16 MiB checkpoint limit remains. There is no traffic write-ahead log,
+so consumption since the previous checkpoint can still be lost on a crash.
 
 ## Config Endpoints
 
@@ -1570,9 +1629,9 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `server` with keys other than `listeners` | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
 
-**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. In particular, `web.vhosts` is an array: changing one vhost `base_path` requires sending the complete vhost array, including every retained vhost and each required `host`, `public_addr`, `decoy`, and profile field. A mutation is written to the single source file that owns every touched semantic section. Untouched table bodies, the root file when it is not the owner, and all other include files remain byte-identical; touched TOML table bodies are reserialized and may lose their internal formatting or comments. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
+**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. In particular, `web.vhosts` is an array: changing one vhost `base_path` requires sending the complete vhost array, including every retained vhost and each required hostname selector (`host` or non-empty `hosts`), `public_addr`, `decoy`, and profile field. A mutation is written to the single source file that owns every touched semantic section. Untouched table bodies, the root file when it is not the owner, and all other include files remain byte-identical; touched TOML table bodies are reserialized and may lose their internal formatting or comments. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
 
-**Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified.
+**Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified. WEB host selectors are mutually exclusive; duplicate normalized names are rejected across all groups. The effective configuration must fit active process limits: `max_vhosts` counts concrete hostname entries and `max_profiles` counts expanded host/profile pairs. Raising desired restart-only limits in the same patch cannot bypass the active ceilings.
 
 **Read-only mode:** returns `403 read_only` when the API runs with `read_only = true`.
 
