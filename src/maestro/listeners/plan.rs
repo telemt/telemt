@@ -7,6 +7,7 @@ use crate::config::{
 };
 use crate::transport::ListenOptions;
 
+#[cfg(target_os = "linux")]
 use super::tcp_mss_runtime_profile;
 
 /// Immutable socket and connection policy for one listener endpoint.
@@ -30,6 +31,7 @@ pub(crate) fn listener_bind_plan(
     config: &ProxyConfig,
 ) -> Result<BTreeMap<SocketAddr, ListenerBindSpec>, String> {
     let mut plan = BTreeMap::new();
+    #[cfg(target_os = "linux")]
     let bulk_client_mss = config
         .server
         .client_mss_bulk_value()
@@ -53,6 +55,7 @@ pub(crate) fn listener_bind_plan(
                 .effective_client_mss(&config.server)
                 .map_err(|error| format!("invalid client MSS for listener {addr}: {error}"))?
         };
+        #[cfg(target_os = "linux")]
         let listener_bulk_mss = (listener.transport != ListenerTransport::Web)
             .then_some(bulk_client_mss)
             .flatten();
