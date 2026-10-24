@@ -282,7 +282,7 @@ To display a domain instead of an IP address in native `tg://proxy` links, add t
 public_host = "proxy.example.com"
 ```
 
-This setting, together with `public_port`, affects only native links. WEB `tg://webproxy` links always use `[[web.vhosts]].host` and external port `443`.
+This setting, together with `public_port`, affects only native links. WEB `tg://webproxy` links always use the concrete hostname from `[[web.vhosts]].host` or `hosts` and external port `443`.
 
 ### Total server connection limit
 This parameter limits the total number of active connections to the server:
@@ -291,6 +291,12 @@ This parameter limits the total number of active connections to the server:
 # Zero disables the limit; 10000 is the default.
 max_connections = 10000
 ```
+
+The limit includes client sessions routed through ME. With `max_connections = 0`,
+there is no separate ME session cap; operating-system resources and other configured
+limits still apply. This parameter does not set the number of upstream ME TCP
+writers. Changing it requires a process restart; a configuration reload is not
+sufficient. See the [parameter reference](Config_params/CONFIG_PARAMS.en.md#max_connections).
 
 ### Upstream Manager
 To configure outbound connections (upstreams), add the corresponding parameters to the `[[upstreams]]` section of the configuration file:
