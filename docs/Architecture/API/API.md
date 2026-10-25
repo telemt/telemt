@@ -180,7 +180,7 @@ Notes:
 | `POST /v1/users/{username}/rotate-secret` | Rotates one user's secret and returns the effective secret. |
 | `POST /v1/users/{username}/enable` | Enables one user, removing any disabled override from config. |
 | `POST /v1/users/{username}/disable` | Disables one user and closes active runtime sessions for that user. |
-| `POST /v1/users/{username}/reset-quota` | Resets one user's runtime quota counter and persists quota state. |
+| `POST /v1/users/{username}/reset-quota` | Persists the quota checkpoint before resetting one user's live accounting. |
 
 ## Common Error Codes
 
@@ -334,7 +334,7 @@ Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the 
 | `web` | `object` | Complete normalized `[web]` section, including defaults. Each `web.vhosts[]` item preserves either `host` or `hosts` and includes `base_path` (empty string when omitted in TOML); hostname lists remain grouped. The derived runtime-only `web.runtime` field is excluded. |
 | `server` | `object?` | Partial `[server]` view when editable nested fields are present. Currently only `listeners` may appear; `api`/`admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
 
-The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed, and an empty listener array is omitted. Changes under `[web.limits]` are valid desired configuration but remain process-deferred; the patch response reports `web.limits` in `deferred_process_fields` until restart.
+The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed, and an empty listener array is omitted. Changes to `web.allow_wildcard_hosts` and `[web.limits]` remain process-deferred; the patch response reports them in `deferred_process_fields` until restart. Wildcard patterns require the flag to be enabled in the active process; staging the flag does not authorize patterns before restart.
 
 ### WEB runtime identity and lifecycle
 
@@ -1479,7 +1479,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 
 #### `UserLinks`
 
-`UserLinks` contains only native MTProxy links. It never contains a WEB `tg://webproxy` link; WEB links use a separate startup-only derivation contract based on every concrete hostname selected by `web.vhosts[].host` or `hosts`, `base_path`, and profile secret mode.
+`UserLinks` contains only native MTProxy links. It never contains a WEB `tg://webproxy` link; WEB links use a separate startup-only derivation contract based on every configured exact hostname selected by `web.vhosts[].host` or `hosts` (never a wildcard pattern), `base_path`, and profile secret mode.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -1533,7 +1533,8 @@ continues to reject `access`. Invalid periods, missing/nonpositive quota amounts
 and inventories above 65,536 users with any period configured are rejected before
 writing. A metadata-only change does not cancel sessions or rotate secrets.
 
-`GET /v1/stats/users/quota` returns `data.users` entries with the existing `username`,
+`GET /v1/stats/users/quota` returns configured users with a positive quota only,
+sorted by username. Its `data.users` entries contain the existing `username`,
 `data_quota_bytes`, `used_bytes`, and `last_reset_epoch_secs`, plus:
 
 | Field | Type | Meaning |
@@ -1548,7 +1549,8 @@ writing. A metadata-only change does not cancel sessions or rotate secrets.
 durable publication. Before the runtime accepts a desired change, the old active
 period can still be returned with `pending`. After acceptance, its active period
 and boundary fields are null until the new metadata is durable. `error` means a
-calendar/checkpoint attempt failed; live usage is unchanged. `overdue` means the
+calendar/checkpoint attempt failed; consumption is not reset and cursors do not
+advance, while ongoing traffic continues to accrue. `overdue` means the
 next boundary has arrived and the durable reset has not completed. Status reads
 share the quota mutation gate, so an in-flight commit can delay the response.
 
@@ -1560,23 +1562,29 @@ reset time without changing cadence. Secret rotation preserves it; deletion and
 recreation start fresh. Disabled or expired users still rotate quotas but are not
 reenabled by a reset.
 
-Before CREATE persists a new username, it durably removes any retired quota row
+Before CREATE persists any new username, including one without a recurring quota, it durably removes any retired quota row
 for that name. An unreadable checkpoint or failed durable write returns HTTP 500
 without creating the user in configuration or live admission; retry after fixing
 storage. The existing quota gate spans this cleanup and config publication. Other
-users' persisted consumption and calendar metadata are preserved.
+users' persisted consumption and calendar metadata are preserved. An existing
+checkpoint is rewritten even when that username has no row, confirming durability
+after a possibly ambiguous earlier rename/sync failure. A missing checkpoint
+needs no cleanup write.
 
 One process worker checkpoints due users as a batch before resetting live
 accounting generations. Existing reservations stay in their original generation;
 late refunds cannot subtract new-period usage. No TLS, MTProto, KDF, relay limit,
-or lifetime telemetry semantics change. I/O failures retain live usage and retry
-at 1, 2, 4, 8, 16, 32, then 60 seconds. After downtime, only the latest due period is
+or lifetime telemetry semantics change. I/O failures do not reset consumption or
+advance cursors; traffic continues to accrue. Retries run at 1, 2, 4, 8, 16, 32,
+then 60 seconds. After downtime, only the latest due period is
 applied. The worker finishes accepted writes cooperatively before final shutdown
 persistence. Config and quota-state files remain separate durable writes, not a
 cross-file transaction.
 
 With recurring policies, invalid existing quota state fails startup. Missing state
 initializes fresh counters; legacy state migrates without resetting consumption.
+Startup also requires successful durable publication of the initial state, even
+when the checkpoint was valid or missing.
 The existing 16 MiB checkpoint limit remains. There is no traffic write-ahead log,
 so consumption since the previous checkpoint can still be lost on a crash.
 
@@ -1631,7 +1639,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 
 **Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. In particular, `web.vhosts` is an array: changing one vhost `base_path` requires sending the complete vhost array, including every retained vhost and each required hostname selector (`host` or non-empty `hosts`), `public_addr`, `decoy`, and profile field. A mutation is written to the single source file that owns every touched semantic section. Untouched table bodies, the root file when it is not the owner, and all other include files remain byte-identical; touched TOML table bodies are reserialized and may lose their internal formatting or comments. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
 
-**Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified. WEB host selectors are mutually exclusive; duplicate normalized names are rejected across all groups. The effective configuration must fit active process limits: `max_vhosts` counts concrete hostname entries and `max_profiles` counts expanded host/profile pairs. Raising desired restart-only limits in the same patch cannot bypass the active ceilings.
+**Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified. WEB host selectors are mutually exclusive; duplicate normalized names are rejected across all groups. The effective configuration must fit active process limits: `max_vhosts` counts exact hostname entries and `max_profiles` counts exact host/profile pairs plus one shared profile set per wildcard source group. Wildcard selectors count toward `web.limits.wildcard.max_rules`. Raising desired restart-only limits in the same patch cannot bypass the active ceilings.
 
 **Read-only mode:** returns `403 read_only` when the API runs with `read_only = true`.
 
@@ -1723,6 +1731,11 @@ curl -s -X PATCH -H "Authorization: <token>" -H "If-Match: <revision>" \
 
 ## Runtime Reload Endpoints
 
+Prepared or delayed configuration snapshots cannot restore an older quota period
+after a newer API user mutation, including period-only changes that preserve
+credentials. Admission changes made after preparation remain authoritative during
+activation.
+
 ### `POST /v1/system/reload`
 
 Loads the current on-disk config under the API mutation lock and submits an immutable config snapshot to Maestro. `If-Match` is optional and uses the same revision contract as `PATCH /v1/config`. An empty body defaults to `{"mode":"instant","failure_policy":"keep_new"}`.
@@ -1753,10 +1766,10 @@ The API exposes WEB desired configuration through the common config resource, pr
 
 | Operation | Current contract |
 | --- | --- |
-| Read or patch `[web]`, vhosts, profiles, decoys, timeouts, or limits | Supported through `GET` and `PATCH /v1/config`; `web.runtime` is derived and excluded. Tables deep-merge, arrays replace wholesale; changing one `web.vhosts[].base_path` therefore requires the complete vhost array. `web.limits` and `web.decoy_fasttrack_mode` remain process-deferred. |
+| Read or patch `[web]`, vhosts, profiles, decoys, timeouts, or limits | Supported through `GET` and `PATCH /v1/config`; `web.runtime` is derived and excluded. Tables deep-merge, arrays replace wholesale; changing one `web.vhosts[].base_path` therefore requires the complete vhost array. `web.allow_wildcard_hosts`, `web.limits`, and `web.decoy_fasttrack_mode` remain process-deferred. Patterns require wildcard mode to be active before the update. |
 | Persist `server.listeners` | Supported through `PATCH /v1/config`; arrays replace wholesale. A native endpoint-only change may rebind in-process under the constraints above. Any WEB listener-plan change and unsupported native policy change remain deferred until process restart. |
 | Apply an externally edited WEB config | Update the owning TOML source, call `POST /v1/system/reload`, then poll `GET /v1/system/reload/{id}`. |
-| Inspect restart requirements | Read `deferred_process_fields` from reload status. Unsupported `server.listeners` changes, `web.limits`, and `web.decoy_fasttrack_mode` require process restart. |
+| Inspect restart requirements | Read `deferred_process_fields` from reload status. Unsupported `server.listeners` changes, `web.allow_wildcard_hosts`, `web.limits`, and `web.decoy_fasttrack_mode` require process restart. |
 | Inspect WEB lifecycle, capacity, sessions, operations, learning, and debug state | Use the authenticated `GET /v1/runtime/web/*` routes documented above. |
 | Pause, drain, or resume new WEB work | Use `POST /v1/runtime/web/lifecycle/pause`, `/drain`, or `/resume` with the current `runtime_instance`. |
 | Close selected or all point-in-time sessions | Use `POST /v1/runtime/web/sessions/close`; close-all first requires effective issuance to be disabled. |
@@ -1766,7 +1779,7 @@ The API exposes WEB desired configuration through the common config resource, pr
 | Rotate a profiled user's secret | Use `/v1/users/{username}/rotate-secret`; the durable credential identity is staged immediately and active owners for the old identity are cancelled. The config watcher rebuilds WEB capabilities from the new access snapshot. The API returns the raw secret, not a `tg://webproxy` link. |
 | Read WEB-specific runtime diagnostics | Use authenticated `GET /web-status`; filters cover client IP, process session ID, User-Agent, and non-secret key fingerprint, with optional grouping, expandable HTTP request-to-response details, and WebSocket handshake/message/frame rows. |
 
-`web.enabled`, `web.carrier`, `web.debug`, `web.timeouts`, vhosts, profiles, and decoy snapshots are runtime-generation fields. A changed carrier applies only to newly issued bridge sessions; existing sessions and issued bootstrap chains retain their issuance-time policy. `web.enabled=false` stops new issuance but never closes live sessions implicitly. WEB listener inventory and trust policy, plus all `[web.limits]`, are process-owned. A successful reload can therefore activate the runtime-owned subset while reporting the process-owned subset as deferred.
+`web.enabled`, `web.carrier`, `web.debug`, `web.timeouts`, vhosts, profiles, and decoy snapshots are runtime-generation fields. A changed carrier applies only to newly issued bridge sessions; existing sessions and issued bootstrap chains retain their issuance-time policy. `web.enabled=false` stops new issuance but never closes live sessions implicitly. WEB listener inventory and trust policy, plus `web.allow_wildcard_hosts` and all `[web.limits]`, are process-owned. A successful reload can therefore activate the runtime-owned subset while reporting the process-owned subset as deferred.
 
 `base_path` scopes only the WEB data listener. It never prefixes Control API `/v1/*`, `/web-status`, or `/metrics`. `GET /v1/config` shows the desired path but does not prove runtime activation because WEB status intentionally exposes no host, path, or capability. Confirm a terminal reload, the expected `runtime.generation_id`, and external probes of the new and old exact routes. Paths and base paths are never Prometheus labels.
 
@@ -1783,12 +1796,12 @@ Deployment, TLS-terminator examples, links, and WEB-specific verification are do
 | Endpoint | Notes |
 | --- | --- |
 | `PATCH /v1/config` | Deep-merges and validates the patch, writes touched sections via atomic `tmp + rename`, and optionally submits the exact written revision for an in-process Maestro reload. |
-| `POST /v1/users` | Creates and validates a user, atomically updates only affected `access.*` TOML tables, then stages the credential and enabled state in process-wide admission after the durable write. |
-| `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged; explicit `null` removes optional entries. Admission is staged only when `secret` or `enabled` changes; an identity change or disable cancels current owners, while a metadata-only patch does not. |
+| `POST /v1/users` | Before saving any new user, including one without a recurring quota, reads existing quota state and durably clears any retired row; read/write failure returns `500` without creating the user. Creates and validates a user, atomically updates only affected `access.*` TOML tables, then stages the credential and enabled state in process-wide admission after the durable write. |
+| `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged; explicit `null` removes optional entries. Admission is staged when `secret` or `enabled` is explicitly supplied, even if unchanged; an identity change or disable cancels current owners, while a metadata-only patch does not. Every accepted patch also fences quota policy freshness, including metadata-only or no-op patches. |
 | `POST /v1/users/{username}/rotate-secret` | Replaces the user's secret with a provided valid 32-hex value or a generated value, stages the new process-wide admission identity, cancels owners of the old identity, then returns the effective secret in `CreateUserResponse`. |
 | `POST /v1/users/{username}/enable` | Enables the user idempotently by removing the `access.user_enabled[username]` override and updating the runtime admission state immediately. |
 | `POST /v1/users/{username}/disable` | Disables the user idempotently by writing `access.user_enabled[username] = false`, updating runtime admission immediately, and cancelling active sessions for that username. |
-| `POST /v1/users/{username}/reset-quota` | Resets the runtime quota counter for the route username, persists quota state to `general.quota_state_path`, and does not modify user config. |
+| `POST /v1/users/{username}/reset-quota` | Persists the quota checkpoint to `general.quota_state_path` before resetting live accounting for the route username; does not modify user config. |
 | `DELETE /v1/users/{username}` | Deletes only the specified user, removes it from API-managed optional `access.user_*` maps, blocks last-user deletion, stages a deletion tombstone that cancels active owners, and atomically updates only related API-managed `access.*` TOML tables. It leaves `access.user_source_deny` untouched; manage that table manually in TOML. |
 
 All accepted durable config, user, and quota mutations:
@@ -1809,6 +1822,7 @@ Docker deployment note:
 - A read-only single-file mount remains valid only for read-only deployments or when `[server.api].read_only=true`.
 
 Delete path cleanup guarantees:
+- DELETE commits config and admission removal even if quota-checkpoint cleanup fails; the failure is logged. Recreating the username through CREATE still requires successful durable cleanup before saving the new account.
 - Config cleanup removes only the requested username keys.
 - Runtime unique-IP cleanup removes only this user's limiter and tracked IP state.
 
