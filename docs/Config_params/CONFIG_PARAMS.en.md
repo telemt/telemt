@@ -333,7 +333,7 @@ This document lists all configuration keys accepted by `config.toml`.
     data_path = "/var/lib/telemt"
     ```
 ## quota_state_path
-  - **Recurring quotas**: This file also stores per-user UTC calendar watermarks. When [`user_quota_periods`](#user_quota_periods) is nonempty, invalid existing state is a startup error; a missing file starts fresh.
+  - **Recurring quotas**: This file also stores per-user UTC calendar watermarks. When [`user_quota_periods`](#user_quota_periods) is nonempty, invalid existing state is a startup error; a missing file starts fresh. Initial durable publication must also succeed before startup can complete.
   - **Constraints / validation**: `Path`. Relative paths are resolved from the process working directory.
   - **Description**: JSON state file used to persist runtime per-user quota consumption.
   - **Example**:
@@ -698,6 +698,7 @@ This document lists all configuration keys accepted by `config.toml`.
     direct_relay_copy_buf_c2s_bytes = 65536
     ```
 ## direct_relay_copy_buf_s2c_bytes
+  - **Flush behavior**: In both directions, direct adaptive copy drives buffered output flushes when the source becomes pending, without waiting for EOF or another source packet. TLS framing, configured buffer limits and quota enforcement remain unchanged.
   - **Constraints / validation**: Must be within `8192..=2097152` (bytes).
   - **Description**: Copy buffer size for DC->client direction in direct relay.
   - **Example**:
@@ -1121,6 +1122,9 @@ This document lists all configuration keys accepted by `config.toml`.
     disable_colors = false
     ```
 ## me_socks_kdf_policy
+
+A valid public SOCKS `BND.ADDR/BND.PORT` with a nonzero port supplies the complete KDF source tuple, ahead of configured/discovered NAT information. Its family must match the logical ME destination, independently of the TCP family used to reach SOCKS. IPv4-mapped IPv6 destinations count as IPv4 and require a native IPv4 BND tuple; IPv4-compatible destinations remain IPv6. `strict` rejects unavailable/invalid BND; `compat` retains the existing fallback. This does not change KDF fields, ports, SOCKS CONNECT destination encoding, public-address checks, or STUN behavior.
+
   - **Constraints / validation**: `"strict"` or `"compat"`.
   - **Description**: SOCKS-bound KDF fallback policy for Middle-End handshake.
   - **Example**:
@@ -2064,6 +2068,9 @@ This document lists all configuration keys accepted by `config.toml`.
     proxy_protocol_trusted_cidrs = ["127.0.0.1/32", "10.0.0.0/8"]
     ```
 ## metrics_port
+
+With only `metrics_port`, Telemt attempts IPv4 and IPv6 loopback binds. `metrics_listen` overrides that binding. Docker port publishing alone does not expose a loopback-only listener: configure an explicit container-reachable bind and whitelist the immediate scraper/Docker peer.
+
   - **Constraints / validation**: `u16` (optional).
   - **Description**: Prometheus-compatible metrics endpoint port. When set, enables the metrics listener (bind behavior can be overridden by `metrics_listen`).
   - **Example**:
@@ -2082,6 +2089,9 @@ This document lists all configuration keys accepted by `config.toml`.
     metrics_listen = "127.0.0.1:9090"
     ```
 ## metrics_whitelist
+
+Authorization checks the immediate peer IP in its original form and, for IPv4-mapped IPv6, its canonical IPv4 form. Explicit IPv6 CIDRs remain valid. Forwarded headers do not grant access.
+
   - **Constraints / validation**: `IpNetwork[]`.
   - **Description**: CIDR whitelist for metrics endpoint access.
   - **Example**:
@@ -2458,6 +2468,9 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     synlimit_burst = 24
     ```
 ## synlimit_ios_seconds (server.listeners)
+
+This is a packet-shape heuristic, not authenticated Apple-device detection. IPv4 SYN packets of length `60` use the generic bucket; no universal iOS/background-resume fix is implied.
+
   - **Constraints / validation**: `u32`, must be `> 0`. Default is `1`.
   - **Description**: Token-bucket interval for SYN packets matching the iOS-like classifier. IPv4 matches packet length `64` and TTL `< 65`; IPv6 matches packet length `84` and hop limit `< 65`.
   - **Example**:
@@ -2676,7 +2689,7 @@ These process-wide ceilings make every WEB registry, queue, request body, capabi
 | `control_bytes_global` | `usize` | `16777216` | Process-wide byte reserve available only to control frames. |
 | `max_bootstraps_global` | `usize` | `512` | Live bootstrap credentials process-wide. |
 | `max_bootstraps_per_ip` | `usize` | `64` | Live bootstrap credentials per client IP. |
-| `max_vhosts` | `usize` | `8` | Concrete WEB hostnames across all groups; each `hosts` entry counts separately. |
+| `max_vhosts` | `usize` | `8` | Concrete exact WEB hostnames across all groups; each exact `hosts` entry counts separately. Wildcard selectors count toward `max_rules`. |
 | `max_profiles` | `usize` | `32` | Exact host/profile bindings plus one shared profile set per wildcard source group. |
 | `max_static_files` | `usize` | `4096` | Static snapshot entries across all groups; a shared group snapshot counts once. |
 | `max_static_file_bytes` | `usize` | `8388608` | Maximum bytes in one static file. |
@@ -2721,6 +2734,7 @@ Unless a row states otherwise, timeouts are measured in seconds and must be with
 | `http_overload_timeout_ms` | `u64` | `250` | `✔` | Per-phase deadline in milliseconds for an accepted saturated socket to wait for capacity or write its retryable response; validated within `1..=60000`. A timed-out wait and its response write each receive at most one phase budget. |
 | `shutdown_secs` | `u64` | `15` | `✔` | One absolute process-shutdown budget shared by all listener acceptors and connections plus WEB session and auxiliary-task drains. The active value is captured once when shutdown starts. |
 | `decoy_header_secs` | `u64` | `30` | `✔` | Connect and response-head deadline for an HTTP decoy. |
+| `decoy_resolve_secs` | `u64` | `5` | `✔` | Deadline per distinct hostname/port DNS lookup during preparation; `1..=3600` seconds, not an aggregate preparation or HTTP exchange deadline. |
 
 # [web.limits.wildcard]
 
@@ -2762,11 +2776,13 @@ Exactly one of `host` or `hosts` is required, including when WEB is disabled. Em
 
 # [web.vhosts.decoy]
 
+For `http_upstream`, `resolve` accepts `"never"` (default) or `"startup"`. The default requires a loopback, link-local, or private IP literal. `startup` additionally permits DNS names: asynchronous configuration preparation resolves each distinct hostname/port, validates every answer against the allowed address classes and effective WEB listeners, and pins the first resolver-order address. Failure, no answers, a public address, or a direct listener loop rejects preparation. The configured hostname is preserved in the upstream authority. There is no request-time DNS or automatic answer failover; reload prepares a fresh snapshot. `web.timeouts.decoy_resolve_secs` bounds each distinct hostname/port DNS lookup during preparation; lookups are sequential, with no aggregate preparation deadline. Operators must exclude indirect loops through other forwarding layers.
+
 Exactly one decoy mode is required:
 
 | Mode | Required keys | Validation |
 | --- | --- | --- |
-| `http_upstream` | `upstream` | An `http://` origin using a loopback, link-local, or private IP literal; no credentials, path, query, or fragment. |
+| `http_upstream` | `upstream` | An `http://` origin without credentials, path, query, or fragment. Private IP literal by default; DNS name only with `resolve = "startup"`. |
 | `static_directory` | `directory`; optional `index = "index.html"` | Absolute real directory and one safe index file name. Symlinks and escaping paths are rejected; the immutable snapshot is loaded under `[web.limits]`. |
 
 # [[web.vhosts.profiles]]
@@ -2782,6 +2798,8 @@ Exactly one decoy mode is required:
 Profile limits must be non-zero and no greater than their corresponding global limits. Duplicate `(user, secret_mode)` profiles in one group are rejected. Each concrete hostname retains its own quota identity; process-wide, IP, and access-user restrictions still apply. Configured profile ceilings do not preallocate live sessions or streams. A group shares immutable policy and one decoy snapshot, while host-bound capabilities and their bounded containment indexes remain separate.
 
 ## WEB lifecycle and API management
+
+The process must already have `web.allow_wildcard_hosts` enabled before a patch can introduce patterns. Saving the desired flag does not enable patterns immediately; premature updates fail atomically until restart.
 
 - The config watcher and generation reload apply `web.enabled`, carrier and negotiation policy, `web.debug`, `web.timeouts`, vhosts, profiles, and decoy snapshots without a process restart. One immutable expanded source snapshot is validated and activated; a candidate generation's watcher starts only after that generation becomes active. Existing sessions and in-flight negotiation chains keep their issuance-time carrier candidates, limits, timeouts, and absolute deadlines; newly issued bridge sessions use one pinned active generation.
 - Changing `base_path` atomically replaces both the new-request route and derived capability. Reissue links and drain affected live sessions first: established WebSockets and already routed exchanges continue; later old-base requests carrying a process-authentic bootstrap or session token receive a local no-store `404`, while the now-inactive old capability follows ordinary decoy handling.
@@ -3559,9 +3577,9 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
   - **Default**: Empty. Users without a period retain the existing manual/lifetime quota behavior.
   - **Calendar**: All boundaries are UTC: daily at midnight, weekly on Monday at midnight, monthly on the first day at midnight. A month is a calendar month, not a fixed number of days.
   - **Activation**: Enabling or changing a period preserves consumption and starts automatic resets at the next boundary. Removing a period preserves consumption and the durable calendar watermark. Hot reload applies the policy without changing the secret or restarting the process.
-  - **Lifecycle**: Secret rotation preserves consumption and calendar state. Disabled and expired accounts continue their calendar but remain disabled/expired. Deleting and recreating an account starts fresh. Manual `reset-quota` does not shift UTC cadence. A clock rollback cannot repeat an already processed boundary, including after removing and restoring a period.
-  - **Persistence**: The worker checkpoints the complete reset batch before publishing new counters. On write failure, live consumption and cursors stay unchanged; retries use monotonic delays of 1, 2, 4, 8, 16, 32, then 60 seconds. Delayed or restarted workers reset once to the latest due period, rather than replaying every missed interval. Successful metadata-only activation does not overwrite traffic accumulated during the write.
-  - **Startup**: With periods configured, an existing unreadable, invalid, oversized, or unsupported calendar checkpoint fails startup. A missing file initializes fresh state; a valid legacy file preserves consumption while acquiring calendar metadata. The checkpoint remains limited to 16 MiB and 65,536 rows. Keep `general.quota_state_path` on persistent writable storage.
+  - **Lifecycle**: Secret rotation preserves consumption and calendar state. Disabled and expired accounts continue their calendar but remain disabled/expired. Deleting and recreating an account starts fresh; CREATE requires successful durable cleanup before saving the new user, including users without a recurring period. Manual `reset-quota` does not shift UTC cadence. A clock rollback cannot repeat an already processed boundary, including after removing and restoring a period.
+  - **Persistence**: The worker checkpoints the complete reset batch before publishing new counters. On write failure, consumption is not reset and calendar cursors do not advance; ongoing traffic continues to accrue. Retries use monotonic delays of 1, 2, 4, 8, 16, 32, then 60 seconds. Delayed or restarted workers reset once to the latest due period, rather than replaying every missed interval. Successful metadata-only activation does not overwrite traffic accumulated during the write.
+  - **Startup**: With periods configured, an existing unreadable, invalid, oversized, or unsupported calendar checkpoint fails startup. A missing file initializes fresh state; a valid legacy file preserves consumption while acquiring calendar metadata. The checkpoint remains limited to 16 MiB and 65,536 rows. Startup also requires successful durable publication of the initial state, even if the checkpoint was valid or missing. Keep `general.quota_state_path` on persistent writable storage.
   - **Accounting**: Resets replace the existing accounting generation; reservations already held by relays retain their original generation. Refunding an old reservation cannot reduce new-period consumption. Lifetime traffic telemetry is unchanged. This feature does not add a traffic write-ahead log: consumption since the last checkpoint retains the existing crash-loss window.
   - **API**: User create/PATCH accepts `quota_period`; quota status distinguishes desired configuration from the effective durable calendar. See the [API contract](../Architecture/API/API.md#recurring-quota-periods).
   - **Example**:
