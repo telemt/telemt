@@ -201,7 +201,7 @@ mode = "http_upstream"
 upstream = "http://127.0.0.1:8080"
 
 [[web.vhosts.profiles]]
-user = "alice"
+user = "web-user"
 secret_mode = "dd"
 ```
 
@@ -268,6 +268,10 @@ and the new flag/limit table.
 
 ## Server-side carrier negotiation
 
+For `websocket-lanes`, rejection or timeout before a lane upgrades invokes shared session recovery. Failure after upgrade remains lane-local. This protocol behavior does not establish native macOS/iOS background-resume compatibility.
+
+Immutable bridge assembly is cached, while per-response nonce, bootstrap, host and base-path substitutions remain fresh. Expiry processing uses conservative deadline hints without extending expiration boundaries. These internal optimizations do not change wire formats, admission limits or configured timeouts, and do not by themselves establish an end-to-end connection-time improvement.
+
 Auto-negotiation is optional and disabled unless `carriers` is an explicit non-empty array. The configured `carrier` remains the final fallback and is appended exactly once, even when it also appears in the array:
 
 ```toml
@@ -326,7 +330,9 @@ Every pre-Upgrade authentication, shape, lane-reservation, or capacity failure f
 
 The WEB listener must use `proxy_protocol = false` and `reuse_allow = false`. It cannot use `client_mss`, `synlimit`, `announce`, or `announce_ip`. `web_trusted_proxy_cidrs` must be non-empty and must contain only the immediate NGINX or HAProxy peers; `/0` networks are rejected.
 
-The HTTP decoy origin must be a loopback, link-local, or private IP literal. Telemt preserves ordinary request method, path, query, headers, streamed body, response status, headers, and body while removing hop-by-hop headers. Malformed carrier requests have carrier credentials and bodies removed before falling back to the decoy. A literal decoy endpoint that exactly matches an effective WEB listener, or is covered by its same-family wildcard address on the same port, is rejected. Indirect loops through DNS, NGINX, HAProxy, or another forwarding layer cannot be proven from Telemt configuration and must be excluded operationally.
+For `http_upstream`, `resolve` accepts `"never"` (default) or `"startup"`. The default requires a loopback, link-local, or private IP literal. `startup` additionally permits DNS names: asynchronous configuration preparation resolves each distinct hostname/port, validates every answer against the allowed address classes and effective WEB listeners, and pins the first resolver-order address. Failure, no answers, a public address, or a direct listener loop rejects preparation. The configured hostname is preserved in the upstream authority. There is no request-time DNS or automatic answer failover; reload prepares a fresh snapshot. `web.timeouts.decoy_resolve_secs` bounds each distinct hostname/port DNS lookup during preparation; lookups are sequential, with no aggregate preparation deadline. Operators must exclude indirect loops through other forwarding layers.
+
+Ordinary requests retain method, path, query, headers, streamed body, response status and body, except hop-by-hop headers. Malformed carrier requests lose carrier credentials and bodies before decoy forwarding.
 
 An immutable static-site snapshot can be used instead:
 
@@ -592,7 +598,7 @@ curl -sS http://127.0.0.1:9091/v1/system/reload/RELOAD_ID \
   -H "Authorization: ${TELEMT_API_AUTH}"
 ```
 
-A terminal `succeeded` status confirms runtime activation. Changed carrier, candidate, deadline, or learning policy is used by newly issued bridge sessions; existing sessions and in-flight attempt chains are not migrated. If `deferred_process_fields` contains `server.listeners` or `web.limits`, the file is valid and persisted but those settings still require a Telemt restart.
+A terminal `succeeded` status confirms runtime activation. Changed carrier, candidate, deadline, or learning policy is used by newly issued bridge sessions; existing sessions and in-flight attempt chains are not migrated. If `deferred_process_fields` contains `server.listeners`, `web.allow_wildcard_hosts`, or `web.limits`, the file is valid and persisted but those settings still require a Telemt restart.
 
 Access-user operations use the existing endpoints, for example:
 
@@ -636,7 +642,7 @@ See the complete [Control API contract](../Architecture/API/API.md) for request 
 
 | Symptom | Check |
 | --- | --- |
-| WEB configuration is valid on disk but listener behavior did not change | Inspect reload `deferred_process_fields`; listener and `[web.limits]` changes require restart. |
+| WEB configuration is valid on disk but listener behavior did not change | Inspect reload `deferred_process_fields`; listener and `web.allow_wildcard_hosts` / `[web.limits]` changes require restart. |
 | Carrier requests reach the decoy | Verify exact vhost, link secret mode, direct proxy CIDR, and one parseable `X-Forwarded-For` value. |
 | A link stopped working after `base_path` changed | Import the newly printed path link and verify that the complete new prefix reaches Telemt unchanged. Existing sessions may recover only through the new exact base; old capabilities cannot be reused. |
 | `/telegram/web` redirects to `/telegram/web/` | Add an exact non-WEB handler for the no-slash path. Only the slash-terminated configured subtree belongs to Telemt's WEB contract. |
