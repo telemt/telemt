@@ -463,6 +463,12 @@ pub(super) fn log_changes(
             new_hot.user_expirations.len()
         );
     }
+    if old_hot.user_quota_periods != new_hot.user_quota_periods {
+        info!(
+            "config reload: user_quota_periods updated ({} entries)",
+            new_hot.user_quota_periods.len()
+        );
+    }
     if old_hot.user_data_quota != new_hot.user_data_quota {
         info!(
             "config reload: user_data_quota updated ({} entries)",

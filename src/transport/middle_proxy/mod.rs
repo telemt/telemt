@@ -47,6 +47,10 @@ mod send;
 #[cfg(test)]
 #[path = "tests/send_adversarial_tests.rs"]
 mod send_adversarial_tests;
+// Full relay lifecycle checks exercise propagation of ME task completion.
+#[cfg(test)]
+#[path = "tests/relay_completion_tests.rs"]
+mod relay_completion_tests;
 mod wire;
 
 /// Network-free writer fixtures shared by admission and recovery regressions.

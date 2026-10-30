@@ -77,6 +77,8 @@ pub(crate) struct TraceClearOutcome {
 
 /// Process-owned bounded WEB debug trace store.
 pub(crate) struct WebTraceStore {
+    /// Process-frozen redaction for credentials outside the finite hostname inventory.
+    pub(super) wildcard_redaction: bool,
     policy: ArcSwap<WebDebugConfig>,
     policy_update: Mutex<()>,
     enabled: AtomicBool,
@@ -97,9 +99,20 @@ pub(crate) struct WebTraceStore {
 }
 
 impl WebTraceStore {
-    /// Creates a process-owned store from restart-only capacity and initial policy.
+    /// Creates an exact-host trace store for existing fixtures.
+    #[cfg(test)]
     pub(crate) fn new(policy: WebDebugConfig, limits: &WebLimitsConfig) -> Arc<Self> {
+        Self::new_with_wildcards(policy, limits, false)
+    }
+
+    /// Freezes automatic-host diagnostic redaction independently of mutable debug policy.
+    pub(crate) fn new_with_wildcards(
+        policy: WebDebugConfig,
+        limits: &WebLimitsConfig,
+        wildcard_redaction: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            wildcard_redaction,
             enabled: AtomicBool::new(policy.enabled),
             policy: ArcSwap::from_pointee(policy),
             policy_update: Mutex::new(()),

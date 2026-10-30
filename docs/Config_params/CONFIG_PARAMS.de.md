@@ -27,6 +27,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
  - [web](#web)
  - [web.debug](#webdebug)
  - [web.limits](#weblimits)
+ - [web.limits.wildcard](#weblimitswildcard)
  - [web.timeouts](#webtimeouts)
  - [web.vhosts](#webvhosts)
  - [web.vhosts.decoy](#webvhostsdecoy)
@@ -332,6 +333,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     data_path = "/var/lib/telemt"
     ```
 ## quota_state_path
+  - **Periodische Quoten**: Diese Datei speichert auch die UTC-Kalendermarken je Benutzer. Ist [`user_quota_periods`](#user_quota_periods) nicht leer, verhindert ein ungültiger vorhandener Zustand den Start; eine fehlende Datei beginnt mit frischem Zustand. Auch die erste dauerhafte Veröffentlichung muss vor Abschluss des Starts erfolgreich sein.
   - **Einschränkungen / Validierung**: `Path`. Relative Pfade werden aus dem Arbeitsverzeichnis des Prozesses aufgelöst.
   - **Beschreibung**: JSON-Statusdatei, die verwendet wird, um den Kontingentverbrauch pro User während der Runtime beizubehalten.
   - **Beispiel**:
@@ -696,6 +698,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     direct_relay_copy_buf_c2s_bytes = 65536
     ```
 ## direct_relay_copy_buf_s2c_bytes
+  - **Flush-Verhalten**: In beiden Richtungen treibt Direct Adaptive Copy das Leeren gepufferter Ausgaben voran, sobald die Quelle wartet, ohne EOF oder ein weiteres Quellpaket abzuwarten. TLS-Framing, konfigurierte Puffergrenzen und Quotendurchsetzung bleiben unverändert.
   - **Einschränkungen / Validierung**: Muss innerhalb von `8192..=2097152` (Bytes) liegen.
   - **Beschreibung**: Puffergröße für DC->Client-Richtung im direkten Relay kopieren.
   - **Beispiel**:
@@ -1119,6 +1122,9 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     disable_colors = false
     ```
 ## me_socks_kdf_policy
+
+Gültige öffentliche SOCKS-Werte `BND.ADDR/BND.PORT` mit einem Port ungleich null liefern das vollständige KDF-Quelltupel vor konfigurierten/ermittelten NAT-Daten. Die Familie muss dem logischen ME-Ziel entsprechen, unabhängig von der TCP-Familie zur SOCKS-Verbindung. IPv4-mapped IPv6-Ziele gelten als IPv4 und erfordern ein natives IPv4-BND-Tupel; IPv4-compatible Ziele bleiben IPv6. `strict` weist fehlendes/ungültiges BND ab, `compat` behält den bisherigen Fallback. KDF-Felder und Ports, SOCKS-CONNECT-Zielcodierung, Prüfung öffentlicher Adressen und STUN bleiben unverändert.
+
   - **Einschränkungen / Validierung**: `"strict"` oder `"compat"`.
   - **Beschreibung**: SOCKS-gebundene KDF-Fallback-Richtlinie für Middle-End-Handshake.
   - **Beispiel**:
@@ -2062,6 +2068,9 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     proxy_protocol_trusted_cidrs = ["127.0.0.1/32", "10.0.0.0/8"]
     ```
 ## metrics_port
+
+Bei allein gesetztem `metrics_port` versucht Telemt, IPv4- und IPv6-Loopback zu binden. `metrics_listen` ersetzt diese Bindung. Docker-Portfreigabe allein macht einen Loopback-Listener nicht erreichbar: Konfigurieren Sie eine über das Containernetz erreichbare Bindung und erlauben Sie den direkten Scraper-/Docker-Peer in der Whitelist.
+
   - **Einschränkungen / Validierung**: `u16` (optional).
   - **Beschreibung**: Prometheus-kompatibler Metrik-Endpunktport. Wenn gesetzt, wird der Metrik-Listener aktiviert (Bindungsverhalten kann durch `metrics_listen` überschrieben werden).
   - **Beispiel**:
@@ -2080,6 +2089,9 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     metrics_listen = "127.0.0.1:9090"
     ```
 ## metrics_whitelist
+
+Die Autorisierung prüft die IP des direkten Peers in Originalform und bei IPv4-mapped IPv6 auch in kanonischer IPv4-Form. Explizite IPv6-CIDRs bleiben gültig. Forwarded-Header gewähren keinen Zugriff.
+
   - **Einschränkungen / Validierung**: `IpNetwork[]`.
   - **Beschreibung**: CIDR-Allowlist für Metrik-Endpunktzugriff.
   - **Beispiel**:
@@ -2091,7 +2103,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```
 ## max_connections
   - **Einschränkungen / Validierung**: `u32`. `0` bedeutet unbegrenzt.
-  - **Beschreibung**: Maximale Anzahl gleichzeitiger Clientverbindungen.
+  - **Beschreibung**: Maximale Anzahl gleichzeitiger Clientverbindungen, einschließlich der ME-Clientsitzungen. Bei `0` gilt keine zusätzliche Obergrenze für ME-Sitzungen; die verfügbaren Betriebssystemressourcen und andere konfigurierte Limits gelten weiterhin. Änderungen erfordern einen Neustart des Prozesses. Dieser Parameter legt nicht die Anzahl der ausgehenden TCP-Verbindungen des ME-Pools fest.
   - **Beispiel**:
 
     ```toml
@@ -2456,6 +2468,9 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     synlimit_burst = 24
     ```
 ## synlimit_ios_seconds (server.listeners)
+
+Dies ist eine Paketform-Heuristik, keine authentifizierte Apple-Geräteerkennung. IPv4-SYN-Pakete der Länge `60` verwenden den allgemeinen Bucket; daraus folgt keine universelle Lösung für iOS oder die Rückkehr aus dem Hintergrund.
+
   - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `1`.
   - **Beschreibung**: Token-Bucket-Intervall für SYN-Pakete, die dem iOS-ähnlichen Classifier entsprechen. IPv4 entspricht der Paketlänge `64` und TTL `< 65`; IPv6 entspricht der Paketlänge `84` und dem Hop-Limit `< 65`.
   - **Beispiel**:
@@ -2589,6 +2604,7 @@ Der WEB-Modus transportiert MTProxy-Datenverkehr von Telegram Desktop über HTTP
 | Schlüssel | Typ | Default | Hot-Reload |
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | `✔` |
+| `allow_wildcard_hosts` | `bool` | `false` | `✘` |
 | `carrier` | `"https"`, `"https-lanes"`, `"websocket"` oder `"websocket-lanes"` | `"https"` | `✔` |
 | `carriers` | `false` oder ein nicht leeres Array eindeutiger Carrier | `false` | `✔` |
 | `carrier_learning` | `bool` | `true` | `✔` |
@@ -2673,11 +2689,11 @@ Diese prozessweiten Obergrenzen begrenzen alle WEB-Register, Warteschlangen, Req
 | `control_bytes_global` | `usize` | `16777216` | Prozessweites, nur für Control Frames verfügbares Byte-Budget. |
 | `max_bootstraps_global` | `usize` | `512` | Prozessweit aktive Bootstrap-Zugangsdaten. |
 | `max_bootstraps_per_ip` | `usize` | `64` | Aktive Bootstrap-Zugangsdaten pro Client-IP. |
-| `max_vhosts` | `usize` | `8` | Konfigurierte virtuelle WEB-Hosts. |
-| `max_profiles` | `usize` | `32` | WEB-Profile über alle vhosts. |
-| `max_static_files` | `usize` | `4096` | Einträge statischer Snapshots über alle vhosts. |
+| `max_vhosts` | `usize` | `8` | Konkrete exakte WEB-Hostnamen aller Gruppen; jeder exakte `hosts`-Eintrag zählt einzeln. Wildcard-Selektoren zählen zu `max_rules`. |
+| `max_profiles` | `usize` | `32` | Exakte Host-/Profilbindungen plus ein gemeinsamer Profilsatz je Wildcard-Quellgruppe. |
+| `max_static_files` | `usize` | `4096` | Statische Snapshot-Einträge aller Gruppen; ein gemeinsamer Gruppensnapshot zählt einmal. |
 | `max_static_file_bytes` | `usize` | `8388608` | Maximale Größe einer statischen Datei. |
-| `max_static_bytes` | `usize` | `67108864` | Bytes statischer Snapshots über alle vhosts. |
+| `max_static_bytes` | `usize` | `67108864` | Statische Snapshot-Bytes aller Gruppen; ein gemeinsamer Gruppensnapshot zählt einmal. |
 | `debug_records_capacity` | `usize` | `65536` | Maximale Zahl gespeicherter WEB-Debugdatensätze. |
 | `debug_bytes_global` | `usize` | `67108864` | Globale Byte-Obergrenze für gespeicherte und in Verarbeitung befindliche WEB-Debugdaten; mindestens 4096. |
 | `memory_envelope_bytes` | `usize` | `1342177280` | Deklarierter Rahmen für HTTP-Heads, Bodys, gemeinsame Queues/WebSocket-I/O, Lane-Zustand, Carrier-Learning, statische Snapshots und begrenzte Debug-/Statuspuffer; maximal 4 GiB. |
@@ -2713,31 +2729,77 @@ Sofern eine Zeile nichts anderes angibt, werden Timeouts in Sekunden angegeben u
 | `carrier_negotiation_deadlines_secs` | `[u64; 4]` | `[3, 5, 8, 12]` | `✔` | Streng steigende kumulative Offsets: Die Bridge verwendet sie vor ihrem ersten `/session`-Request, der Server bei Annahme des ersten automatischen Versuchs. Die Checkpoints für ein bis vier Kandidaten sind `[d3]`, `[d0, d3]`, `[d0, d1, d3]` und `[d0, d1, d2, d3]`; der letzte Kandidat verwendet immer `d3`. |
 | `carrier_learning_secs` | `u64` | `600` | `✔` | Feste Lebensdauer zweier prozesslokaler Evidenzfenster; Bereich `2..=86400`. |
 | `bootstrap_lifetime_secs` | `u64` | `120` | `✔` | Lebensdauer ungenutzter Bootstraps und geschlossener Token-Replay-Marker. |
-| `reconnect_grace_secs` | `u64` | `120` | `✔` | Maximale Carrier-Inaktivität bis zum Schließen der Sitzung. |
+| `reconnect_grace_secs` | `u64` | `120` | `✔` | Maximale bestätigte Peer-Inaktivität bis zum Schließen der Sitzung; leere Polls und alleiniger Backend-Fortschritt verlängern diese Frist nicht. |
 | `http_idle_secs` | `u64` | `75` | `✔` | Idle-Grenze zwischen HTTP-Austauschvorgängen und bei ausbleibendem Fortschritt eines bereits ausgegebenen Response-Bodys. Explizit begrenzte Request-Body-, Long-Poll-, Decoy- und ausstehende Upgrade-Phasen behalten ihre eigenen Deadlines und werden nicht durch diesen Timer verkürzt. Der Wert wird beim Annehmen der Verbindung fixiert. |
 | `http_overload_timeout_ms` | `u64` | `250` | `✔` | Deadline je Phase in Millisekunden, um bei akzeptierter Überlast auf Kapazität zu warten oder die wiederholbare Antwort zu schreiben; Bereich `1..=60000`. Wait-Timeout und Response-Write erhalten jeweils höchstens ein Phasenbudget. |
 | `shutdown_secs` | `u64` | `15` | `✔` | Ein absolutes Budget für das Beenden des Prozesses, das von allen Listener-Acceptoren und Verbindungen sowie WEB-Sitzungs- und Hilfstask-Drains gemeinsam verwendet wird. Der aktive Wert wird beim Start des Shutdowns einmalig erfasst. |
 | `decoy_header_secs` | `u64` | `30` | `✔` | Deadline für Verbindung und Response-Head eines HTTP-Decoys. |
+| `decoy_resolve_secs` | `u64` | `5` | `✔` | Deadline je DNS-Abfrage für ein eindeutiges Host-/Portpaar während der Vorbereitung; `1..=3600` Sekunden, keine Gesamtdeadline der Vorbereitung oder des HTTP-Austauschs. |
+
+# [web.limits.wildcard]
+
+Diese für die Prozesslaufzeit festen Limits gelten für automatische Wildcard-Hosts.
+Siehe [Betriebs- und Sicherheitsvertrag](../WEB/WEB_PROXY.de.md#automatische-wildcard-hosts).
+Das Frontend muss Host-Werte begrenzen; unbekannte/verdrängte fremde Capabilities
+können Decoys erreichen. Nur Diagnosekopien verwenden vorsorgliche formbasierte Maskierung.
+
+| Schlüssel | Typ | Standard | Bedeutung |
+| --- | --- | --- | --- |
+| `max_rules` | `usize` | `32` | Gesamtzahl der Suffix-/Catch-all-Selektoren. |
+| `max_profiles_per_request` | `usize` | `256` | Obergrenze für vollständige Wildcard-Gruppenscans und kalte HMAC-Berechnungen. |
+| `cache_hosts` | `usize` | `256` | Positive FIFO-Einträge; `0` deaktiviert die Speicherung. |
+| `cache_bytes` | `usize` | `8388608` | Berechnete Bytes für Einträge/Indizes, auch verdrängte, noch referenzierte Einträge. |
+| `cold_hmac_per_minute` | `u32` | `1000000` | Dauerhaftes prozessweites Budget für kalte HMAC-Auswertungen. |
+| `cold_hmac_burst` | `u32` | `65536` | Auswertungsburst, mindestens `max_profiles_per_request`. |
+
+Außer `cache_hosts` müssen die Grenzen bei aktiviertem Wildcard-Modus positiv sein.
+Kalte Requests reservieren die gesamte Profilzahl atomar; Erschöpfung ergibt sofort
+HTTP 503. Nur erfolgreiche Bootstrap-Ausgaben füllen den Cache. Authentifizierte
+Carrier umgehen diesen Cache und das kalte Budget. Verdrängung verändert keine
+Quoten. Runtime-Snapshots grenzen Cachetreffer bei allen Reload-Arten voneinander ab.
+Zusätzliche geprüfte Speicherreservierungen gelten nur im Wildcard-Modus; bei
+Standardlimits sind mindestens 1290 MiB statt der bisherigen 1280 MiB nötig.
+`memory_envelope_bytes = 1610612736` setzt für das Beispiel einen Rahmen von 1536 MiB.
 
 # [[web.vhosts]]
 
 | Schlüssel | Typ | Erforderlich | Hot-Reload | Beschreibung |
 | --- | --- | --- | --- | --- |
-| `host` | `String` | ja | `✔` | Eindeutiger, kanonischer ACE-FQDN in Kleinbuchstaben ohne Port, Pfad, Zugangsdaten oder abschließenden Punkt. |
+| `host` | `String` | ein Selektor | `✔` | Exakter Hostname oder aktivierter Wildcard-Selektor; schließt `hosts` aus. |
+| `hosts` | `String[]` | ein Selektor | `✔` | Nicht leere Selektorliste mit gemeinsamen Profilen, Decoy, `base_path` und `public_addr`. |
 | `base_path` | `String` | nein | `✔` | Exaktes, groß-/kleinschreibungssensitives WEB-Präfix ohne führenden oder abschließenden Schrägstrich; standardmäßig leer. Höchstens 128 ASCII-Bytes in durch Schrägstriche getrennten Segmenten `[A-Za-z0-9][A-Za-z0-9_-]*`. |
 | `public_addr` | `SocketAddr` | ja | `✔` | Konkrete öffentliche IP auf Port `443`; wird im Ziel-Tupel des inneren Relays verwendet. |
 | `decoy` | Tabelle | ja | `✔` | Gewöhnlicher Site-Fallback für nicht authentifizierten oder ungültigen Datenverkehr. |
-| `profiles` | Tabellen-Array | bei aktiviertem WEB | `✔` | Explizite Benutzer und Client-Secret-Modi für diesen Hostnamen. |
+| `profiles` | Tabellen-Array | bei aktiviertem WEB | `✔` | Explizite Benutzer und Secret-Modi, unabhängig auf jedem Hostnamen der Gruppe verfügbar. |
 
-Der Hostname wird bei der Validierung normalisiert und muss von Telegram Desktop akzeptiert werden. Ein leerer `base_path` behält die Root-Capability v1 und das bisherige hexadezimale Link-Secret. Ein nicht leerer Pfad verwendet die v2-Host/Pfad-Capability und einen Telegram-Desktop-Pfadlink mit percent-encoded `HOST/BASE` sowie dem base64url-Secret-Marker `0x70`. Das Routing verlangt das exakte Präfix mit abschließendem Schrägstrich und leitet es nie um, normalisiert oder entfernt es. Ein Bootstrap ist ein Bearer-Token: Client-Adresse und IP-Familie dürfen sich vor der Sitzungserstellung ändern. Ein ungenutzter Bootstrap bleibt über einen Konfigurations-Reload hinweg nur gültig, solange dieselbe Profilidentität aktiv bleibt.
+Genau einer der Selektoren `host` oder `hosts` ist erforderlich, auch bei
+deaktiviertem WEB. Leere oder gleichzeitig angegebene Selektoren sind unzulässig.
+Jeder Hostname muss ein von Telegram Desktop akzeptierter FQDN ohne IP-Literal,
+Port, Pfad, Zugangsdaten oder abschließenden Punkt sein. Die Validierung normalisiert
+ihn zu lowercase ACE; kanonische Duplikate innerhalb und zwischen Gruppen werden
+abgewiesen. `*.suffix` und `*` erfordern `web.allow_wildcard_hosts = true` und einen
+Neustart. Vorrang haben exakte Selektoren, danach das längste Suffix, danach Catch-all.
+Suffixe erfassen Nachfahren beliebiger Tiefe, aber nicht den Stammnamen. Eingebettete
+Wildcards und Regex sind nicht unterstützt. Die normalisierte Konfiguration behält
+den gewählten Selektor; Listen werden beim Serialisieren nicht expandiert. Ein
+leerer `base_path` behält die v1-Capability und das bisherige hexadezimale Link-Secret.
+Ein nicht leerer Pfad verwendet die v2-Host-/Pfad-Capability und einen Telegram-
+Desktop-Pfadlink mit percent-encoded `HOST/BASE` sowie dem base64url-Secret-Marker
+`0x70`. Routing verlangt das exakte Präfix mit abschließendem Schrägstrich und leitet
+es weder um noch normalisiert oder entfernt es. Ein Bootstrap ist ein Bearer-
+Credential: Clientadresse und Adressfamilie dürfen vor Sitzungserstellung wechseln.
+Ein unbenutzter Bootstrap bleibt nach Reload nur bei weiterhin aktiver
+Profilidentität gültig.
 
 # [web.vhosts.decoy]
+
+Für `http_upstream` akzeptiert `resolve` die Werte `"never"` (Standard) und `"startup"`. Standardmäßig ist ein Loopback-, Link-Local- oder privates IP-Literal erforderlich. `startup` erlaubt zusätzlich DNS-Namen: Die asynchrone Konfigurationsvorbereitung löst jedes eindeutige Host-/Portpaar auf, prüft alle Antworten gegen erlaubte Adressklassen und effektive WEB-Listener und fixiert die erste Adresse in Resolver-Reihenfolge. Fehler, leere Antworten, öffentliche Adressen oder direkte Listener-Schleifen verwerfen die Vorbereitung. Der konfigurierte Hostname bleibt in der Upstream-Authority erhalten. Es gibt weder DNS während der Request-Verarbeitung noch automatischen Wechsel zu weiteren Antworten; Reload erstellt einen frischen Snapshot. `web.timeouts.decoy_resolve_secs` begrenzt jede DNS-Abfrage für ein eindeutiges Host-/Portpaar. Die Abfragen laufen nacheinander, ohne gemeinsame Deadline für die gesamte Vorbereitung. Indirekte Schleifen über weitere Weiterleitungsschichten müssen Betreiber ausschließen.
 
 Genau ein Decoy-Modus ist erforderlich:
 
 | Modus | Erforderliche Schlüssel | Validierung |
 | --- | --- | --- |
-| `http_upstream` | `upstream` | Ein `http://`-Origin mit Loopback-, Link-Local- oder privater IP-Adresse als Literal; keine Zugangsdaten, kein Pfad, Query oder Fragment. |
+| `http_upstream` | `upstream` | Ein `http://`-Origin ohne Zugangsdaten, Pfad, Query oder Fragment. Standardmäßig privates IP-Literal; DNS-Name nur mit `resolve = "startup"`. |
 | `static_directory` | `directory`; optional `index = "index.html"` | Absolutes reales Verzeichnis und ein sicherer Index-Dateiname. Symlinks und Pfade außerhalb des Verzeichnisses werden abgelehnt; der unveränderliche Snapshot wird innerhalb von `[web.limits]` geladen. |
 
 # [[web.vhosts.profiles]]
@@ -2746,18 +2808,20 @@ Genau ein Decoy-Modus ist erforderlich:
 | --- | --- | --- | --- | --- |
 | `user` | `String` | ja | — | Vorhandener Schlüssel mit 1–64 Byte aus `[access.users]`; die Grenze hält Runtime-Status und Filter beschränkt. |
 | `secret_mode` | `"plain"` oder `"dd"` | ja | — | Exakte Secret-Darstellung für Telegram Desktop. `ee` wird nicht unterstützt. |
-| `max_sessions` | `usize` | nein | `web.limits.max_sessions_global` | Aktive Sitzungen für dieses Profil. |
-| `max_streams` | `usize` | nein | `web.limits.max_streams_global` | Aktive logische Streams für dieses Profil. |
+| `max_sessions` | `usize` | nein | `web.limits.max_sessions_global` | Lebende Profilsitzungen je konkretem Hostnamen. |
+| `max_streams` | `usize` | nein | `web.limits.max_streams_global` | Lebende logische Profilstreams je konkretem Hostnamen. |
 | `max_streams_per_session` | `usize` | nein | `web.limits.max_streams_per_session` | Aktive logische Streams in einer Profilsitzung. |
 
-Profilgrenzen müssen ungleich null sein und dürfen die zugehörigen globalen Grenzen nicht überschreiten. Doppelte `(user, secret_mode)`-Profile in einem vhost werden abgelehnt.
+Profillimits müssen positiv sein und dürfen die entsprechenden globalen Limits nicht überschreiten. Doppelte `(user, secret_mode)`-Profile innerhalb einer Gruppe sind unzulässig. Jeder konkrete Hostname behält seine eigene Quotenidentität; Prozess-, IP- und Zugangsbenutzerlimits gelten weiterhin. Profilobergrenzen reservieren keine Sitzungen oder Streams vorab. Eine Gruppe teilt unveränderliche Richtlinien und einen Decoy-Snapshot; hostgebundene Capabilities und ihre begrenzten Indizes zur Vermeidung von Credential-Lecks bleiben getrennt.
 
 ## WEB-Lebenszyklus und API-Verwaltung
 
+Vor dem Hinzufügen von Mustern über die API muss `web.allow_wildcard_hosts` im aktiven Prozess bereits aktiviert sein. Das Speichern des gewünschten Parameters aktiviert Muster nicht sofort; verfrühte Änderungen werden bis zum Neustart atomar abgewiesen.
+
 - Config-Watcher und Generations-Reload wenden `web.enabled`, Carrier- und Negotiation-Richtlinie, `web.debug`, `web.timeouts`, vhosts, Profile und Decoy-Snapshots ohne Prozessneustart an. Ein einzelner unveränderlicher expandierter Source-Snapshot wird validiert und aktiviert; der Watcher einer Kandidatengeneration startet erst nach deren Aktivierung. Bestehende Sitzungen und laufende Negotiation-Ketten behalten Carrier-Kandidaten, Grenzen, Timeouts und absolute Deadlines ihres Ausgabezeitpunkts; neue Bridge-Sitzungen verwenden genau eine fixierte aktive Generation.
 - Eine Änderung von `base_path` ersetzt atomar sowohl die Route für neue Requests als auch die abgeleitete Capability. Geben Sie zuerst neue Links aus und beenden Sie betroffene aktive Sitzungen: etablierte WebSockets und bereits geroutete Austauschvorgänge laufen weiter; spätere Requests an die alte Basis mit einem prozessauthentischen Bootstrap- oder Session-Token erhalten ein lokales, nicht cachebares `404`, während die nun inaktive alte Capability der gewöhnlichen Decoy-Behandlung folgt.
-- Bestand und Vertrauensrichtlinie der WEB-Listener unter `server.listeners` sowie alle Werte in `web.limits` sind prozesseigen und erfordern einen Neustart.
-- `GET /v1/config` liefert den vollständigen verfassten `[web]`-Baum außer dem abgeleiteten Snapshot `web.runtime`. `PATCH /v1/config` akzeptiert ein dünn besetztes `web`-Objekt, führt Tabellen tief zusammen, ersetzt Arrays vollständig, validiert den gesamten Kandidaten und meldet `web.limits` bis zum Neustart in `deferred_process_fields`.
+- Bestand und Vertrauensrichtlinie der WEB-Listener unter `server.listeners`, der Parameter `web.allow_wildcard_hosts` und alle Werte in `web.limits` sind prozesseigen und erfordern einen Neustart.
+- `GET /v1/config` liefert den vollständigen verfassten `[web]`-Baum außer dem abgeleiteten Snapshot `web.runtime`. `PATCH /v1/config` akzeptiert ein dünn besetztes `web`-Objekt, führt Tabellen tief zusammen, ersetzt Arrays vollständig, validiert den gesamten Kandidaten und meldet `web.allow_wildcard_hosts`, `web.limits` bis zum Neustart in `deferred_process_fields`.
 - `GET /v1/runtime/web/status`, `/sessions`, `/sessions/{session_ref}` und `/operations/{operation_id}` stellen begrenzten, nicht geheimen Runtime-Zustand bereit. POST-Steuerungen schließen ausgewählte Sitzungen, löschen Debugdaten oder setzen Carrier-Learning zurück und verlangen die aktuelle zufällige `runtime_instance`.
 - `web.enabled = false` stoppt nach der Aktivierung neue Bootstrap-/Session-Ausgaben, schließt aber keine aktiven Sitzungen. Warten Sie für Close-all auf `manager.issuance_enabled = false`, senden Sie den asynchronen Selektor `all` und fragen Sie dessen Operation ab.
 - Vorhandene Access-Benutzer können über `/v1/users` erstellt, geändert, rotiert, aktiviert, deaktiviert und gelöscht werden. Das Erstellen eines Benutzers fügt kein WEB-Profil hinzu. Das Deaktivieren aktualisiert die Admission sofort und beendet die aktiven Sitzungen dieses Benutzers.
@@ -3439,6 +3503,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
 | [`user_max_tcp_conns_global_each`](#user_max_tcp_conns_global_each) | `usize` | `0` | `✔` |
 | [`user_expirations`](#user_expirations) | `Map<String, DateTime<Utc>>` | `{}` | `✔` |
 | [`user_data_quota`](#user_data_quota) | `Map<String, u64>` | `{}` | `✔` |
+| [`user_quota_periods`](#user_quota_periods) | `Map<String, "daily" / "weekly" / "monthly">` | `{}` | `✔` |
 | [`user_max_unique_ips`](#user_max_unique_ips) | `Map<String, usize>` | `{}` | `✔` |
 | [`user_max_unique_ips_global_each`](#user_max_unique_ips_global_each) | `usize` | `0` | `✔` |
 | [`user_max_unique_ips_mode`](#user_max_unique_ips_mode) | `"active_window"`, `"time_window"` oder `"combined"` | `"active_window"` | `✔` |
@@ -3524,6 +3589,26 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     # Alice receives a 1 GiB quota.
     alice = 1073741824
     ```
+## user_quota_periods
+  - **Einschränkungen / Validierung**: Jeder Schlüssel muss einen vorhandenen `access.users`-Eintrag mit positivem `access.user_data_quota` benennen. Zulässige Werte sind genau `"daily"`, `"weekly"` oder `"monthly"`. Bei nicht leerer Tabelle darf die gesamte konfigurierte Benutzerzahl 65.536 nicht überschreiten.
+  - **Standard**: Leer. Benutzer ohne Periode behalten die bisherige manuell zurückgesetzte Quote ohne automatische Erneuerung.
+  - **Kalender**: Alle Grenzen gelten in UTC: täglich um Mitternacht, wöchentlich montags um Mitternacht, monatlich am ersten Tag um Mitternacht. Ein Monat ist ein Kalendermonat, keine feste Tageszahl.
+  - **Aktivierung**: Aktivieren oder Ändern erhält den Verbrauch und beginnt automatische Rücksetzungen an der nächsten Grenze. Entfernen erhält Verbrauch und dauerhafte Kalendermarke. Hot Reload übernimmt die Richtlinie ohne Secret-Wechsel oder Prozessneustart.
+  - **Lebenszyklus**: Secret-Rotation erhält Verbrauch und Kalender. Deaktivierte und abgelaufene Konten durchlaufen weiter den Kalender, bleiben aber gesperrt/abgelaufen. Löschen und Neuerstellen beginnt frisch; CREATE muss vor Speicherung des neuen Benutzers den alten dauerhaften Zustand erfolgreich bereinigen, auch ohne periodische Quote. Manuelles `reset-quota` verschiebt keine UTC-Grenzen. Eine rückwärts laufende Uhr wiederholt keine verarbeitete Grenze, auch nach Entfernen und Wiederherstellen einer Periode.
+  - **Persistenz**: Der Worker speichert den gesamten Rücksetzungsbatch vor Veröffentlichung neuer Zähler. Bei Schreibfehlern wird der Verbrauch nicht zurückgesetzt und Kalendermarken werden nicht vorgerückt; laufender Verkehr wird weiter gezählt. Wiederholungen verwenden monotone Verzögerungen von 1, 2, 4, 8, 16, 32 und danach 60 Sekunden. Nach Verzögerung oder Neustart wird einmal auf die letzte fällige Periode zurückgesetzt, ohne jedes verpasste Intervall nachzuspielen. Eine reine Metadatenaktivierung überschreibt keinen während des Schreibens entstandenen Verbrauch.
+  - **Start**: Bei konfigurierten Perioden verhindert ein vorhandener unlesbarer, ungültiger, zu großer oder nicht unterstützter Kalender-Checkpoint den Start. Eine fehlende Datei beginnt frisch; ein gültiger bisheriger Zustand behält den Verbrauch und erhält Kalendermetadaten. Die Grenzen bleiben 16 MiB und 65.536 Einträge. Auch bei gültiger oder fehlender Datei muss die erste dauerhafte Veröffentlichung gelingen. `general.quota_state_path` muss auf dauerhaftem beschreibbarem Speicher liegen.
+  - **Abrechnung**: Rücksetzungen ersetzen die Abrechnungsgeneration; bereits gehaltene Relay-Reservierungen behalten ihre ursprüngliche Generation. Eine alte Rückerstattung kann den Verbrauch der neuen Periode nicht verringern. Kumulative Verkehrstelemetrie bleibt unverändert. Es wird kein Traffic-Write-Ahead-Log eingeführt: Bei einem Absturz kann Verbrauch seit dem letzten Checkpoint weiterhin verloren gehen.
+  - **API**: Benutzer-Create/PATCH akzeptiert `quota_period`; der Status unterscheidet gewünschte Konfiguration und wirksamen dauerhaften Kalender. Siehe [API-Vertrag](../Architecture/API/API.md#recurring-quota-periods).
+  - **Beispiel**:
+
+    ```toml
+    [access.user_data_quota]
+    alice = 1073741824
+
+    [access.user_quota_periods]
+    alice = "monthly"
+    ```
+
 ## user_max_unique_ips
   - **Einschränkungen / Validierung**: `Map<String, usize>`.
   - **Beschreibung**: Eindeutige Source-IP-Limits pro User.

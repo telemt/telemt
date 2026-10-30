@@ -238,6 +238,22 @@ impl ProxySharedState {
             .apply_config_from_source(source_generation, users, user_enabled)
     }
 
+    /// Serializes cold quota transitions without entering the relay hot path.
+    pub(crate) fn quota_mutation_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.user_admission.quota_mutation_gate()
+    }
+
+    /// Reconciles the active source calendar under the process quota gate.
+    pub(crate) fn publish_quota_config(
+        &self,
+        source: u64,
+        config: &Arc<crate::config::ProxyConfig>,
+        accepted_after_mutation: bool,
+    ) {
+        self.user_admission
+            .publish_quota_config(source, config, accepted_after_mutation);
+    }
+
     /// Applies one persisted user mutation before asynchronous config reload.
     pub(crate) fn stage_user(
         &self,

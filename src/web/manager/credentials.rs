@@ -136,7 +136,7 @@ impl WebProcessRuntime {
         };
         let Some(mut user_publication) = generation
             .proxy_shared
-            .claim_authenticated_user(&profile.user, profile.credential_id)
+            .claim_authenticated_user(&profile.shared.user, profile.shared.credential_id)
         else {
             self.telemetry
                 .record_rejection(WebRejectionReason::UserDisabled);
@@ -164,13 +164,15 @@ impl WebProcessRuntime {
         }
         let trace_session_id = self.trace.next_session_id();
         let bridge_diagnostics_enabled = config.web.debug.bridge_diagnostics_enabled();
-        let (user_agent, user_agent_id) = bounded_user_agent(user_agent);
+        let (user_agent, user_agent_id) = bounded_user_agent(user_agent, self.wildcard.is_some());
         let issued_profile = Arc::clone(&profile);
+        let expires_at = now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs);
+        state.bootstrap_expiry = Some(state.bootstrap_expiry.unwrap_or(expires_at).min(expires_at));
         state.bootstraps.insert(
             hash,
             Bootstrap {
                 user_registration,
-                expires_at: now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs),
+                expires_at,
                 issued_at: now,
                 issuance_ip: client_ip,
                 profile,
@@ -379,7 +381,7 @@ impl WebProcessRuntime {
     }
 }
 
-fn bounded_user_agent(value: Option<&str>) -> (Option<Arc<str>>, Option<[u8; 16]>) {
+fn bounded_user_agent(value: Option<&str>, wildcard: bool) -> (Option<Arc<str>>, Option<[u8; 16]>) {
     const DISPLAY_BYTES: usize = 256;
     const HASH_CONTEXT: &[u8] = b"telemt-web-user-agent-v1\0";
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -392,6 +394,7 @@ fn bounded_user_agent(value: Option<&str>) -> (Option<Arc<str>>, Option<[u8; 16]
     let mut id = [0; 16];
     id.copy_from_slice(&digest[..16]);
     let mut display = String::with_capacity(value.len().min(DISPLAY_BYTES));
+    let mut truncated = false;
     for character in value.chars() {
         let character = if character.is_control() {
             '\u{fffd}'
@@ -399,9 +402,28 @@ fn bounded_user_agent(value: Option<&str>) -> (Option<Arc<str>>, Option<[u8; 16]
             character
         };
         if display.len().saturating_add(character.len_utf8()) > DISPLAY_BYTES {
+            truncated = true;
             break;
         }
         display.push(character);
     }
+    if wildcard {
+        crate::web::trace::scrub_text(&mut display, truncated);
+    }
     (Some(Arc::from(display)), Some(id))
+}
+
+#[cfg(test)]
+mod wildcard_tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_user_agent_redaction_preserves_original_hash_and_masks_expanded_cutoff() {
+        let value = format!("{}/{}tail", "x\t".repeat(60), "A".repeat(43));
+        let (plain, plain_hash) = bounded_user_agent(Some(&value), false);
+        let (redacted, redacted_hash) = bounded_user_agent(Some(&value), true);
+        assert_eq!(plain_hash, redacted_hash);
+        assert!(plain.unwrap().ends_with(&"A".repeat(15)));
+        assert!(redacted.unwrap().ends_with(&"*".repeat(15)));
+    }
 }

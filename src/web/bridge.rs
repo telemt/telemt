@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use base64::Engine as _;
 
 use crate::config::WebCarrierMethod;
@@ -41,6 +43,68 @@ pub(crate) fn render(
     let mut nonce = [0u8; 18];
     rng.fill(&mut nonce);
     let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce);
+    let base_prefix = base.strip_suffix('/').unwrap_or(base);
+    let body = template(bridge_diagnostics_enabled)
+        .replace("__NONCE__", &nonce)
+        .replace("__HOST__", host)
+        .replace("__BASE_PREFIX__", base_prefix)
+        .replace("__BOOTSTRAP__", bootstrap)
+        .replace("__CARRIER_METHOD__", carrier_method.as_str())
+        .replace("__BATCH_LIMIT__", &batch_limit.to_string())
+        .replace("__QUEUE_LIMIT__", &queue_limit.to_string())
+        .replace("__QUEUE_ITEMS__", &queue_items.to_string())
+        .replace("__MAX_STREAMS__", &max_streams.to_string())
+        .replace(
+            "__NEGOTIATION_ENABLED__",
+            if negotiation_enabled { "true" } else { "false" },
+        )
+        .replace("__CANDIDATE_COUNT__", &candidate_count.to_string())
+        .replace("__LONG_POLL_SECS__", &long_poll_secs.to_string())
+        .replace("__BRIDGE_REQUEST_SECS__", &bridge_request_secs.to_string())
+        .replace("__BRIDGE_RETRY_SECS__", &bridge_retry_secs.to_string())
+        .replace(
+            "__BRIDGE_RECOVERY_SECS__",
+            &bridge_recovery_secs.to_string(),
+        )
+        .replace("__WEBSOCKET_OPEN_SECS__", &websocket_open_secs.to_string())
+        .replace(
+            "__RECONNECT_GRACE_SECS__",
+            &reconnect_grace_secs.to_string(),
+        )
+        .replace(
+            "__CARRIER_PROBE_COALESCE_MS__",
+            &carrier_probe_coalesce_ms.to_string(),
+        )
+        .replace(
+            "__CARRIER_DEADLINES__",
+            &carrier_deadlines
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    BridgePage {
+        body,
+        content_security_policy: format!(
+            "default-src 'none'; base-uri 'none'; child-src 'none'; connect-src 'self' wss://{host}; font-src 'none'; form-action 'none'; frame-ancestors http://127.0.0.1:*; frame-src 'none'; img-src 'none'; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'nonce-{nonce}'; style-src 'none'; worker-src 'none'; sandbox allow-same-origin allow-scripts"
+        ),
+    }
+}
+
+// Only immutable embedded source is cached; credentials and CSP nonces stay response-owned.
+static TEMPLATES: [OnceLock<String>; 2] = [OnceLock::new(), OnceLock::new()];
+
+/// Prepares both static variants before a WEB runtime accepts requests.
+pub(super) fn prepare_templates() {
+    template(false);
+    template(true);
+}
+
+fn template(diagnostics: bool) -> &'static str {
+    TEMPLATES[usize::from(diagnostics)].get_or_init(|| assemble_template(diagnostics))
+}
+
+fn assemble_template(bridge_diagnostics_enabled: bool) -> String {
     let diagnostic_script = if bridge_diagnostics_enabled {
         format!("<script nonce=\"__NONCE__\">\n{DIAGNOSTIC_RUNTIME}\n</script>\n")
     } else {
@@ -58,8 +122,7 @@ pub(crate) fn render(
     } else {
         String::new()
     };
-    let base_prefix = base.strip_suffix('/').unwrap_or(base);
-    let body = DOCUMENT
+    DOCUMENT
         .replace("__DIAGNOSTIC_RUNTIME__\n", &diagnostic_script)
         .replace("__RESPONSE_RUNTIME__", RESPONSE_RUNTIME)
         .replace("__REQUEST_RUNTIME__", REQUEST_RUNTIME)
@@ -124,50 +187,6 @@ pub(crate) fn render(
                 ""
             },
         )
-        .replace("__NONCE__", &nonce)
-        .replace("__HOST__", host)
-        .replace("__BASE_PREFIX__", base_prefix)
-        .replace("__BOOTSTRAP__", bootstrap)
-        .replace("__CARRIER_METHOD__", carrier_method.as_str())
-        .replace("__BATCH_LIMIT__", &batch_limit.to_string())
-        .replace("__QUEUE_LIMIT__", &queue_limit.to_string())
-        .replace("__QUEUE_ITEMS__", &queue_items.to_string())
-        .replace("__MAX_STREAMS__", &max_streams.to_string())
-        .replace(
-            "__NEGOTIATION_ENABLED__",
-            if negotiation_enabled { "true" } else { "false" },
-        )
-        .replace("__CANDIDATE_COUNT__", &candidate_count.to_string())
-        .replace("__LONG_POLL_SECS__", &long_poll_secs.to_string())
-        .replace("__BRIDGE_REQUEST_SECS__", &bridge_request_secs.to_string())
-        .replace("__BRIDGE_RETRY_SECS__", &bridge_retry_secs.to_string())
-        .replace(
-            "__BRIDGE_RECOVERY_SECS__",
-            &bridge_recovery_secs.to_string(),
-        )
-        .replace("__WEBSOCKET_OPEN_SECS__", &websocket_open_secs.to_string())
-        .replace(
-            "__RECONNECT_GRACE_SECS__",
-            &reconnect_grace_secs.to_string(),
-        )
-        .replace(
-            "__CARRIER_PROBE_COALESCE_MS__",
-            &carrier_probe_coalesce_ms.to_string(),
-        )
-        .replace(
-            "__CARRIER_DEADLINES__",
-            &carrier_deadlines
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-    BridgePage {
-        body,
-        content_security_policy: format!(
-            "default-src 'none'; base-uri 'none'; child-src 'none'; connect-src 'self' wss://{host}; font-src 'none'; form-action 'none'; frame-ancestors http://127.0.0.1:*; frame-src 'none'; img-src 'none'; manifest-src 'none'; media-src 'none'; object-src 'none'; script-src 'nonce-{nonce}'; style-src 'none'; worker-src 'none'; sandbox allow-same-origin allow-scripts"
-        ),
-    }
 }
 
 const DOCUMENT: &str = include_str!("bridge/document.html");
@@ -183,3 +202,11 @@ const RUNTIME: &str = include_str!("bridge/runtime.js");
 // Rendered wire-contract tests remain separate from the embedded document.
 #[cfg(test)]
 mod tests;
+
+// Differential tests retain the original renderer as an independent wire-contract oracle.
+#[cfg(test)]
+#[path = "bridge/render_reference.rs"]
+mod render_reference;
+#[cfg(test)]
+#[path = "bridge/render_tests.rs"]
+mod render_tests;

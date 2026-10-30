@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
@@ -69,8 +68,7 @@ pub(super) async fn run_telemt_core(
     let quota_state_path = config.general.quota_state_path.clone();
     let quota_state =
         crate::quota_state::QuotaStateOwner::new(quota_state_path, quota_store.clone());
-    let configured_quota_users = config.access.users.keys().cloned().collect::<BTreeSet<_>>();
-    quota_state.load(&configured_quota_users).await;
+    quota_state.load_for_config(&config).await?;
 
     let upstream_manager = Arc::new(
         UpstreamManager::new(
@@ -131,19 +129,39 @@ pub(super) async fn run_telemt_core(
         traffic_limiter,
         user_admission,
     );
+    let quota_guard = quota_state.lock().await;
     let _ = shared_state.activate_user_config_source(
         1,
         None,
         &config.access.users,
         &config.access.user_enabled,
     );
+    shared_state.publish_quota_config(1, &Arc::new(config.clone()), true);
+    drop(quota_guard);
+    if let Err(error) = quota_state
+        .process_schedules(
+            crate::quota_state::now_epoch_secs(),
+            !config.access.user_quota_periods.is_empty(),
+        )
+        .await
+    {
+        if !config.access.user_quota_periods.is_empty() {
+            return Err(error.into());
+        }
+        warn!(error = %error, "Deferred quota calendar cleanup until persistence recovers");
+    }
+    quota_state.spawn_scheduler(&process_control_plane);
     let max_connections_limit = if config.server.max_connections == 0 {
         Semaphore::MAX_PERMITS
     } else {
         config.server.max_connections as usize
     };
     let max_connections = Arc::new(Semaphore::new(max_connections_limit));
-    let web_trace = WebTraceStore::new(config.web.debug.clone(), &config.web.limits);
+    let web_trace = WebTraceStore::new_with_wildcards(
+        config.web.debug.clone(),
+        &config.web.limits,
+        config.web.allow_wildcard_hosts,
+    );
     let web_runtime_control = WebRuntimeControl::new();
 
     let (detected_ips_tx, detected_ips_rx) = watch::channel((None::<IpAddr>, None::<IpAddr>));

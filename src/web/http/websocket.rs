@@ -253,6 +253,7 @@ pub(super) async fn handle(
     trusted_proxy_cidrs: &[IpNetwork],
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
+    host: &str,
 ) -> HttpResponse {
     let request_deadline = super::request_deadline(&request);
     let Some(parsed) = parse_upgrade(&request) else {
@@ -265,7 +266,7 @@ pub(super) async fn handle(
     else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
-    let Ok(session) = runtime.get_session(parsed.token_hash, &vhost.host) else {
+    let Ok(session) = runtime.get_session(parsed.token_hash, host) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
     let kind = match (parsed.carrier, session.carrier()) {

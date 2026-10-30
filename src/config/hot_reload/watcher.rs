@@ -156,6 +156,7 @@ fn reload_config_with_resolver(
     detected_ip_v6: Option<IpAddr>,
     reload_state: &mut ReloadState,
     dns_resolver: Option<&crate::network::dns_overrides::GenerationDnsResolver>,
+    refresh_quota_source: bool,
 ) -> Option<WatchManifest> {
     let (loaded, applied_cfg) = prepared;
     let LoadedConfig {
@@ -178,6 +179,9 @@ fn reload_config_with_resolver(
     }
 
     if !hot_changed {
+        if refresh_quota_source {
+            config_tx.send(Arc::new(applied_cfg)).ok();
+        }
         reload_state.mark_applied(rendered_hash);
         return Some(next_manifest);
     }
@@ -228,6 +232,7 @@ pub(super) fn reload_config(
         detected_ip_v6,
         reload_state,
         None,
+        false,
     )
 }
 
@@ -248,6 +253,8 @@ pub fn spawn_config_watcher(
     cancellation: tokio_util::sync::CancellationToken,
     dns_resolver: Option<Arc<crate::network::dns_overrides::GenerationDnsResolver>>,
     mut activation: Option<watch::Receiver<bool>>,
+    quota_mutation: Option<Arc<tokio::sync::Mutex<()>>>,
+    quota_source_refresh: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> (
     watch::Receiver<Arc<ProxyConfig>>,
     watch::Receiver<LogLevel>,
@@ -365,7 +372,12 @@ pub fn spawn_config_watcher(
         if poll_watcher.is_some() {
             info!("config watcher: poll watcher active (Docker/NFS safe)");
         }
-        if initial_loaded.is_some() && !initial_matches_disk {
+        if initial_loaded.is_some()
+            && (!initial_matches_disk
+                || quota_source_refresh
+                    .as_ref()
+                    .is_some_and(|refresh| refresh()))
+        {
             let _ = notify_tx.try_send(());
         }
 
@@ -409,6 +421,8 @@ pub fn spawn_config_watcher(
                 &mut reload_state,
                 dns_resolver.clone(),
                 force,
+                quota_mutation.as_ref(),
+                quota_source_refresh.as_deref(),
             )
             .await;
             if next_manifest.is_none() {
@@ -423,6 +437,8 @@ pub fn spawn_config_watcher(
                     &mut reload_state,
                     dns_resolver.clone(),
                     force,
+                    quota_mutation.as_ref(),
+                    quota_source_refresh.as_deref(),
                 )
                 .await;
             }
@@ -461,3 +477,6 @@ mod path_tests {
 
 #[cfg(test)]
 mod decoy_dns_tests;
+
+#[cfg(test)]
+mod quota_period_tests;

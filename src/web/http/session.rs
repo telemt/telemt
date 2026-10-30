@@ -26,6 +26,7 @@ pub(super) async fn handle_session(
     request: Request<RequestBody>,
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
+    host: &str,
     token_hash: TokenHash,
     client_ip: IpAddr,
 ) -> HttpResponse {
@@ -39,7 +40,7 @@ pub(super) async fn handle_session(
         let Some(carrier_failure) = optional_failure_header(&request) else {
             return serve_decoy(request, vhost, true, &runtime).await;
         };
-        let session = runtime.get_session(token_hash, &vhost.host).ok();
+        let session = runtime.get_session(token_hash, host).ok();
         if let Some(trace) = request_trace(&request)
             && let Some(session) = &session
         {
@@ -63,7 +64,7 @@ pub(super) async fn handle_session(
         };
         if !body.is_empty()
             || runtime
-                .close_token(token_hash, &vhost.host, carrier_failure)
+                .close_token(token_hash, host, carrier_failure)
                 .is_err()
         {
             return serve_decoy(request, vhost, true, &runtime).await;
@@ -73,7 +74,7 @@ pub(super) async fn handle_session(
     if request.method() != Method::POST || !binary_content_type(&request) {
         return serve_decoy(request, vhost, true, &runtime).await;
     }
-    let Some(carrier_request) = carrier_request(&request, &vhost.host) else {
+    let Some(carrier_request) = carrier_request(&request, host) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
     let up_window = if request.headers().contains_key("x-telemt-up-window") {
@@ -89,7 +90,7 @@ pub(super) async fn handle_session(
     let carrier_request = carrier_request.with_up_window(up_window);
     let ip_learning_eligible = carrier_ip_learning_eligible(&request, client_ip);
     let Some((trace_session_id, profile, body_timeout)) =
-        runtime.bootstrap_trace_identity(token_hash, &vhost.host)
+        runtime.bootstrap_trace_identity(token_hash, host)
     else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
@@ -117,7 +118,7 @@ pub(super) async fn handle_session(
     }
     match runtime.create_session(
         token_hash,
-        &vhost.host,
+        host,
         client_ip,
         &body,
         carrier_request,
@@ -185,9 +186,7 @@ pub(super) async fn handle_session(
         }
         Err(ManagerError::Committed) => {
             let mut response = carrier_empty(StatusCode::CONFLICT);
-            if let Some(echo) =
-                runtime.carrier_echo(token_hash, &vhost.host, client_ip, carrier_request)
-            {
+            if let Some(echo) = runtime.carrier_echo(token_hash, host, client_ip, carrier_request) {
                 response.headers_mut().insert(
                     HeaderName::from_static("x-carrier-mode"),
                     HeaderValue::from_static(echo.carrier.as_str()),

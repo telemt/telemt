@@ -132,7 +132,7 @@ Operators can observe pending age, writer count and deficit, missing DC groups, 
 7. Runtime DNS overrides are used for upstream hostname resolution.
 8. In ME mode, the selected upstream is also used for ME TCP dial path.
 9. In ME mode for `direct` upstream with bind/interface, STUN reflection logic is bind-aware for KDF source material.
-10. In ME mode for SOCKS upstream, SOCKS `BND.ADDR/BND.PORT` is used for KDF when it is valid/public for the same family.
+10. In ME mode for SOCKS upstream, a valid public `BND.ADDR/BND.PORT` with a nonzero port supplies the full KDF source tuple. Its address family must match the logical ME destination, independently of the TCP family used to reach SOCKS. IPv4-mapped destinations require a native IPv4 BND tuple; IPv4-compatible IPv6 remains IPv6.
 11. `shadowsocks` upstreams require `general.use_middle_proxy = false`. Config load fails fast if ME mode is enabled.
 
 ## Upstream Configuration Examples

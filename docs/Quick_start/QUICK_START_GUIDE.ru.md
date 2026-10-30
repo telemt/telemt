@@ -26,6 +26,8 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
 
 Если заданы все параметры, интерактивных вопросов не будет.
 
+При обновлении существующей конфигурации явный `--port` или непустой ответ на запрос порта меняет только уже имеющийся `[server].port`. Порты в `[[server.listeners]]` и других секциях сохраняются. Нажатие Enter или запуск без терминала не задаёт смену порта. Если `[server].port` отсутствует, установщик выводит предупреждение и не добавляет ключ; явные listeners нужно изменить самостоятельно.
+
 После завершения установки скрипт выдаст ссылку для подключения клиентов:
 ```bash
 tg://proxy?server=IP&port=PORT&secret=SECRET
@@ -220,6 +222,9 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 ```
+
+Для systemd установщик выдаёт capabilities через `AmbientCapabilities` и `CapabilityBoundingSet`, без файловых capabilities на исполняемом файле. Файловые capabilities могут очистить ambient-набор и оставить firewall helpers без нужных прав. Замена бинарника текущим установщиком и перезапуск службы удаляют прежние файловые атрибуты и применяют политику unit.
+
 Затем нажмите Ctrl+S -> Ctrl+X, чтобы сохранить
 
 перезагрузите конфигурацию systemd

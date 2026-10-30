@@ -202,6 +202,7 @@ impl WebSession {
         if existing.is_none() {
             let limit = self
                 .profile
+                .shared
                 .max_streams_per_session
                 .saturating_add(self.limits.max_tombstones_per_session)
                 .saturating_add(1);

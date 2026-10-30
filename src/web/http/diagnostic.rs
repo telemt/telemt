@@ -19,6 +19,7 @@ pub(super) async fn handle(
     request: Request<RequestBody>,
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
+    host: &str,
     token_hash: TokenHash,
     client_ip: IpAddr,
 ) -> HttpResponse {
@@ -26,7 +27,7 @@ pub(super) async fn handle(
         return serve_decoy(request, vhost, true, &runtime).await;
     }
     let Some((trace_session_id, profile, body_timeout)) =
-        runtime.bootstrap_trace_identity(token_hash, &vhost.host)
+        runtime.bootstrap_trace_identity(token_hash, host)
     else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
@@ -56,7 +57,7 @@ pub(super) async fn handle(
     let Some(event) = parse_event(&body) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
-    match runtime.claim_bridge_diagnostic(token_hash, &vhost.host, event) {
+    match runtime.claim_bridge_diagnostic(token_hash, host, event) {
         Ok(first) => {
             if first {
                 runtime.trace().record_profile_lifecycle(

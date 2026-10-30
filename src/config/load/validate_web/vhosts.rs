@@ -1,21 +1,86 @@
 use super::*;
 
+/// Bounds exact bindings and wildcard rules before normalizing hostname selectors.
 pub(super) fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
     let limits = &config.web.limits;
-    if config.web.vhosts.len() > limits.max_vhosts {
-        return config_error("web.vhosts exceeds web.limits.max_vhosts");
-    }
-    let mut hosts = HashSet::with_capacity(config.web.vhosts.len());
+    let mut host_count = 0usize;
+    let mut rule_count = 0usize;
     let mut profile_count = 0usize;
+    for (vhost_idx, vhost) in config.web.vhosts.iter().enumerate() {
+        match (&vhost.host, &vhost.hosts) {
+            (Some(_), None) => {}
+            (None, Some(hosts)) if !hosts.is_empty() => {}
+            _ => {
+                return config_error(&format!(
+                    "web.vhosts[{vhost_idx}] requires exactly one of host or non-empty hosts"
+                ));
+            }
+        }
+        let selectors = vhost.host.iter().chain(vhost.hosts.iter().flatten());
+        let patterns = selectors
+            .clone()
+            .filter(|host| host.trim().starts_with('*'))
+            .count();
+        let exact = selectors.count() - patterns;
+        rule_count = rule_count.checked_add(patterns).ok_or_else(|| {
+            ProxyError::Config("WEB wildcard rule count overflowed usize".to_string())
+        })?;
+        if patterns > 0
+            && (!config.web.allow_wildcard_hosts
+                || rule_count > limits.wildcard.max_rules
+                || vhost.profiles.len() > limits.wildcard.max_profiles_per_request)
+        {
+            return config_error(&format!(
+                "web.vhosts[{vhost_idx}] wildcard selectors require allow_wildcard_hosts and must fit web.limits.wildcard bounds"
+            ));
+        }
+        host_count = host_count
+            .checked_add(exact)
+            .ok_or_else(|| ProxyError::Config("WEB hostname count overflowed usize".to_string()))?;
+        profile_count = exact
+            .checked_add(usize::from(patterns > 0))
+            .and_then(|count| count.checked_mul(vhost.profiles.len()))
+            .and_then(|expanded| profile_count.checked_add(expanded))
+            .ok_or_else(|| ProxyError::Config("WEB profile count overflowed usize".to_string()))?;
+        if host_count > limits.max_vhosts {
+            return config_error("web.vhosts exceeds web.limits.max_vhosts");
+        }
+        if profile_count > limits.max_profiles {
+            return config_error("WEB profiles exceed web.limits.max_profiles");
+        }
+    }
+    let mut hosts = HashSet::with_capacity(host_count);
     for (vhost_idx, vhost) in config.web.vhosts.iter_mut().enumerate() {
-        vhost.host = normalize_web_host(&vhost.host, &format!("web.vhosts[{vhost_idx}].host"))?;
+        let single = vhost.host.is_some();
+        for (host_idx, host) in vhost
+            .host
+            .iter_mut()
+            .chain(vhost.hosts.iter_mut().flatten())
+            .enumerate()
+        {
+            let field = if single {
+                format!("web.vhosts[{vhost_idx}].host")
+            } else {
+                format!("web.vhosts[{vhost_idx}].hosts[{host_idx}]")
+            };
+            *host = if config.web.allow_wildcard_hosts && host.trim() == "*" {
+                "*".to_string()
+            } else if config.web.allow_wildcard_hosts
+                && let Some(suffix) = host.trim().strip_prefix("*.")
+            {
+                let normalized = normalize_web_host(&format!("x.{suffix}"), &field)?;
+                format!("*.{}", &normalized[2..])
+            } else {
+                normalize_web_host(host, &field)?
+            };
+            if !hosts.insert(host.clone()) {
+                return config_error(&format!("duplicate WEB vhost host `{host}` at {field}"));
+            }
+        }
         validate_web_base_path(
             &vhost.base_path,
             &format!("web.vhosts[{vhost_idx}].base_path"),
         )?;
-        if !hosts.insert(vhost.host.clone()) {
-            return config_error(&format!("duplicate WEB vhost host `{}`", vhost.host));
-        }
         if vhost.public_addr.port() != 443 || vhost.public_addr.ip().is_unspecified() {
             return config_error(&format!(
                 "web.vhosts[{vhost_idx}].public_addr must be a concrete socket address on port 443"
@@ -42,8 +107,8 @@ pub(super) fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
             }
             if !profiles.insert((profile.user.as_str(), profile.secret_mode)) {
                 return config_error(&format!(
-                    "duplicate WEB profile for user `{}` in vhost `{}`",
-                    profile.user, vhost.host
+                    "duplicate WEB profile for user `{}` in web.vhosts[{vhost_idx}]",
+                    profile.user
                 ));
             }
             let max_streams = profile.max_streams.unwrap_or(limits.max_streams_global);
@@ -68,13 +133,7 @@ pub(super) fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
                     "web.vhosts[{vhost_idx}].profiles[{profile_idx}] limits must be non-zero and within global WEB limits"
                 ));
             }
-            profile_count = profile_count.checked_add(1).ok_or_else(|| {
-                ProxyError::Config("WEB profile count overflowed usize".to_string())
-            })?;
         }
-    }
-    if profile_count > limits.max_profiles {
-        return config_error("WEB profiles exceed web.limits.max_profiles");
     }
     Ok(())
 }
@@ -98,6 +157,7 @@ fn validate_web_base_path(value: &str, field: &str) -> Result<()> {
     ))
 }
 
+/// Applies the client-compatible hostname rules only during configuration loading.
 pub(super) fn normalize_web_host(value: &str, field: &str) -> Result<String> {
     let input = value.trim();
     if input.is_empty()
@@ -137,6 +197,7 @@ pub(super) fn normalize_web_host(value: &str, field: &str) -> Result<String> {
     Ok(host)
 }
 
+/// Rejects numeric suffixes that clients may interpret as address literals.
 pub(super) fn web_host_last_label_is_numeric(host: &str) -> bool {
     let label = host.rsplit('.').next().unwrap_or_default();
     let digits = label
@@ -148,6 +209,7 @@ pub(super) fn web_host_last_label_is_numeric(host: &str) -> bool {
     label.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// Validates one group's ordinary-site origin or bounded static snapshot source.
 pub(super) fn validate_decoy(vhost_idx: usize, decoy: &WebDecoyConfig) -> Result<()> {
     match decoy {
         WebDecoyConfig::HttpUpstream { upstream, resolve } => {

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_buf};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -25,8 +25,15 @@ use super::WATCHDOG_INTERVAL;
 use super::io::{SharedCounters, StatsIo, is_quota_io_error};
 use super::watchdog_delta;
 
+// Buffered copy progress and downstream pressure sampling remain local to this relay.
+mod copy;
 mod write_pressure;
 
+// Deterministic transport and relay lifecycle regressions.
+#[cfg(test)]
+mod tests;
+
+use self::copy::copy_with_flush;
 use self::write_pressure::WritePressureIo;
 
 struct AdaptiveBufferState {
@@ -227,12 +234,12 @@ where
     let relay_outcome = {
         let copy = async {
             let c2s = async {
-                let copied = copy_buf(&mut c2s_reader, &mut server_writer).await?;
+                let copied = copy_with_flush(&mut c2s_reader, &mut server_writer).await?;
                 server_writer.shutdown().await?;
                 Ok::<u64, io::Error>(copied)
             };
             let s2c = async {
-                let copied = copy_buf(&mut s2c_reader, &mut client_writer).await?;
+                let copied = copy_with_flush(&mut s2c_reader, &mut client_writer).await?;
                 client_writer.shutdown().await?;
                 Ok::<u64, io::Error>(copied)
             };

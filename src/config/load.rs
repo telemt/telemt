@@ -156,6 +156,10 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub default_dc: Option<u8>,
 
+    /// Monotonic start of source acquisition, used only for cold quota policy fencing.
+    #[serde(skip)]
+    pub(crate) quota_source_read_at: Option<std::time::Instant>,
+
     /// Precomputed authentication snapshot for handshake hot paths.
     #[serde(skip)]
     pub(crate) runtime_user_auth: Option<Arc<UserAuthSnapshot>>,
@@ -177,8 +181,11 @@ impl ProxyConfig {
         path: P,
         source_overrides: &BTreeMap<PathBuf, String>,
     ) -> Result<LoadedConfig> {
+        let read_at = std::time::Instant::now();
         let graph = Self::read_source_graph_with_overrides(path, source_overrides)?;
-        Self::load_source_graph(graph)
+        let mut loaded = Self::load_source_graph(graph)?;
+        loaded.config.quota_source_read_at = Some(read_at);
+        Ok(loaded)
     }
 
     /// Captures the raw include graph without requiring typed config validity.
@@ -259,7 +266,11 @@ impl ProxyConfig {
         path: P,
         overrides: &BTreeMap<PathBuf, String>,
     ) -> Result<ParsedConfigSource> {
-        pipeline::parse_source_graph(Self::read_source_graph_with_overrides(path, overrides)?)
+        let read_at = std::time::Instant::now();
+        let mut parsed =
+            pipeline::parse_source_graph(Self::read_source_graph_with_overrides(path, overrides)?)?;
+        parsed.config.quota_source_read_at = Some(read_at);
+        Ok(parsed)
     }
 
     /// Loads and prepares a complete runtime candidate without blocking async workers.
@@ -318,6 +329,7 @@ impl ProxyConfig {
 
     /// Validates cross-field configuration invariants after deserialization.
     pub fn validate(&self) -> Result<()> {
+        self.access.validate_quota_periods()?;
         if self.access.users.is_empty() {
             return Err(ProxyError::Config("No users configured".to_string()));
         }

@@ -7,7 +7,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::stats::{QuotaStore, UserQuotaSnapshot};
+use crate::stats::{QuotaScheduleCheckpoint, QuotaStore, UserQuotaSnapshot};
+
+// UTC period transactions share the existing bounded durable checkpoint owner.
+mod periods;
+// Account creation must retire durable state before publishing new credentials.
+mod recreation;
+#[cfg(test)]
+mod recreation_tests;
+#[cfg(test)]
+mod test_io;
 
 const QUOTA_STATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const QUOTA_STATE_MAX_USERS: usize = 65_536;
@@ -22,6 +31,9 @@ pub(crate) struct QuotaStateFile {
 pub(crate) struct QuotaUserState {
     pub(crate) used_bytes: u64,
     pub(crate) last_reset_epoch_secs: u64,
+    /// Optional calendar metadata is compatible with legacy checkpoints.
+    #[serde(flatten)]
+    pub(crate) schedule: QuotaScheduleCheckpoint,
 }
 
 /// Serialized process owner for bounded durable quota checkpoints and resets.
@@ -29,6 +41,8 @@ pub(crate) struct QuotaStateOwner {
     path: PathBuf,
     store: Arc<QuotaStore>,
     mutation: Arc<Mutex<()>>,
+    #[cfg(test)]
+    scheduler_iterations: std::sync::atomic::AtomicU64,
 }
 
 impl QuotaStateOwner {
@@ -36,8 +50,10 @@ impl QuotaStateOwner {
     pub(crate) fn new(path: PathBuf, store: Arc<QuotaStore>) -> Arc<Self> {
         Arc::new(Self {
             path,
+            mutation: store.mutation_gate(),
             store,
-            mutation: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            scheduler_iterations: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -48,19 +64,46 @@ impl QuotaStateOwner {
 
     /// Loads only quota entries owned by currently configured users.
     pub(crate) async fn load(&self, configured_users: &BTreeSet<String>) {
+        let _ = self.load_inner(configured_users, false).await;
+    }
+
+    async fn load_inner(
+        &self,
+        configured_users: &BTreeSet<String>,
+        strict: bool,
+    ) -> std::io::Result<()> {
         let _guard = self.mutation.lock().await;
         let state = match read_state_file(&self.path).await {
             Ok(Some(state)) => state,
-            Ok(None) => return,
+            Ok(None) => return Ok(()),
             Err(error) => {
+                if strict {
+                    return Err(error);
+                }
                 warn!(
                     error = %error,
                     path = %self.path.display(),
                     "Failed to load quota state file"
                 );
-                return;
+                return Ok(());
             }
         };
+        if strict {
+            if state.users.len() > QUOTA_STATE_MAX_USERS {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "quota state exceeds 65536 users",
+                ));
+            }
+            for entry in state.users.values() {
+                if let Some(period) = entry.schedule.quota_period {
+                    period.next(entry.schedule.period_cursor_epoch_secs)?;
+                } else if entry.schedule.period_cursor_epoch_secs > 0 {
+                    crate::config::UserQuotaPeriod::Daily
+                        .next(entry.schedule.period_cursor_epoch_secs)?;
+                }
+            }
+        }
 
         let persisted_users = state.users.len();
         let mut loaded_users = 0usize;
@@ -70,6 +113,7 @@ impl QuotaStateOwner {
             }
             self.store
                 .load(&user, quota.used_bytes, quota.last_reset_epoch_secs);
+            self.store.load_schedule(&user, quota.schedule);
             loaded_users = loaded_users.saturating_add(1);
         }
         info!(
@@ -78,6 +122,7 @@ impl QuotaStateOwner {
             skipped_users = persisted_users.saturating_sub(loaded_users),
             "Loaded bounded per-user quota state"
         );
+        Ok(())
     }
 
     /// Persists a checkpoint filtered to the active configured user set.
@@ -99,18 +144,37 @@ impl QuotaStateOwner {
         user: &str,
     ) -> std::io::Result<UserQuotaSnapshot> {
         let guard = Arc::clone(&self.mutation).lock_owned().await;
-        let last_reset_epoch_secs = now_epoch_secs();
+        self.reset_user_locked(configured_users, user, now_epoch_secs(), guard)
+            .await
+    }
+
+    async fn reset_user_locked(
+        &self,
+        configured_users: &BTreeSet<String>,
+        user: &str,
+        last_reset_epoch_secs: u64,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> std::io::Result<UserQuotaSnapshot> {
         let prospective = UserQuotaSnapshot {
             used_bytes: 0,
             last_reset_epoch_secs,
         };
         let reset_target = self.store.current_or_legacy_handle(user);
-        let state = self.state_for_users(configured_users, Some((user, prospective.clone())));
+        let mut state = self.state_for_users(configured_users, Some((user, prospective.clone())));
+        let schedule = reset_target.manual_schedule_checkpoint(last_reset_epoch_secs);
+        if let Some(entry) = state.users.get_mut(user) {
+            entry.schedule = schedule;
+        }
+        let store = Arc::clone(&self.store);
+        let user_owned = user.to_owned();
         let path = self.path.clone();
         let task = tokio::task::spawn_blocking(move || {
             let _guard = guard;
             write_state_file_blocking(&path, &state)?;
-            Ok(reset_target.reset(last_reset_epoch_secs))
+            let snapshot = reset_target.reset(last_reset_epoch_secs);
+            reset_target.publish_manual_schedule(schedule);
+            store.refresh_schedule(&user_owned);
+            Ok(snapshot)
         });
         wait_for_blocking_io(task).await
     }
@@ -122,6 +186,16 @@ impl QuotaStateOwner {
         user: &str,
     ) -> std::io::Result<()> {
         let guard = Arc::clone(&self.mutation).lock_owned().await;
+        self.remove_user_locked(configured_users, user, guard).await
+    }
+
+    /// Persists deletion while retaining the already-owned lifecycle gate.
+    pub(crate) async fn remove_user_locked(
+        &self,
+        configured_users: &BTreeSet<String>,
+        user: &str,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> std::io::Result<()> {
         debug_assert!(!configured_users.contains(user));
         let state = self.state_for_users(configured_users, None);
         let path = self.path.clone();
@@ -140,17 +214,53 @@ impl QuotaStateOwner {
         let snapshot = self.store.snapshot();
         let mut users = BTreeMap::new();
         let mut last_reset_epoch_secs = 0;
-        for user in configured_users.iter().take(QUOTA_STATE_MAX_USERS) {
+        // Calendar watermarks and an explicit reset are mandatory. Legacy rows fill
+        // the remaining bounded space; no scheduled cursor can disappear by sorting.
+        let mut selected = configured_users
+            .iter()
+            .filter(|user| {
+                override_user
+                    .as_ref()
+                    .is_some_and(|(name, _)| name == &user.as_str())
+                    || self.store.current_handle(user).is_some_and(|target| {
+                        target.schedule_checkpoint() != QuotaScheduleCheckpoint::default()
+                    })
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for user in configured_users {
+            if selected.len() >= QUOTA_STATE_MAX_USERS {
+                break;
+            }
+            selected.insert(user.clone());
+        }
+        for user in &selected {
             let quota = override_user
                 .as_ref()
                 .filter(|(override_name, _)| *override_name == user.as_str())
                 .map(|(_, quota)| quota.clone())
                 .or_else(|| snapshot.get(user).cloned());
+            let schedule = self
+                .store
+                .current_handle(user)
+                .map(|handle| handle.schedule_checkpoint())
+                .unwrap_or_default();
+            let quota = quota.or_else(|| {
+                (schedule != QuotaScheduleCheckpoint::default())
+                    .then(|| {
+                        self.store
+                            .current_handle(user)
+                            .map(|handle| handle.snapshot())
+                    })
+                    .flatten()
+            });
             let Some(quota) = quota else {
                 continue;
             };
             last_reset_epoch_secs = last_reset_epoch_secs.max(quota.last_reset_epoch_secs);
-            users.insert(user.clone(), quota_user_state(quota));
+            let mut entry = quota_user_state(quota);
+            entry.schedule = schedule;
+            users.insert(user.clone(), entry);
         }
         QuotaStateFile {
             last_reset_epoch_secs,
@@ -159,7 +269,8 @@ impl QuotaStateOwner {
     }
 }
 
-fn now_epoch_secs() -> u64 {
+/// Reads wall time only for cold quota administration.
+pub(crate) fn now_epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -226,6 +337,14 @@ async fn wait_for_blocking_io<T>(
 }
 
 fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Result<()> {
+    #[cfg(test)]
+    test_io::before(path);
+    if state.users.len() > QUOTA_STATE_MAX_USERS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "quota state exceeds 65536 mandatory users",
+        ));
+    }
     let mut payload = serde_json::to_vec_pretty(state)?;
     payload.push(b'\n');
     if payload.len() as u64 > QUOTA_STATE_MAX_BYTES {
@@ -237,7 +356,10 @@ fn write_state_file_blocking(path: &Path, state: &QuotaStateFile) -> std::io::Re
 
     #[cfg(unix)]
     {
-        return crate::util::secure_fs::atomic_replace(path, &payload, 0o600);
+        crate::util::secure_fs::atomic_replace(path, &payload, 0o600)?;
+        #[cfg(test)]
+        test_io::after(path)?;
+        return Ok(());
     }
     #[cfg(not(unix))]
     {
@@ -295,6 +417,7 @@ fn quota_user_state(quota: UserQuotaSnapshot) -> QuotaUserState {
     QuotaUserState {
         used_bytes: quota.used_bytes,
         last_reset_epoch_secs: quota.last_reset_epoch_secs,
+        schedule: QuotaScheduleCheckpoint::default(),
     }
 }
 
@@ -400,6 +523,7 @@ mod tests {
                 (
                     "alice".to_string(),
                     QuotaUserState {
+                        schedule: QuotaScheduleCheckpoint::default(),
                         used_bytes: 512,
                         last_reset_epoch_secs: 1,
                     },
@@ -407,6 +531,7 @@ mod tests {
                 (
                     "orphan".to_string(),
                     QuotaUserState {
+                        schedule: QuotaScheduleCheckpoint::default(),
                         used_bytes: 1024,
                         last_reset_epoch_secs: 1,
                     },
@@ -424,3 +549,6 @@ mod tests {
         assert!(!store.snapshot().contains_key("orphan"));
     }
 }
+
+#[cfg(test)]
+mod period_tests;

@@ -48,6 +48,7 @@ async fn decoy_dns_watcher_publishes_dns_only_changes_once() {
         None,
         &mut state,
         None,
+        false,
     )
     .unwrap();
     assert!(config_rx.has_changed().unwrap());
@@ -62,13 +63,14 @@ async fn decoy_dns_watcher_publishes_dns_only_changes_once() {
         None,
         &mut state,
         None,
+        false,
     )
     .unwrap();
     assert!(!config_rx.has_changed().unwrap());
     assert!(Arc::ptr_eq(&published, &config_rx.borrow()));
 
     preparation::reload(
-        &path, &config_tx, &log_tx, None, None, &mut state, None, false,
+        &path, &config_tx, &log_tx, None, None, &mut state, None, false, None, None,
     )
     .await
     .unwrap();
@@ -77,7 +79,7 @@ async fn decoy_dns_watcher_publishes_dns_only_changes_once() {
 
     // Explicit reload bypasses the unchanged source hash and replaces the injected endpoint.
     preparation::reload(
-        &path, &config_tx, &log_tx, None, None, &mut state, None, true,
+        &path, &config_tx, &log_tx, None, None, &mut state, None, true, None, None,
     )
     .await
     .unwrap();
@@ -87,7 +89,7 @@ async fn decoy_dns_watcher_publishes_dns_only_changes_once() {
     let current = config_rx.borrow_and_update().clone();
     std::fs::write(&path, SOURCE.replace("localhost:18081", "localhost:18080")).unwrap();
     preparation::reload(
-        &path, &config_tx, &log_tx, None, None, &mut state, None, false,
+        &path, &config_tx, &log_tx, None, None, &mut state, None, false, None, None,
     )
     .await
     .unwrap();
@@ -111,7 +113,7 @@ async fn decoy_dns_unchanged_watcher_source_skips_resolution() {
     let mut state = ReloadState::new(Some(source.rendered_hash));
     assert!(preparation::source_matches_active(&initial, &source));
     preparation::reload(
-        &path, &config_tx, &log_tx, None, None, &mut state, None, false,
+        &path, &config_tx, &log_tx, None, None, &mut state, None, false, None, None,
     )
     .await
     .unwrap();

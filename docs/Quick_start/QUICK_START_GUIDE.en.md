@@ -27,6 +27,8 @@ To modify the script’s startup parameters, you can use the following flags:
 
 Providing all options skips interactive prompts.
 
+When updating an existing configuration, an explicit `--port` or a nonempty interactive port answer changes only an existing `[server].port`. Explicit `[[server.listeners]]` ports and other sections remain unchanged. Pressing Enter or running without a terminal does not request a port change. If `[server].port` is absent, the installer warns instead of inserting it; edit explicit listeners yourself.
+
 After completion, the script will provide a link for client connections:
 ```bash
 tg://proxy?server=IP&port=PORT&secret=SECRET
@@ -221,6 +223,9 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 ```
+
+For systemd, the installer grants capabilities through `AmbientCapabilities` and `CapabilityBoundingSet`, without file capabilities on the executable. File capabilities can clear the ambient set and leave firewall helpers unprivileged. Replacing the binary with the current installer and restarting the service removes the old file attributes and applies the unit policy.
+
 then Ctrl+S -> Ctrl+X to save
 
 reload systemd units

@@ -158,12 +158,14 @@ async fn serve_listener(
 
         let runtime = active_runtime.load_full();
         let config = runtime.config();
+        // Dual-stack sockets report IPv4 peers as mapped IPv6 addresses.
+        // Keep explicit IPv6 CIDRs valid while also matching the underlying IPv4 address.
         if !config.server.metrics_whitelist.is_empty()
             && !config
                 .server
                 .metrics_whitelist
                 .iter()
-                .any(|net| net.contains(peer.ip()))
+                .any(|net| net.contains(peer.ip()) || net.contains(peer.ip().to_canonical()))
         {
             debug!(peer = %peer, "Metrics request denied by whitelist");
             continue;
@@ -462,3 +464,7 @@ use render::render_metrics;
 
 #[cfg(test)]
 mod tests;
+
+// Socket-level admission checks cover address representations used by dual-stack listeners.
+#[cfg(test)]
+mod listener_tests;

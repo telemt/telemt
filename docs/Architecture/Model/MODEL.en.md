@@ -66,6 +66,8 @@ Main invariants:
 - Registry state is the source of truth for active ME-bound session mapping.
 - The registry binding lock linearizes client binds, writer publication, and the transition that closes a replacement victim to new binds.
 
+Each leased client route reserves cleanup capacity for its lifetime. Dropping it removes the hot route synchronously and hands binding cleanup to the bounded worker with the existing reservation. Cancellation must not leak either the route or its cleanup permit. A zero `server.max_connections` removes the configured client ceiling without reducing this capacity to 128; positive values retain cleanup headroom. This does not increase writer targets or remove data-plane budgets.
+
 ## Adaptive Floor
 
 ### What it is
@@ -284,6 +286,8 @@ To evolve this model safely:
 - Introduce new retry/recovery strategies behind explicit config.
 
 ## Failure and Recovery Notes
+
+Completion of the client-to-ME sender or the task delivering ME responses to the client ends the associated relay even when the client is idle; the existing bounded cleanup still applies. An open, healthy sender with no traffic is not itself a failure.
 
 - Single-endpoint DC failure is a normal degraded mode case; policy should prioritize fast reconnect and optional shadow/probing strategies.
 - Idle close by peer should be treated as expected when upstream enforces idle timeout.

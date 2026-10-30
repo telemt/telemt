@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use super::web_carrier::{WebCarrier, WebCarrierMethod, WebCarriers};
 use super::web_debug::WebDebugConfig;
 
+// Wildcard policy is restart-frozen independently of reloadable routing rules.
+mod wildcard;
+pub use wildcard::WebWildcardLimitsConfig;
+
 // Serialized WEB defaults remain separate from the runtime data model.
 mod defaults;
 use defaults::*;
@@ -73,19 +77,23 @@ pub enum WebDecoyConfig {
     },
 }
 
-/// One externally visible WEB hostname and its explicit access profiles.
+/// WEB hostname selectors sharing one immutable decoy and explicit profile policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebVhostConfig {
-    /// Canonical lowercase ACE hostname used by Telegram Desktop.
-    pub host: String,
+    /// Single exact or opted-in wildcard selector, mutually exclusive with `hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Non-empty selector list, normalized to lowercase ACE during validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
     /// Optional canonical WEB endpoint prefix without surrounding slashes.
     #[serde(default)]
     pub base_path: String,
     /// Stable public destination tuple used by inner relay routing and KDF metadata.
     pub public_addr: SocketAddr,
-    /// Ordinary-site fallback for this hostname.
+    /// Ordinary-site fallback shared by every hostname in this group.
     pub decoy: WebDecoyConfig,
-    /// Access users and exact secret modes enabled for this hostname.
+    /// Access profiles whose limits apply independently to each hostname.
     #[serde(default)]
     pub profiles: Vec<WebProfileConfig>,
 }
@@ -93,6 +101,9 @@ pub struct WebVhostConfig {
 /// Hard process and protocol limits for WEB ingress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebLimitsConfig {
+    /// Bounds automatic wildcard derivation and positive capability retention.
+    #[serde(default)]
+    pub wildcard: WebWildcardLimitsConfig,
     /// Maximum bytes accepted while parsing one HTTP request head.
     #[serde(default = "default_web_max_header_bytes")]
     pub max_header_bytes: usize,
@@ -192,19 +203,19 @@ pub struct WebLimitsConfig {
     /// Live bootstrap credential ceiling for one forwarded client address.
     #[serde(default = "default_web_max_bootstraps_per_ip")]
     pub max_bootstraps_per_ip: usize,
-    /// Maximum configured WEB virtual-host count.
+    /// Maximum concrete hostname count across all WEB groups.
     #[serde(default = "default_web_max_vhosts")]
     pub max_vhosts: usize,
-    /// Maximum configured WEB access-profile count across all virtual hosts.
+    /// Maximum exact bindings plus one shared profile set per wildcard group.
     #[serde(default = "default_web_max_profiles")]
     pub max_profiles: usize,
-    /// Maximum static snapshot entry count across all virtual hosts.
+    /// Maximum static snapshot entry count, charged once per source group.
     #[serde(default = "default_web_max_static_files")]
     pub max_static_files: usize,
     /// Maximum bytes read from one static snapshot file.
     #[serde(default = "default_web_max_static_file_bytes")]
     pub max_static_file_bytes: usize,
-    /// Maximum static snapshot bytes across all virtual hosts.
+    /// Maximum static snapshot bytes, charged once per source group.
     #[serde(default = "default_web_max_static_bytes")]
     pub max_static_bytes: usize,
     /// Maximum retained WEB debug record count.
@@ -239,6 +250,7 @@ pub struct WebLimitsConfig {
 impl Default for WebLimitsConfig {
     fn default() -> Self {
         Self {
+            wildcard: WebWildcardLimitsConfig::default(),
             max_header_bytes: default_web_max_header_bytes(),
             max_body_bytes: default_web_max_body_bytes(),
             max_frame_payload_bytes: default_web_max_frame_payload_bytes(),
@@ -418,6 +430,9 @@ pub enum WebCarrierNegotiationAggressiveness {
 /// WEB ingress, carrier, fallback, and lifecycle configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebConfig {
+    /// Restart-only opt-in to automatic suffix and catch-all hostname selectors.
+    #[serde(default)]
+    pub allow_wildcard_hosts: bool,
     /// Enables issuance of new WEB bridge and session credentials.
     #[serde(default)]
     pub enabled: bool,
@@ -454,7 +469,7 @@ pub struct WebConfig {
     /// WEB lifecycle deadlines.
     #[serde(default)]
     pub timeouts: WebTimeoutsConfig,
-    /// Public hostnames served by WEB listeners.
+    /// Exact hostname and opted-in wildcard groups served by WEB listeners.
     #[serde(default)]
     pub vhosts: Vec<WebVhostConfig>,
     /// Validated immutable runtime snapshot built during configuration loading.
@@ -490,6 +505,7 @@ impl Default for WebConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            allow_wildcard_hosts: false,
             carrier: WebCarrier::default(),
             carrier_method: WebCarrierMethod::default(),
             conveyor: default_web_conveyor(),
@@ -511,6 +527,6 @@ impl Default for WebConfig {
 // Immutable runtime WEB configuration consumed by hot paths.
 mod runtime;
 pub(crate) use runtime::{
-    WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeVhost, WebStaticAsset,
-    WebStaticSite,
+    WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeProfileShared, WebRuntimeVhost,
+    WebRuntimeWildcard, WebStaticAsset, WebStaticSite,
 };

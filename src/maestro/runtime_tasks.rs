@@ -156,6 +156,7 @@ pub(crate) async fn spawn_runtime_tasks(
             Some("spawn config hot-reload watcher".to_string()),
         )
         .await;
+    let quota_source_authority = shared_state.user_admission();
     let (config_rx, log_level_rx, config_watcher_task) = spawn_config_watcher(
         config_path.to_path_buf(),
         config.clone(),
@@ -164,6 +165,10 @@ pub(crate) async fn spawn_runtime_tasks(
         task_scope.cancellation_token(),
         Some(upstream_manager.dns_resolver()),
         config_watcher_activation,
+        Some(shared_state.quota_mutation_gate()),
+        Some(Arc::new(move || {
+            quota_source_authority.has_fresh_quota_schedules()
+        })),
     );
     task_scope.spawn(config_watcher_task);
     startup_tracker
@@ -267,6 +272,7 @@ pub(crate) async fn spawn_runtime_tasks(
             if config_rx_user_enabled.changed().await.is_err() {
                 break;
             }
+            let quota_guard = shared_user_enabled.quota_mutation_gate().lock_owned().await;
             let cfg = config_rx_user_enabled.borrow_and_update().clone();
             let Some(cancelled_users) = shared_user_enabled.apply_user_config_from_source(
                 generation_id,
@@ -275,6 +281,8 @@ pub(crate) async fn spawn_runtime_tasks(
             ) else {
                 continue;
             };
+            shared_user_enabled.publish_quota_config(generation_id, &cfg, true);
+            drop(quota_guard);
             for (user, cancelled) in cancelled_users {
                 if cancelled > 0 {
                     info!(

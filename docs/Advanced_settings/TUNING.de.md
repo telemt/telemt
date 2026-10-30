@@ -132,7 +132,7 @@ Pending-Alter, Writer-Anzahl und -Defizit, fehlende DC-Gruppen, Map-Aktualität,
 7. Runtime DNS Overrides werden für Hostname-Auflösung bei Upstream-Verbindungen genutzt.
 8. Im ME-Modus wird der gewählte Upstream auch für den ME-TCP-Dial-Pfad verwendet.
 9. Im ME-Modus ist bei `direct` mit bind/interface die STUN-Reflection bind-aware für KDF-Adressmaterial.
-10. Im ME-Modus werden bei SOCKS-Upstream `BND.ADDR/BND.PORT` für KDF verwendet, wenn gültig/öffentlich und gleiche IP-Familie.
+10. Im ME-Modus über SOCKS liefert ein gültiges öffentliches `BND.ADDR/BND.PORT` mit einem Port ungleich null das vollständige KDF-Quelltupel. Die Adressfamilie muss dem logischen ME-Ziel entsprechen, unabhängig von der TCP-Familie zum SOCKS-Server. IPv4-mapped Ziele benötigen ein natives IPv4-BND-Tupel; IPv4-compatible IPv6 bleibt IPv6.
 11. `shadowsocks`-Upstreams erfordern `general.use_middle_proxy = false`. Mit aktiviertem ME-Modus schlägt das Laden der Config sofort fehl.
 
 ## Upstream-Konfigurationsbeispiele

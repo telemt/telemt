@@ -262,4 +262,63 @@ test('native close cancels every HTTP request and pagehide cannot repeat cleanup
  }
 });
 
+// WebSocket events are explicit so failed upgrades and stale callbacks are deterministic.
+async function laneSession(page){
+ const env=environment(page),sockets=[];
+ env.context.WebSocket=class {
+  static OPEN=1;static CLOSING=2;
+  constructor(url,protocol){this.url=url;this.protocol=protocol;this.readyState=0;this.bufferedAmount=0;this.sent=[];sockets.push(this)}
+  open(){this.readyState=1;this.onopen?.()}
+  send(data){assert.equal(this.readyState,1);this.sent.push(structuredClone(data))}
+  receive(data){this.onmessage?.({data})}
+  close(){if(this.readyState>=2)return;this.readyState=3;Promise.resolve().then(()=>this.onclose?.())}
+ };
+ const headers=token=>({'X-Session-Token':token,'X-Down-Cursor':'0','X-Carrier-Mode':'websocket-lanes','X-Carrier-Attempt':'1','X-Carrier-Candidate-Count':'4','X-Carrier-Deadline':'12','X-Carrier-State':'provisional'});
+ env.send(frame(16,0,[1]));await flush();env.answer(env.pending('/api/v1/session')[0],200,frame(17),headers('B'.repeat(43)));await flush();
+ env.send(frame(1,1));await flush();assert.equal(sockets.length,1);
+ sockets[0].open();await flush();assert.equal(sockets[0].sent.length,1);sockets[0].receive(new ArrayBuffer(0));await flush();
+ assert.ok(env.received.some(value=>value?.t==='status'&&value.state==='connected'));
+ return {env,sockets,headers,recoveries:()=>env.requests.filter(request=>request.options.headers?.Accept==='application/vnd.telemt.web-recovery+json')};
+}
+
+test('websocket lanes replace an expired session after idle and upgrade rejection',async page=>{
+ const {env,sockets,headers,recoveries}=await laneSession(page);
+ await env.tick(600000);assert.equal(recoveries().length,0,'healthy idle alone must not start recovery');
+ sockets[0].close();await flush();assert.equal(recoveries().length,0,'established lane loss is isolated');
+ env.send(frame(1,2));await flush();const stale=sockets[1];assert.ok(stale.protocol.includes('B'.repeat(43)));
+ stale.close();await flush();assert.equal(recoveries().length,1,'failed upgrade must replace the expired session');
+ const recovery=recoveries()[0];assert.equal(recovery.options.headers.Authorization,'Bearer '+'B'.repeat(43));
+ const policy={v:1,bootstrap:'C'.repeat(43),limits:{carrier_batch_bytes:2097152,pending_bytes_per_session:33554432,pending_items_per_session:16384,max_streams_per_session:1024},timeouts:{long_poll_secs:25,bridge_request_secs:10,bridge_retry_secs:90,bridge_recovery_secs:15,websocket_open_secs:15,reconnect_grace_secs:120},negotiation:{enabled:true,candidate_count:4,deadlines_secs:[3,5,8,12],carrier_probe_coalesce_ms:0}};
+ env.answer(recovery,200,new TextEncoder().encode(JSON.stringify(policy)),{'Content-Type':'application/vnd.telemt.web-recovery+json'});await flush();
+ const replacement=env.pending('/api/v1/session')[0];assert.ok(replacement);assert.equal(replacement.options.headers.Authorization,'Bearer '+'C'.repeat(43));
+ env.answer(replacement,200,frame(17),headers('D'.repeat(43)));await flush();
+ env.send(frame(1,3));await flush();const fresh=sockets[2];assert.ok(fresh.protocol.includes('D'.repeat(43)));
+ fresh.open();await flush();fresh.receive(new ArrayBuffer(0));await flush();
+ // A callback queued by the retired socket must not disturb its replacement.
+ stale.onclose();stale.onopen();await flush();assert.equal(fresh.readyState,1);assert.equal(recoveries().length,1);
+ const upload=frame(2,3,[7]);env.send(upload);await flush();assert.deepEqual(new Uint8Array(fresh.sent.at(-1)),new Uint8Array(upload));
+ const download=frame(2,3,[9]);fresh.receive(download);await flush();assert.deepEqual(new Uint8Array(binary(env).at(-1)),new Uint8Array(frame(2,3,[9])));
+ assert.equal(env.received.filter(value=>value instanceof ArrayBuffer&&new Uint8Array(value)[0]===17).length,1,'WELCOME is not replayed to native');
+ assert.ok(env.received.filter(value=>value?.t==='status').every(value=>Object.keys(value).sort().join(',')==='state,t'));
+ assert.ok(!env.received.some(value=>value?.t==='close'));env.close();await flush();
+});
+
+test('concurrent websocket lane open timeouts share one recovery',async page=>{
+ const {env,sockets,recoveries}=await laneSession(page);
+ env.send(join(frame(1,2),frame(1,3)));await flush();assert.equal(sockets.length,3);
+ await env.tick(15000);assert.equal(recoveries().length,1,'one recovery owns both rejected lanes');
+ sockets[1].onclose();sockets[2].onclose();await flush();assert.equal(recoveries().length,1);
+ env.close();await flush();assert.ok(recoveries()[0].options.signal.aborted);
+});
+
+test('upgraded websocket lane closure preserves sibling traffic',async page=>{
+ const {env,sockets,recoveries}=await laneSession(page);
+ env.send(join(frame(1,2),frame(1,3)));await flush();
+ for(const socket of sockets.slice(1)){socket.open();await flush();socket.receive(frame(2,Number(socket.protocol.split('.').at(-1)),[1]));await flush()}
+ sockets[1].close();await flush();assert.equal(recoveries().length,0);assert.equal(sockets[2].readyState,1);
+ const upload=frame(2,3,[5]);env.send(upload);await flush();assert.deepEqual(new Uint8Array(sockets[2].sent.at(-1)),new Uint8Array(upload));
+ const closes=binary(env).filter(value=>new Uint8Array(value)[0]===3).map(value=>new Uint8Array(value)[3]);
+ assert.deepEqual(closes,[2]);env.close();await flush();
+});
+
 (async()=>{const page=renderedPage();let failed=0;for(const {name,run} of tests){let timer;try{await Promise.race([run(page),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('test made no bounded progress')),5000)})]);console.log('ok - '+name)}catch(error){failed++;console.error('not ok - '+name+'\n'+error.stack)}finally{clearTimeout(timer)}}if(failed)process.exitCode=1})();

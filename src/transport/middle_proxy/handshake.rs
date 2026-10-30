@@ -42,6 +42,10 @@ use super::wire::{IpMaterial, extract_ip_material};
 
 const ME_KDF_DRIFT_STRICT: bool = false;
 
+// Exercises SOCKS negotiation and encrypted ME handshakes across address families.
+#[cfg(test)]
+mod socks_tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum KdfClientPortSource {
     LocalSocket = 0,
@@ -60,14 +64,23 @@ impl KdfClientPortSource {
 
 /// Result of a successful ME handshake with timings.
 pub(crate) struct HandshakeOutput {
+    /// Read half positioned after the encrypted handshake response.
     pub rd: ReadHalf<TcpStream>,
+    /// Write half positioned after the encrypted handshake request.
     pub wr: WriteHalf<TcpStream>,
+    /// Translated local IP advertised in subsequent proxy requests.
     pub source_ip: IpAddr,
+    /// Key for decrypting subsequent ME frames.
     pub read_key: [u8; 32],
+    /// CBC continuation IV after reading the handshake response.
     pub read_iv: [u8; 16],
+    /// Key for encrypting subsequent ME frames.
     pub write_key: [u8; 32],
+    /// CBC continuation IV after writing the handshake request.
     pub write_iv: [u8; 16],
+    /// Checksum mode negotiated with the ME peer.
     pub crc_mode: RpcChecksumMode,
+    /// Elapsed handshake time in milliseconds, excluding TCP connection setup.
     pub handshake_ms: f64,
 }
 
@@ -276,7 +289,14 @@ impl MePool {
         } else {
             None
         };
-        let socks_bound_addr = Self::select_socks_bound_addr(family, upstream_egress);
+        // BND describes the SOCKS egress to ME, whose family can differ from
+        // the local TCP connection to the SOCKS server. Match KDF classification
+        // so IPv4-mapped destinations require an IPv4 egress tuple.
+        let socks_family = match extract_ip_material(peer_addr) {
+            IpMaterial::V4(_) => IpFamily::V4,
+            IpMaterial::V6(_) => IpFamily::V6,
+        };
+        let socks_bound_addr = Self::select_socks_bound_addr(socks_family, upstream_egress);
         let bnd_addr_status = if !is_socks_route {
             BndAddrStatus::Error
         } else if raw_socks_bound_addr.is_some() && socks_bound_addr.is_none() {

@@ -90,8 +90,8 @@ impl WebSession {
             trace_session_id: self.trace_session_id,
             client_ip: self.client_ip,
             host: self.profile.host.clone(),
-            user: self.profile.user.clone(),
-            key_id: self.profile.key_fingerprint.clone(),
+            user: self.profile.shared.user.clone(),
+            key_id: self.profile.shared.key_fingerprint.clone(),
             carrier: self.selected_carrier,
             attempt: self.carrier_attempt,
             client_class: self.carrier_class.as_str(),
@@ -144,12 +144,12 @@ impl WebSession {
 
     /// Returns the configured non-secret user label.
     pub(crate) fn profile_user(&self) -> &str {
-        &self.profile.user
+        &self.profile.shared.user
     }
 
     /// Returns the configured non-secret key fingerprint.
     pub(crate) fn key_id(&self) -> &str {
-        &self.profile.key_fingerprint
+        &self.profile.shared.key_fingerprint
     }
 }
 

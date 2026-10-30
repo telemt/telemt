@@ -33,6 +33,7 @@ async fn rotate_secret_to_completion(
         .ok_or_else(|| ApiFailure::internal("validated user secret could not be decoded"))?;
 
     let _guard = shared.mutation_lock.lock().await;
+    let quota_guard = shared.quota_state.lock().await;
     let (mut cfg, base_revision) =
         load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
@@ -59,6 +60,8 @@ async fn rotate_secret_to_completion(
         credential_id,
         cfg.access.is_user_enabled(user),
     );
+    shared.quota_state.refresh_fresh_schedule(user, &cfg);
+    drop(quota_guard);
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
@@ -106,6 +109,7 @@ async fn delete_user_to_completion(
     shared: &ApiShared,
 ) -> Result<(String, String), ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
+    let quota_guard = shared.quota_state.lock().await;
     let (mut cfg, base_revision) =
         load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
@@ -138,6 +142,9 @@ async fn delete_user_to_completion(
     if cfg.access.user_expirations.remove(user).is_some() {
         touched_sections.push(AccessSection::UserExpirations);
     }
+    if cfg.access.user_quota_periods.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserQuotaPeriods);
+    }
     if cfg.access.user_data_quota.remove(user).is_some() {
         touched_sections.push(AccessSection::UserDataQuota);
     }
@@ -161,7 +168,7 @@ async fn delete_user_to_completion(
     let configured_users = cfg.access.users.keys().cloned().collect();
     if let Err(error) = shared
         .quota_state
-        .remove_user(&configured_users, user)
+        .remove_user_locked(&configured_users, user, quota_guard)
         .await
     {
         warn!(

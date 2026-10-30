@@ -25,6 +25,49 @@ pub(in crate::web::http) fn canonical_request_host<B>(request: &Request<B>) -> O
     Some(host)
 }
 
+/// Canonicalizes one ASCII DNS authority into bounded request-local storage.
+/// Only the literal public HTTPS port is permitted; forwarding headers are ignored.
+pub(in crate::web::http) fn wildcard_request_host<'a, B>(
+    request: &Request<B>,
+    storage: &'a mut [u8; 253],
+) -> Option<&'a str> {
+    let mut values = request.headers().get_all(header::HOST).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let host = value.strip_suffix(":443").unwrap_or(value);
+    if host.len() > storage.len() || !host.contains('.') || !host.is_ascii() {
+        return None;
+    }
+    for (out, byte) in storage.iter_mut().zip(host.bytes()) {
+        *out = byte.to_ascii_lowercase();
+    }
+    let host = std::str::from_utf8(&storage[..host.len()]).ok()?;
+    if host.parse::<IpAddr>().is_ok()
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return None;
+    }
+    let last = host.rsplit('.').next()?;
+    if last.bytes().all(|byte| byte.is_ascii_digit())
+        || last
+            .strip_prefix("0x")
+            .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return None;
+    }
+    Some(host)
+}
+
 /// Accepts one forwarded client address or the direct address of a trusted peer.
 pub(in crate::web::http) fn client_ip<B>(
     request: &Request<B>,

@@ -76,7 +76,7 @@ impl WebSession {
         if state.closed || self.cancel.is_cancelled() {
             return Err(ManagerError::Closed);
         }
-        if state.active_peer_ports.len() >= self.profile.max_streams_per_session
+        if state.active_peer_ports.len() >= self.profile.shared.max_streams_per_session
             || state.streams.contains_key(&lane_id)
             || state.closing_streams.contains_key(&lane_id)
             || state.closed_streams.contains(&lane_id)
@@ -89,9 +89,9 @@ impl WebSession {
         };
         let (peer_port, notify) = manager.try_acquire_stream_quiet(
             self.profile_key,
-            self.profile.max_streams,
+            self.profile.shared.max_streams,
             self.client_ip,
-            self.profile.public_addr,
+            self.profile.shared.public_addr,
         );
         if let Some(notify) = notify {
             effects.notify(notify);
@@ -108,7 +108,7 @@ impl WebSession {
             if let Some(notify) = manager.release_stream_quiet(
                 self.profile_key,
                 self.client_ip,
-                self.profile.public_addr,
+                self.profile.shared.public_addr,
                 peer_port,
             ) {
                 effects.notify(notify);
@@ -122,7 +122,7 @@ impl WebSession {
             if let Some(notify) = manager.release_stream_quiet(
                 self.profile_key,
                 self.client_ip,
-                self.profile.public_addr,
+                self.profile.shared.public_addr,
                 peer_port,
             ) {
                 effects.notify(notify);
@@ -149,7 +149,7 @@ impl WebSession {
             if let Some(notify) = manager.release_stream_quiet(
                 self.profile_key,
                 self.client_ip,
-                self.profile.public_addr,
+                self.profile.shared.public_addr,
                 peer_port,
             ) {
                 effects.notify(notify);
@@ -395,7 +395,7 @@ impl WebSession {
             manager.release_stream(
                 self.profile_key,
                 self.client_ip,
-                self.profile.public_addr,
+                self.profile.shared.public_addr,
                 claim.peer_port,
             );
         }

@@ -1,5 +1,6 @@
 use super::*;
 
+/// Completes an accepted user creation even if the requesting client disconnects.
 pub(in crate::api) async fn create_user(
     body: CreateUserRequest,
     expected_revision: Option<String>,
@@ -58,6 +59,7 @@ async fn create_user_to_completion(
     let credential_id = credential_id_from_hex(&secret)
         .ok_or_else(|| ApiFailure::internal("validated user secret could not be decoded"))?;
     let _guard = shared.mutation_lock.lock().await;
+    let quota_guard = shared.quota_state.lock().await;
     let (mut cfg, base_revision) =
         load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
@@ -112,10 +114,18 @@ async fn create_user_to_completion(
         cfg.access.user_enabled.insert(body.username.clone(), false);
     }
 
+    if let Some(period) = body.quota_period {
+        cfg.access
+            .user_quota_periods
+            .insert(body.username.clone(), period);
+    }
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
 
     let mut touched_sections = vec![AccessSection::Users];
+    if body.quota_period.is_some() {
+        touched_sections.push(AccessSection::UserQuotaPeriods);
+    }
     if touches_user_ad_tags {
         touched_sections.push(AccessSection::UserAdTags);
     }
@@ -138,6 +148,12 @@ async fn create_user_to_completion(
         touched_sections.push(AccessSection::UserEnabled);
     }
 
+    // Clear any retired durable identity before the username can survive restart.
+    let quota_guard = shared
+        .quota_state
+        .prepare_user_creation_locked(&body.username, quota_guard)
+        .await
+        .map_err(|error| ApiFailure::internal(format!("failed to prepare user quota: {error}")))?;
     let revision = save_access_sections_to_disk_if_revision(
         &shared.config_path,
         &cfg,
@@ -151,6 +167,14 @@ async fn create_user_to_completion(
         cfg.access.is_user_enabled(&body.username),
     );
 
+    shared.quota_state.fence_fresh_schedule(
+        &body.username,
+        &shared.active_runtime.load_full().config(),
+        credential_id,
+        cfg.access.user_quota_periods.get(&body.username).copied(),
+        cfg.access.user_data_quota.get(&body.username).copied(),
+    );
+    drop(quota_guard);
     if let Some(limit) = updated_limit {
         shared
             .ip_tracker
@@ -187,6 +211,7 @@ async fn create_user_to_completion(
                     .then_some(cfg.access.user_max_tcp_conns_global_each)),
             expiration_rfc3339: None,
             data_quota_bytes: None,
+            quota_period: body.quota_period,
             rate_limit_up_bps: body.rate_limit_up_bps.filter(|limit| *limit > 0),
             rate_limit_down_bps: body.rate_limit_down_bps.filter(|limit| *limit > 0),
             max_unique_ips: updated_limit,

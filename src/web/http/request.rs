@@ -17,7 +17,9 @@ use super::capability::scan_capabilities;
 
 // Canonical host and forwarded-address provenance remain isolated from credentials.
 mod identity;
-pub(super) use identity::{canonical_request_host, carrier_ip_learning_eligible, client_ip};
+pub(super) use identity::{
+    canonical_request_host, carrier_ip_learning_eligible, client_ip, wildcard_request_host,
+};
 
 /// Matches one capability after a complete branchless scan of the virtual host table.
 pub(super) fn match_profile(

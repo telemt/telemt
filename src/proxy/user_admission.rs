@@ -121,6 +121,52 @@ impl UserAdmissionAuthority {
         })
     }
 
+    /// Requests source evidence for pending API intent or a rejected quota snapshot.
+    pub(crate) fn has_fresh_quota_schedules(&self) -> bool {
+        self.quota_store.has_fresh_schedules()
+    }
+
+    /// Shares the process quota gate with lifecycle publication callers.
+    pub(crate) fn quota_mutation_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.quota_store.mutation_gate()
+    }
+
+    /// Publishes calendars only for credentials owned by the active config source.
+    /// The caller holds the process quota gate; disabled users retain their calendar.
+    pub(crate) fn publish_quota_config(
+        &self,
+        source: u64,
+        config: &Arc<crate::config::ProxyConfig>,
+        accepted_after_mutation: bool,
+    ) {
+        let state = self.state.lock();
+        if state.active_config_source != Some(source) {
+            return;
+        }
+        let now = crate::quota_state::now_epoch_secs();
+        for (user, secret) in &config.access.users {
+            let Some(credential) = credential_id_from_hex(secret) else {
+                continue;
+            };
+            let Some(record) = state.users.get(user) else {
+                continue;
+            };
+            if record
+                .effective()
+                .is_some_and(|effective| effective.credential_id == credential)
+            {
+                self.quota_store.request_schedule(
+                    user,
+                    record.incarnation,
+                    credential,
+                    config,
+                    now,
+                    accepted_after_mutation,
+                );
+            }
+        }
+    }
+
     /// Returns the mutation epoch used to reject stale candidate configuration.
     pub(crate) fn epoch(&self) -> u64 {
         self.state.lock().epoch

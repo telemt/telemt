@@ -18,3 +18,7 @@ pub(crate) use types::{
     TraceLifecycleContext, TraceLifecycleEvent, TraceLifecycleRecord, TraceRecord, TraceRecordKind,
     TraceRoute, TraceWebSocketContext,
 };
+
+// Shape-based sanitization is exclusively for diagnostic copies, never public routing.
+mod wildcard;
+pub(crate) use wildcard::scrub_text;

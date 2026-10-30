@@ -143,6 +143,7 @@ impl WebProcessRuntime {
             let mut state = self.state.lock();
             state.closed = true;
             state.bootstraps.clear();
+            state.bootstrap_expiry = None;
             state.bootstraps_per_ip.clear();
             state.sessions.values().cloned().collect::<Vec<_>>()
         };

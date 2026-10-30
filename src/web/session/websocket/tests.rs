@@ -48,26 +48,32 @@ impl TestRuntime {
 fn runtime(admission: bool) -> TestRuntime {
     let profile = Arc::new(WebRuntimeProfile {
         host: "proxy.example.com".to_string(),
-        public_addr: "203.0.113.10:443".parse().unwrap(),
-        user: "default".to_string(),
-        secret_mode: WebSecretMode::Plain,
-        carrier: WebCarrier::WebsocketLanes,
-        carrier_negotiation_enabled: false,
-        carrier_learning: true,
-        carriers: Arc::from([WebCarrier::WebsocketLanes]),
-        carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
         capability: [7; 32],
-        credential_id: [0; 16],
-        key_fingerprint: "0000000000000000".to_string(),
-        max_sessions: 2,
-        max_streams: 1,
-        max_streams_per_session: 1,
+        shared: Arc::new(crate::config::WebRuntimeProfileShared {
+            derivation_context: [0; 32],
+            public_addr: "203.0.113.10:443".parse().unwrap(),
+            user: "default".to_string(),
+            secret_mode: WebSecretMode::Plain,
+            carrier: WebCarrier::WebsocketLanes,
+            carrier_negotiation_enabled: false,
+            carrier_learning: true,
+            carriers: Arc::from([WebCarrier::WebsocketLanes]),
+            carrier_negotiation_deadlines_secs: [3, 5, 8, 12],
+            credential_id: [0; 16],
+            key_fingerprint: "0000000000000000".to_string(),
+            max_sessions: 2,
+            max_streams: 1,
+            max_streams_per_session: 1,
+        }),
     });
     let mut config = ProxyConfig::default();
     config.web.enabled = true;
     config.web.carrier = WebCarrier::WebsocketLanes;
     config.web.timeouts.shutdown_secs = 1;
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
+        snapshot_id: 0,
+        wildcards: Default::default(),
+        catch_all: None,
         vhosts: BTreeMap::new(),
         profiles: vec![Arc::clone(&profile)],
         capabilities: vec![[7; 32]].into_boxed_slice(),
@@ -121,7 +127,7 @@ fn detach_stale_lane(runtime: &TestRuntime, reservation: &WebSocketLaneReservati
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
-        runtime.session.profile.public_addr,
+        runtime.session.profile.shared.public_addr,
         claim.peer_port,
     );
 }
@@ -171,9 +177,9 @@ async fn rejected_open_retains_stream_quota_until_lane_socket_teardown() {
             .manager
             .try_acquire_stream(
                 runtime.session.profile_key,
-                runtime.session.profile.max_streams,
+                runtime.session.profile.shared.max_streams,
                 runtime.session.client_ip,
-                runtime.session.profile.public_addr,
+                runtime.session.profile.shared.public_addr,
             )
             .is_err()
     );
@@ -183,15 +189,15 @@ async fn rejected_open_retains_stream_quota_until_lane_socket_teardown() {
         .manager
         .try_acquire_stream(
             runtime.session.profile_key,
-            runtime.session.profile.max_streams,
+            runtime.session.profile.shared.max_streams,
             runtime.session.client_ip,
-            runtime.session.profile.public_addr,
+            runtime.session.profile.shared.public_addr,
         )
         .unwrap();
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
-        runtime.session.profile.public_addr,
+        runtime.session.profile.shared.public_addr,
         peer_port,
     );
     runtime.shutdown().await;
@@ -213,15 +219,15 @@ async fn closed_session_releases_bound_lane_quota_on_reservation_drop() {
         .manager
         .try_acquire_stream(
             runtime.session.profile_key,
-            runtime.session.profile.max_streams,
+            runtime.session.profile.shared.max_streams,
             runtime.session.client_ip,
-            runtime.session.profile.public_addr,
+            runtime.session.profile.shared.public_addr,
         )
         .unwrap();
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
-        runtime.session.profile.public_addr,
+        runtime.session.profile.shared.public_addr,
         peer_port,
     );
     runtime.shutdown().await;
@@ -254,15 +260,15 @@ async fn closed_session_releases_transferred_rejected_lane_quota() {
         .manager
         .try_acquire_stream(
             runtime.session.profile_key,
-            runtime.session.profile.max_streams,
+            runtime.session.profile.shared.max_streams,
             runtime.session.client_ip,
-            runtime.session.profile.public_addr,
+            runtime.session.profile.shared.public_addr,
         )
         .unwrap();
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
-        runtime.session.profile.public_addr,
+        runtime.session.profile.shared.public_addr,
         peer_port,
     );
     runtime.shutdown().await;
@@ -295,9 +301,9 @@ async fn closed_session_keeps_stream_owned_quota_until_task_completion() {
             .manager
             .try_acquire_stream(
                 runtime.session.profile_key,
-                runtime.session.profile.max_streams,
+                runtime.session.profile.shared.max_streams,
                 runtime.session.client_ip,
-                runtime.session.profile.public_addr,
+                runtime.session.profile.shared.public_addr,
             )
             .is_err()
     );
@@ -306,15 +312,15 @@ async fn closed_session_keeps_stream_owned_quota_until_task_completion() {
         .manager
         .try_acquire_stream(
             runtime.session.profile_key,
-            runtime.session.profile.max_streams,
+            runtime.session.profile.shared.max_streams,
             runtime.session.client_ip,
-            runtime.session.profile.public_addr,
+            runtime.session.profile.shared.public_addr,
         )
         .unwrap();
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
-        runtime.session.profile.public_addr,
+        runtime.session.profile.shared.public_addr,
         peer_port,
     );
     runtime.shutdown().await;
@@ -475,7 +481,7 @@ async fn exact_lane_teardown_wakes_stream_after_releasing_session_lock() {
     runtime.manager.release_stream(
         runtime.session.profile_key,
         runtime.session.client_ip,
-        runtime.session.profile.public_addr,
+        runtime.session.profile.shared.public_addr,
         claim.peer_port,
     );
     drop(reservation);
