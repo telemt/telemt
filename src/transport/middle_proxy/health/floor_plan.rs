@@ -1,56 +1,6 @@
 use super::*;
 
-pub(super) fn should_emit_rate_limited_warn(
-    next_allowed: &mut HashMap<(i32, IpFamily), Instant>,
-    key: (i32, IpFamily),
-    now: Instant,
-    cooldown: Duration,
-) -> bool {
-    let Some(ready_at) = next_allowed.get(&key).copied() else {
-        next_allowed.insert(key, now + cooldown);
-        return true;
-    };
-    if now >= ready_at {
-        next_allowed.insert(key, now + cooldown);
-        return true;
-    }
-    false
-}
 
-pub(super) async fn live_active_writers_for_dc_family(
-    pool: &Arc<MePool>,
-    dc: i32,
-    family: IpFamily,
-) -> usize {
-    let active_generation = pool.current_generation();
-    let writers = pool.writers.read().await;
-    writers
-        .iter()
-        .filter(|writer| {
-            if writer.draining.load(std::sync::atomic::Ordering::Relaxed) {
-                return false;
-            }
-            if writer.writer_dc != dc {
-                return false;
-            }
-            if writer.generation != active_generation {
-                return false;
-            }
-            if !matches!(
-                crate::transport::middle_proxy::pool::WriterContour::from_u8(
-                    writer.contour.load(std::sync::atomic::Ordering::Relaxed),
-                ),
-                crate::transport::middle_proxy::pool::WriterContour::Active
-            ) {
-                return false;
-            }
-            match family {
-                IpFamily::V4 => writer.addr.is_ipv4(),
-                IpFamily::V6 => writer.addr.is_ipv6(),
-            }
-        })
-        .count()
-}
 
 pub(super) fn adaptive_floor_class_min(
     pool: &Arc<MePool>,
@@ -177,7 +127,6 @@ pub(super) async fn build_family_floor_plan(
             warm_cap_effective_total: warm_cap_configured_total,
             active_writers_current,
             warm_writers_current,
-            target_writers_total: 0,
         };
     }
 
@@ -199,7 +148,6 @@ pub(super) async fn build_family_floor_plan(
             warm_cap_effective_total: warm_cap_configured_total,
             active_writers_current,
             warm_writers_current,
-            target_writers_total: target_total,
         };
     }
 
@@ -251,7 +199,6 @@ pub(super) async fn build_family_floor_plan(
     }
     let active_cap_effective_total =
         active_cap_configured_total.max(other_active.saturating_add(min_sum));
-    let target_writers_total = other_active.saturating_add(target_sum);
     FamilyFloorPlan {
         by_dc,
         active_cap_configured_total,
@@ -260,6 +207,5 @@ pub(super) async fn build_family_floor_plan(
         warm_cap_effective_total: warm_cap_configured_total,
         active_writers_current,
         warm_writers_current,
-        target_writers_total,
     }
 }

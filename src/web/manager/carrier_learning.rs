@@ -133,6 +133,7 @@ pub(super) struct DetachedCarrierEvidence {
 /// Result of one generation-fenced policy reconciliation.
 pub(super) struct CarrierLearningPolicyOutcome {
     /// Current epoch after the reconciliation.
+    #[cfg(test)]
     pub(super) epoch: Option<u64>,
     /// Whether this generation was current enough to apply.
     pub(super) applied: bool,
@@ -215,6 +216,7 @@ impl CarrierLearning {
             .is_some_and(|applied| generation < applied)
         {
             return CarrierLearningPolicyOutcome {
+                #[cfg(test)]
                 epoch: self.epoch,
                 applied: false,
                 detached: None,
@@ -239,6 +241,7 @@ impl CarrierLearning {
             self.policy_started_at = now;
         }
         CarrierLearningPolicyOutcome {
+            #[cfg(test)]
             epoch: self.epoch,
             applied: true,
             detached,

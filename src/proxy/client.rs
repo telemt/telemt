@@ -71,9 +71,9 @@ mod authenticated;
 use handshake_support::*;
 #[cfg(test)]
 pub use stream_entry::handle_client_stream;
-pub use stream_entry::{
-    handle_client_stream_with_shared, handle_client_stream_with_shared_and_pool_runtime,
-};
+#[cfg(test)]
+pub use stream_entry::handle_client_stream_with_shared;
+pub use stream_entry::handle_client_stream_with_shared_and_pool_runtime;
 
 pub struct ClientHandler;
 

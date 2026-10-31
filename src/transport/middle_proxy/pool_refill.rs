@@ -193,22 +193,6 @@ impl MePool {
         self.refill_states.lock().contains_key(&key)
     }
 
-    pub(super) async fn connect_endpoints_round_robin(
-        self: &Arc<Self>,
-        dc: i32,
-        endpoints: &[SocketAddr],
-        rng: &SecureRandom,
-    ) -> bool {
-        self.connect_endpoints_round_robin_with_generation_contour(
-            dc,
-            endpoints,
-            rng,
-            self.current_generation(),
-            WriterContour::Active,
-            WriterOpenIntent::Normal,
-        )
-        .await
-    }
 
     pub(super) async fn connect_endpoints_round_robin_with_generation_contour(
         self: &Arc<Self>,

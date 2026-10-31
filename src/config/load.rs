@@ -38,8 +38,10 @@ mod validate_server;
 mod validate_web;
 mod validation;
 
+#[cfg(test)]
+use self::includes::normalize_config_path;
 use self::includes::{
-    hash_rendered_snapshot, normalize_config_path, preprocess_includes, read_config_source,
+    hash_rendered_snapshot, preprocess_includes, read_config_source,
 };
 use self::normalize::{
     is_valid_ad_tag, is_valid_tls_domain_name, normalize_domain_to_ascii,
@@ -167,16 +169,19 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     /// Loads runtime configuration from a TOML file.
+    #[cfg(test)]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::load_with_metadata(path).map(|loaded| loaded.config)
     }
 
     /// Loads typed configuration together with its source and rendered metadata.
+    #[cfg(test)]
     pub(crate) fn load_with_metadata<P: AsRef<Path>>(path: P) -> Result<LoadedConfig> {
         Self::load_with_source_overrides(path, &BTreeMap::new())
     }
 
     /// Loads a typed snapshot while replacing selected captured source documents.
+    #[cfg(test)]
     pub(crate) fn load_with_source_overrides<P: AsRef<Path>>(
         path: P,
         source_overrides: &BTreeMap<PathBuf, String>,
@@ -247,6 +252,7 @@ impl ProxyConfig {
         })
     }
 
+    #[cfg(test)]
     fn load_source_graph(graph: ConfigSourceGraph) -> Result<LoadedConfig> {
         pipeline::load_source_graph(graph)
     }

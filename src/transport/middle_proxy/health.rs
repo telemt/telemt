@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
+#[cfg(test)]
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -65,27 +66,17 @@ struct FamilyFloorPlan {
     warm_cap_effective_total: usize,
     active_writers_current: usize,
     warm_writers_current: usize,
-    target_writers_total: usize,
 }
 
-#[derive(Debug)]
-struct FamilyReconnectOutcome {
-    key: (i32, IpFamily),
-    dc: i32,
-    family: IpFamily,
-    required: usize,
-    endpoint_count: usize,
-}
 
+#[cfg(test)]
 struct ScheduledReconnects<'a> {
     inflight: &'a mut HashMap<(i32, IpFamily), usize>,
     keys: Vec<(i32, IpFamily)>,
 }
 
+#[cfg(test)]
 impl ScheduledReconnects<'_> {
-    fn current(&self, key: &(i32, IpFamily)) -> usize {
-        self.inflight.get(key).copied().unwrap_or(0)
-    }
 
     fn reserve(&mut self, key: (i32, IpFamily)) {
         self.keys.push(key);
@@ -93,6 +84,7 @@ impl ScheduledReconnects<'_> {
     }
 }
 
+#[cfg(test)]
 impl Drop for ScheduledReconnects<'_> {
     fn drop(&mut self) {
         for key in self.keys.drain(..) {
@@ -118,9 +110,9 @@ mod scheduler;
 mod drain;
 // Per-family reconnect scheduling and health state.
 mod family;
-// Adaptive-floor planning and warning rate limits.
+// Adaptive-floor planning.
 mod floor_plan;
-// Idle-writer refresh and cap-aware swaps.
+// Idle-writer refresh under the current capacity policy.
 mod idle_refresh;
 // Single-endpoint recovery and shadow rotation.
 mod recovery;
@@ -128,18 +120,15 @@ mod recovery;
 mod zombie_watchdog;
 
 pub use drain::me_drain_timeout_enforcer;
-pub(in crate::transport::middle_proxy) use drain::{
-    health_drain_close_budget, reap_draining_writers,
-};
+#[cfg(test)]
+pub(in crate::transport::middle_proxy) use drain::health_drain_close_budget;
+pub(in crate::transport::middle_proxy) use drain::reap_draining_writers;
 use family::{check_family, update_family_runtime_state};
-use floor_plan::{
-    build_family_floor_plan, live_active_writers_for_dc_family, should_emit_rate_limited_warn,
-};
-use idle_refresh::{maybe_refresh_idle_writer_for_dc, maybe_swap_idle_writer_for_cap};
+use floor_plan::build_family_floor_plan;
+use idle_refresh::maybe_refresh_idle_writer_for_dc;
 pub use monitor::me_health_monitor;
 use recovery::{
     has_bound_clients_on_endpoint, maybe_rotate_single_endpoint_shadow,
-    recover_single_endpoint_outage,
 };
 pub use zombie_watchdog::me_zombie_writer_watchdog;
 

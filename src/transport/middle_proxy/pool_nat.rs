@@ -169,6 +169,7 @@ impl MePool {
     }
 
     /// Applies the configured or HTTP-detected NAT IP to non-public addresses.
+    #[cfg(test)]
     pub(super) fn translate_ip_for_nat(&self, ip: IpAddr) -> IpAddr {
         Self::translate_ip_with_nat(
             ip,

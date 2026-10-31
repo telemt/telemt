@@ -128,6 +128,7 @@ pub(in crate::config::load) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
                     group_id: vhost_idx,
                     profiles: shared_profiles,
                 }),
+                #[cfg(test)]
                 host: String::new(),
                 base: if vhost.base_path.is_empty() {
                     "/".to_string()
@@ -155,6 +156,7 @@ pub(in crate::config::load) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
                 host.clone(),
                 Arc::new(WebRuntimeVhost {
                     wildcard: None,
+                    #[cfg(test)]
                     host: host.clone(),
                     base: if vhost.base_path.is_empty() {
                         "/".to_string()

@@ -63,6 +63,7 @@ impl QuotaStateOwner {
     }
 
     /// Loads only quota entries owned by currently configured users.
+    #[cfg(test)]
     pub(crate) async fn load(&self, configured_users: &BTreeSet<String>) {
         let _ = self.load_inner(configured_users, false).await;
     }
@@ -179,15 +180,6 @@ impl QuotaStateOwner {
         wait_for_blocking_io(task).await
     }
 
-    /// Removes a deleted user's persisted quota checkpoint.
-    pub(crate) async fn remove_user(
-        &self,
-        configured_users: &BTreeSet<String>,
-        user: &str,
-    ) -> std::io::Result<()> {
-        let guard = Arc::clone(&self.mutation).lock_owned().await;
-        self.remove_user_locked(configured_users, user, guard).await
-    }
 
     /// Persists deletion while retaining the already-owned lifecycle gate.
     pub(crate) async fn remove_user_locked(
@@ -323,6 +315,7 @@ async fn read_state_file(path: &Path) -> std::io::Result<Option<QuotaStateFile>>
     Ok(Some(state))
 }
 
+#[cfg(test)]
 async fn write_state_file(path: &Path, state: QuotaStateFile) -> std::io::Result<()> {
     let path = path.to_path_buf();
     let task = tokio::task::spawn_blocking(move || write_state_file_blocking(&path, &state));
