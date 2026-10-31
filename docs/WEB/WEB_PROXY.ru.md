@@ -2,6 +2,8 @@
 
 [English](WEB_PROXY.en.md) | [Русский](WEB_PROXY.ru.md) | [Deutsch](WEB_PROXY.de.md)
 
+[Ping в списке прокси, RPC Ping/Pong и задержки WEB](PROXY_PING.ru.md)
+
 WEB-режим переносит обычные MTProxy-потоки через bounded HTTPS или WebSocket carriers, совместимые с типом прокси `WEB` в Telegram Desktop. Telemt не терминирует TLS: публичный сертификат обслуживает NGINX, HAProxy или Caddy, который передаёт обычный HTTP/1.1 на приватный listener Telemt.
 
 > [!IMPORTANT]

@@ -2,6 +2,8 @@
 
 [English](WEB_PROXY.en.md) | [Русский](WEB_PROXY.ru.md) | [Deutsch](WEB_PROXY.de.md)
 
+[Ping in der Proxyliste, RPC Ping/Pong und WEB-Latenz](PROXY_PING.de.md)
+
 Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über begrenzte HTTPS- oder WebSocket-Carrier, die mit dem Proxy-Typ `WEB` von Telegram Desktop kompatibel sind. Telemt terminiert TLS nicht selbst: NGINX, HAProxy oder Caddy verwaltet das öffentliche Zertifikat und leitet unverschlüsseltes HTTP/1.1 an einen privaten Telemt-Listener weiter.
 
 > [!IMPORTANT]

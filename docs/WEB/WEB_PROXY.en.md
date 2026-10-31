@@ -2,6 +2,8 @@
 
 [English](WEB_PROXY.en.md) | [Русский](WEB_PROXY.ru.md) | [Deutsch](WEB_PROXY.de.md)
 
+[Proxy-list ping, RPC Ping/Pong and WEB latency](PROXY_PING.en.md)
+
 WEB mode carries ordinary MTProxy streams through bounded HTTPS or WebSocket carriers compatible with Telegram Desktop's `WEB` proxy type. Telemt does not terminate TLS: NGINX, HAProxy, or Caddy owns the public certificate and forwards plain HTTP/1.1 to a private Telemt listener.
 
 > [!IMPORTANT]
