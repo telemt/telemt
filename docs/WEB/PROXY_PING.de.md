@@ -113,6 +113,34 @@ Bei Wiederverwendung des Carriers entfällt der bedingte TCP/TLS/Upgrade-Aufwand
 
 Die sichtbare Differenz kann somit verbleibenden WEB-Streamaufbau, zusätzliche Verbindungen, Transportverarbeitung und Scheduling sowie belegte Retries enthalten. Sie ist weder ein fester TLS-Zuschlag noch die arithmetische Summe aller Kästen. Der erste echte TLS-Handshake steht bewusst vor dem Android-Timer: Er beeinflusst die Gesamtdauer der Prüfung, normalerweise aber nicht den angezeigten Messwert. Da die Prüfung einen separaten Transport verwendet, garantiert eine aktive App-Verbindung auch keine warme Prüfung in der Proxyliste.
 
+## Beispielhafte Zeitleiste mit ungefähren Dauern
+
+**Ein Erklärungsmodell, kein Benchmark und kein erwarteter Latenzbereich.** Die Zahlen sollen das Zusammenspiel der Phasen zeigen. Sie rekonstruieren nicht die beobachteten 1000–1500 ms. Annahmen: DNS ist bereits zwischengespeichert, der RTT zwischen Client und Frontend beträgt 40 ms, die TCP-Verbindung ist neu, bei Bedarf erfolgt ein vollständiger TLS-1.3-Handshake, ein DC-Autorisierungsschlüssel ist vorhanden, und es gibt weder Paketverlust noch ein Zurücksetzen des nativen Anfragezeitstempels. Als Basis dient Classic/DD. Bei EE kommt der eigene FakeTLS-Aufbau vor dem nativen Timer hinzu.
+
+In diesem Beispiel benötigt natives MTProxy 40 ms Vorbereitung für TCP. Die WEB-Vorbereitung dauert 750 ms: 50 ms Client-/Bridge-Start + 40 ms TCP + 40 ms TLS + 120 ms HTTP-Austausch für Bridge und Sitzung + 500 ms Wartezeit des Android-Checkers. Hier werden aufeinanderfolgende Dauern angenommen; reale Phasen können überlappen. Das anfängliche TLS und die 500 ms Wartezeit liegen außerhalb des angezeigten Pings.
+
+Die Skala beginnt beim **letzten Anfragezeitstempel** der jeweiligen Prüfung, nicht beim App-Start oder ersten Verbindungsversuch. Ein Zeichen entspricht 20 ms. Die drei Zeilen sind getrennte Szenarien, keine gleichzeitigen Anfragen:
+
+```text
+                0         200       400       600       800       1000      1200 ms
+                |---------|---------|---------|---------|---------|---------|
+Classic/DD      RRRRR                                                             100 ms
+WEB             UURRRRRDDD                                                        200 ms
+WEB + retry     FF..................................................UURRRRRDDD    1240 ms
+```
+
+Die folgenden Dauern beziehen sich auf ganze Folgen gleicher Zeichen, nicht auf einzelne Zeichen: `R` = 100 ms grundlegende MTProxy-Relay-/Netzwerk-/DC-Arbeit für Anfrage und Antwort. `U` = 40 ms zusätzliche WEB-Uplink-/OPEN-/Client-Arbeit. `D` = 60 ms zusätzliche WEB-Downlink-/Zustellarbeit. `F` = 40 ms für einen fehlgeschlagenen Upload-Versuch. `.` = 1000 ms Wartezeit gemäß `Retry-After: 1`. `U` und `D` sind beispielhafte Zusatzkosten gegenüber `R`, keine erneute Anrechnung des gesamten Netzwerk-RTT. Die ACK/Commit-Freigabe wird nur berücksichtigt, soweit sie die Zustellung tatsächlich verzögert.
+
+| Szenario | Vor dem Ping-Timer | Angezeigter Ping | Gesamtdauer der Prüfung im Modell |
+| --- | --- | --- | --- |
+| Classic/DD | 40 ms | 100 ms | 140 ms |
+| WEB ohne Fehler | 750 ms | 40 + 100 + 60 = 200 ms | 950 ms |
+| WEB mit einem fehlgeschlagenen Upload und einer Retry-Pause | 750 ms | 40 + 1000 + 40 + 100 + 60 = 1240 ms | 1990 ms |
+
+Eine weitere TCP- und TLS-1.3-Verbindung **innerhalb** der Messung könnte hier bei vollständig sequenziellem Ablauf ungefähr 80 ms hinzufügen: Aus 200 ms würden 280 ms. Bei Verbindungswiederverwendung entfällt dieser zusätzliche Handshake-Aufwand. Ein anfänglicher vollständiger TLS-1.2- statt TLS-1.3-Handshake verlängert unter diesen Annahmen die Vorbereitung um etwa 40 ms, nicht den angezeigten Ping. Die Beispiele lassen TLS-Verarbeitung, Sitzungswiederaufnahme und Paketverlust unberücksichtigt.
+
+Die Zeile mit 1240 ms zeigt einen möglichen Mechanismus für einen Sekundenwert: einen durch HTTP-Traces belegten Retry. Sie beweist nicht, dass Retries die ursprüngliche Beobachtung verursacht haben. Ohne einen solchen Retry müssen andere tatsächlich gemessene Verzögerungen lokalisiert werden, etwa Warteschlangen, Frontend-Pufferung, Verbindungsaufbau oder Upstream-Arbeit. Timeouts dürfen nicht als Wartepausen eingesetzt und überlappende Phasen nicht ungeprüft in dieses sequenzielle Modell übertragen werden.
+
 ## HTTP, WebSocket und weitere Verzögerungen
 
 | Faktor | Auswirkung und Beleg |

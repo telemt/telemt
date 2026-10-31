@@ -113,6 +113,34 @@ On a reused carrier, the conditional TCP/TLS/Upgrade cost disappears, while fram
 
 Thus the visible difference can include remaining WEB stream setup, additional connection setup, carrier handling and scheduling, plus retries when observed. It is not a fixed TLS surcharge or an arithmetic sum of all boxes. The initial real TLS handshake is shown outside the Android timer deliberately: it affects total time to check, but normally not the displayed sample. The separate checker transport also means that an active app connection does not guarantee a warm proxy-list check.
 
+## Illustrative timeline with approximate durations
+
+**An explanatory model, not a benchmark or an expected latency range.** The numbers below are chosen to show how the stages combine. They do not reconstruct the reported 1000–1500 ms. Assume cached DNS, a 40 ms client-to-frontend RTT, a new TCP connection, a full TLS 1.3 handshake where required, an existing DC authorization key, and no loss or native request-timestamp reset. The baseline is Classic/DD. EE adds its own FakeTLS setup before the native timer.
+
+For this example, native preparation takes 40 ms for TCP. WEB preparation takes 750 ms: 50 ms client/bridge startup + 40 ms TCP + 40 ms TLS + 120 ms HTTP bridge/session exchange + the Android checker's 500 ms wait. These are chosen serial durations for this example; real stages can overlap. The initial TLS and the 500 ms wait are outside the displayed ping.
+
+The following scale starts at each checker's **latest request timestamp**, not at app launch or the first connection attempt. One character represents 20 ms. The three rows are separate scenarios, not concurrent requests:
+
+```text
+                0         200       400       600       800       1000      1200 ms
+                |---------|---------|---------|---------|---------|---------|
+Classic/DD      RRRRR                                                             100 ms
+WEB             UURRRRRDDD                                                        200 ms
+WEB + retry     FF..................................................UURRRRRDDD    1240 ms
+```
+
+The following durations refer to whole runs of symbols, not individual characters: `R` = 100 ms of baseline MTProxy relay/network/DC request-response work. `U` = 40 ms of additional WEB uplink/OPEN/client work. `D` = 60 ms of additional WEB downlink/delivery work. `F` = 40 ms spent on one failed upload attempt. `.` = the 1000 ms wait requested by `Retry-After: 1`. `U` and `D` are illustrative incremental costs beyond `R`, not a second count of the full network round trip. ACK/commit gating is included only insofar as it actually delays delivery.
+
+| Scenario | Before ping timer | Displayed ping | Total check time in this model |
+| --- | --- | --- | --- |
+| Classic/DD | 40 ms | 100 ms | 140 ms |
+| WEB, no errors | 750 ms | 40 + 100 + 60 = 200 ms | 950 ms |
+| WEB, one failed upload and one retry wait | 750 ms | 40 + 1000 + 40 + 100 + 60 = 1240 ms | 1990 ms |
+
+A further TCP + TLS 1.3 connection opened **inside** the measured interval could add approximately 80 ms here, if fully sequential: the 200 ms sample would become 280 ms. With connection reuse, that extra handshake cost is zero. Switching the initial full handshake from TLS 1.3 to TLS 1.2 adds about 40 ms to preparation under these assumptions, not to the displayed ping. These examples omit TLS processing, resumption and packet loss.
+
+The 1240 ms row demonstrates one possible mechanism for a second-scale result: a retry confirmed by HTTP traces. It is not evidence that retries caused the original observation. Without such a retry, a large result requires locating other measured delays, such as queues, frontend buffering, connection setup or upstream work. Do not insert timeout values as waiting periods or force overlapping stages into this serial model.
+
 ## HTTP, WebSocket and other delay sources
 
 | Factor | Effect and evidence |
