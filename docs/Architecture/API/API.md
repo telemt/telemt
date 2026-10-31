@@ -311,6 +311,20 @@ Example — replace `[[server.listeners]]` (other `[server]` fields including `[
 {"server": {"listeners": [{"ip": "0.0.0.0", "port": 443, "client_mss": "92"}]}}
 ```
 
+#### WEB retry jitter configuration
+
+The managed `web.retry_jitter` object supports `enabled`, `min_ms`, `max_ms`,
+`distribution` (`uniform` or `triangular`) and optional triangular `peak_ms`.
+Validation is identical to file configuration, including when disabled. Reload
+updates newly rendered bridge pages without a process restart. Existing pages
+retain their policy through recovery; the recovery representation is unchanged.
+Require `0 <= min_ms <= max_ms <= 30000`; an explicit `peak_ms` is valid only
+with `triangular` and must lie within that interval. Unknown keys and
+distributions are rejected. The range is an additive delay, not the total pause.
+See [retry jitter parameters](../../Config_params/CONFIG_PARAMS.en.md#webretry_jitter)
+and the [WEB guide](../../WEB/WEB_PROXY.en.md#configurable-http-retry-jitter)
+for defaults, budgets and compatibility semantics.
+
 ### `RotateSecretRequest`
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -417,7 +431,7 @@ for `POST /v1/runtime/web/lifecycle/pause` and `/resume`, and:
 
 for `POST /v1/runtime/web/lifecycle/drain`, where `timeout_secs` is bounded to `1..=3600`. Pause and resume return `200`; drain freezes one monotonic absolute deadline and returns `202` without waiting for completion. A second drain while one is `draining` or `force_closing` returns `409 web_lifecycle_in_progress` and cannot alter the first deadline. Repeated pause/resume requests already satisfied by the current state are idempotent and do not advance the lifecycle epoch. Pause during an active drain leaves that drain running. Resume cancels an active drain and opens admission; if the deadline already committed its forced-close snapshot, those old session close signals remain effective.
 
-Pause and drain block bootstrap issuance, initial/replacement session creation, and logical-stream admission. Exact session-creation replay, existing DATA/WINDOW/CLOSE, carrier polling/WebSocket exchanges, and explicit session DELETE remain available. Rejection does not consume bootstrap/session/stream rate or quota state: authenticated session creation returns retryable `503` with `Retry-After: 1`, while bridge issuance preserves the decoy route and a rejected logical `OPEN` receives a stream-local close.
+Pause and drain block bootstrap issuance, initial/replacement session creation, and logical-stream admission. Exact session-creation replay, existing DATA/WINDOW/CLOSE, carrier polling/WebSocket exchanges, and explicit session DELETE remain available. Rejection does not consume bootstrap/session/stream rate or quota state: authenticated session creation returns retryable `503` with `Retry-After: 1` and `X-Telemt-Retry-After-Ms: 250`, while bridge issuance preserves the decoy route and a rejected logical `OPEN` receives a stream-local close.
 
 Drain remains graceful until either all live sessions, logical-stream ownership, and session-owned WebSockets reach zero or its deadline fires. The deadline is the latest time to commit close signals, not a claim that cooperative task teardown is already complete. At the deadline every remaining live session receives an idempotent close signal outside manager locks, status becomes `force_closing`, and only confirmed zero publishes `drained` with outcome `forced`. Natural zero publishes outcome `graceful`. Both outcomes keep operator admission closed until explicit resume.
 

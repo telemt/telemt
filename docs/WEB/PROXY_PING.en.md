@@ -94,7 +94,7 @@ flowchart LR
         W5 --> W6["TL_pong received<br/>Displayed sample ends"]
         X["Only if another connection is needed<br/>TCP + TLS, possible WebSocket Upgrade<br/>No handshake per ping on a reused connection"] -.-> W3
         X -.-> W5
-        R["Only on errors or overload<br/>Retries and backoff<br/>Retry-After: 1 can add about one second"] -.-> W3
+        R["Only on errors or overload<br/>Retries and backoff<br/>Telemt base 250 ms<br/>Plus optional jitter"] -.-> W3
         R -.-> W5
     end
     classDef preparation fill:#eeeeee,stroke:#666666,color:#111111
@@ -113,6 +113,30 @@ On a reused carrier, the conditional TCP/TLS/Upgrade cost disappears, while fram
 
 Thus the visible difference can include remaining WEB stream setup, additional connection setup, carrier handling and scheduling, plus retries when observed. It is not a fixed TLS surcharge or an arithmetic sum of all boxes. The initial real TLS handshake is shown outside the Android timer deliberately: it affects total time to check, but normally not the displayed sample. The separate checker transport also means that an active app connection does not guarantee a warm proxy-list check.
 
+### Configurable HTTP retry jitter
+
+`[web.retry_jitter]` adds an independently sampled delay to every existing bridge HTTP retry (network errors and 408/429/502/503/504). It requires no Telegram application changes. Without this section, or with `enabled = false`, the existing 250 ms Telemt hint and legacy backoff/jitter remain unchanged.
+
+```toml
+[web.retry_jitter]
+enabled = true
+min_ms = 0
+max_ms = 250
+distribution = "uniform"
+# Only for distribution = "triangular":
+# peak_ms = 125
+```
+
+The range describes an **addition**, not the total pause: the Telemt 250 ms hint plus this example gives 250–500 ms. Without a positive server hint, the base remains 250, 500, 1000, then 2000 ms. Enabled jitter replaces the legacy 25% jitter. A valid standard `Retry-After` is not shortened to the legacy 30-second cap in enabled mode. If the pause exceeds the remaining operation budget, the budget expires without an early retry.
+
+Defaults are `enabled = false`, `min_ms = 0`, `max_ms = 250`, `distribution = "uniform"`, and no `peak_ms`. Require `0 <= min_ms <= max_ms <= 30000`. `uniform` samples integer milliseconds; `triangular` samples a triangular density and rounds to milliseconds. Its optional peak defaults to the midpoint and must be within the interval. An explicit peak with `uniform`, unknown keys/distributions and invalid ranges are rejected even when disabled. Equal bounds produce a constant addition.
+
+The policy is frozen into each bridge page. Config/API reload affects newly loaded pages; existing pages retain it through recovery. Recovery JSON and HTTP compatibility headers remain unchanged. Sampling prefers `crypto.getRandomValues`, with `Math.random` as a compatibility fallback. Successful traffic is not delayed. Attempt limits, absolute budgets, cancellation and payload/sequence replay remain intact; longer pauses can exhaust a startup/recovery budget sooner in terms of completed attempts.
+
+This reduces fixed retry timing, without guaranteeing resistance to DPI. Browser scheduling, network queues and other protocol timing remain observable. Existing timeline examples describe the default disabled mode. To evaluate enabled mode, add a sampled delay to each retry pause, not to the initial connection or every data frame.
+
+The policy changes existing retry waits only. Stricter per-call limits still apply: ordinary `/down` polls and committed `/up` calls use one attempt; their recovery replay permits two. This option does not create new retry loops. It neither extends `web.timeouts.bridge_retry_secs` nor any startup/recovery deadline.
+
 ## Illustrative timeline with approximate durations
 
 **An explanatory model, not a benchmark or an expected latency range.** The numbers below are chosen to show how the stages combine. They do not reconstruct the reported 1000–1500 ms. Assume cached DNS, a 40 ms client-to-frontend RTT, a new TCP connection, a full TLS 1.3 handshake where required, an existing DC authorization key, and no loss or native request-timestamp reset. The baseline is Classic/DD. EE adds its own FakeTLS setup before the native timer.
@@ -126,10 +150,10 @@ The diagram starts at each checker's **latest request timestamp**, not at app la
 gantt
     dateFormat x
     axisFormat %S.%L
-    tickInterval 200millisecond
+    tickInterval 100millisecond
     todayMarker off
-    title Displayed ping - illustrative model
-    accTitle: Displayed ping - illustrative model
+    title Displayed ping - jitter off
+    accTitle: Displayed ping - jitter off
     accDescr: Seconds from the request timestamp, labels show milliseconds
     section Classic/DD - 100 ms
     R 100 ms :n_r, 0, 100ms
@@ -137,27 +161,30 @@ gantt
     U 40 ms :w_u, 0, 40ms
     R 100 ms :w_r, after w_u, 100ms
     D 60 ms :w_d, after w_r, 60ms
-    section WEB with retry - 1240 ms
+    section WEB with retry - 490 ms
     F 40 ms :crit, f_u, 0, 40ms
-    Wait 1000 ms :crit, retry_wait, after f_u, 1000ms
+    Wait 250 ms :crit, retry_wait, after f_u, 250ms
     U 40 ms :retry_u, after retry_wait, 40ms
     R 100 ms :retry_r, after retry_u, 100ms
     D 60 ms :retry_d, after retry_r, 60ms
 ```
 
-Stage durations: `R` = 100 ms of baseline MTProxy relay/network/DC request-response work. `U` = 40 ms of additional WEB uplink/OPEN/client work. `D` = 60 ms of additional WEB downlink/delivery work. `F` = 40 ms spent on one failed upload attempt. `Wait` = the 1000 ms wait requested by `Retry-After: 1`. `U` and `D` are illustrative incremental costs beyond `R`, not a second count of the full network round trip. ACK/commit gating is included only insofar as it actually delays delivery.
+Stage durations: `R` = 100 ms of baseline MTProxy relay/network/DC request-response work. `U` = 40 ms of additional WEB uplink/OPEN/client work. `D` = 60 ms of additional WEB downlink/delivery work. `F` = 40 ms spent on one failed upload attempt. `Wait` = the 250 ms wait requested by `X-Telemt-Retry-After-Ms: 250`. `U` and `D` are illustrative incremental costs beyond `R`, not a second count of the full network round trip. ACK/commit gating is included only insofar as it actually delays delivery.
 
 | Scenario | Before ping timer | Displayed ping | Total check time in this model |
 | --- | --- | --- | --- |
 | Classic/DD | 40 ms | 100 ms | 140 ms |
 | WEB, no errors | 750 ms | 40 + 100 + 60 = 200 ms | 950 ms |
-| WEB, one failed upload and one retry wait | 750 ms | 40 + 1000 + 40 + 100 + 60 = 1240 ms | 1990 ms |
+| WEB, one failed upload and one retry wait | 750 ms | 40 + 250 + 40 + 100 + 60 = 490 ms | 1240 ms |
+| WEB, same retry with uniform jitter 0–250 ms | 750 ms | 490–740 ms | 1240–1490 ms |
 
 A further TCP + TLS 1.3 connection opened **inside** the measured interval could add approximately 80 ms here, if fully sequential: the 200 ms sample would become 280 ms. With connection reuse, that extra handshake cost is zero. Switching the initial full handshake from TLS 1.3 to TLS 1.2 adds about 40 ms to preparation under these assumptions, not to the displayed ping. These examples omit TLS processing, resumption and packet loss.
 
-The 1240 ms row demonstrates one possible mechanism for a second-scale result: a retry confirmed by HTTP traces. It is not evidence that retries caused the original observation. Without such a retry, a large result requires locating other measured delays, such as queues, frontend buffering, connection setup or upstream work. Do not insert timeout values as waiting periods or force overlapping stages into this serial model.
+The 490 ms row and diagram illustrate one retry with jitter disabled. The extra table row applies `enabled = true`, `min_ms = 0`, `max_ms = 250`, `distribution = "uniform"` to that same retry; its range comes from this model, not measurements. An earlier JavaScript bridge without the millisecond extension, or an intermediary removing that hint when jitter is disabled, retains the standard one-second fallback: the same model then gives a displayed ping of 1240 ms. Neither scenario identifies the cause of the original observation. Without trace evidence of retries, locate other delays such as queues, frontend buffering, connection setup or upstream work. Do not insert timeouts as waiting periods or force overlapping stages into this serial model.
 
 ## HTTP, WebSocket and other delay sources
+
+Telemt overload responses carry `Retry-After: 1` and `X-Telemt-Retry-After-Ms: 250`. Only status `503` with that exact header pair selects a **250 ms base delay** in the generated bridge. With `web.retry_jitter.enabled = false`, the pause is 250 ms; when enabled, the configured random addition applies. Other responses use the standard `Retry-After` handling or fallback backoff described below. Earlier JavaScript bridge pages without support for the millisecond hint use the one-second fallback until replaced by a newly loaded page; this does not require updating the Telegram application. Attempt limits, absolute budgets, cancellation and admission limits remain unchanged.
 
 | Factor | Effect and evidence |
 | --- | --- |
@@ -168,7 +195,7 @@ The 1240 ms row demonstrates one possible mechanism for a second-scale result: a
 | Frontend buffering | Request/response buffering or missing streaming/Upgrade support can delay small messages. Compare with the existing NGINX example; preserve routing, authentication and limits. |
 | Client scheduling | Java accept/read threads, UI dispatch, WebView/JavaScript and delivery back to native code add queues. CPU pressure, mobile power management and network transitions can amplify them. |
 | Relay and network | Remaining stream admission, inner MTProxy handshake, Direct connection or ME registration, Telegram response, loss/retransmission and queue pressure can contribute. A ready WEB session does not prove a ready upstream. |
-| Errors and retries | Telemt can return `503` with `Retry-After: 1`. The bridge honors it; other retry backoff starts at 250 ms and doubles up to 2000 ms plus jitter up to approximately 25%, within the retry budget. Retryable HTTP statuses include 408/429/502/503/504. A trace must show such events before attributing a one-second step to them. See [responses][response] and [retry logic][request]. |
+| Errors and retries | Retryable statuses are 408/429/502/503/504. With jitter disabled, the exact Telemt overload hint gives a 250 ms pause; without a positive server hint, backoff starts at 250 ms and doubles to a 2000 ms base plus legacy jitter below 25%. With jitter enabled, the pause is the positive server hint or that base **plus** the configured sample, replacing legacy jitter. Budgets and per-call attempt limits still apply. Record the loaded bridge policy and actual retry timestamps. See [responses][response] and [retry logic][request]. |
 
 Deadlines are not mandatory sleeps. The default 10 s bridge-request deadline, 90 s retry budget, 30 s stream-first-byte deadline and 10 s stream-handshake deadline must not be summed into normal ping. `carrier_probe_coalesce_ms=0` disables that optional coalescing delay. Carrier fallback deadlines affect failed attempts, not every successful exchange. See [timeout defaults](../../src/config/types/web/defaults.rs).
 
@@ -176,7 +203,7 @@ A conceptual WEB sample is **remaining setup + carrier/network transit + queues 
 
 ## Diagnosis without changing protections
 
-1. Record client/build, Android WebView version, carrier, public endpoint, IP family, network, Direct/ME route, DC and load. Match these conditions for comparison. Respect Android's two-minute cached result; do not treat repeated UI reads as new samples.
+1. Record client/build, Android WebView version, the loaded bridge’s `web.retry_jitter` policy, carrier, public endpoint, IP family, network, Direct/ME route, DC and load. Match these conditions for comparison. Respect Android's two-minute cached result; do not treat repeated UI reads as new samples.
 2. Separate three experiments: a new proxy-list check; a new logical stream on a ready carrier; application RPC on an established MTProto session. The latter two require suitable client instrumentation and are not automatically provided by the proxy-list display. Record individual samples and distributions rather than comparing one cold sample with one warm sample.
 3. Use the authenticated `GET /web-status` and existing `[web.debug]` controls with `capture_timings=true`, `capture_frames=true`, `body_capture="metadata"`. Enable bounded capture as described in the [WEB diagnostics guide](WEB_PROXY.en.md), then restore its prior state. Payloads, capabilities and secrets are unnecessary for this investigation.
 4. Correlate session creation, carrier selection/commit/failure, `stream_admitted`, `stream_first_byte`, `handshake_succeeded`, OPEN/DATA, HTTP status and retries. `relay_started` precedes upstream work and is not a DC-ready timestamp. Use `GET /v1/runtime/web/status` and `GET /v1/runtime/web/sessions` for capacity and queue-pressure context, not end-to-end RTT.
@@ -184,7 +211,7 @@ A conceptual WEB sample is **remaining setup + carrier/network transit + queues 
 6. Add frontend connection/TLS/request timing and client timestamps to locate delays outside Telemt. Establish connection reuse, negotiated HTTP version, buffering and Upgrade behavior. Bridge startup/HELLO sideband events do not provide a complete client timeline. Synchronize clocks for cross-host comparisons or use durations on each host.
 7. If ME is involved, compare the existing `ME RTT sample` trace (`rtt_ms`, `ema_ms`, `base_ms`, `degraded`). The timestamp precedes the writer queue/flush, and the EMA uses 80% previous value plus 20% new sample. Keepalive scheduling before that timestamp is excluded. A low ME value with high Android ping points to work outside that measured ME segment, without identifying one particular cause. See [writer][writer] and [reader][reader].
 
-Evidence patterns: fast Telemt handling with late client delivery suggests investigating frontend/network/client queues; `503` plus `Retry-After: 1` supports a retry delay; long upstream work calls for Direct/ME investigation. None alone proves that TLS cryptography causes 1000–1500 ms. Keep compatibility, certificate verification, admission limits and backpressure intact while collecting evidence.
+Evidence patterns: fast Telemt handling with late client delivery suggests investigating frontend/network/client queues; `503` and its retry headers identify the base delay, while the loaded jitter policy and client timestamps establish the actual pause; long upstream work calls for Direct/ME investigation. None alone proves that TLS cryptography causes 1000–1500 ms. Keep compatibility, certificate verification, admission limits and backpressure intact while collecting evidence.
 
 ## Evidence scope
 

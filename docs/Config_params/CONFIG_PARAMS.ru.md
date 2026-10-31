@@ -2622,11 +2622,11 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `timeouts` | таблица | ограниченные defaults | `✔` |
 | `vhosts` | массив таблиц | `[]` | `✔` |
 
-Для `enabled = true` нужен как минимум один доступный по сетевой политике WEB-listener, один vhost и один профиль в каждом vhost. `https` сохраняет сериализованный HTTPS transport и требует `max_http_handlers >= 2`. В `https-lanes` stream zero и каждый logical stream получают независимые uplink sequence, downlink cursor, retry и long poll; carrier требует `max_http_handlers >= 4` и публичного HTTP/2 на TLS-терминаторе. `websocket` переносит все logical streams через одно упорядоченное RFC 6455 connection, а `websocket-lanes` выделяет отдельное connection каждому ненулевому stream и изолирует сбои lane. Оба WebSocket carrier используют `GET /api/v1/ws` после создания HTTPS-сессии и требуют от TLS-терминатора сохранять HTTP/1.1 Upgrade headers.
+Для `enabled = true` нужен как минимум один доступный по сетевой политике WEB-listener, один vhost и один профиль в каждом vhost. `https` использует общую последовательность HTTPS uplink с согласуемым окном upload 1–4 и требует `max_http_handlers >= 2`. В `https-lanes` stream zero и каждый logical stream получают независимые uplink sequence, downlink cursor, retry и long poll; carrier требует `max_http_handlers >= 4` и публичного HTTP/2 на TLS-терминаторе. `websocket` переносит все logical streams через одно упорядоченное RFC 6455 connection, а `websocket-lanes` выделяет отдельное connection каждому ненулевому stream и изолирует сбои lane. Оба WebSocket carrier используют `GET /api/v1/ws` после создания HTTPS-сессии и требуют от TLS-терминатора сохранять HTTP/1.1 Upgrade headers.
 
 Если `carriers` отсутствует или равен `false`, auto-negotiation и обучение выключены, а `carrier` задаёт единственный режим. Непустой массив `carriers` включает стартовый перебор в заданном порядке; `carrier` ровно один раз добавляется последним fallback-вариантом. Пустой массив, дубликаты и `true` запрещены. Клиент может перейти к следующему кандидату только до commit carrier; для смены carrier после commit нужна новая сессия. Native-клиент без метаданных, включая Telegram iOS, всегда использует настроенный фиксированный `carrier`, даже при включённом auto-negotiation. Текущий iOS поддерживает только `https`, поэтому такой deployment должен задавать `carrier = "https"`. Классификация User-Agent CFNetwork и Darwin не определяет поддержку carrier. Явные capabilities нативного iOS пересекаются с `{https}`; capabilities остальных явных клиентов применяются как переданы.
 
-`http_connection_capacity_action` применяется только после того, как Telemt принял приватное WEB TCP connection и исчерпал `max_http_connections`. `drop` сохраняет немедленное закрытие. `respond` отправляет пустой повторяемый `503 Service Unavailable` с `Retry-After: 1`, `Cache-Control: no-store` и `Connection: close`. `wait` ожидает обычную capacity не более `http_overload_timeout_ms`, затем переходит к нормальной HTTP-обработке; по timeout отправляется тот же ограниченный `503`. Вне обычной capacity могут ожидать или отвечать не более `max_http_overload_connections` принятых sockets.
+`http_connection_capacity_action` применяется только после того, как Telemt принял приватное WEB TCP connection и исчерпал `max_http_connections`. `drop` сохраняет немедленное закрытие. `respond` отправляет пустой повторяемый `503 Service Unavailable` с `Retry-After: 1`, `X-Telemt-Retry-After-Ms: 250`, `Cache-Control: no-store` и `Connection: close`. `wait` ожидает обычную capacity не более `http_overload_timeout_ms`, затем переходит к нормальной HTTP-обработке; по timeout отправляется тот же ограниченный `503`. Вне обычной capacity могут ожидать или отвечать не более `max_http_overload_connections` принятых sockets.
 
 `decoy_fasttrack_mode` требует перезапуска и управляет только capability work для `GET/HEAD` на настроенном base root. `off` сохраняет полный scan, `shadow` считает подходящие requests, но не пропускает scan, а `enforce` пропускает его только для `HEAD` или отсутствующего/неканонического параметра `bridge`. Канонический bridge-shaped `GET` всегда сканирует все профили выбранного vhost. Оптимизация не ограничивает враждебные канонические probes; `enforce` необходимо проверять на различимость timing за production TLS-терминатором.
 
@@ -2709,6 +2709,38 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `new_sessions_burst` | `u32` | `128` | Process-wide burst создания сессий. |
 | `new_streams_per_minute` | `u32` | `6000` | Устойчивая скорость создания logical streams. |
 | `new_streams_burst` | `u32` | `512` | Process-wide burst создания logical streams. |
+
+# [web.retry_jitter]
+
+| Ключ | Тип | По умолчанию | Описание |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `false` | Включает добавочный jitter повторов. |
+| `min_ms` | `u32` | `0` | Минимальная добавка в миллисекундах включительно. |
+| `max_ms` | `u32` | `250` | Максимальная добавка в миллисекундах включительно; не более `30000`. |
+| `distribution` | `string` | `"uniform"` | `uniform` или `triangular`. |
+| `peak_ms` | `Option<u32>` | `—` | Пик треугольного распределения; при отсутствии — середина диапазона. |
+
+`[web.retry_jitter]` добавляет независимо выбранную задержку к каждому существующему HTTP-повтору бриджа: сетевым ошибкам и ответам 408/429/502/503/504. Менять приложения Telegram не требуется. Без секции или при `enabled = false` сохраняются подсказка Telemt на 250 мс и прежний backoff/jitter.
+
+```toml
+[web.retry_jitter]
+enabled = true
+min_ms = 0
+max_ms = 250
+distribution = "uniform"
+# Only for distribution = "triangular":
+# peak_ms = 125
+```
+
+Диапазон задаёт **добавку**, а не полную паузу: подсказка Telemt 250 мс с этим примером даёт 250–500 мс. Без положительной серверной подсказки база остаётся 250, 500, 1000, затем 2000 мс. Включённый jitter заменяет прежний jitter до 25%. Корректный стандартный `Retry-After` во включённом режиме не сокращается прежним пределом в 30 секунд. Если пауза не помещается в оставшийся бюджет операции, бюджет истекает без раннего повтора.
+
+Значения по умолчанию: `enabled = false`, `min_ms = 0`, `max_ms = 250`, `distribution = "uniform"`, `peak_ms` отсутствует. Требуется `0 <= min_ms <= max_ms <= 30000`. `uniform` выбирает целые миллисекунды равномерно; `triangular` использует треугольную плотность с округлением до миллисекунд. Необязательный пик по умолчанию находится посередине и должен входить в диапазон. Явный пик для `uniform`, неизвестные ключи/распределения и неверные границы отклоняются даже при выключенной опции. Одинаковые границы дают постоянную добавку.
+
+Политика фиксируется в каждой странице бриджа. Reload через конфиг/API влияет на новые страницы; активные сохраняют настройки при recovery. Recovery JSON и HTTP-заголовки совместимости не меняются. Используется `crypto.getRandomValues`, при недоступности — `Math.random` для совместимости. Успешный трафик не задерживается. Лимиты попыток, общий бюджет, отмена и повтор неизменных payload/sequence сохраняются; более длинные паузы могут уменьшить число попыток, помещающихся в startup/recovery-бюджет.
+
+Это размывает фиксированные интервалы повторов, но не гарантирует защиту от DPI. Планирование браузера, сетевые очереди и другие временные характеристики протокола остаются наблюдаемыми. Существующие примеры временной шкалы описывают выключенную опцию. Для включённого режима добавляйте выбранную задержку к каждой паузе повтора, а не к первому соединению или каждому кадру данных.
+
+Политика меняет только уже предусмотренные паузы перед повтором. Более строгие ограничения отдельных вызовов сохраняются: обычный poll `/down` и вызов `/up` после commit выполняют одну попытку; их replay при восстановлении допускает две. Опция не создаёт новых циклов повторов. Она не продлевает `web.timeouts.bridge_retry_secs` и сроки запуска или восстановления.
 
 # [web.timeouts]
 
