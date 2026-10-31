@@ -38,6 +38,7 @@ pub(crate) fn render(
     carrier_probe_coalesce_ms: u64,
     bridge_diagnostics_enabled: bool,
     carrier_method: WebCarrierMethod,
+    retry_jitter: &crate::config::WebRetryJitterConfig,
     rng: &SecureRandom,
 ) -> BridgePage {
     let mut nonce = [0u8; 18];
@@ -47,6 +48,7 @@ pub(crate) fn render(
     let body = template(bridge_diagnostics_enabled)
         .replace("__NONCE__", &nonce)
         .replace("__HOST__", host)
+        .replace("__RETRY_JITTER__", &retry_jitter.bridge_policy())
         .replace("__BASE_PREFIX__", base_prefix)
         .replace("__BOOTSTRAP__", bootstrap)
         .replace("__CARRIER_METHOD__", carrier_method.as_str())

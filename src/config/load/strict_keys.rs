@@ -260,7 +260,10 @@ const LISTENER_CONFIG_KEYS: &[&str] = &[
     "web_trusted_proxy_cidrs",
 ];
 
+const WEB_RETRY_JITTER_KEYS: &[&str] = &["enabled", "min_ms", "max_ms", "distribution", "peak_ms"];
+
 const WEB_CONFIG_KEYS: &[&str] = &[
+    "retry_jitter",
     "allow_wildcard_hosts",
     "enabled",
     "carrier",

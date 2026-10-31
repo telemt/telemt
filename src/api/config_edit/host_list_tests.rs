@@ -141,3 +141,50 @@ async fn grouped_hosts_cannot_bypass_frozen_process_limits() {
 // Effective process policy must reject patterns until the explicit restart has happened.
 #[path = "wildcard_tests.rs"]
 mod wildcard_tests;
+
+#[tokio::test]
+async fn retry_jitter_patch_validates_and_reloads_without_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, source()).unwrap();
+    let initial = ProxyConfig::load(&path).unwrap();
+    let (_, revision) = read_managed_config(&path).await.unwrap();
+    let patch = serde_json::json!({"web":{"retry_jitter":{
+        "enabled":true,"min_ms":10,"max_ms":300,"distribution":"triangular","peak_ms":100
+    }}});
+    let mut response = apply_patch_to_path(&path, &patch, Some(revision))
+        .await
+        .unwrap();
+    let desired = ProxyConfig::load(&path).unwrap();
+    let resolved = reconcile_runtime_effect(&mut response, &initial, &desired).unwrap();
+    assert!(resolved.runtime_changed);
+    assert!(!response.process_restart_required);
+    assert_eq!(
+        resolved.effective.web.retry_jitter,
+        desired.web.retry_jitter
+    );
+    assert!(!initial.web.retry_jitter.enabled);
+    let (managed, revision) = read_managed_config(&path).await.unwrap();
+    assert_eq!(
+        managed["web"]["retry_jitter"]["peak_ms"].as_integer(),
+        Some(100)
+    );
+    let before = std::fs::read(&path).unwrap();
+    for invalid in [
+        serde_json::json!({"max_ms":30001}),
+        serde_json::json!({"peak_ms":301}),
+        serde_json::json!({"distribution":"uniform"}),
+        serde_json::json!({"typo":1}),
+    ] {
+        assert!(
+            apply_patch_to_path(
+                &path,
+                &serde_json::json!({"web":{"retry_jitter":invalid}}),
+                Some(revision.clone())
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}

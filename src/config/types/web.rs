@@ -14,6 +14,9 @@ mod wildcard;
 pub use wildcard::WebWildcardLimitsConfig;
 
 // Serialized WEB defaults remain separate from the runtime data model.
+mod retry;
+pub use retry::{WebRetryJitterConfig, WebRetryJitterDistribution};
+
 mod defaults;
 use defaults::*;
 // Decoy fast-track policy remains isolated from the bulky WEB data model.
@@ -469,6 +472,9 @@ pub struct WebConfig {
     /// WEB lifecycle deadlines.
     #[serde(default)]
     pub timeouts: WebTimeoutsConfig,
+    /// Additive HTTP retry jitter frozen into each generated bridge page.
+    #[serde(default)]
+    pub retry_jitter: WebRetryJitterConfig,
     /// Exact hostname and opted-in wildcard groups served by WEB listeners.
     #[serde(default)]
     pub vhosts: Vec<WebVhostConfig>,
@@ -517,6 +523,7 @@ impl Default for WebConfig {
             limits: WebLimitsConfig::default(),
             debug: WebDebugConfig::default(),
             timeouts: WebTimeoutsConfig::default(),
+            retry_jitter: WebRetryJitterConfig::default(),
             vhosts: Vec::new(),
             runtime: None,
             decoy_dns: Arc::default(),

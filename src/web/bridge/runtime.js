@@ -30,6 +30,7 @@ const failureReason=(error,fallback)=>error&&canonicalFailures.includes(error.te
 const status=__STATUS_FUNCTION__;
 const socketURL=()=>relayBase.replace(/^https:/,'wss:')+'/api/v1/ws';
 const requestClient=requestSupport.create({
+ jitter:Object.freeze(__RETRY_JITTER__),
  base:()=>relayBase,closed:()=>closed,retryMs:()=>bridgeRetryMs,longPollMs:()=>longPollMs,requestMs:()=>bridgeRequestMs,
  batchLimit:()=>batchLimit,read:(response,limit,exact,signal)=>responseBody.read(response,limit,exact,signal),cancel:responseBody.cancel,
  failure,reason:failureReason,retrying:()=>status('reconnecting')

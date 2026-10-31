@@ -11,7 +11,7 @@ function renderedPage(){
  page=page.replace('__DIAGNOSTIC_RUNTIME__','');
  for(const [key,file] of Object.entries(modules))if(page.includes('__'+key+'_RUNTIME__'))page=page.replace('__'+key+'_RUNTIME__',()=>fs.readFileSync(path.join(__dirname,file+'.js'),'utf8'));
  page=page.replace('__RUNTIME__',()=>fs.readFileSync(path.join(__dirname,'runtime.js'),'utf8'));
- const values={BOOTSTRAP:'A'.repeat(43),HOST:'proxy.example.com',BASE_PREFIX:'',CARRIER_METHOD:'POST',NEGOTIATION_ENABLED:'true',CANDIDATE_COUNT:4,CARRIER_DEADLINES:'3,5,8,12',LONG_POLL_SECS:25,BRIDGE_REQUEST_SECS:10,BRIDGE_RETRY_SECS:90,BRIDGE_RECOVERY_SECS:15,WEBSOCKET_OPEN_SECS:15,RECONNECT_GRACE_SECS:120,CARRIER_PROBE_COALESCE_MS:0,BATCH_LIMIT:2097152,QUEUE_LIMIT:33554432,QUEUE_ITEMS:16384,MAX_STREAMS:1024,STATUS_FUNCTION:"state=>{if(port&&!closed)port.postMessage({t:'status',state})}",HELLO_TIMEOUT_CALLBACK:"()=>fail('timeout')",PAGEHIDE_CALLBACK:'()=>close(true)'};
+ const values={RETRY_JITTER:'{enabled:false,min:0,max:250,peak:125,triangular:false}',BOOTSTRAP:'A'.repeat(43),HOST:'proxy.example.com',BASE_PREFIX:'',CARRIER_METHOD:'POST',NEGOTIATION_ENABLED:'true',CANDIDATE_COUNT:4,CARRIER_DEADLINES:'3,5,8,12',LONG_POLL_SECS:25,BRIDGE_REQUEST_SECS:10,BRIDGE_RETRY_SECS:90,BRIDGE_RECOVERY_SECS:15,WEBSOCKET_OPEN_SECS:15,RECONNECT_GRACE_SECS:120,CARRIER_PROBE_COALESCE_MS:0,BATCH_LIMIT:2097152,QUEUE_LIMIT:33554432,QUEUE_ITEMS:16384,MAX_STREAMS:1024,STATUS_FUNCTION:"state=>{if(port&&!closed)port.postMessage({t:'status',state})}",HELLO_TIMEOUT_CALLBACK:"()=>fail('timeout')",PAGEHIDE_CALLBACK:'()=>close(true)'};
  return page.replace(/__([A-Z_]+)__/g,(all,key)=>key.startsWith('DIAGNOSTIC_')?'':String(values[key]??''));
 }
 function frame(type,id=0,payload=[]){
@@ -86,6 +86,15 @@ test('closing the bridge cancels the 250 ms overload retry',async page=>{
  env.answer(env.pending('/api/v1/up')[0],503,null,{'Retry-After':'1','X-Telemt-Retry-After-Ms':'250'});await flush();
  await env.tick(249);env.close();await flush();await env.tick(1000);
  assert.equal(env.requests.filter(r=>r.url.endsWith('/api/v1/up')).length,1);
+});
+test('retry jitter distributions, fallback, deadlines and page ownership',require('./retry_jitter_tests'));
+test('configured jitter is added once to the Telemt delay',async page=>{
+ page=page.replace('{enabled:false,min:0,max:250,peak:125,triangular:false}','{enabled:true,min:100,max:100,peak:100,triangular:false}');
+ const env=await session(page);env.send(frame(1,1));await flush();
+ env.answer(env.pending('/api/v1/up')[0],503,null,{'Retry-After':'1','X-Telemt-Retry-After-Ms':'250'});await flush();
+ await env.tick(349);assert.equal(env.pending('/api/v1/up').length,0);
+ await env.tick(1);assert.equal(env.pending('/api/v1/up').length,1);
+ env.close();await flush();
 });
 test('already queued OPEN and DATA share the zero-wait startup request',async page=>{
  const env=await session(page);const body=join(frame(1,1),frame(2,1,[7,8]));env.send(body);await flush();

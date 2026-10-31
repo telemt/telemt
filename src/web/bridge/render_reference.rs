@@ -23,6 +23,7 @@ pub(super) fn render(
     carrier_probe_coalesce_ms: u64,
     bridge_diagnostics_enabled: bool,
     carrier_method: WebCarrierMethod,
+    retry_jitter: &crate::config::WebRetryJitterConfig,
     nonce: &str,
 ) -> BridgePage {
     let diagnostic_script = if bridge_diagnostics_enabled {
@@ -110,6 +111,7 @@ pub(super) fn render(
         )
         .replace("__NONCE__", &nonce)
         .replace("__HOST__", host)
+        .replace("__RETRY_JITTER__", &retry_jitter.bridge_policy())
         .replace("__BASE_PREFIX__", base_prefix)
         .replace("__BOOTSTRAP__", bootstrap)
         .replace("__CARRIER_METHOD__", carrier_method.as_str())

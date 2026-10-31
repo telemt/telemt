@@ -55,11 +55,13 @@ struct Case {
     negotiation: bool,
     candidates: usize,
     value: usize,
+    jitter: crate::config::WebRetryJitterConfig,
 }
 
 impl Case {
     fn new(index: usize) -> Self {
         Self {
+            jitter: crate::config::WebRetryJitterConfig::default(),
             host: format!("proxy-{index}.example.com"),
             base: "/telegram/web/".to_string(),
             bootstrap: format!("{index:043}"),
@@ -96,6 +98,7 @@ impl Case {
             self.value as u64 - 1,
             self.diagnostics,
             self.method,
+            &self.jitter,
             rng,
         )
     }
@@ -121,6 +124,7 @@ impl Case {
             self.value as u64 - 1,
             self.diagnostics,
             self.method,
+            &self.jitter,
             nonce,
         )
     }
@@ -222,4 +226,26 @@ fn concurrent_responses_keep_nonces_and_configuration_response_owned() {
         assert!(template(diagnostics).contains("__BOOTSTRAP__"));
         assert!(template(diagnostics).contains("__BASE_PREFIX__"));
     }
+}
+
+#[test]
+fn retry_jitter_is_rendered_per_page_without_changing_existing_pages() {
+    let rng = SecureRandom::new();
+    let mut case = Case::new(1);
+    let old = case.render(&rng);
+    case.jitter.enabled = true;
+    case.jitter.min_ms = 10;
+    case.jitter.max_ms = 301;
+    case.jitter.distribution = crate::config::WebRetryJitterDistribution::Triangular;
+    let new = case.render(&rng);
+    assert!(
+        old.body
+            .contains("{enabled:false,min:0,max:250,peak:125,triangular:false}")
+    );
+    assert!(
+        new.body
+            .contains("{enabled:true,min:10,max:301,peak:155.5,triangular:true}")
+    );
+    let nonce = case.assert_page(&new);
+    assert_eq!(new.body, case.reference(&nonce).body);
 }
