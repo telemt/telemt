@@ -36,7 +36,7 @@ sequenceDiagram
     participant P as Classic/DD/EE proxy
     participant D as Telegram DC
     C->>P: DNS / TCP / proxy transport setup
-    Note over C,P: Remote transport ready; measurement timestamp refreshed
+    Note over C,P: Remote transport ready, measurement timestamp refreshed
     C->>P: Encrypted TL_ping
     P->>D: Relay
     D->>P: TL_pong
@@ -54,7 +54,7 @@ sequenceDiagram
     T->>B: WELCOME
     Note over B: Wait 500 ms before native_checkProxy
     C->>B: Connect to 127.0.0.1
-    Note over C,B: Local socket ready; measurement timestamp refreshed
+    Note over C,B: Local socket ready, measurement timestamp refreshed
     Note over B,T: OPEN may race with the native timestamp update
     C->>B: MTProxy header and encrypted TL_ping
     B->>T: OPEN / DATA over selected carrier
