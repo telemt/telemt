@@ -36,7 +36,7 @@ function create(settings){
   const seconds=Number(header);
   if(Number.isFinite(seconds)&&seconds>=0)return jitter.enabled?seconds*1000:Math.min(seconds*1000,30000);
   const when=Date.parse(header);
-  if(Number.isFinite(when)){const delta=when-Date.now();return delta>0?(jitter.enabled?delta:Math.min(delta,30000)):0}
+  if(Number.isFinite(when)){const delta=when-Date.now();return delta>0?(jitter.enabled?delta:Math.min(delta,30000)):0;}
   return 0;
  }
  function retryableStatus(status){return status===408||status===429||status===502||status===503||status===504}
