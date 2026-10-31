@@ -50,6 +50,7 @@ use crate::proxy::handshake::{
 };
 #[cfg(test)]
 use crate::proxy::handshake::{handle_mtproto_handshake, handle_tls_handshake};
+use crate::proxy::pending_handshake::{PendingHandshakeAdmission, PendingHandshakeGuard};
 #[cfg(test)]
 use crate::proxy::route_mode::RelayRouteMode;
 use crate::proxy::route_mode::RouteRuntimeController;

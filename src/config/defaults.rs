@@ -244,6 +244,11 @@ pub(crate) fn default_accept_permit_timeout_ms() -> u64 {
     DEFAULT_ACCEPT_PERMIT_TIMEOUT_MS
 }
 
+/// Per-IP pending-handshake limit is opt-in.
+pub(crate) fn default_max_pending_handshakes_per_ip() -> u32 {
+    0
+}
+
 /// Keeps privileged conntrack control disabled unless explicitly requested.
 pub(crate) fn default_conntrack_control_enabled() -> bool {
     DEFAULT_CONNTRACK_CONTROL_ENABLED

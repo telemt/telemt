@@ -12,6 +12,7 @@ use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, run_probe};
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, run_direct_buffer_budget_controller};
+use crate::proxy::pending_handshake::PendingHandshakeLimiter;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
 use crate::proxy::traffic_limiter::TrafficLimiter;
@@ -57,6 +58,7 @@ pub(crate) async fn prepare_runtime(
     traffic_limiter: Arc<TrafficLimiter>,
     direct_buffer_budget: Arc<DirectBufferBudget>,
     max_connections: Arc<Semaphore>,
+    pending_handshakes: Arc<PendingHandshakeLimiter>,
 ) -> Result<PreparedRuntime, String> {
     let user_admission_epoch = user_admission.epoch();
     config
@@ -93,6 +95,7 @@ pub(crate) async fn prepare_runtime(
         direct_buffer_budget.clone(),
         traffic_limiter,
         user_admission,
+        pending_handshakes,
     );
 
     let probe = run_probe(
