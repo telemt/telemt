@@ -23,6 +23,7 @@ pub(crate) struct WebRuntimeVhost {
     /// Shared automatic-host policy; exact hosts keep their precomputed bindings.
     pub(crate) wildcard: Option<WebRuntimeWildcard>,
     /// Canonical lowercase ACE hostname; empty for a wildcard template.
+    #[cfg(test)]
     pub(crate) host: String,
     /// Exact slash-delimited endpoint base, including the trailing slash.
     pub(crate) base: String,

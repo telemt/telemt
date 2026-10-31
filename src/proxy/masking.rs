@@ -77,15 +77,16 @@ mod relay;
 pub use backend_setup::handle_bad_client;
 use backend_setup::*;
 use copy::*;
+#[cfg(test)]
 pub(crate) use handler::handle_bad_client_with_shared;
 pub(in crate::proxy) use handler::handle_bad_client_with_shared_resolver;
 use interfaces::*;
 use relay::*;
 use target::*;
+#[cfg(test)]
+use timing::mask_outcome_target_budget;
 pub(crate) use timing::sample_lognormal_percentile_bounded;
-use timing::{
-    mask_outcome_target_budget, wait_mask_connect_budget_if_needed, wait_mask_outcome_budget,
-};
+use timing::{wait_mask_connect_budget_if_needed, wait_mask_outcome_budget};
 
 #[cfg(test)]
 #[path = "tests/masking_security_tests.rs"]

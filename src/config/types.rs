@@ -58,7 +58,8 @@ pub use server::{
 pub use web::{
     WebCarrierNegotiationAggressiveness, WebConfig, WebDecoyConfig, WebDecoyFastTrackMode,
     WebDecoyResolve, WebHttpConnectionCapacityAction, WebLimitsConfig, WebProfileConfig,
-    WebSecretMode, WebTimeoutsConfig, WebVhostConfig, WebWildcardLimitsConfig,
+    WebRetryJitterConfig, WebRetryJitterDistribution, WebSecretMode, WebTimeoutsConfig,
+    WebVhostConfig, WebWildcardLimitsConfig,
 };
 pub(crate) use web::{
     WebDecoyDnsSnapshot, WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile,

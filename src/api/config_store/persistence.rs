@@ -97,6 +97,7 @@ pub(in crate::api) fn render_server_listeners(cfg: &ProxyConfig) -> Result<Strin
 }
 
 /// Validates and atomically writes access tables to their single source owner.
+#[cfg(test)]
 pub(in crate::api) async fn save_access_sections_to_disk(
     config_path: &Path,
     cfg: &ProxyConfig,

@@ -2616,11 +2616,11 @@ WEB mode carries Telegram Desktop MTProxy traffic through HTTPS terminated by an
 | `timeouts` | table | bounded defaults | `✔` |
 | `vhosts` | array of tables | `[]` | `✔` |
 
-`enabled = true` requires at least one network-eligible WEB listener, at least one vhost, and at least one profile in every vhost. `https` preserves the serialized HTTPS transport and requires `max_http_handlers >= 2`. `https-lanes` gives stream zero and every logical stream independent uplink sequencing, downlink cursors, retries, and long polls; it requires `max_http_handlers >= 4` and public HTTP/2 on the TLS terminator. `websocket` carries all logical streams over one ordered RFC 6455 connection, while `websocket-lanes` owns one connection per non-zero logical stream and isolates lane failures. Both WebSocket carriers use `GET /api/v1/ws` after HTTPS session creation and require the TLS terminator to preserve HTTP/1.1 Upgrade headers.
+`enabled = true` requires at least one network-eligible WEB listener, at least one vhost, and at least one profile in every vhost. `https` uses a shared HTTPS uplink sequence with a negotiated upload window of 1–4 and requires `max_http_handlers >= 2`. `https-lanes` gives stream zero and every logical stream independent uplink sequencing, downlink cursors, retries, and long polls; it requires `max_http_handlers >= 4` and public HTTP/2 on the TLS terminator. `websocket` carries all logical streams over one ordered RFC 6455 connection, while `websocket-lanes` owns one connection per non-zero logical stream and isolates lane failures. Both WebSocket carriers use `GET /api/v1/ws` after HTTPS session creation and require the TLS terminator to preserve HTTP/1.1 Upgrade headers.
 
 When `carriers` is missing or `false`, auto-negotiation and learning are disabled and `carrier` is the only mode. A non-empty `carriers` array enables startup-only negotiation in its configured order; `carrier` is appended exactly once as the final fallback. Empty arrays, duplicates, and `true` are rejected. The client advances candidates only before carrier commit and must create a new session to change carrier after commit. A metadata-free native client, including Telegram iOS, always uses the configured fixed `carrier`, even when negotiation is enabled. Current iOS supports only `https`, so such deployments must configure `carrier = "https"`. CFNetwork and Darwin User-Agent classification does not infer carrier support. Explicit native iOS capabilities are intersected with `{https}`; other explicit client capabilities participate as reported.
 
-`http_connection_capacity_action` applies only after Telemt has accepted a private WEB TCP connection and `max_http_connections` is exhausted. `drop` preserves the legacy immediate close. `respond` emits an empty `503 Service Unavailable` with `Retry-After: 1`, `Cache-Control: no-store`, and `Connection: close`. `wait` waits for ordinary connection capacity for at most `http_overload_timeout_ms`, then enters normal HTTP handling; timeout emits the same bounded `503`. At most `max_http_overload_connections` accepted sockets may wait or respond outside ordinary connection capacity. This policy cannot observe or cause a TCP connect refusal before Telemt accepts the socket.
+`http_connection_capacity_action` applies only after Telemt has accepted a private WEB TCP connection and `max_http_connections` is exhausted. `drop` preserves the legacy immediate close. `respond` emits an empty `503 Service Unavailable` with `Retry-After: 1`, `X-Telemt-Retry-After-Ms: 250`, `Cache-Control: no-store`, and `Connection: close`. `wait` waits for ordinary connection capacity for at most `http_overload_timeout_ms`, then enters normal HTTP handling; timeout emits the same bounded `503`. At most `max_http_overload_connections` accepted sockets may wait or respond outside ordinary connection capacity. This policy cannot observe or cause a TCP connect refusal before Telemt accepts the socket.
 
 `decoy_fasttrack_mode` is restart-only. `off` preserves legacy root-request scanning and collects no fast-track decisions. `shadow` records eligible requests while preserving the full scan. `enforce` skips scans only for `HEAD` or absent/noncanonical bridge queries. A canonical bridge-shaped `GET`, including an unknown capability, always scans every profile in the selected vhost. The optimization does not bound hostile canonical probes and enforce mode must be validated for request-shape timing distinguishability behind the production TLS terminator.
 
@@ -2703,6 +2703,38 @@ These process-wide ceilings make every WEB registry, queue, request body, capabi
 | `new_sessions_burst` | `u32` | `128` | Process-wide session creation burst. |
 | `new_streams_per_minute` | `u32` | `6000` | Sustained logical-stream creation rate. |
 | `new_streams_burst` | `u32` | `512` | Process-wide logical-stream creation burst. |
+
+# [web.retry_jitter]
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `false` | Enable additive retry jitter. |
+| `min_ms` | `u32` | `0` | Inclusive minimum addition in milliseconds. |
+| `max_ms` | `u32` | `250` | Inclusive maximum addition in milliseconds; at most `30000`. |
+| `distribution` | `string` | `"uniform"` | `uniform` or `triangular`. |
+| `peak_ms` | `Option<u32>` | `—` | Triangular peak; omitted means the interval midpoint. |
+
+`[web.retry_jitter]` adds an independently sampled delay to every existing bridge HTTP retry (network errors and 408/429/502/503/504). It requires no Telegram application changes. Without this section, or with `enabled = false`, the existing 250 ms Telemt hint and legacy backoff/jitter remain unchanged.
+
+```toml
+[web.retry_jitter]
+enabled = true
+min_ms = 0
+max_ms = 250
+distribution = "uniform"
+# Only for distribution = "triangular":
+# peak_ms = 125
+```
+
+The range describes an **addition**, not the total pause: the Telemt 250 ms hint plus this example gives 250–500 ms. Without a positive server hint, the base remains 250, 500, 1000, then 2000 ms. Enabled jitter replaces the legacy 25% jitter. A valid standard `Retry-After` is not shortened to the legacy 30-second cap in enabled mode. If the pause exceeds the remaining operation budget, the budget expires without an early retry.
+
+Defaults are `enabled = false`, `min_ms = 0`, `max_ms = 250`, `distribution = "uniform"`, and no `peak_ms`. Require `0 <= min_ms <= max_ms <= 30000`. `uniform` samples integer milliseconds; `triangular` samples a triangular density and rounds to milliseconds. Its optional peak defaults to the midpoint and must be within the interval. An explicit peak with `uniform`, unknown keys/distributions and invalid ranges are rejected even when disabled. Equal bounds produce a constant addition.
+
+The policy is frozen into each bridge page. Config/API reload affects newly loaded pages; existing pages retain it through recovery. Recovery JSON and HTTP compatibility headers remain unchanged. Sampling prefers `crypto.getRandomValues`, with `Math.random` as a compatibility fallback. Successful traffic is not delayed. Attempt limits, absolute budgets, cancellation and payload/sequence replay remain intact; longer pauses can exhaust a startup/recovery budget sooner in terms of completed attempts.
+
+This reduces fixed retry timing, without guaranteeing resistance to DPI. Browser scheduling, network queues and other protocol timing remain observable. Existing timeline examples describe the default disabled mode. To evaluate enabled mode, add a sampled delay to each retry pause, not to the initial connection or every data frame.
+
+The policy changes existing retry waits only. Stricter per-call limits still apply: ordinary `/down` polls and committed `/up` calls use one attempt; their recovery replay permits two. This option does not create new retry loops. It neither extends `web.timeouts.bridge_retry_secs` nor any startup/recovery deadline.
 
 # [web.timeouts]
 

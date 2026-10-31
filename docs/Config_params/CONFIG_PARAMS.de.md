@@ -2616,11 +2616,11 @@ Der WEB-Modus transportiert MTProxy-Datenverkehr von Telegram Desktop über HTTP
 | `timeouts` | Tabelle | begrenzte Defaults | `✔` |
 | `vhosts` | Tabellen-Array | `[]` | `✔` |
 
-`enabled = true` erfordert mindestens einen durch die Netzwerkrichtlinie zugelassenen WEB-Listener, einen vhost und mindestens ein Profil in jedem vhost. `https` behält den serialisierten HTTPS-Transport bei und erfordert `max_http_handlers >= 2`. Mit `https-lanes` erhalten Stream null und jeder logische Stream eigene Uplink-Sequenzen, Downlink-Cursor, Wiederholungen und Long Polls; dieser Carrier erfordert `max_http_handlers >= 4` und öffentliches HTTP/2 am TLS-Terminator. `websocket` transportiert alle logischen Streams über eine geordnete RFC-6455-Verbindung, während `websocket-lanes` jedem Stream ungleich null eine eigene Verbindung zuweist und Lane-Fehler isoliert. Beide WebSocket-Carrier verwenden nach der HTTPS-Sitzungserstellung `GET /api/v1/ws` und erfordern, dass der TLS-Terminator die HTTP/1.1-Upgrade-Header unverändert weiterleitet.
+`enabled = true` erfordert mindestens einen durch die Netzwerkrichtlinie zugelassenen WEB-Listener, einen vhost und mindestens ein Profil in jedem vhost. `https` verwendet eine gemeinsame HTTPS-Uplink-Sequenz mit einem ausgehandelten Upload-Fenster von 1–4 und erfordert `max_http_handlers >= 2`. Mit `https-lanes` erhalten Stream null und jeder logische Stream eigene Uplink-Sequenzen, Downlink-Cursor, Wiederholungen und Long Polls; dieser Carrier erfordert `max_http_handlers >= 4` und öffentliches HTTP/2 am TLS-Terminator. `websocket` transportiert alle logischen Streams über eine geordnete RFC-6455-Verbindung, während `websocket-lanes` jedem Stream ungleich null eine eigene Verbindung zuweist und Lane-Fehler isoliert. Beide WebSocket-Carrier verwenden nach der HTTPS-Sitzungserstellung `GET /api/v1/ws` und erfordern, dass der TLS-Terminator die HTTP/1.1-Upgrade-Header unverändert weiterleitet.
 
 Fehlt `carriers` oder ist es `false`, sind Auto-Negotiation und Lernen deaktiviert und `carrier` ist der einzige Modus. Ein nicht leeres `carriers`-Array aktiviert die Start-Negotiation in der konfigurierten Reihenfolge; `carrier` wird genau einmal als letzter Fallback angehängt. Leere Arrays, Duplikate und `true` werden abgelehnt. Der Client darf nur vor dem Carrier-Commit zum nächsten Kandidaten wechseln; nach dem Commit erfordert ein Carrier-Wechsel eine neue Sitzung. Ein nativer Client ohne Metadaten, einschließlich Telegram iOS, verwendet immer den konfigurierten festen `carrier`, auch bei aktivierter Negotiation. Das aktuelle iOS unterstützt nur `https`; solche Bereitstellungen müssen daher `carrier = "https"` setzen. Die CFNetwork- und Darwin-User-Agent-Klassifizierung leitet keine Carrier-Unterstützung ab. Explizite native iOS-Capabilities werden mit `{https}` geschnitten; andere explizite Client-Capabilities gelten wie gemeldet.
 
-`http_connection_capacity_action` gilt erst, nachdem Telemt eine private WEB-TCP-Verbindung akzeptiert hat und `max_http_connections` ausgeschöpft ist. `drop` schließt wie bisher sofort. `respond` sendet eine leere wiederholbare `503 Service Unavailable` mit `Retry-After: 1`, `Cache-Control: no-store` und `Connection: close`. `wait` wartet höchstens `http_overload_timeout_ms` auf normale Kapazität und beginnt danach die übliche HTTP-Verarbeitung; bei Timeout wird dieselbe begrenzte `503` gesendet. Höchstens `max_http_overload_connections` akzeptierte Sockets dürfen außerhalb der normalen Kapazität warten oder antworten.
+`http_connection_capacity_action` gilt erst, nachdem Telemt eine private WEB-TCP-Verbindung akzeptiert hat und `max_http_connections` ausgeschöpft ist. `drop` schließt wie bisher sofort. `respond` sendet eine leere wiederholbare `503 Service Unavailable` mit `Retry-After: 1`, `X-Telemt-Retry-After-Ms: 250`, `Cache-Control: no-store` und `Connection: close`. `wait` wartet höchstens `http_overload_timeout_ms` auf normale Kapazität und beginnt danach die übliche HTTP-Verarbeitung; bei Timeout wird dieselbe begrenzte `503` gesendet. Höchstens `max_http_overload_connections` akzeptierte Sockets dürfen außerhalb der normalen Kapazität warten oder antworten.
 
 `decoy_fasttrack_mode` ist restart-only und betrifft nur Capability-Arbeit für `GET/HEAD` am konfigurierten Basis-Root. `off` behält den vollständigen Scan bei, `shadow` zählt geeignete Requests ohne den Scan zu überspringen, und `enforce` überspringt ihn nur für `HEAD` oder eine fehlende/nicht kanonische `bridge`-Query. Ein kanonisch geformtes Bridge-`GET` scannt immer alle Profile des ausgewählten vhost. Die Optimierung begrenzt keine feindlichen kanonischen Probes; `enforce` muss hinter dem produktiven TLS-Terminator auf Timing-Unterscheidbarkeit geprüft werden.
 
@@ -2703,6 +2703,38 @@ Diese prozessweiten Obergrenzen begrenzen alle WEB-Register, Warteschlangen, Req
 | `new_sessions_burst` | `u32` | `128` | Prozessweiter Burst für die Sitzungserstellung. |
 | `new_streams_per_minute` | `u32` | `6000` | Nachhaltige Erstellungsrate für logische Streams. |
 | `new_streams_burst` | `u32` | `512` | Prozessweiter Burst für die Stream-Erstellung. |
+
+# [web.retry_jitter]
+
+| Schlüssel | Typ | Standard | Beschreibung |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `false` | Aktiviert additiven Retry-Jitter. |
+| `min_ms` | `u32` | `0` | Inklusiver minimaler Zuschlag in Millisekunden. |
+| `max_ms` | `u32` | `250` | Inklusiver maximaler Zuschlag in Millisekunden; höchstens `30000`. |
+| `distribution` | `string` | `"uniform"` | `uniform` oder `triangular`. |
+| `peak_ms` | `Option<u32>` | `—` | Spitze der Dreiecksverteilung; ohne Angabe die Intervallmitte. |
+
+`[web.retry_jitter]` ergänzt jeden bestehenden HTTP-Retry der Bridge um eine unabhängig gewählte Verzögerung: Netzwerkfehler und Antworten mit 408/429/502/503/504. Telegram-Anwendungen müssen nicht geändert werden. Ohne diesen Abschnitt oder mit `enabled = false` bleiben der 250-ms-Hinweis von Telemt und das bisherige Backoff/Jitter-Verhalten erhalten.
+
+```toml
+[web.retry_jitter]
+enabled = true
+min_ms = 0
+max_ms = 250
+distribution = "uniform"
+# Only for distribution = "triangular":
+# peak_ms = 125
+```
+
+Der Bereich beschreibt einen **Zuschlag**, nicht die gesamte Pause: Zusammen mit dem Telemt-Hinweis von 250 ms ergibt dieses Beispiel 250–500 ms. Ohne positiven Serverhinweis bleibt die Basis bei 250, 500, 1000, dann 2000 ms. Aktivierter Jitter ersetzt den bisherigen Jitter von bis zu 25%. Ein gültiger standardmäßiger `Retry-After` wird im aktivierten Modus nicht auf die bisherige Grenze von 30 Sekunden verkürzt. Übersteigt die Pause das verbleibende Operationsbudget, läuft das Budget ohne vorzeitigen Retry ab.
+
+Standardwerte: `enabled = false`, `min_ms = 0`, `max_ms = 250`, `distribution = "uniform"`, ohne `peak_ms`. Es gilt `0 <= min_ms <= max_ms <= 30000`. `uniform` verteilt ganze Millisekunden gleichmäßig; `triangular` verwendet eine Dreiecksverteilung mit Rundung auf Millisekunden. Der optionale Gipfel liegt standardmäßig in der Mitte und muss innerhalb des Intervalls liegen. Ein expliziter Gipfel bei `uniform`, unbekannte Schlüssel/Verteilungen und ungültige Grenzen werden auch im deaktivierten Zustand abgelehnt. Gleiche Grenzen ergeben einen konstanten Zuschlag.
+
+Die Richtlinie wird pro Bridge-Seite festgeschrieben. Konfigurations-/API-Reload wirkt auf neu geladene Seiten; bestehende Seiten behalten ihre Einstellungen bei Recovery. Recovery-JSON und HTTP-Kompatibilitätsheader bleiben unverändert. Die Auswahl bevorzugt `crypto.getRandomValues`, mit `Math.random` als Kompatibilitätsfallback. Erfolgreicher Datenverkehr wird nicht verzögert. Versuchslimits, absolute Budgets, Abbruch und unveränderte Payload-/Sequence-Wiederholung bleiben erhalten; längere Pausen können die Anzahl der Versuche innerhalb eines Startup-/Recovery-Budgets reduzieren.
+
+Dies streut feste Retry-Intervalle, garantiert aber keinen Schutz vor DPI. Browser-Scheduling, Netzwerkwarteschlangen und andere Protokollzeiten bleiben beobachtbar. Bestehende Zeitleisten zeigen den deaktivierten Standardmodus. Bei aktiviertem Modus wird zu jeder Retry-Pause eine gezogene Verzögerung addiert, nicht zum ersten Verbindungsaufbau oder zu jedem Datenframe.
+
+Die Richtlinie ändert nur bereits vorhandene Retry-Pausen. Strengere Limits einzelner Aufrufe bleiben erhalten: Reguläre `/down`-Polls und `/up`-Aufrufe nach dem Commit führen einen Versuch aus; ihr Recovery-Replay erlaubt zwei. Die Option erzeugt keine neuen Retry-Schleifen. Sie verlängert weder `web.timeouts.bridge_retry_secs` noch Start- oder Recovery-Deadlines.
 
 # [web.timeouts]
 

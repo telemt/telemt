@@ -180,6 +180,8 @@ impl ConnRegistry {
             .as_secs()
     }
 
+    /// Creates a test registry with the requested route channel capacity.
+    #[cfg(test)]
     pub fn with_route_channel_capacity(route_channel_capacity: usize) -> Self {
         let route_channel_capacity = route_channel_capacity.max(1);
         Self::with_route_limits(
@@ -288,6 +290,8 @@ impl ConnRegistry {
             .store(watermark, Ordering::Relaxed);
     }
 
+    /// Registers a test route without a lifetime cleanup lease.
+    #[cfg(test)]
     pub async fn register(&self) -> (u64, mpsc::Receiver<MeResponse>) {
         self.register_route()
     }

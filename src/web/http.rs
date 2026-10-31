@@ -432,6 +432,7 @@ async fn handle_root(
         config.web.timeouts.carrier_probe_coalesce_ms,
         config.web.debug.bridge_diagnostics_enabled(),
         config.web.carrier_method,
+        &config.web.retry_jitter,
         &generation.rng,
     );
     let mut response = full_response(StatusCode::OK, Bytes::from(page.body));

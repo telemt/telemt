@@ -160,6 +160,7 @@ impl WebProcessRuntime {
     }
 
     /// Stops issuance and drains all WEB work until one absolute deadline.
+    #[cfg(test)]
     pub(crate) async fn shutdown_until(
         self: &std::sync::Arc<Self>,
         deadline: TokioInstant,
@@ -168,6 +169,7 @@ impl WebProcessRuntime {
     }
 
     /// Stops issuance and drains WEB work under the currently configured budget.
+    #[cfg(test)]
     pub(crate) async fn shutdown(self: &std::sync::Arc<Self>) -> WebShutdownOutcome {
         let timeout_secs = self
             .active_runtime

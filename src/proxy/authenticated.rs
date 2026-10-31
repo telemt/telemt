@@ -297,6 +297,7 @@ impl Drop for UserIpPermit {
 
 impl UserConnectionReservation {
     /// Creates an active reservation after both admission counters were acquired.
+    #[cfg(test)]
     pub(crate) fn new(
         stats: Arc<Stats>,
         ip_tracker: Arc<UserIpTracker>,
@@ -375,6 +376,7 @@ impl Drop for UserConnectionReservation {
 }
 
 /// Applies user quota, connection, and source-IP admission atomically.
+#[cfg(test)]
 pub(crate) async fn acquire_user_connection_reservation(
     user: &str,
     config: &ProxyConfig,

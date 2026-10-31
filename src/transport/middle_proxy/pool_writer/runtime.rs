@@ -407,38 +407,6 @@ impl MePool {
         removed
     }
 
-    pub(crate) async fn mark_writer_draining_with_timeout(
-        self: &Arc<Self>,
-        writer_id: u64,
-        timeout: Option<Duration>,
-        allow_drain_fallback: bool,
-    ) {
-        let timeout = timeout.filter(|d| !d.is_zero());
-        let found = {
-            let ws = self.writers.write().await;
-            let mut registry_registration = self.registry.prepare_writer_registration().await;
-            if let Some(w) = ws.iter().find(|w| w.id == writer_id) {
-                if !allow_drain_fallback {
-                    registry_registration.retire(writer_id);
-                }
-                self.apply_writer_draining_state(w, timeout, allow_drain_fallback);
-                true
-            } else {
-                false
-            }
-        };
-
-        if !found {
-            return;
-        }
-
-        let timeout_secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
-        debug!(
-            writer_id,
-            timeout_secs, allow_drain_fallback, "ME writer marked draining"
-        );
-    }
-
     /// Publishes drain metadata before the release-store that makes draining observable.
     pub(in crate::transport::middle_proxy) fn apply_writer_draining_state(
         &self,
@@ -470,11 +438,6 @@ impl MePool {
             self.increment_draining_active_runtime();
         }
         !already_draining
-    }
-
-    pub(crate) async fn mark_writer_draining(self: &Arc<Self>, writer_id: u64) {
-        self.mark_writer_draining_with_timeout(writer_id, Some(Duration::from_secs(300)), false)
-            .await;
     }
 
     pub(in crate::transport::middle_proxy) fn writer_accepts_new_binding(

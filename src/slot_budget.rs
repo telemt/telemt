@@ -61,6 +61,7 @@ impl SlotBudget {
     }
 
     /// Returns the exact number of currently committed or reserved slots.
+    #[cfg(test)]
     pub(crate) fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
     }

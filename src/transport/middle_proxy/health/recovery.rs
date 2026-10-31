@@ -15,6 +15,7 @@ pub(super) fn has_bound_clients_on_endpoint(
 }
 
 /// Restores missing single-endpoint coverage under the bounded outage retry policy.
+#[cfg(test)]
 pub(super) async fn recover_single_endpoint_outage(
     pool: &Arc<MePool>,
     rng: &Arc<SecureRandom>,

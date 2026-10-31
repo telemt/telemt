@@ -91,6 +91,7 @@ fn same_file_version(left: &std::fs::Metadata, right: &std::fs::Metadata) -> boo
 }
 
 /// Opens an append-only regular file without following path components or hard links.
+#[cfg(test)]
 pub(crate) fn open_append_regular(path: &Path, mode: u32) -> io::Result<std::fs::File> {
     let anchored = AnchoredPath::open_creating_parents(path, 0o750)?;
     open_regular_at(

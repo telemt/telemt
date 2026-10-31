@@ -15,10 +15,12 @@ mod atomic;
 
 pub(in crate::api) use atomic::{write_atomic, write_atomic_if_unchanged};
 #[cfg(test)]
+pub(in crate::api) use persistence::save_access_sections_to_disk;
+#[cfg(test)]
 use persistence::{find_toml_table_bounds, render_access_section, save_sections_to_disk};
 pub(in crate::api) use persistence::{
-    render_server_listeners, render_top_level_section, save_access_sections_to_disk,
-    save_access_sections_to_disk_if_revision, upsert_toml_table,
+    render_server_listeners, render_top_level_section, save_access_sections_to_disk_if_revision,
+    upsert_toml_table,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

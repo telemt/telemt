@@ -48,6 +48,8 @@ impl UpstreamManager {
         Ok(self)
     }
 
+    /// Replaces DNS overrides for isolated upstream tests.
+    #[cfg(test)]
     pub(crate) fn update_dns_overrides(&self, entries: &[String]) -> Result<()> {
         self.dns_resolver.apply_entries(entries)
     }

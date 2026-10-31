@@ -11,9 +11,11 @@ pub(crate) use path::{
     AnchoredPath, chdir_nofollow_or_create, open_compatible_dir, open_dir_nofollow,
     open_trusted_dir_nofollow_or_create,
 };
+#[cfg(test)]
+pub(crate) use write::open_append_regular;
 pub(crate) use write::{
-    atomic_replace, atomic_replace_async, open_append_regular, open_append_regular_at,
-    read_regular_limited, read_regular_limited_async,
+    atomic_replace, atomic_replace_async, open_append_regular_at, read_regular_limited,
+    read_regular_limited_async,
 };
 
 #[cfg(test)]

@@ -57,6 +57,7 @@ impl PidFile {
     }
 
     /// Checks whether the PID file names a running process without modifying either file.
+    #[cfg(test)]
     pub fn check_running(&self) -> Result<Option<i32>, DaemonError> {
         let Some(pid) = read_pid_file_if_exists(&self.path, self.strict_runtime_paths)? else {
             return Ok(None);
