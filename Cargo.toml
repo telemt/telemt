@@ -74,7 +74,7 @@ x25519-dalek = "2.0.1"
 anyhow = "1.0.104"
 
 # HTTP
-reqwest = { version = "0.13.4", features = ["rustls"], default-features = false }
+reqwest = { version = "0.13.4", features = ["rustls-no-provider"], default-features = false }
 notify = "8.2.0"
 ipnetwork = { version = "0.21.1", features = ["serde"] }
 hyper = { version = "1.11.1", features = ["client", "server", "http1"] }
