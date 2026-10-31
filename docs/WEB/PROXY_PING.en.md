@@ -119,17 +119,33 @@ Thus the visible difference can include remaining WEB stream setup, additional c
 
 For this example, native preparation takes 40 ms for TCP. WEB preparation takes 750 ms: 50 ms client/bridge startup + 40 ms TCP + 40 ms TLS + 120 ms HTTP bridge/session exchange + the Android checker's 500 ms wait. These are chosen serial durations for this example; real stages can overlap. The initial TLS and the 500 ms wait are outside the displayed ping.
 
-The following scale starts at each checker's **latest request timestamp**, not at app launch or the first connection attempt. One character represents 20 ms. The three rows are separate scenarios, not concurrent requests:
+The diagram starts at each checker's **latest request timestamp**, not at app launch or the first connection attempt. The horizontal axis shows seconds with millisecond precision (0.200 = 200 ms). Bar widths are proportional to duration. Each section is a separate scenario; its stages are successive, not parallel. Initial preparation remains outside the diagram.
 
-```text
-                0         200       400       600       800       1000      1200 ms
-                |---------|---------|---------|---------|---------|---------|
-Classic/DD      RRRRR                                                             100 ms
-WEB             UURRRRRDDD                                                        200 ms
-WEB + retry     FF..................................................UURRRRRDDD    1240 ms
+```mermaid
+%%{init: {"theme": "neutral", "gantt": {"leftPadding": 200, "rightPadding": 100, "barHeight": 24, "barGap": 8, "fontSize": 14, "sectionFontSize": 14}}}%%
+gantt
+    dateFormat x
+    axisFormat %S.%L
+    tickInterval 200millisecond
+    todayMarker off
+    title Displayed ping - illustrative model
+    accTitle: Displayed ping - illustrative model
+    accDescr: Seconds from the request timestamp, labels show milliseconds
+    section Classic/DD - 100 ms
+    R 100 ms :n_r, 0, 100ms
+    section WEB without errors - 200 ms
+    U 40 ms :w_u, 0, 40ms
+    R 100 ms :w_r, after w_u, 100ms
+    D 60 ms :w_d, after w_r, 60ms
+    section WEB with retry - 1240 ms
+    F 40 ms :crit, f_u, 0, 40ms
+    Wait 1000 ms :crit, retry_wait, after f_u, 1000ms
+    U 40 ms :retry_u, after retry_wait, 40ms
+    R 100 ms :retry_r, after retry_u, 100ms
+    D 60 ms :retry_d, after retry_r, 60ms
 ```
 
-The following durations refer to whole runs of symbols, not individual characters: `R` = 100 ms of baseline MTProxy relay/network/DC request-response work. `U` = 40 ms of additional WEB uplink/OPEN/client work. `D` = 60 ms of additional WEB downlink/delivery work. `F` = 40 ms spent on one failed upload attempt. `.` = the 1000 ms wait requested by `Retry-After: 1`. `U` and `D` are illustrative incremental costs beyond `R`, not a second count of the full network round trip. ACK/commit gating is included only insofar as it actually delays delivery.
+Stage durations: `R` = 100 ms of baseline MTProxy relay/network/DC request-response work. `U` = 40 ms of additional WEB uplink/OPEN/client work. `D` = 60 ms of additional WEB downlink/delivery work. `F` = 40 ms spent on one failed upload attempt. `Wait` = the 1000 ms wait requested by `Retry-After: 1`. `U` and `D` are illustrative incremental costs beyond `R`, not a second count of the full network round trip. ACK/commit gating is included only insofar as it actually delays delivery.
 
 | Scenario | Before ping timer | Displayed ping | Total check time in this model |
 | --- | --- | --- | --- |

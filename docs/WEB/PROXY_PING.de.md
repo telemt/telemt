@@ -119,17 +119,33 @@ Die sichtbare Differenz kann somit verbleibenden WEB-Streamaufbau, zusätzliche 
 
 In diesem Beispiel benötigt natives MTProxy 40 ms Vorbereitung für TCP. Die WEB-Vorbereitung dauert 750 ms: 50 ms Client-/Bridge-Start + 40 ms TCP + 40 ms TLS + 120 ms HTTP-Austausch für Bridge und Sitzung + 500 ms Wartezeit des Android-Checkers. Hier werden aufeinanderfolgende Dauern angenommen; reale Phasen können überlappen. Das anfängliche TLS und die 500 ms Wartezeit liegen außerhalb des angezeigten Pings.
 
-Die Skala beginnt beim **letzten Anfragezeitstempel** der jeweiligen Prüfung, nicht beim App-Start oder ersten Verbindungsversuch. Ein Zeichen entspricht 20 ms. Die drei Zeilen sind getrennte Szenarien, keine gleichzeitigen Anfragen:
+Die Darstellung beginnt beim **letzten Anfragezeitstempel** der jeweiligen Prüfung, nicht beim App-Start oder ersten Verbindungsversuch. Die horizontale Achse zeigt Sekunden mit Millisekundengenauigkeit (0.200 = 200 ms). Die Balkenbreite ist proportional zur Dauer. Jeder Abschnitt ist ein separates Szenario; seine Phasen folgen aufeinander und laufen nicht parallel. Die anfängliche Vorbereitung liegt außerhalb der Darstellung.
 
-```text
-                0         200       400       600       800       1000      1200 ms
-                |---------|---------|---------|---------|---------|---------|
-Classic/DD      RRRRR                                                             100 ms
-WEB             UURRRRRDDD                                                        200 ms
-WEB + retry     FF..................................................UURRRRRDDD    1240 ms
+```mermaid
+%%{init: {"theme": "neutral", "gantt": {"leftPadding": 200, "rightPadding": 100, "barHeight": 24, "barGap": 8, "fontSize": 14, "sectionFontSize": 14}}}%%
+gantt
+    dateFormat x
+    axisFormat %S.%L
+    tickInterval 200millisecond
+    todayMarker off
+    title Angezeigter Ping - Beispielmodell
+    accTitle: Angezeigter Ping - Beispielmodell
+    accDescr: Sekunden seit Anfragezeitstempel, Beschriftungen in Millisekunden
+    section Classic/DD - 100 ms
+    R 100 ms :n_r, 0, 100ms
+    section WEB ohne Fehler - 200 ms
+    U 40 ms :w_u, 0, 40ms
+    R 100 ms :w_r, after w_u, 100ms
+    D 60 ms :w_d, after w_r, 60ms
+    section WEB mit Retry - 1240 ms
+    F 40 ms :crit, f_u, 0, 40ms
+    Warten 1000 ms :crit, retry_wait, after f_u, 1000ms
+    U 40 ms :retry_u, after retry_wait, 40ms
+    R 100 ms :retry_r, after retry_u, 100ms
+    D 60 ms :retry_d, after retry_r, 60ms
 ```
 
-Die folgenden Dauern beziehen sich auf ganze Folgen gleicher Zeichen, nicht auf einzelne Zeichen: `R` = 100 ms grundlegende MTProxy-Relay-/Netzwerk-/DC-Arbeit für Anfrage und Antwort. `U` = 40 ms zusätzliche WEB-Uplink-/OPEN-/Client-Arbeit. `D` = 60 ms zusätzliche WEB-Downlink-/Zustellarbeit. `F` = 40 ms für einen fehlgeschlagenen Upload-Versuch. `.` = 1000 ms Wartezeit gemäß `Retry-After: 1`. `U` und `D` sind beispielhafte Zusatzkosten gegenüber `R`, keine erneute Anrechnung des gesamten Netzwerk-RTT. Die ACK/Commit-Freigabe wird nur berücksichtigt, soweit sie die Zustellung tatsächlich verzögert.
+Dauer der einzelnen Phasen: `R` = 100 ms grundlegende MTProxy-Relay-/Netzwerk-/DC-Arbeit für Anfrage und Antwort. `U` = 40 ms zusätzliche WEB-Uplink-/OPEN-/Client-Arbeit. `D` = 60 ms zusätzliche WEB-Downlink-/Zustellarbeit. `F` = 40 ms für einen fehlgeschlagenen Upload-Versuch. `Warten` = 1000 ms Wartezeit gemäß `Retry-After: 1`. `U` und `D` sind beispielhafte Zusatzkosten gegenüber `R`, keine erneute Anrechnung des gesamten Netzwerk-RTT. Die ACK/Commit-Freigabe wird nur berücksichtigt, soweit sie die Zustellung tatsächlich verzögert.
 
 | Szenario | Vor dem Ping-Timer | Angezeigter Ping | Gesamtdauer der Prüfung im Modell |
 | --- | --- | --- | --- |
