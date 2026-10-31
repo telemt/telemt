@@ -98,13 +98,19 @@ pub(crate) struct UserMutationResult {
     /// Number of live owners cancelled by the mutation.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Mutation results are asserted by admission regression tests")
+        expect(
+            dead_code,
+            reason = "Mutation results are asserted by admission regression tests"
+        )
     )]
     pub(crate) cancelled: usize,
     /// Whether the effective enabled state changed from enabled to disabled.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "Mutation results are asserted by admission regression tests")
+        expect(
+            dead_code,
+            reason = "Mutation results are asserted by admission regression tests"
+        )
     )]
     pub(crate) newly_disabled: bool,
 }

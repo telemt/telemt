@@ -180,7 +180,6 @@ impl QuotaStateOwner {
         wait_for_blocking_io(task).await
     }
 
-
     /// Persists deletion while retaining the already-owned lifecycle gate.
     pub(crate) async fn remove_user_locked(
         &self,

@@ -409,6 +409,10 @@ async fn diagnostic_body_pressure_does_not_claim_the_event() {
         response_header(split_response(&saturated).0, "retry-after"),
         "1"
     );
+    assert_eq!(
+        response_header(split_response(&saturated).0, "x-telemt-retry-after-ms"),
+        "250"
+    );
     drop(held);
 
     let accepted = request(&listener, &runtime, retry).await;

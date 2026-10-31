@@ -1,7 +1,5 @@
 use super::*;
 
-
-
 pub(super) fn adaptive_floor_class_min(
     pool: &Arc<MePool>,
     endpoint_count: usize,

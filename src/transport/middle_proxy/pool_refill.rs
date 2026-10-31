@@ -193,7 +193,6 @@ impl MePool {
         self.refill_states.lock().contains_key(&key)
     }
 
-
     pub(super) async fn connect_endpoints_round_robin_with_generation_contour(
         self: &Arc<Self>,
         dc: i32,

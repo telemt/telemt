@@ -68,7 +68,6 @@ struct FamilyFloorPlan {
     warm_writers_current: usize,
 }
 
-
 #[cfg(test)]
 struct ScheduledReconnects<'a> {
     inflight: &'a mut HashMap<(i32, IpFamily), usize>,
@@ -77,7 +76,6 @@ struct ScheduledReconnects<'a> {
 
 #[cfg(test)]
 impl ScheduledReconnects<'_> {
-
     fn reserve(&mut self, key: (i32, IpFamily)) {
         self.keys.push(key);
         *self.inflight.entry(key).or_insert(0) += 1;
@@ -119,17 +117,15 @@ mod recovery;
 // Independent stale draining-writer watchdog.
 mod zombie_watchdog;
 
-pub use drain::me_drain_timeout_enforcer;
 #[cfg(test)]
 pub(in crate::transport::middle_proxy) use drain::health_drain_close_budget;
+pub use drain::me_drain_timeout_enforcer;
 pub(in crate::transport::middle_proxy) use drain::reap_draining_writers;
 use family::{check_family, update_family_runtime_state};
 use floor_plan::build_family_floor_plan;
 use idle_refresh::maybe_refresh_idle_writer_for_dc;
 pub use monitor::me_health_monitor;
-use recovery::{
-    has_bound_clients_on_endpoint, maybe_rotate_single_endpoint_shadow,
-};
+use recovery::{has_bound_clients_on_endpoint, maybe_rotate_single_endpoint_shadow};
 pub use zombie_watchdog::me_zombie_writer_watchdog;
 
 #[cfg(test)]

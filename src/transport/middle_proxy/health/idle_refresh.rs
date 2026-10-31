@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(super) async fn maybe_refresh_idle_writer_for_dc(
     pool: &Arc<MePool>,
     rng: &Arc<SecureRandom>,

@@ -407,7 +407,6 @@ impl MePool {
         removed
     }
 
-
     /// Publishes drain metadata before the release-store that makes draining observable.
     pub(in crate::transport::middle_proxy) fn apply_writer_draining_state(
         &self,
@@ -440,7 +439,6 @@ impl MePool {
         }
         !already_draining
     }
-
 
     pub(in crate::transport::middle_proxy) fn writer_accepts_new_binding(
         &self,

@@ -54,6 +54,39 @@ function streaming(env,request,next='1',length=null){
  let controller;const body=new ReadableStream({start(value){controller=value}}),headers={'X-Down-Cursor':next};if(length!==null)headers['Content-Length']=String(length);
  request.answered=true;request.resolve({status:200,headers:new Headers(headers),body});return controller;
 }
+test('Telemt overload hint retries at 250 ms with legacy and malformed fallback',async page=>{
+ for(const android of [false,true])for(const carrier of ['https','https-lanes'])for(const [status,hint,retry,delay] of [
+  [503,'250','1',250],[503,null,'1',1000],[503,'0','1',1000],
+  [503,'0.25','1',1000],[503,'250, 250','1',1000],[503,'250','2',2000],[429,'250','1',1000]
+ ]){
+  const env=await session(page,carrier,4,android);env.send(frame(1,1));await flush();
+  const original=env.pending('/api/v1/up')[0],headers={'Retry-After':retry};
+  if(hint!==null)headers['X-Telemt-Retry-After-Ms']=hint;
+  env.answer(original,status,null,headers);await flush();
+  await env.tick(delay-1);assert.equal(env.pending('/api/v1/up').length,0,'retry must not run early');
+  await env.tick(1);const replay=env.pending('/api/v1/up')[0];assert.ok(replay,'retry at selected deadline');
+  assert.equal(replay.options.headers['X-Up-Seq'],original.options.headers['X-Up-Seq']);
+  assert.deepEqual(new Uint8Array(replay.options.body),new Uint8Array(original.options.body));
+  ack(env,replay);await flush();env.close();await flush();
+ }
+});
+test('repeated 250 ms overload hints retain the nine-attempt limit',async page=>{
+ const env=await session(page);env.send(frame(1,1));await flush();
+ for(let attempt=1;attempt<=9;attempt++){
+  const request=env.pending('/api/v1/up')[0];assert.ok(request,'bounded retry attempt '+attempt);
+  env.answer(request,503,null,{'Retry-After':'1','X-Telemt-Retry-After-Ms':'250'});await flush();
+  if(attempt<9)await env.tick(250);
+ }
+ await env.tick(250);
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/api/v1/up')).length,9);
+ env.close();await flush();
+});
+test('closing the bridge cancels the 250 ms overload retry',async page=>{
+ const env=await session(page);env.send(frame(1,1));await flush();
+ env.answer(env.pending('/api/v1/up')[0],503,null,{'Retry-After':'1','X-Telemt-Retry-After-Ms':'250'});await flush();
+ await env.tick(249);env.close();await flush();await env.tick(1000);
+ assert.equal(env.requests.filter(r=>r.url.endsWith('/api/v1/up')).length,1);
+});
 test('already queued OPEN and DATA share the zero-wait startup request',async page=>{
  const env=await session(page);const body=join(frame(1,1),frame(2,1,[7,8]));env.send(body);await flush();
  assert.equal(env.pending('/api/v1/up')[0].options.body.byteLength,body.byteLength);env.close();await flush();

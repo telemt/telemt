@@ -12,6 +12,8 @@ function create(settings){
  });
  function retryAfterMs(response){
   const header=response.headers.get('Retry-After');
+  // Only the exact Telemt overload hint overrides its legacy whole-second fallback.
+  if(response.status===503&&header==='1'&&response.headers.get('X-Telemt-Retry-After-Ms')==='250')return 250;
   if(!header)return 0;
   const seconds=Number(header);
   if(Number.isFinite(seconds)&&seconds>=0)return Math.min(seconds*1000,30000);

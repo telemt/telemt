@@ -1,8 +1,8 @@
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
-use std::fs::File;
 #[cfg(any(test, not(unix)))]
 use std::fs;
+use std::fs::File;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

@@ -40,9 +40,7 @@ mod validation;
 
 #[cfg(test)]
 use self::includes::normalize_config_path;
-use self::includes::{
-    hash_rendered_snapshot, preprocess_includes, read_config_source,
-};
+use self::includes::{hash_rendered_snapshot, preprocess_includes, read_config_source};
 use self::normalize::{
     is_valid_ad_tag, is_valid_tls_domain_name, normalize_domain_to_ascii,
     normalize_exclusive_mask_target, normalize_mask_host_to_ascii, parse_exclusive_mask_target,

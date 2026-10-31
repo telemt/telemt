@@ -46,6 +46,11 @@ pub(super) fn service_unavailable() -> HttpResponse {
     response
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    // Keep whole-second HTTP guidance for clients without the Telemt extension.
+    response.headers_mut().insert(
+        HeaderName::from_static("x-telemt-retry-after-ms"),
+        HeaderValue::from_static("250"),
+    );
     response
 }
 

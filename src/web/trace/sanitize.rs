@@ -216,6 +216,7 @@ fn header_value_allowed(name: &hyper::header::HeaderName) -> bool {
             | "x-carrier-failure"
             | "x-carrier-mode"
             | "retry-after"
+            | "x-telemt-retry-after-ms"
             | "cache-control"
             | "etag"
             | "if-none-match"

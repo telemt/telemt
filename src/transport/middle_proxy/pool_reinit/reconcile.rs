@@ -169,7 +169,6 @@ impl MePool {
         }
     }
 
-
     /// Reconciles exactly the revision owned by the scheduler's retry objective.
     pub(in crate::transport::middle_proxy) async fn reinit_endpoint_snapshot(
         self: &Arc<Self>,
@@ -408,5 +407,4 @@ impl MePool {
         }
         true
     }
-
 }

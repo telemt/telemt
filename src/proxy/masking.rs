@@ -83,9 +83,9 @@ pub(in crate::proxy) use handler::handle_bad_client_with_shared_resolver;
 use interfaces::*;
 use relay::*;
 use target::*;
-pub(crate) use timing::sample_lognormal_percentile_bounded;
 #[cfg(test)]
 use timing::mask_outcome_target_budget;
+pub(crate) use timing::sample_lognormal_percentile_bounded;
 use timing::{wait_mask_connect_budget_if_needed, wait_mask_outcome_budget};
 
 #[cfg(test)]
