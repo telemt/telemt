@@ -210,6 +210,14 @@ Use English for newly written or substantively updated source comments, document
 - Follow local formatting and naming patterns. Avoid style-only churn.
 - Remove an obsolete item only when doing so is necessary for the task; do not perform general warning or dead-code cleanup by default.
 
+### 12.1 Mermaid Diagram Validation
+
+- When adding or changing Mermaid diagrams, validate every Mermaid block in the affected documents, including localized versions, with a real Mermaid parser (`mermaid.parse`) or Mermaid CLI (`mmdc`). Checking Markdown fences alone is insufficient.
+- Fix parse errors before completing the change. For syntax fixes, reproduce the original failure before validating the correction when practical.
+- When changing diagram layout, also render and inspect readability, label clipping, and connections when a renderer is available.
+- Avoid unescaped semicolons in sequence-diagram labels and notes because Mermaid can interpret them as statement separators. Use commas or supported escaping instead.
+- Report the Mermaid version and actual validation results. Distinguish parser validation, rendering, and GitHub verification; mark checks that were not executed as **NOT RUN** or **BLOCKED**, as applicable.
+
 ## 13. Communication and Deliverables
 
 For a simple answer, answer directly. For a nontrivial implementation, briefly convey the plan, meaningful impact, and verification. Avoid repetitive process narration.

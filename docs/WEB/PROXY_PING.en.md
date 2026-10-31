@@ -75,6 +75,44 @@ For a new connection without loss, the usual TCP handshake costs about one clien
 
 Initial bridge TLS normally occurs before Android's measurement. Additional HTTP connections or a WebSocket Upgrade can still occur inside it; connection reuse must be established from a trace. Persistent HTTPS and an established WebSocket do not perform a new TLS handshake for every ping. `cache: 'no-store'` controls caching, not TCP/TLS reuse. Neither disabling certificate checks nor enabling TLS 0-RTT is required to explain or diagnose this behavior. See [HTTP persistence][http1] and [bridge requests][request].
 
+## Where WEB adds work compared with native MTProxy
+
+The comparison below separates work before the Android timer from work that can enter the displayed sample. The baseline is Classic/DD over TCP. For EE, FakeTLS belongs to native transport setup. Box sizes and arrow lengths do not represent elapsed time.
+
+```mermaid
+flowchart LR
+    subgraph N["Native MTProxy: Classic/DD"]
+        direction TB
+        N0["Before measurement<br/>DNS + TCP + native transport setup"] --> N1["Remote transport ready<br/>Request timestamp refreshed"]
+        N1 --> N2["MTProxy request and response<br/>Relay setup still pending, network, queues, Telegram DC"] --> N3["TL_pong received<br/>Displayed sample ends"]
+    end
+    subgraph W["WEB: MTProxy inside HTTPS or WebSocket"]
+        direction TB
+        W0["Before measurement<br/>DNS + TCP + real TLS<br/>HTTP bridge + HELLO/WELCOME + 500 ms"] --> W1["Local socket ready<br/>Request timestamp refreshed"]
+        W1 --> W2["Extra client work<br/>Java / WebView / JavaScript queues<br/>Remote OPEN may still be pending"] --> W3["Uplink carrier work<br/>HTTP upload or WebSocket frame<br/>Frontend handling and possible buffering"]
+        W3 --> W4["Inner MTProxy request and response<br/>Relay setup still pending, network, queues, Telegram DC"] --> W5["Downlink carrier work<br/>HTTP poll or WebSocket frame<br/>ACK/commit gate, native delivery queues"]
+        W5 --> W6["TL_pong received<br/>Displayed sample ends"]
+        X["Only if another connection is needed<br/>TCP + TLS, possible WebSocket Upgrade<br/>No handshake per ping on a reused connection"] -.-> W3
+        X -.-> W5
+        R["Only on errors or overload<br/>Retries and backoff<br/>Retry-After: 1 can add about one second"] -.-> W3
+        R -.-> W5
+    end
+    classDef preparation fill:#eeeeee,stroke:#666666,color:#111111
+    classDef boundary fill:#dbeafe,stroke:#2563eb,color:#111111
+    classDef shared fill:#dcfce7,stroke:#15803d,color:#111111
+    classDef extra fill:#ffedd5,stroke:#c2410c,color:#111111
+    class N0,W0 preparation
+    class N1,N3,W1,W6 boundary
+    class N2,W4 shared
+    class W2,W3,W5,X,R extra
+```
+
+**Gray:** work before the displayed sample. **Blue:** timer boundaries. **Green:** MTProxy relay/DC work present in both paths, whose actual cost can differ. **Orange:** WEB carrier and client work inside the sample. **Dashed arrows:** conditional connection setup or retries, not obligatory stages.
+
+On a reused carrier, the conditional TCP/TLS/Upgrade cost disappears, while framing, HTTP or WebSocket handling and client queues remain. HTTP can overlap uplink and downlink; it does not necessarily add a whole RTT for every request. Polling wakes on data, and frontend buffering is deployment-dependent. Any delay from loss, congestion or upstream setup may also affect native MTProxy.
+
+Thus the visible difference can include remaining WEB stream setup, additional connection setup, carrier handling and scheduling, plus retries when observed. It is not a fixed TLS surcharge or an arithmetic sum of all boxes. The initial real TLS handshake is shown outside the Android timer deliberately: it affects total time to check, but normally not the displayed sample. The separate checker transport also means that an active app connection does not guarantee a warm proxy-list check.
+
 ## HTTP, WebSocket and other delay sources
 
 | Factor | Effect and evidence |

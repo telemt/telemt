@@ -75,6 +75,44 @@ Bei einer neuen Verbindung ohne Paketverlust benötigt der übliche TCP-Handshak
 
 Das anfängliche TLS für die Bridge liegt normalerweise vor der Android-Messung. Zusätzliche HTTP-Verbindungen oder ein WebSocket-Upgrade können noch innerhalb des Intervalls stattfinden; Verbindungswiederverwendung muss anhand eines Traces belegt werden. Persistente HTTPS-Verbindungen und bestehende WebSockets führen nicht für jeden Ping einen neuen TLS-Handshake aus. `cache: 'no-store'` steuert Caching, nicht die Wiederverwendung von TCP/TLS. Weder das Abschalten der Zertifikatsprüfung noch TLS 0-RTT ist zur Erklärung oder Diagnose erforderlich. Siehe [persistente HTTP-Verbindungen][http1] und [Bridge-Anfragen][request].
 
+## Zusätzliche Arbeit bei WEB gegenüber nativem MTProxy
+
+Die Darstellung trennt Arbeit vor dem Android-Timer von Arbeit, die in den angezeigten Wert eingehen kann. Als Basis dient Classic/DD über TCP. Bei EE gehört FakeTLS zum Aufbau des nativen Transports. Die Größe der Kästen und die Länge der Pfeile stellen keine Zeitdauer dar.
+
+```mermaid
+flowchart LR
+    subgraph N["Natives MTProxy: Classic/DD"]
+        direction TB
+        N0["Vor der Messung<br/>DNS + TCP + nativer Transportaufbau"] --> N1["Entfernter Transport bereit<br/>Anfragezeitstempel aktualisiert"]
+        N1 --> N2["MTProxy-Anfrage und Antwort<br/>Ausstehender Relay-Aufbau, Netzwerk, Warteschlangen, Telegram-DC"] --> N3["TL_pong empfangen<br/>Angezeigte Messung beendet"]
+    end
+    subgraph W["WEB: MTProxy in HTTPS oder WebSocket"]
+        direction TB
+        W0["Vor der Messung<br/>DNS + TCP + echtes TLS<br/>HTTP-Bridge + HELLO/WELCOME + 500 ms"] --> W1["Lokaler Socket bereit<br/>Anfragezeitstempel aktualisiert"]
+        W1 --> W2["Zusätzliche Client-Arbeit<br/>Java / WebView / JavaScript-Warteschlangen<br/>Entferntes OPEN eventuell noch ausstehend"] --> W3["Uplink-Verarbeitung<br/>HTTP-Upload oder WebSocket-Frame<br/>Frontend-Verarbeitung und mögliche Pufferung"]
+        W3 --> W4["Innere MTProxy-Anfrage und Antwort<br/>Ausstehender Relay-Aufbau, Netzwerk, Warteschlangen, Telegram-DC"] --> W5["Downlink-Verarbeitung<br/>HTTP-Poll oder WebSocket-Frame<br/>ACK/Commit-Freigabe und native Zustellwarteschlangen"]
+        W5 --> W6["TL_pong empfangen<br/>Angezeigte Messung beendet"]
+        X["Nur wenn eine weitere Verbindung nötig ist<br/>TCP + TLS, eventuell WebSocket-Upgrade<br/>Kein Handshake pro Ping bei Wiederverwendung"] -.-> W3
+        X -.-> W5
+        R["Nur bei Fehlern oder Überlastung<br/>Retries und Backoff<br/>Retry-After: 1 kann etwa eine Sekunde hinzufügen"] -.-> W3
+        R -.-> W5
+    end
+    classDef preparation fill:#eeeeee,stroke:#666666,color:#111111
+    classDef boundary fill:#dbeafe,stroke:#2563eb,color:#111111
+    classDef shared fill:#dcfce7,stroke:#15803d,color:#111111
+    classDef extra fill:#ffedd5,stroke:#c2410c,color:#111111
+    class N0,W0 preparation
+    class N1,N3,W1,W6 boundary
+    class N2,W4 shared
+    class W2,W3,W5,X,R extra
+```
+
+**Grau:** Arbeit vor der angezeigten Messung. **Blau:** Timer-Grenzen. **Grün:** MTProxy-Relay/DC-Arbeit in beiden Pfaden, deren tatsächliche Dauer abweichen kann. **Orange:** WEB-Transport- und Client-Arbeit innerhalb der Messung. **Gestrichelte Pfeile:** bedingter Verbindungsaufbau oder Retries, keine obligatorischen Phasen.
+
+Bei Wiederverwendung des Carriers entfällt der bedingte TCP/TLS/Upgrade-Aufwand. Framing, HTTP- oder WebSocket-Verarbeitung und Client-Warteschlangen bleiben bestehen. HTTP kann Up- und Downlink überlappen, sodass nicht jede Anfrage zwingend einen ganzen RTT hinzufügt. Polling wird bei verfügbaren Daten geweckt, und Frontend-Pufferung hängt von der Installation ab. Paketverlust, Netzwerküberlastung und Upstream-Aufbau können auch natives MTProxy verzögern.
+
+Die sichtbare Differenz kann somit verbleibenden WEB-Streamaufbau, zusätzliche Verbindungen, Transportverarbeitung und Scheduling sowie belegte Retries enthalten. Sie ist weder ein fester TLS-Zuschlag noch die arithmetische Summe aller Kästen. Der erste echte TLS-Handshake steht bewusst vor dem Android-Timer: Er beeinflusst die Gesamtdauer der Prüfung, normalerweise aber nicht den angezeigten Messwert. Da die Prüfung einen separaten Transport verwendet, garantiert eine aktive App-Verbindung auch keine warme Prüfung in der Proxyliste.
+
 ## HTTP, WebSocket und weitere Verzögerungen
 
 | Faktor | Auswirkung und Beleg |
