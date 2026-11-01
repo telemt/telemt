@@ -38,6 +38,7 @@ use crate::web::trace::WebTraceStore;
 
 mod config_edit;
 pub(crate) mod config_store;
+mod discovery;
 mod events;
 mod http_utils;
 // Authenticated request admission and route dispatch.
@@ -264,6 +265,8 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
     }
     match path {
         "/v1/health"
+        | "/v1/capabilities"
+        | "/v1/config/schema"
         | "/v1/health/ready"
         | "/v1/system/info"
         | "/v1/runtime/gates"

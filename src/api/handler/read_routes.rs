@@ -10,6 +10,21 @@ pub(super) async fn handle(
 ) -> Result<Option<Response<Full<Bytes>>>, ApiFailure> {
     let api_cfg = &cfg.server.api;
     match (method.as_str(), normalized_path) {
+        ("GET", "/v1/capabilities") => {
+            discovery::reject_query(query)?;
+            let revision = current_revision(&shared.config_path).await?;
+            let data = discovery::capabilities(shared, cfg)?;
+            Ok(success_response(StatusCode::OK, data, revision))
+        }
+        ("GET", "/v1/config/schema") => {
+            discovery::reject_query(query)?;
+            let revision = current_revision(&shared.config_path).await?;
+            Ok(success_response(
+                StatusCode::OK,
+                discovery::config_schema()?,
+                revision,
+            ))
+        }
         ("GET", "/web-status") => Ok(web_status::render(query, &shared.web_trace).await),
         ("GET", "/v1/health") => {
             let revision = current_revision(&shared.config_path).await?;
