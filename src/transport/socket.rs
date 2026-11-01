@@ -16,8 +16,6 @@ mod fragmented_send;
 #[cfg(target_os = "linux")]
 pub(crate) use fragmented_send::send_tcp_fragmented_fd;
 
-const DEFAULT_SOCKET_BUFFER_BYTES: usize = 256 * 1024;
-
 /// Configure TCP socket with recommended settings for proxy use
 #[allow(dead_code)]
 pub fn configure_tcp_socket(
@@ -41,9 +39,7 @@ pub fn configure_tcp_socket(
         socket.set_tcp_keepalive(&keepalive)?;
     }
 
-    // Use explicit baseline buffers to reduce slow-start stalls on high RTT links.
-    socket.set_recv_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
-    socket.set_send_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
+    // Leave SO_RCVBUF/SO_SNDBUF unset so the kernel can autotune them.
 
     Ok(())
 }
@@ -67,9 +63,7 @@ pub fn configure_client_socket(
 
     socket.set_tcp_keepalive(&keepalive)?;
 
-    // Keep explicit baseline buffers for predictable throughput across busy hosts.
-    socket.set_recv_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
-    socket.set_send_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
+    // Leave SO_RCVBUF/SO_SNDBUF unset so the kernel can autotune them.
 
     // Set TCP user timeout (Linux only)
     // NOTE: iOS does not support TCP_USER_TIMEOUT - application-level timeout
@@ -151,8 +145,7 @@ pub fn create_outgoing_socket_bound(addr: SocketAddr, bind_addr: Option<IpAddr>)
 
     // Disable Nagle
     socket.set_tcp_nodelay(true)?;
-    socket.set_recv_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
-    socket.set_send_buffer_size(DEFAULT_SOCKET_BUFFER_BYTES)?;
+    // SO_RCVBUF/SO_SNDBUF left unset: kernel autotuning.
 
     if let Some(bind_ip) = bind_addr {
         let bind_sock_addr = SocketAddr::new(bind_ip, 0);
