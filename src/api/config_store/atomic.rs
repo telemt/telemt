@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -26,7 +27,19 @@ enum AtomicWriteError {
     Conflict,
     ReadGraph(String),
     Io(std::io::Error),
+    RuntimeConflict,
 }
+
+pub(in crate::api) type CommitCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+#[derive(Debug)]
+struct RuntimeConflict;
+impl std::fmt::Display for RuntimeConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Runtime configuration changed before persistence")
+    }
+}
+impl std::error::Error for RuntimeConflict {}
 
 struct ExistingTarget {
     contents: String,
@@ -36,6 +49,7 @@ struct ExistingTarget {
 struct GraphFence<'a> {
     config_path: &'a Path,
     expected_revision: &'a str,
+    runtime_check: Option<&'a CommitCheck>,
 }
 
 struct ConfigWriteLock {
@@ -99,6 +113,27 @@ pub(in crate::api) async fn write_atomic_if_unchanged(
     expected_contents: String,
     contents: String,
 ) -> Result<String, ApiFailure> {
+    write_atomic_with_runtime_check(
+        config_path,
+        expected_revision,
+        path,
+        expected_contents,
+        contents,
+        None,
+    )
+    .await
+}
+
+/// The runtime check runs after source fencing, immediately before the rename.
+/// It is an optimistic check, not a lock against later runtime publication.
+pub(in crate::api) async fn write_atomic_with_runtime_check(
+    config_path: PathBuf,
+    expected_revision: String,
+    path: PathBuf,
+    expected_contents: String,
+    contents: String,
+    runtime_check: Option<CommitCheck>,
+) -> Result<String, ApiFailure> {
     tokio::task::spawn_blocking(move || {
         let config_path = normalize_path(&config_path);
         let path = normalize_path(&path);
@@ -116,10 +151,16 @@ pub(in crate::api) async fn write_atomic_if_unchanged(
             Some(GraphFence {
                 config_path: &config_path,
                 expected_revision: &expected_revision,
+                runtime_check: runtime_check.as_ref(),
             }),
         )
         .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
+            if error
+                .get_ref()
+                .is_some_and(|inner| inner.is::<RuntimeConflict>())
+            {
+                AtomicWriteError::RuntimeConflict
+            } else if error.kind() == std::io::ErrorKind::AlreadyExists {
                 AtomicWriteError::Conflict
             } else {
                 AtomicWriteError::Io(error)
@@ -135,6 +176,11 @@ pub(in crate::api) async fn write_atomic_if_unchanged(
     .map_err(|error| ApiFailure::internal(format!("failed to join writer: {error}")))?
     .map_err(|error| match error {
         AtomicWriteError::Conflict => revision_conflict(),
+        AtomicWriteError::RuntimeConflict => ApiFailure::new(
+            hyper::StatusCode::CONFLICT,
+            "runtime_conflict",
+            "Runtime configuration changed before persistence",
+        ),
         AtomicWriteError::ReadGraph(error) => {
             ApiFailure::internal(format!("failed to verify config graph: {error}"))
         }
@@ -203,7 +249,14 @@ fn fenced_post_commit_revision(
         ));
     };
     *owner = contents.to_string();
-    Ok(compute_source_revision(&graph))
+    let revision = compute_source_revision(&graph);
+    if fence.runtime_check.is_some_and(|check| !check()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            RuntimeConflict,
+        ));
+    }
+    Ok(revision)
 }
 
 #[cfg(unix)]
@@ -393,9 +446,16 @@ fn write_atomic_sync(
             "config target changed during persistence",
         ));
     }
-    let committed_revision = graph_fence
+    let committed_revision = match graph_fence
         .map(|fence| fenced_post_commit_revision(fence, path, contents))
-        .transpose()?;
+        .transpose()
+    {
+        Ok(revision) => revision,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+    };
     std::fs::rename(temp, path)?;
     Ok(committed_revision)
 }

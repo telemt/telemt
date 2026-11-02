@@ -14,12 +14,16 @@ use super::ApiShared;
 use super::model::ApiFailure;
 
 #[cfg(test)]
-mod http_tests;
+pub(in crate::api) mod http_tests;
 mod schema;
 #[cfg(test)]
 mod tests;
 
 pub(super) use schema::config_schema;
+
+pub(super) fn config_field_paths() -> Result<Vec<&'static str>, ApiFailure> {
+    schema::field_paths()
+}
 
 pub(super) const SCHEMA_VERSION: u32 = 1;
 
@@ -43,6 +47,10 @@ pub(super) struct Operation {
     pub(super) exact_json_content_type: bool,
     #[serde(default)]
     pub(super) if_match: bool,
+    #[serde(default)]
+    pub(super) if_runtime_match: bool,
+    #[serde(default)]
+    pub(super) read_only_operation: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -162,7 +170,7 @@ fn build_capabilities(
                 _ => (Some(true), None),
             }
         };
-        let mutation = operation.method != "GET";
+        let mutation = operation.method != "GET" && !operation.read_only_operation;
         entries.push(OperationCapability {
             operation,
             supported: true,

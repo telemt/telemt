@@ -16,13 +16,13 @@ use crate::maestro::{
 use crate::quota_state::QuotaStateOwner;
 use crate::stats::QuotaStore;
 
-struct Fixture {
+pub(in crate::api) struct Fixture {
     _directory: tempfile::TempDir,
-    shared: Arc<ApiShared>,
+    pub(in crate::api) shared: Arc<ApiShared>,
 }
 
 impl Fixture {
-    fn new(whitelist_denied: bool) -> Self {
+    pub(in crate::api) fn new(whitelist_denied: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         std::fs::write(&config_path, "# discovery must not edit this source\n").unwrap();
@@ -49,6 +49,7 @@ impl Fixture {
             ),
             detected_ips_rx: watch::channel((None, None)).1,
             mutation_lock: Arc::new(Mutex::new(())),
+            config_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             minimal_cache: Arc::new(Mutex::new(None)),
             runtime_edge_connections_cache: Arc::new(Mutex::new(None)),
             runtime_edge_recompute_lock: Arc::new(Mutex::new(())),
@@ -76,7 +77,23 @@ impl Fixture {
         }
     }
 
-    async fn request(&self, method: &str, path: &str, authorized: bool) -> (u16, String, Value) {
+    pub(in crate::api) async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        authorized: bool,
+    ) -> (u16, String, Value) {
+        self.request_body(method, path, authorized, None, &[]).await
+    }
+
+    pub(in crate::api) async fn request_body(
+        &self,
+        method: &str,
+        path: &str,
+        authorized: bool,
+        body: Option<&Value>,
+        headers: &[(&str, &str)],
+    ) -> (u16, String, Value) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let shared = self.shared.clone();
@@ -100,6 +117,14 @@ impl Fixture {
             .header("Connection", "close");
         if authorized {
             request = request.header("Authorization", "Bearer discovery-test");
+        }
+        if let Some(body) = body {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_vec(body).unwrap());
+        }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
         }
         let response = request.send().await.unwrap();
         let status = response.status().as_u16();

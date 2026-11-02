@@ -163,6 +163,9 @@ async fn dispatch(
                 .await
         }
         ("GET", "/v1/config") => fixed_routes::get_config_route(shared).await,
+        ("POST", "/v1/config/validate") => {
+            fixed_routes::validate_config_route(req, shared, query, body_limit).await
+        }
         ("POST", "/v1/system/reload") => {
             fixed_routes::reload_route(req, shared, cfg, request_id, body_limit).await
         }

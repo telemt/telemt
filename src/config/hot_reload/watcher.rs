@@ -180,7 +180,9 @@ fn reload_config_with_resolver(
 
     if !hot_changed {
         if refresh_quota_source {
-            config_tx.send(Arc::new(applied_cfg)).ok();
+            config_tx
+                .send(Arc::new(applied_cfg.with_publication_epoch()))
+                .ok();
         }
         reload_state.mark_applied(rendered_hash);
         return Some(next_manifest);
@@ -205,7 +207,9 @@ fn reload_config_with_resolver(
         detected_ip_v4,
         detected_ip_v6,
     );
-    config_tx.send(Arc::new(applied_cfg)).ok();
+    config_tx
+        .send(Arc::new(applied_cfg.with_publication_epoch()))
+        .ok();
     reload_state.mark_applied(rendered_hash);
     Some(next_manifest)
 }
@@ -261,7 +265,8 @@ pub fn spawn_config_watcher(
     impl std::future::Future<Output = ()> + Send + 'static,
 ) {
     let initial_level = initial.general.log_level.clone();
-    let (config_tx, config_rx) = watch::channel(initial);
+    let (config_tx, config_rx) =
+        watch::channel(Arc::new((*initial).clone().with_publication_epoch()));
     let (log_tx, log_rx) = watch::channel(initial_level);
 
     let config_path = normalize_watch_path(&config_path);

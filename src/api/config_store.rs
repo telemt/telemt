@@ -13,7 +13,10 @@ mod persistence;
 // Compare-and-replace file persistence and metadata preservation.
 mod atomic;
 
-pub(in crate::api) use atomic::{write_atomic, write_atomic_if_unchanged};
+pub(in crate::api) use atomic::write_atomic;
+#[cfg(test)]
+pub(in crate::api) use atomic::write_atomic_if_unchanged;
+pub(in crate::api) use atomic::{CommitCheck, write_atomic_with_runtime_check};
 #[cfg(test)]
 pub(in crate::api) use persistence::save_access_sections_to_disk;
 #[cfg(test)]

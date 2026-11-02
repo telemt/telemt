@@ -29,6 +29,7 @@ mod runtime_web;
 mod decode;
 mod effective;
 mod pipeline;
+mod publication;
 // Candidate-owned DNS preparation is separate from pure runtime reconstruction.
 mod decoy_dns;
 mod validate_core;
@@ -155,6 +156,10 @@ pub struct ProxyConfig {
     /// If not set, defaults to 2 (matching Telegram's official `default 2;` in proxy-multi.conf).
     #[serde(default)]
     pub default_dc: Option<u8>,
+
+    /// Process-local identity assigned by the owner of a published config snapshot.
+    #[serde(skip)]
+    pub(crate) runtime_config_epoch: u64,
 
     /// Monotonic start of source acquisition, used only for cold quota policy fencing.
     #[serde(skip)]

@@ -505,6 +505,14 @@ const LOGGING_CONFIG_KEYS: &[&str] = &[
 // Recursive table traversal and key suggestion logic.
 mod check;
 
+impl super::ProxyConfig {
+    /// Checks sparse API input without permissive-mode logging or key suggestions.
+    /// Dynamic map keys and accepted source aliases retain the source loader rules.
+    pub(crate) fn unknown_source_paths(document: &toml::Value) -> Vec<String> {
+        check::unknown_paths(document)
+    }
+}
+
 /// Rejects or reports unknown configuration keys according to strict mode.
 pub(super) fn handle_unknown_config_keys(parsed_toml: &toml::Value) -> Result<()> {
     let unknown = check::collect_unknown_config_keys(parsed_toml);

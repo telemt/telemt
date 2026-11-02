@@ -104,6 +104,14 @@ pub(in crate::api) fn config_schema() -> Result<&'static ConfigSchemaData, ApiFa
         .map_err(|error| ApiFailure::internal(error.clone()))
 }
 
+pub(super) fn field_paths() -> Result<Vec<&'static str>, ApiFailure> {
+    Ok(config_schema()?
+        .fields
+        .iter()
+        .map(|field| field.spec.path.as_str())
+        .collect())
+}
+
 fn field_specs() -> Result<Vec<FieldSpec>, String> {
     serde_json::from_str(include_str!("fields.json"))
         .map_err(|error| format!("invalid compiled config field catalog: {error}"))

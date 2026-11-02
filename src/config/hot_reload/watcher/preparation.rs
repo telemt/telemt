@@ -53,7 +53,9 @@ pub(super) async fn reload(
     {
         let mut refreshed = (**config_tx.borrow()).clone();
         refreshed.quota_source_read_at = source.config.quota_source_read_at;
-        config_tx.send(Arc::new(refreshed)).ok();
+        config_tx
+            .send(Arc::new(refreshed.with_publication_epoch()))
+            .ok();
         reload_state.mark_applied(source.rendered_hash);
         return Some(manifest);
     }
