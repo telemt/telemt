@@ -14,6 +14,11 @@ use crate::transport::UpstreamManager;
 
 use super::generation::RuntimeTaskScope;
 
+/// First retry delay for domains that are still served from the default profile.
+const TLS_FRONT_RETRY_INITIAL: Duration = Duration::from_secs(30);
+/// Retry delay cap; far below the regular refresh period.
+const TLS_FRONT_RETRY_MAX: Duration = Duration::from_secs(600);
+
 /// Readiness requirement for TLS-front cache initialization.
 #[derive(Clone, Copy)]
 pub(crate) enum TlsBootstrapPolicy {
@@ -36,9 +41,10 @@ struct TlsFetchContext {
 }
 
 impl TlsFetchContext {
-    async fn fetch_all(&self, failure_message: &'static str) {
+    async fn fetch_domains(&self, domains: &[String], failure_message: &'static str) {
         let mut join = tokio::task::JoinSet::new();
-        for domain in self.domains.clone() {
+        for domain in domains {
+            let domain = domain.clone();
             let cache = self.cache.clone();
             let host = tls_fetch_host_for_domain(&self.mask_host, &self.primary_domain, &domain);
             let unix_sock = self.mask_unix_sock.clone();
@@ -73,15 +79,85 @@ impl TlsFetchContext {
     }
 
     async fn fetch_all_with_budget(&self, phase: &'static str) {
-        if tokio::time::timeout(self.strategy.total_budget, self.fetch_all(phase))
-            .await
-            .is_err()
+        self.fetch_with_budget(&self.domains, phase).await;
+    }
+
+    async fn fetch_with_budget(&self, domains: &[String], phase: &'static str) {
+        if tokio::time::timeout(
+            self.strategy.total_budget,
+            self.fetch_domains(domains, phase),
+        )
+        .await
+        .is_err()
         {
             warn!(
                 phase,
                 timeout_ms = self.strategy.total_budget.as_millis(),
                 "TLS emulation fetch budget exhausted"
             );
+        }
+    }
+}
+
+/// Regular refresh period for fetched profiles: 4-6h base plus up to 2h jitter.
+fn regular_refresh_delay() -> Duration {
+    let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
+    let jitter_secs = rand::rng().random_range(0..=7200);
+    Duration::from_secs(base_secs + jitter_secs)
+}
+
+/// Picks a delay in `[backoff / 2, backoff]` so that nodes restarted together do not
+/// probe the origin in lockstep, while the delay never exceeds the backoff.
+fn jittered_retry_delay(backoff: Duration) -> Duration {
+    let backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(rand::rng().random_range(backoff_ms / 2..=backoff_ms))
+}
+
+/// Refresh cadence: exponential retries while any domain still has the default
+/// profile, the regular period once every domain has a fetched one.
+struct RefreshSchedule {
+    retry_backoff: Duration,
+}
+
+impl RefreshSchedule {
+    fn new() -> Self {
+        Self {
+            retry_backoff: TLS_FRONT_RETRY_INITIAL,
+        }
+    }
+
+    fn next_delay(&mut self, has_default_profiles: bool) -> Duration {
+        if !has_default_profiles {
+            self.retry_backoff = TLS_FRONT_RETRY_INITIAL;
+            return regular_refresh_delay();
+        }
+        let delay = jittered_retry_delay(self.retry_backoff);
+        self.retry_backoff = self
+            .retry_backoff
+            .saturating_mul(2)
+            .min(TLS_FRONT_RETRY_MAX);
+        delay
+    }
+}
+
+/// Retries only the domains without a fetched profile, so origins that already
+/// answered are not probed more often than the regular refresh.
+async fn run_refresh_loop(context: TlsFetchContext) {
+    let mut schedule = RefreshSchedule::new();
+    loop {
+        let pending = context
+            .cache
+            .default_profile_domains(&context.domains)
+            .await;
+        tokio::time::sleep(schedule.next_delay(!pending.is_empty())).await;
+        if pending.is_empty() {
+            context
+                .fetch_all_with_budget("TLS emulation refresh failed")
+                .await;
+        } else {
+            context
+                .fetch_with_budget(&pending, "TLS emulation retry failed")
+                .await;
         }
     }
 }
@@ -165,28 +241,8 @@ pub(crate) async fn bootstrap_tls_front(
         proxy_protocol: config.censorship.mask_proxy_protocol,
     };
 
-    match policy {
-        TlsBootstrapPolicy::BestEffort => {
-            let initial_fetch = fetch_context.clone();
-            let fake_cert_len = config.censorship.fake_cert_len;
-            task_scope.spawn(async move {
-                initial_fetch
-                    .fetch_all_with_budget("TLS emulation initial fetch failed")
-                    .await;
-                for domain in initial_fetch
-                    .cache
-                    .default_profile_domains(&initial_fetch.domains)
-                    .await
-                {
-                    warn!(
-                        domain = %domain,
-                        timeout_ms = initial_fetch.strategy.total_budget.as_millis(),
-                        fake_cert_len,
-                        "TLS-front fetch not ready within timeout; using cache/default fake cert fallback"
-                    );
-                }
-            });
-        }
+    let best_effort_initial_fetch = match policy {
+        TlsBootstrapPolicy::BestEffort => true,
         TlsBootstrapPolicy::RequireReady => {
             fetch_context
                 .fetch_all_with_budget("TLS emulation initial fetch failed")
@@ -198,19 +254,33 @@ pub(crate) async fn bootstrap_tls_front(
                     .await;
                 return Err(ProxyError::Proxy(error));
             }
+            false
         }
-    }
+    };
 
     let refresh_context = fetch_context;
+    let fake_cert_len = config.censorship.fake_cert_len;
+    // The best-effort initial fetch runs on the refresh task so that a retry
+    // never overlaps it.
     task_scope.spawn(async move {
-        loop {
-            let base_secs = rand::rng().random_range(4 * 3600..=6 * 3600);
-            let jitter_secs = rand::rng().random_range(0..=7200);
-            tokio::time::sleep(Duration::from_secs(base_secs + jitter_secs)).await;
+        if best_effort_initial_fetch {
             refresh_context
-                .fetch_all_with_budget("TLS emulation refresh failed")
+                .fetch_all_with_budget("TLS emulation initial fetch failed")
                 .await;
+            for domain in refresh_context
+                .cache
+                .default_profile_domains(&refresh_context.domains)
+                .await
+            {
+                warn!(
+                    domain = %domain,
+                    timeout_ms = refresh_context.strategy.total_budget.as_millis(),
+                    fake_cert_len,
+                    "TLS-front fetch not ready within timeout; using cache/default fake cert fallback"
+                );
+            }
         }
+        run_refresh_loop(refresh_context).await;
     });
 
     startup_tracker
@@ -279,6 +349,34 @@ mod tests {
             tls_fetch_host_for_domain("origin.example", "a.com", "b.com"),
             "origin.example"
         );
+    }
+
+    #[test]
+    fn refresh_schedule_retries_default_profiles_with_capped_backoff() {
+        let mut schedule = RefreshSchedule::new();
+        let expected_backoff_secs = [30, 60, 120, 240, 480, 600, 600];
+        for backoff_secs in expected_backoff_secs {
+            let delay = schedule.next_delay(true);
+            let backoff = Duration::from_secs(backoff_secs);
+            assert!(
+                delay >= backoff / 2 && delay <= backoff,
+                "retry delay {delay:?} outside jitter window of {backoff:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_schedule_returns_to_regular_period_and_resets_backoff() {
+        let mut schedule = RefreshSchedule::new();
+        for _ in 0..4 {
+            schedule.next_delay(true);
+        }
+
+        let regular = schedule.next_delay(false);
+        assert!(regular >= Duration::from_secs(4 * 3600));
+        assert!(regular <= Duration::from_secs(8 * 3600));
+
+        assert!(schedule.next_delay(true) <= TLS_FRONT_RETRY_INITIAL);
     }
 
     #[test]
@@ -383,5 +481,52 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), scope.stop())
             .await
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn best_effort_retries_failed_domain_before_regular_refresh() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let origin_dir = tempfile::tempdir().unwrap();
+        let origin_path = origin_dir.path().join("origin.sock");
+        let listener = tokio::net::UnixListener::bind(&origin_path).unwrap();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted_by_origin = accepted.clone();
+        let origin = tokio::spawn(async move {
+            // Closing every connection keeps the fetch failing and the profile default.
+            while let Ok((stream, _)) = listener.accept().await {
+                accepted_by_origin.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let mut config = test_config(cache_dir.path());
+        config.censorship.mask_unix_sock = Some(origin_path.display().to_string());
+        let domains = vec![config.censorship.tls_domain.clone()];
+        let tracker = Arc::new(StartupTracker::new(1));
+        let scope = RuntimeTaskScope::new();
+
+        bootstrap_tls_front(
+            &config,
+            &domains,
+            upstream_manager(&config),
+            &tracker,
+            scope.clone(),
+            Arc::new(TlsFullCertBudget::new()),
+            TlsBootstrapPolicy::BestEffort,
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let after_initial = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_initial > 0, "initial fetch must reach the origin");
+        tokio::time::sleep(TLS_FRONT_RETRY_INITIAL).await;
+        assert!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst) > after_initial,
+            "a domain without a fetched profile must be retried within the first backoff"
+        );
+
+        scope.stop().await;
+        origin.abort();
     }
 }
