@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::SystemTime;
 
 use crate::crypto::SecureRandom;
@@ -154,5 +155,59 @@ fn emulated_server_hello_prefers_cert_payload_over_alpn_marker() {
     assert!(
         !payload.starts_with(&alpn_marker),
         "ALPN marker must not displace selected certificate payload"
+    );
+}
+
+fn inner_content_type_bytes(
+    cached: &CachedTlsData,
+    client_tls_version: ClientHelloTlsVersion,
+) -> HashSet<u8> {
+    let rng = SecureRandom::new();
+    let mut seen = HashSet::new();
+    for _ in 0..32 {
+        let response = build_emulated_server_hello(
+            b"secret",
+            &[0x33; 32],
+            &[0x43; 16],
+            cached,
+            true,
+            true,
+            client_tls_version,
+            [0x13, 0x01],
+            &test_server_key_share(),
+            &rng,
+            None,
+            0,
+        );
+        let payload = first_app_data_payload(&response);
+        assert!(payload.len() > 17);
+        seen.insert(payload[payload.len() - 17]);
+    }
+    seen
+}
+
+#[test]
+fn emulated_server_hello_inner_content_type_position_is_not_constant() {
+    let cached = make_cached(None);
+
+    let seen = inner_content_type_bytes(&cached, ClientHelloTlsVersion::Tls13);
+    assert!(
+        seen.len() > 1,
+        "byte at the TLS 1.3 inner content type position must not be a fixed plaintext marker"
+    );
+}
+
+#[test]
+fn emulated_server_hello_with_cert_payload_inner_content_type_position_is_not_constant() {
+    let cert_msg = vec![0x0b, 0x00, 0x00, 0x05, 0x00, 0xaa, 0xbb, 0xcc, 0xdd];
+    let cached = make_cached(Some(TlsCertPayload {
+        cert_chain_der: vec![vec![0x30, 0x01, 0x00]],
+        certificate_message: cert_msg,
+    }));
+
+    let seen = inner_content_type_bytes(&cached, ClientHelloTlsVersion::Tls12);
+    assert!(
+        seen.len() > 1,
+        "byte after the certificate payload must not be a fixed plaintext content type marker"
     );
 }

@@ -508,21 +508,13 @@ pub fn build_emulated_server_hello(
                     rec.extend_from_slice(&payload[payload_offset..payload_offset + copy_len]);
                     payload_offset += copy_len;
                 }
-                if body_len > copy_len {
-                    rec.extend_from_slice(&rng.bytes(body_len - copy_len));
-                }
-                rec.push(0x16);
-                rec.extend_from_slice(&rng.bytes(16));
+                // The 17-byte tail stands in for the encrypted inner content
+                // type and AEAD tag. Both are ciphertext in real TLS 1.3, so a
+                // fixed plaintext content type byte would be a stable marker.
+                rec.extend_from_slice(&rng.bytes(body_len - copy_len + 17));
             } else {
                 rec.extend_from_slice(&rng.bytes(size));
             }
-        } else if size > 17 {
-            let body_len = size - 17;
-            let mut body = Vec::with_capacity(body_len);
-            body.extend_from_slice(&rng.bytes(body_len));
-            rec.extend_from_slice(&body);
-            rec.push(0x16);
-            rec.extend_from_slice(&rng.bytes(16));
         } else {
             rec.extend_from_slice(&rng.bytes(size));
         }
@@ -887,7 +879,6 @@ mod tests {
 
         let payload = first_app_data_payload(&response);
         assert!(payload.len() >= 64);
-        assert_eq!(payload[payload.len() - 17], 0x16);
     }
 
     #[test]
