@@ -50,6 +50,7 @@ impl Fixture {
             detected_ips_rx: watch::channel((None, None)).1,
             mutation_lock: Arc::new(Mutex::new(())),
             config_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            config_state_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             minimal_cache: Arc::new(Mutex::new(None)),
             runtime_edge_connections_cache: Arc::new(Mutex::new(None)),
             runtime_edge_recompute_lock: Arc::new(Mutex::new(())),

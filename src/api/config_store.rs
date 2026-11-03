@@ -108,23 +108,11 @@ pub(super) fn compute_revision(content: &str) -> String {
 
 /// Hashes source documents only; prepared DNS answers never change a revision.
 pub(super) fn compute_snapshot_revision(source_contents: &BTreeMap<PathBuf, String>) -> String {
-    compute_source_revision(&ConfigSourceGraph {
-        source_contents: source_contents.clone(),
-        rendered: String::new(),
-    })
+    crate::config::observation::source_revision(source_contents)
 }
 
 pub(super) fn compute_source_revision(graph: &ConfigSourceGraph) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"telemt-config-manifest-v1\0");
-    for (path, content) in &graph.source_contents {
-        let path = path.as_os_str().as_encoded_bytes();
-        hasher.update((path.len() as u64).to_le_bytes());
-        hasher.update(path);
-        hasher.update((content.len() as u64).to_le_bytes());
-        hasher.update(content.as_bytes());
-    }
-    hex::encode(hasher.finalize())
+    compute_snapshot_revision(&graph.source_contents)
 }
 
 /// Reads a normalized source snapshot without resolving decoys or loading static assets.

@@ -27,6 +27,7 @@ use std::sync::Arc;
 mod diagnostics;
 mod preflight;
 mod preparation;
+pub(super) use preflight::{RuntimeBaseline, RuntimeFence};
 pub(super) use preflight::{parse_runtime_match, validate_config};
 use preparation::prepare_patch_to_path;
 

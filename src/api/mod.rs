@@ -37,6 +37,8 @@ use crate::web::control::WebRuntimePublication;
 use crate::web::trace::WebTraceStore;
 
 mod config_edit;
+mod config_projection;
+mod config_state;
 pub(crate) mod config_store;
 mod discovery;
 mod events;
@@ -122,6 +124,7 @@ pub(super) struct ApiShared {
     pub(super) detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
     pub(super) mutation_lock: Arc<Mutex<()>>,
     pub(super) config_preflight_slots: Arc<Semaphore>,
+    pub(super) config_state_slots: Arc<Semaphore>,
     pub(super) minimal_cache: Arc<Mutex<Option<MinimalCacheEntry>>>,
     pub(super) runtime_edge_connections_cache: Arc<Mutex<Option<EdgeConnectionsCacheEntry>>>,
     pub(super) runtime_edge_recompute_lock: Arc<Mutex<()>>,
@@ -159,6 +162,7 @@ impl ApiShared {
             detected_ips_rx: self.detected_ips_rx.clone(),
             mutation_lock: self.mutation_lock.clone(),
             config_preflight_slots: self.config_preflight_slots.clone(),
+            config_state_slots: self.config_state_slots.clone(),
             minimal_cache: self.minimal_cache.clone(),
             runtime_edge_connections_cache: self.runtime_edge_connections_cache.clone(),
             runtime_edge_recompute_lock: self.runtime_edge_recompute_lock.clone(),
@@ -269,6 +273,7 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         "/v1/health"
         | "/v1/capabilities"
         | "/v1/config/schema"
+        | "/v1/config/state"
         | "/v1/health/ready"
         | "/v1/system/info"
         | "/v1/runtime/gates"
@@ -380,6 +385,7 @@ pub(crate) async fn serve(
         detected_ips_rx,
         mutation_lock: Arc::new(Mutex::new(())),
         config_preflight_slots: Arc::new(Semaphore::new(2)),
+        config_state_slots: Arc::new(Semaphore::new(2)),
         minimal_cache: Arc::new(Mutex::new(None)),
         runtime_edge_connections_cache: Arc::new(Mutex::new(None)),
         runtime_edge_recompute_lock: Arc::new(Mutex::new(())),

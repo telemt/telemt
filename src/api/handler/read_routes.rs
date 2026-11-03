@@ -10,6 +10,9 @@ pub(super) async fn handle(
 ) -> Result<Option<Response<Full<Bytes>>>, ApiFailure> {
     let api_cfg = &cfg.server.api;
     match (method.as_str(), normalized_path) {
+        ("GET", "/v1/config/state") => {
+            Ok(super::super::config_state::response(shared, query).await?)
+        }
         ("GET", "/v1/capabilities") => {
             discovery::reject_query(query)?;
             let revision = current_revision(&shared.config_path).await?;

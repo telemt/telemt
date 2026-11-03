@@ -25,6 +25,8 @@ pub(super) fn config_field_paths() -> Result<Vec<&'static str>, ApiFailure> {
     schema::field_paths()
 }
 
+pub(super) use schema::projection_rules;
+
 pub(super) const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize, Serialize)]

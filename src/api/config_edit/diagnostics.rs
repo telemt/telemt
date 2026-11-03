@@ -1,9 +1,7 @@
-use std::collections::BTreeSet;
-
 use super::*;
 use crate::api::model::FieldIssue;
 
-pub(super) const MAX_PATHS: usize = 4096;
+pub(super) use crate::api::config_projection::{MAX_PATHS, changed_paths};
 
 pub(super) fn issue(
     path: impl Into<String>,
@@ -112,78 +110,6 @@ pub(super) fn reject_unknown(patch: &Json) -> Result<(), ApiFailure> {
         })
         .collect();
     Err(error)
-}
-
-/// Paths only: no before/after values or dynamic keys are returned. Arrays use
-/// indices, open maps use their documented placeholder to avoid leaking identities.
-pub(super) fn changed_paths(old: &Json, new: &Json) -> Vec<String> {
-    fn walk(old: Option<&Json>, new: Option<&Json>, path: &str, out: &mut BTreeSet<String>) {
-        if old == new {
-            return;
-        }
-        if out.len() > MAX_PATHS {
-            return;
-        }
-        let map_key = if path == "dc_overrides" {
-            Some("{dc}")
-        } else if path == "censorship.exclusive_mask" {
-            Some("{hostname}")
-        } else if path.starts_with("access.") {
-            Some("{entry}")
-        } else {
-            None
-        };
-        match (old, new) {
-            (Some(Json::Object(_)), _) | (_, Some(Json::Object(_))) => {
-                let a = old.and_then(Json::as_object);
-                let b = new.and_then(Json::as_object);
-                let keys: BTreeSet<_> = a
-                    .into_iter()
-                    .flat_map(|v| v.keys())
-                    .chain(b.into_iter().flat_map(|v| v.keys()))
-                    .collect();
-                if keys.is_empty() {
-                    out.insert(path.to_string());
-                }
-                for key in keys {
-                    let key_path = map_key.unwrap_or(key);
-                    let next = if path.is_empty() {
-                        key_path.to_string()
-                    } else {
-                        format!("{path}.{key_path}")
-                    };
-                    walk(
-                        a.and_then(|v| v.get(key)),
-                        b.and_then(|v| v.get(key)),
-                        &next,
-                        out,
-                    );
-                }
-            }
-            (Some(Json::Array(_)), _) | (_, Some(Json::Array(_))) => {
-                let a = old
-                    .and_then(Json::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                let b = new
-                    .and_then(Json::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                if a.is_empty() && b.is_empty() {
-                    out.insert(path.to_string());
-                }
-                for index in 0..a.len().max(b.len()) {
-                    walk(a.get(index), b.get(index), &format!("{path}[{index}]"), out);
-                }
-            }
-            _ => {
-                out.insert(path.to_string());
-            }
-        }
-    }
-    let mut paths = BTreeSet::new();
-    walk(Some(old), Some(new), "", &mut paths);
-    paths.into_iter().collect()
 }
 
 #[derive(Debug, Serialize)]

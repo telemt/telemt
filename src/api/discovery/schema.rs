@@ -112,6 +112,22 @@ pub(super) fn field_paths() -> Result<Vec<&'static str>, ApiFailure> {
         .collect())
 }
 
+pub(in crate::api) fn projection_rules()
+-> Result<Vec<(String, bool, Value, Option<Value>)>, ApiFailure> {
+    Ok(config_schema()?
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                field.spec.path.clone(),
+                field.spec.sensitivity == "public",
+                field.spec.value.clone(),
+                field.default.clone(),
+            )
+        })
+        .collect())
+}
+
 fn field_specs() -> Result<Vec<FieldSpec>, String> {
     serde_json::from_str(include_str!("fields.json"))
         .map_err(|error| format!("invalid compiled config field catalog: {error}"))

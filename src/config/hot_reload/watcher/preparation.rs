@@ -43,7 +43,17 @@ pub(super) async fn reload(
         Some(gate) => Some(gate.lock().await),
         None => None,
     };
-    let source = read_source(path).await?;
+    let Some(source) = read_source(path).await else {
+        record_outcome(
+            &config_tx.borrow(),
+            "rejected",
+            None,
+            None,
+            Some("source_invalid_or_unreadable"),
+        );
+        return None;
+    };
+    let revision = source.config.provenance.revision().map(str::to_owned);
     let manifest = WatchManifest::from_source_files(&source.source_files);
     // A new file edit can restore the exact pre-creation bytes. Refresh only source
     // evidence for fenced accounts, retaining prepared DNS and immutable WEB state.
@@ -53,22 +63,56 @@ pub(super) async fn reload(
     {
         let mut refreshed = (**config_tx.borrow()).clone();
         refreshed.quota_source_read_at = source.config.quota_source_read_at;
-        config_tx
+        let published = config_tx
             .send(Arc::new(refreshed.with_publication_epoch()))
-            .ok();
+            .is_ok();
+        let config = config_tx.borrow();
+        record_outcome(
+            &config,
+            if published {
+                "source_refreshed"
+            } else {
+                "publication_failed"
+            },
+            revision,
+            published.then_some(config.runtime_config_epoch),
+            (!published).then_some("publication_closed"),
+        );
         reload_state.mark_applied(source.rendered_hash);
         return Some(manifest);
     }
     drop(guard);
     if !force && reload_state.is_applied(source.rendered_hash) {
+        let config = config_tx.borrow();
+        record_outcome(
+            &config,
+            "unchanged",
+            revision,
+            Some(config.runtime_config_epoch),
+            None,
+        );
         return Some(manifest);
     }
+    record_outcome(
+        &config_tx.borrow(),
+        "preparing",
+        revision.clone(),
+        None,
+        None,
+    );
     let loaded = match source.prepare().await {
         Ok(loaded) => loaded,
         Err(error) => {
             error!(
                 "config reload: preparation failed: {}; keeping old config",
                 error
+            );
+            record_outcome(
+                &config_tx.borrow(),
+                "rejected",
+                revision,
+                None,
+                Some("preparation_failed"),
             );
             return Some(manifest);
         }
@@ -96,12 +140,26 @@ pub(super) async fn reload(
                 "config reload: effective WEB validation failed: {}; keeping old config",
                 error
             );
+            record_outcome(
+                &config_tx.borrow(),
+                "rejected",
+                revision,
+                None,
+                Some("effective_config_invalid"),
+            );
             Some(manifest)
         }
         Err(error) => {
             error!(
                 "config reload: runtime builder failed: {}; keeping old config",
                 error
+            );
+            record_outcome(
+                &config_tx.borrow(),
+                "rejected",
+                revision,
+                None,
+                Some("preparation_worker_failed"),
             );
             Some(manifest)
         }

@@ -10,21 +10,24 @@ use hyper::{HeaderMap, StatusCode};
 use super::*;
 
 #[derive(Debug, Serialize)]
-pub(super) struct RuntimeBaseline {
-    pub(super) active_generation: u64,
-    pub(super) config_epoch: u64,
-    pub(super) runtime_match: String,
+pub(in crate::api) struct RuntimeBaseline {
+    pub(in crate::api) active_generation: u64,
+    pub(in crate::api) config_epoch: u64,
+    pub(in crate::api) runtime_match: String,
 }
 
 #[derive(Clone)]
-pub(super) struct RuntimeFence {
+pub(in crate::api) struct RuntimeFence {
     active: Arc<arc_swap::ArcSwap<RuntimeGeneration>>,
     generation: Arc<RuntimeGeneration>,
-    pub(super) config: Arc<ProxyConfig>,
+    pub(in crate::api) config: Arc<ProxyConfig>,
 }
 
 impl RuntimeFence {
-    pub(super) fn capture(shared: &ApiShared, expected: Option<&str>) -> Result<Self, ApiFailure> {
+    pub(in crate::api) fn capture(
+        shared: &ApiShared,
+        expected: Option<&str>,
+    ) -> Result<Self, ApiFailure> {
         let generation = shared.active_runtime.load_full();
         let config = generation.config();
         let fence = Self {
@@ -39,7 +42,7 @@ impl RuntimeFence {
         Ok(fence)
     }
 
-    pub(super) fn baseline(&self) -> RuntimeBaseline {
+    pub(in crate::api) fn baseline(&self) -> RuntimeBaseline {
         static PROCESS: OnceLock<String> = OnceLock::new();
         let process = PROCESS.get_or_init(|| {
             let mut bytes = [0_u8; 16];
@@ -63,7 +66,7 @@ impl RuntimeFence {
             && Arc::ptr_eq(&self.active.load_full(), &self.generation)
     }
 
-    pub(super) fn ensure_current(&self) -> Result<(), ApiFailure> {
+    pub(in crate::api) fn ensure_current(&self) -> Result<(), ApiFailure> {
         if self.matches() {
             Ok(())
         } else {
