@@ -74,6 +74,7 @@ impl SessionAdmission {
             .fetch_or(SESSION_ADMISSION_CLOSED, Ordering::AcqRel);
     }
 
+    #[cfg(test)]
     fn reopen(&self) {
         self.state
             .fetch_and(!SESSION_ADMISSION_CLOSED, Ordering::AcqRel);

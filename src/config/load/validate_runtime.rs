@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
+    config.access.validate_quota_periods()?;
     if config.general.me_writer_cmd_channel_capacity == 0 {
         return Err(ProxyError::Config(
             "general.me_writer_cmd_channel_capacity must be > 0".to_string(),

@@ -71,30 +71,29 @@ pub(crate) fn print_web_proxy_links(config: &ProxyConfig) {
         .resolve_users(&config.access.users);
     let mut heading_printed = false;
     for profile in &runtime.profiles {
-        if !shown.iter().any(|user| user.as_str() == profile.user) {
+        if !shown
+            .iter()
+            .any(|user| user.as_str() == profile.shared.user)
+        {
             continue;
         }
         if !heading_printed {
             print_maestro_line("WEB proxy links");
             heading_printed = true;
         }
-        let Some(secret) = config.access.users.get(&profile.user) else {
+        let Some(secret) = config.access.users.get(&profile.shared.user) else {
             continue;
         };
-        let Some(vhost) = config
-            .web
-            .vhosts
-            .iter()
-            .find(|vhost| vhost.host == profile.host)
-        else {
+        let Some(vhost) = runtime.vhosts.get(&profile.host) else {
             continue;
         };
         print_maestro_line(format!(
             "User: {} ({:?})",
-            profile.user, profile.secret_mode
+            profile.shared.user, profile.shared.secret_mode
         ));
+        let base_path = vhost.base.trim_matches('/');
         if let Some(link) =
-            format_web_proxy_link(&profile.host, &vhost.base_path, secret, profile.secret_mode)
+            format_web_proxy_link(&profile.host, base_path, secret, profile.shared.secret_mode)
         {
             print_maestro_line(format!("WEB: {link}"));
         }
@@ -474,3 +473,7 @@ mod tests {
         }
     }
 }
+
+// Execute the actual emitter in a child so missing alias links cannot hide behind formatter tests.
+#[cfg(test)]
+mod host_list_tests;

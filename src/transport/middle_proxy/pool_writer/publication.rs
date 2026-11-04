@@ -152,6 +152,7 @@ impl MePool {
 
     /// Commits writer visibility and lifecycle ownership after all cancellation points.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(in crate::transport::middle_proxy) async fn publish_prepared_writer<F>(
         self: &Arc<Self>,
         writer: MeWriter,

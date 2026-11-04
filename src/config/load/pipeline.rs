@@ -1,6 +1,7 @@
 use super::*;
 
 /// Completes legacy synchronous loads without performing hostname resolution.
+#[cfg(test)]
 pub(super) fn load_source_graph(graph: ConfigSourceGraph) -> Result<LoadedConfig> {
     finish(parse_source_graph(graph)?)
 }

@@ -348,6 +348,8 @@ impl ConnRegistry {
         WriterBindOutcome::Bound
     }
 
+    /// Binds a test route and reports whether publication succeeded.
+    #[cfg(test)]
     pub async fn bind_writer(&self, conn_id: u64, writer_id: u64, meta: ConnMeta) -> bool {
         matches!(
             self.bind_writer_with_outcome(conn_id, writer_id, meta)

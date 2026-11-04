@@ -273,6 +273,14 @@ root    hard    nofile  1048576
 ```
 
 
+### FreeBSD service initialization
+
+`telemt --init` refuses to replace any existing `/usr/local/etc/rc.d/telemt`, including a dangling symlink, before writing configuration. Manage an existing script through its package or edit it explicitly; old scripts are not migrated automatically.
+
+The generated rc.d script defaults to PID file `/var/run/telemt/telemt.pid` and data directory `/var/db/telemt`. It prepares the dedicated `/var/run/telemt` directory and the selected data directory with service ownership; it does not change ownership of `/var/run` itself. In `/etc/rc.conf`, use `telemt_uid`, `telemt_gid`, `telemt_pidfile`, and `telemt_data_dir` for overrides. Legacy `telemt_user` and `telemt_group` remain accepted aliases. An unspecified group follows the selected account's primary group.
+
+The service starts with privileges for socket setup and lets Telemt drop them when a non-root user is selected. SYN limiting with privilege dropping remains unsupported on FreeBSD and is rejected. If you override the PID path, its parent must already be writable by the service account.
+
 ## Additional parameters
 
 ### Domain in the link instead of IP
@@ -282,7 +290,7 @@ To display a domain instead of an IP address in native `tg://proxy` links, add t
 public_host = "proxy.example.com"
 ```
 
-This setting, together with `public_port`, affects only native links. WEB `tg://webproxy` links always use `[[web.vhosts]].host` and external port `443`.
+This setting, together with `public_port`, affects only native links. WEB `tg://webproxy` links always use a concrete hostname and external port `443`. Startup links are emitted only for configured exact entries in `[[web.vhosts]].host` or `hosts`, never for wildcard patterns.
 
 ### Total server connection limit
 This parameter limits the total number of active connections to the server:
@@ -291,6 +299,12 @@ This parameter limits the total number of active connections to the server:
 # Zero disables the limit; 10000 is the default.
 max_connections = 10000
 ```
+
+The limit includes client sessions routed through ME. With `max_connections = 0`,
+there is no separate ME session cap; operating-system resources and other configured
+limits still apply. This parameter does not set the number of upstream ME TCP
+writers. Changing it requires a process restart; a configuration reload is not
+sufficient. See the [parameter reference](Config_params/CONFIG_PARAMS.en.md#max_connections).
 
 ### Upstream Manager
 To configure outbound connections (upstreams), add the corresponding parameters to the `[[upstreams]]` section of the configuration file:

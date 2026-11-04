@@ -14,20 +14,39 @@ pub(super) fn mark_internal_credential<B>(
     config: &WebRuntimeConfig,
     runtime: &WebProcessRuntime,
 ) {
+    let found = visit_metadata(request, |candidate| {
+        bool::from(scan_capabilities(&config.capabilities, candidate).matched)
+            || runtime.authentic_token(candidate)
+            || runtime
+                .wildcard
+                .as_ref()
+                .is_some_and(|cache| cache.contains(candidate))
+    });
+    if found {
+        mark(request);
+    }
+}
+
+/// Marks a request after a full selected-host capability scan authenticated metadata.
+pub(super) fn mark<B>(request: &mut Request<B>) {
+    request.extensions_mut().insert(InternalCredential);
+}
+
+/// Visits canonical raw or percent-decoded credential windows without allocating.
+pub(super) fn visit_metadata<B>(
+    request: &Request<B>,
+    mut visit: impl FnMut(&[u8; 32]) -> bool,
+) -> bool {
     let uri = request.uri();
-    let uri_contains = uri
-        .authority()
-        .is_some_and(|authority| contains_secret(authority.as_str().as_bytes(), config, runtime))
+    uri.authority()
+        .is_some_and(|value| visit_text(value.as_str().as_bytes(), &mut visit))
         || uri
             .path_and_query()
-            .is_some_and(|path| contains_secret(path.as_str().as_bytes(), config, runtime));
-    let headers_contain = request.headers().iter().any(|(name, value)| {
-        contains_secret(name.as_str().as_bytes(), config, runtime)
-            || contains_secret(value.as_bytes(), config, runtime)
-    });
-    if uri_contains || headers_contain {
-        request.extensions_mut().insert(InternalCredential);
-    }
+            .is_some_and(|value| visit_text(value.as_str().as_bytes(), &mut visit))
+        || request.headers().iter().any(|(name, value)| {
+            visit_text(name.as_str().as_bytes(), &mut visit)
+                || visit_text(value.as_bytes(), &mut visit)
+        })
 }
 
 /// Returns whether request metadata was authenticated before routing.
@@ -35,7 +54,7 @@ pub(super) fn has_internal_credential<B>(request: &Request<B>) -> bool {
     request.extensions().get::<InternalCredential>().is_some()
 }
 
-fn contains_secret(text: &[u8], config: &WebRuntimeConfig, runtime: &WebProcessRuntime) -> bool {
+fn visit_text(text: &[u8], visit: &mut impl FnMut(&[u8; 32]) -> bool) -> bool {
     let mut window = [0; 43];
     let mut run_len = 0usize;
     let mut offset = 0usize;
@@ -58,10 +77,7 @@ fn contains_secret(text: &[u8], config: &WebRuntimeConfig, runtime: &WebProcessR
                 window[42] = byte;
             }
             if run_len >= window.len()
-                && canonical_credential(&window).is_some_and(|candidate| {
-                    bool::from(scan_capabilities(&config.capabilities, &candidate).matched)
-                        || runtime.authentic_token(&candidate)
-                })
+                && canonical_credential(&window).is_some_and(|candidate| visit(&candidate))
             {
                 return true;
             }
@@ -88,3 +104,11 @@ fn hex_value(value: u8) -> Option<u8> {
 #[cfg(test)]
 #[path = "secrets/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+fn contains_secret(text: &[u8], config: &WebRuntimeConfig, runtime: &WebProcessRuntime) -> bool {
+    visit_text(text, &mut |candidate| {
+        bool::from(scan_capabilities(&config.capabilities, candidate).matched)
+            || runtime.authentic_token(candidate)
+    })
+}

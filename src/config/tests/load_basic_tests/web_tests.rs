@@ -11,6 +11,9 @@ mod carrier_method_tests;
 mod conveyor_tests;
 #[path = "web_tests/decoy_dns_tests.rs"]
 mod decoy_dns_tests;
+// Exact host groups must preserve the legacy per-host routing contract.
+#[path = "web_tests/host_list_tests.rs"]
+mod host_list_tests;
 
 const WEB_CONFIG: &str = r#"
 [access.users]
@@ -58,17 +61,17 @@ fn web_config_builds_canonical_runtime_snapshot() {
     assert_eq!(vhost.capabilities[0], vhost.profiles[0].capability);
     assert_eq!(runtime.capabilities.as_ref(), vhost.capabilities.as_ref());
     assert_eq!(vhost.decoy_fasttrack_mode, WebDecoyFastTrackMode::Off);
-    assert_eq!(vhost.profiles[0].user, "alice");
-    assert_eq!(vhost.profiles[0].secret_mode, WebSecretMode::Dd);
-    assert_eq!(vhost.profiles[0].carrier, WebCarrier::HttpsLanes);
-    assert_eq!(vhost.profiles[0].max_sessions, 4);
-    assert_eq!(vhost.profiles[0].max_streams, 64);
-    assert_eq!(vhost.profiles[0].max_streams_per_session, 16);
-    assert_eq!(vhost.profiles[0].key_fingerprint.len(), 16);
-    assert_ne!(vhost.profiles[0].key_fingerprint, "0001020304050607");
-    assert!(!vhost.profiles[0].carrier_negotiation_enabled);
+    assert_eq!(vhost.profiles[0].shared.user, "alice");
+    assert_eq!(vhost.profiles[0].shared.secret_mode, WebSecretMode::Dd);
+    assert_eq!(vhost.profiles[0].shared.carrier, WebCarrier::HttpsLanes);
+    assert_eq!(vhost.profiles[0].shared.max_sessions, 4);
+    assert_eq!(vhost.profiles[0].shared.max_streams, 64);
+    assert_eq!(vhost.profiles[0].shared.max_streams_per_session, 16);
+    assert_eq!(vhost.profiles[0].shared.key_fingerprint.len(), 16);
+    assert_ne!(vhost.profiles[0].shared.key_fingerprint, "0001020304050607");
+    assert!(!vhost.profiles[0].shared.carrier_negotiation_enabled);
     assert_eq!(
-        vhost.profiles[0].carriers.as_ref(),
+        vhost.profiles[0].shared.carriers.as_ref(),
         [WebCarrier::HttpsLanes]
     );
 }
@@ -251,7 +254,11 @@ fn web_profile_user_labels_are_bounded_for_runtime_status() {
 fn web_carriers_missing_or_false_disable_negotiation() {
     let missing = load_config_from_temp_toml(WEB_CONFIG);
     assert!(!missing.web.carrier_negotiation_enabled());
-    assert!(!missing.web.runtime.unwrap().profiles[0].carrier_learning);
+    assert!(
+        !missing.web.runtime.unwrap().profiles[0]
+            .shared
+            .carrier_learning
+    );
 
     let disabled = WEB_CONFIG.replace(
         "carrier = \"https-lanes\"",
@@ -259,9 +266,16 @@ fn web_carriers_missing_or_false_disable_negotiation() {
     );
     let disabled = load_config_from_temp_toml(&disabled);
     assert!(!disabled.web.carrier_negotiation_enabled());
-    assert!(!disabled.web.runtime.as_ref().unwrap().profiles[0].carrier_learning);
+    assert!(
+        !disabled.web.runtime.as_ref().unwrap().profiles[0]
+            .shared
+            .carrier_learning
+    );
     assert_eq!(
-        disabled.web.runtime.unwrap().profiles[0].carriers.as_ref(),
+        disabled.web.runtime.unwrap().profiles[0]
+            .shared
+            .carriers
+            .as_ref(),
         [WebCarrier::HttpsLanes]
     );
 }
@@ -277,14 +291,14 @@ fn web_carrier_array_enables_ordered_negotiation_and_appends_fallback() {
     assert!(!config.web.carrier_learning);
     let profile = &config.web.runtime.unwrap().profiles[0];
     assert_eq!(
-        profile.carriers.as_ref(),
+        profile.shared.carriers.as_ref(),
         [
             WebCarrier::Websocket,
             WebCarrier::Https,
             WebCarrier::HttpsLanes
         ]
     );
-    assert!(!profile.carrier_learning);
+    assert!(!profile.shared.carrier_learning);
 }
 
 #[test]
@@ -494,7 +508,7 @@ fn web_ipv6_decoy_uses_a_valid_http_authority() {
     let config = load_config_from_temp_toml(&ipv6);
     let runtime = config.web.runtime.expect("WEB runtime snapshot");
     let vhost = runtime.vhosts.get("proxy.example.com").unwrap();
-    let WebRuntimeDecoy::HttpUpstream { authority, .. } = &vhost.decoy else {
+    let WebRuntimeDecoy::HttpUpstream { authority, .. } = vhost.decoy.as_ref() else {
         panic!("expected HTTP decoy");
     };
     assert_eq!(authority, "[::1]:18081");
@@ -509,7 +523,7 @@ fn websocket_carriers_build_runtime_profiles_with_bounded_defaults() {
         let configured = WEB_CONFIG.replace("https-lanes", name);
         let config = load_config_from_temp_toml(&configured);
         let profile = &config.web.runtime.unwrap().profiles[0];
-        assert_eq!(profile.carrier, carrier);
+        assert_eq!(profile.shared.carrier, carrier);
         assert_eq!(config.web.limits.websocket_bytes_global, 256 * 1024 * 1024);
         assert_eq!(config.web.limits.websocket_admission_watermark_pct, 75);
         assert_eq!(config.web.limits.websocket_eviction_watermark_pct, 90);

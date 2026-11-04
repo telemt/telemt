@@ -22,7 +22,7 @@
 //! `server.port`, `censorship.*`, `network.*`, `use_middle_proxy`) are **not**
 //! applied; a warning is emitted. SYN limiter rules are process-owned and are
 //! reconciled only during privileged startup.
-//! `web.decoy_fasttrack_mode` is also restart-only so one process never mixes
+//! `web.allow_wildcard_hosts, web.decoy_fasttrack_mode` is also restart-only so one process never mixes
 //! capability timing policies or process-lifetime counter semantics.
 //! Non-hot changes are never mixed into the runtime config snapshot.
 
@@ -76,3 +76,10 @@ mod carrier_method_tests;
 #[cfg(test)]
 #[path = "hot_reload/conveyor_tests.rs"]
 mod conveyor_tests;
+
+// Host groups are validated and published as one complete immutable snapshot.
+#[cfg(test)]
+mod host_list_tests;
+
+#[cfg(test)]
+mod quota_period_tests;

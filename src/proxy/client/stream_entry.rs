@@ -41,7 +41,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
+/// Runs a client stream with shared process state in tests.
+#[cfg(test)]
 pub async fn handle_client_stream_with_shared<S>(
     stream: S,
     peer: SocketAddr,

@@ -378,6 +378,7 @@ impl MePool {
     }
 
     /// Returns the currently authoritative endpoint set for drain and coverage decisions.
+    #[cfg(test)]
     pub(in crate::transport::middle_proxy) async fn desired_dc_endpoints(
         &self,
     ) -> HashMap<i32, HashSet<SocketAddr>> {

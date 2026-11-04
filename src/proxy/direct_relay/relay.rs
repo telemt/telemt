@@ -1,7 +1,7 @@
 use super::*;
 
-#[allow(dead_code)]
 /// Runs Direct relay with standalone cancellation and shared-state defaults.
+#[cfg(test)]
 pub(crate) async fn handle_via_direct<R, W>(
     client_reader: CryptoReader<R>,
     client_writer: CryptoWriter<W>,
@@ -39,6 +39,7 @@ where
 }
 
 /// Runs Direct relay for a kernel-backed TCP client tuple.
+#[cfg(test)]
 pub(crate) async fn handle_via_direct_with_shared<R, W>(
     client_reader: CryptoReader<R>,
     client_writer: CryptoWriter<W>,

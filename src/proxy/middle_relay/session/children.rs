@@ -1,10 +1,61 @@
 use super::*;
 
+/// Owns relay tasks and their cancellation signals through bounded cleanup.
 pub(super) struct RelayChildTasks {
+    /// Serializes client frames into the ME route.
     pub(super) c2me_sender: AbortOnDropHandle<Result<()>>,
+    /// Delivers ME responses to the client.
     pub(super) me_writer: AbortOnDropHandle<Result<()>>,
+    /// Interrupts downstream quota and transport waits during cleanup.
     pub(super) flow_cancel: CancellationToken,
+    /// Stops the downstream task after the sender has drained or timed out.
     pub(super) stop_tx: Option<oneshot::Sender<()>>,
+}
+
+impl RelayChildTasks {
+    /// Reuses consumed join results and preserves sender-first bounded shutdown.
+    pub(super) async fn finish(
+        &mut self,
+        c2me_completed: Option<std::result::Result<Result<()>, tokio::task::JoinError>>,
+        writer_completed: Option<std::result::Result<Result<()>, tokio::task::JoinError>>,
+        stats: &Stats,
+    ) -> (Result<()>, Result<()>) {
+        // A JoinHandle whose output was selected must never be polled again.
+        let c2me_join = match c2me_completed {
+            Some(joined) => Ok(joined),
+            None => timeout(ME_CHILD_JOIN_TIMEOUT, &mut self.c2me_sender).await,
+        };
+        let c2me_result = match c2me_join {
+            Ok(joined) => joined
+                .unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME sender join error: {e}")))),
+            Err(_) => {
+                stats.increment_me_child_join_timeout_total();
+                stats.increment_me_child_abort_total();
+                self.c2me_sender.abort();
+                Err(ProxyError::Proxy("ME sender join timeout".into()))
+            }
+        };
+
+        self.flow_cancel.cancel();
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        let writer_join = match writer_completed {
+            Some(joined) => Ok(joined),
+            None => timeout(ME_CHILD_JOIN_TIMEOUT, &mut self.me_writer).await,
+        };
+        let writer_result = match writer_join {
+            Ok(joined) => joined
+                .unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}")))),
+            Err(_) => {
+                stats.increment_me_child_join_timeout_total();
+                stats.increment_me_child_abort_total();
+                self.me_writer.abort();
+                Err(ProxyError::Proxy("ME writer join timeout".into()))
+            }
+        };
+        (c2me_result, writer_result)
+    }
 }
 
 impl Drop for RelayChildTasks {

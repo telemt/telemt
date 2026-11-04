@@ -200,7 +200,13 @@ pub(super) async fn handle(
         ("GET", "/v1/stats/users/quota") => {
             let revision = current_revision(&shared.config_path).await?;
             let disk_cfg = load_config_from_disk(&shared.config_path).await?;
-            let data = build_user_quota_list(&disk_cfg, shared.stats.as_ref());
+            let _quota_guard = shared.quota_state.lock().await;
+            let mut data = build_user_quota_list(&disk_cfg, shared.stats.as_ref());
+            for entry in &mut data.users {
+                entry.schedule = shared
+                    .quota_state
+                    .schedule_status(&entry.username, entry.quota_period);
+            }
             Ok(success_response(StatusCode::OK, data, revision))
         }
 

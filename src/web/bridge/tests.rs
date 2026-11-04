@@ -23,6 +23,7 @@ fn carrier_method_is_page_owned_and_used_by_every_https_request() {
             0,
             true,
             method,
+            &crate::config::WebRetryJitterConfig::default(),
             &SecureRandom::new(),
         );
         assert!(!page.body.contains("__"));
@@ -80,6 +81,7 @@ fn render_page(bootstrap: &str, candidate_count: usize) -> BridgePage {
         0,
         false,
         WebCarrierMethod::Post,
+        &crate::config::WebRetryJitterConfig::default(),
         &SecureRandom::new(),
     )
 }
@@ -105,6 +107,7 @@ fn render_diagnostic_page(bootstrap: &str) -> BridgePage {
         0,
         true,
         WebCarrierMethod::Post,
+        &crate::config::WebRetryJitterConfig::default(),
         &SecureRandom::new(),
     )
 }
@@ -157,6 +160,7 @@ fn rendered_page_resolves_carriers_against_the_exact_base_path() {
         0,
         true,
         WebCarrierMethod::Post,
+        &crate::config::WebRetryJitterConfig::default(),
         &SecureRandom::new(),
     );
 
@@ -211,6 +215,7 @@ fn rendered_page_embeds_the_configured_bridge_timing_policy() {
         4,
         false,
         WebCarrierMethod::Post,
+        &crate::config::WebRetryJitterConfig::default(),
         &SecureRandom::new(),
     );
 
@@ -265,6 +270,7 @@ fn disabled_negotiation_does_not_arm_a_carrier_deadline() {
         0,
         false,
         WebCarrierMethod::Post,
+        &crate::config::WebRetryJitterConfig::default(),
         &SecureRandom::new(),
     );
     assert!(page.body.contains(

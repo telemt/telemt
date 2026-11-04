@@ -23,6 +23,8 @@ pub(in crate::api) struct UserInfo {
     pub(in crate::api) max_tcp_conns: Option<usize>,
     pub(in crate::api) expiration_rfc3339: Option<String>,
     pub(in crate::api) data_quota_bytes: Option<u64>,
+    /// Desired UTC period; runtime activation is reported by the quota endpoint.
+    pub(in crate::api) quota_period: Option<crate::config::UserQuotaPeriod>,
     pub(in crate::api) rate_limit_up_bps: Option<u64>,
     pub(in crate::api) rate_limit_down_bps: Option<u64>,
     pub(in crate::api) max_unique_ips: Option<usize>,
@@ -69,6 +71,11 @@ pub(in crate::api) struct UserQuotaListData {
 pub(in crate::api) struct UserQuotaEntry {
     pub(in crate::api) username: String,
     pub(in crate::api) data_quota_bytes: u64,
+    /// Configured period may precede asynchronous runtime activation.
+    pub(in crate::api) quota_period: Option<crate::config::UserQuotaPeriod>,
+    /// Effective schedule comes from the process authority, never desired TOML.
+    #[serde(flatten)]
+    pub(in crate::api) schedule: crate::stats::QuotaScheduleStatus,
     pub(in crate::api) used_bytes: u64,
     pub(in crate::api) last_reset_epoch_secs: u64,
 }
@@ -81,6 +88,8 @@ pub(in crate::api) struct CreateUserRequest {
     pub(in crate::api) max_tcp_conns: Option<usize>,
     pub(in crate::api) expiration_rfc3339: Option<String>,
     pub(in crate::api) data_quota_bytes: Option<u64>,
+    /// Desired UTC period; runtime activation is reported by the quota endpoint.
+    pub(in crate::api) quota_period: Option<crate::config::UserQuotaPeriod>,
     pub(in crate::api) rate_limit_up_bps: Option<u64>,
     pub(in crate::api) rate_limit_down_bps: Option<u64>,
     pub(in crate::api) max_unique_ips: Option<usize>,
@@ -98,6 +107,9 @@ pub(in crate::api) struct PatchUserRequest {
     pub(in crate::api) expiration_rfc3339: Patch<String>,
     #[serde(default, deserialize_with = "patch_field")]
     pub(in crate::api) data_quota_bytes: Patch<u64>,
+    /// Omitted preserves the period; null removes it.
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(in crate::api) quota_period: Patch<crate::config::UserQuotaPeriod>,
     #[serde(default, deserialize_with = "patch_field")]
     pub(in crate::api) rate_limit_up_bps: Patch<u64>,
     #[serde(default, deserialize_with = "patch_field")]

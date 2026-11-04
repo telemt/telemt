@@ -127,20 +127,23 @@ fn runtime_config_with_carriers_and_deadlines(
 ) -> ProxyConfig {
     let profile = Arc::new(WebRuntimeProfile {
         host: "proxy.example.com".to_string(),
-        public_addr: "203.0.113.10:443".parse().unwrap(),
-        user: "alice".to_string(),
-        secret_mode: WebSecretMode::Plain,
-        carrier,
-        carrier_negotiation_enabled,
-        carrier_learning,
-        carriers: Arc::clone(&carriers),
-        carrier_negotiation_deadlines_secs,
         capability,
-        credential_id: [0; 16],
-        key_fingerprint: "0000000000000000".to_string(),
-        max_sessions: 4,
-        max_streams: 16,
-        max_streams_per_session: 4,
+        shared: Arc::new(crate::config::WebRuntimeProfileShared {
+            derivation_context: [0; 32],
+            public_addr: "203.0.113.10:443".parse().unwrap(),
+            user: "alice".to_string(),
+            secret_mode: WebSecretMode::Plain,
+            carrier,
+            carrier_negotiation_enabled,
+            carrier_learning,
+            carriers: Arc::clone(&carriers),
+            carrier_negotiation_deadlines_secs,
+            credential_id: [0; 16],
+            key_fingerprint: "0000000000000000".to_string(),
+            max_sessions: 4,
+            max_streams: 16,
+            max_streams_per_session: 4,
+        }),
     });
     let mut assets = BTreeMap::new();
     assets.insert(
@@ -156,10 +159,11 @@ fn runtime_config_with_carriers_and_deadlines(
         index: "index.html".to_string(),
     });
     let vhost = Arc::new(WebRuntimeVhost {
+        wildcard: None,
         host: "proxy.example.com".to_string(),
         base: base.to_string(),
         decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
-        decoy: WebRuntimeDecoy::StaticDirectory(Arc::clone(&site)),
+        decoy: Arc::new(WebRuntimeDecoy::StaticDirectory(Arc::clone(&site))),
         decoy_header_secs: 1,
         profiles: vec![Arc::clone(&profile)],
         capabilities: vec![capability].into_boxed_slice(),
@@ -169,10 +173,11 @@ fn runtime_config_with_carriers_and_deadlines(
     vhosts.insert(
         "other.example.com".to_string(),
         Arc::new(WebRuntimeVhost {
+            wildcard: None,
             host: "other.example.com".to_string(),
             base: "/".to_string(),
             decoy_fasttrack_mode: WebDecoyFastTrackMode::Off,
-            decoy: WebRuntimeDecoy::StaticDirectory(site),
+            decoy: Arc::new(WebRuntimeDecoy::StaticDirectory(site)),
             decoy_header_secs: 1,
             profiles: Vec::new(),
             capabilities: Vec::new().into_boxed_slice(),
@@ -191,6 +196,9 @@ fn runtime_config_with_carriers_and_deadlines(
     config.web.limits.max_bootstraps_per_ip = 1;
     config.web.timeouts.shutdown_secs = 1;
     config.web.runtime = Some(Arc::new(WebRuntimeConfig {
+        snapshot_id: 0,
+        wildcards: Default::default(),
+        catch_all: None,
         vhosts,
         profiles: vec![profile],
         capabilities: vec![capability].into_boxed_slice(),
@@ -547,3 +555,11 @@ async fn https_lanes_is_advertised_and_requires_canonical_lane_headers() {
     generation.stop_sessions().await;
     generation.stop_background_tasks().await;
 }
+
+// Exercise loaded host groups through real HTTP and process-owned admission.
+#[path = "host_list_tests.rs"]
+mod host_list_tests;
+
+// Manual matched measurements keep timing assertions out of deterministic regressions.
+#[path = "host_list_benchmarks.rs"]
+mod host_list_benchmarks;

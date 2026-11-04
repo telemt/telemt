@@ -8,7 +8,9 @@ use std::time::Instant;
 use dashmap::DashMap;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-use crate::proxy::direct_buffer_budget::{DirectBufferBudget, fallback_direct_buffer_hard_limit};
+use crate::proxy::direct_buffer_budget::DirectBufferBudget;
+#[cfg(test)]
+use crate::proxy::direct_buffer_budget::fallback_direct_buffer_hard_limit;
 use crate::proxy::handshake::{AuthProbeSaturationState, AuthProbeState};
 use crate::proxy::middle_relay::{DesyncDedupRotationState, RelayIdleCandidateRegistry};
 use crate::proxy::pending_handshake::PendingHandshakeLimiter;
@@ -105,6 +107,8 @@ pub(crate) struct ProxySharedState {
 }
 
 impl ProxySharedState {
+    /// Creates isolated process authorities for tests.
+    #[cfg(test)]
     pub(crate) fn new() -> Arc<Self> {
         Self::new_with_direct_buffer_budget(DirectBufferBudget::new(
             fallback_direct_buffer_hard_limit(),
@@ -112,6 +116,7 @@ impl ProxySharedState {
     }
 
     /// Creates process state with the startup-resolved Direct buffer envelope.
+    #[cfg(test)]
     pub(crate) fn new_with_direct_buffer_budget(
         direct_buffer_budget: Arc<DirectBufferBudget>,
     ) -> Arc<Self> {
@@ -122,6 +127,7 @@ impl ProxySharedState {
     }
 
     /// Creates generation state around one process-owned user authority.
+    #[cfg(test)]
     pub(crate) fn new_with_direct_buffer_budget_and_user_admission(
         direct_buffer_budget: Arc<DirectBufferBudget>,
         user_admission: Arc<UserAdmissionAuthority>,
@@ -212,6 +218,7 @@ impl ProxySharedState {
     }
 
     /// Reconciles the complete user authentication policy from configuration.
+    #[cfg(test)]
     pub(crate) fn apply_user_config(
         &self,
         users: &HashMap<String, String>,
@@ -247,7 +254,24 @@ impl ProxySharedState {
             .apply_config_from_source(source_generation, users, user_enabled)
     }
 
+    /// Serializes cold quota transitions without entering the relay hot path.
+    pub(crate) fn quota_mutation_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.user_admission.quota_mutation_gate()
+    }
+
+    /// Reconciles the active source calendar under the process quota gate.
+    pub(crate) fn publish_quota_config(
+        &self,
+        source: u64,
+        config: &Arc<crate::config::ProxyConfig>,
+        accepted_after_mutation: bool,
+    ) {
+        self.user_admission
+            .publish_quota_config(source, config, accepted_after_mutation);
+    }
+
     /// Applies one persisted user mutation before asynchronous config reload.
+    #[cfg(test)]
     pub(crate) fn stage_user(
         &self,
         user: &str,
@@ -292,6 +316,8 @@ impl ProxySharedState {
         self.user_admission.claim_authenticated(user, credential_id)
     }
 
+    /// Registers a test session without an authenticated credential.
+    #[cfg(test)]
     pub(crate) fn register_user_session(
         self: &Arc<Self>,
         user: &str,
@@ -312,6 +338,8 @@ impl ProxySharedState {
         Some(registration)
     }
 
+    /// Cancels all owners of a user in lifecycle tests.
+    #[cfg(test)]
     pub(crate) fn cancel_user_sessions(&self, user: &str) -> usize {
         self.user_admission.cancel_user_owners(user)
     }
