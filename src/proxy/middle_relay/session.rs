@@ -239,6 +239,8 @@ where
     };
 
     let mut main_result: Result<()> = Ok(());
+    let mut c2me_completed = None;
+    let mut writer_completed = None;
     let mut client_closed = false;
     let mut frame_counter: u64 = 0;
     let mut route_watch_open = true;
@@ -303,6 +305,15 @@ where
         }
 
         tokio::select! {
+            // A terminal child result must wake an otherwise idle client relay.
+            joined = &mut child_tasks.c2me_sender => {
+                c2me_completed = Some(joined);
+                break;
+            }
+            joined = &mut child_tasks.me_writer => {
+                writer_completed = Some(joined);
+                break;
+            }
             _ = session_cancel.cancelled() => {
                 warn!(
                     user = %user,
@@ -464,33 +475,9 @@ where
     }
 
     drop(c2me_tx);
-    let c2me_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.c2me_sender).await {
-        Ok(joined) => {
-            joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME sender join error: {e}"))))
-        }
-        Err(_) => {
-            stats.increment_me_child_join_timeout_total();
-            stats.increment_me_child_abort_total();
-            child_tasks.c2me_sender.abort();
-            Err(ProxyError::Proxy("ME sender join timeout".into()))
-        }
-    };
-
-    flow_cancel.cancel();
-    if let Some(stop_tx) = child_tasks.stop_tx.take() {
-        let _ = stop_tx.send(());
-    }
-    let mut writer_result = match timeout(ME_CHILD_JOIN_TIMEOUT, &mut child_tasks.me_writer).await {
-        Ok(joined) => {
-            joined.unwrap_or_else(|e| Err(ProxyError::Proxy(format!("ME writer join error: {e}"))))
-        }
-        Err(_) => {
-            stats.increment_me_child_join_timeout_total();
-            stats.increment_me_child_abort_total();
-            child_tasks.me_writer.abort();
-            Err(ProxyError::Proxy("ME writer join timeout".into()))
-        }
-    };
+    let (c2me_result, mut writer_result) = child_tasks
+        .finish(c2me_completed, writer_completed, stats.as_ref())
+        .await;
 
     // A client-initiated close can unregister the ME channel before its writer exits.
     if client_closed && matches!(writer_result, Err(ProxyError::MiddleConnectionLost)) {

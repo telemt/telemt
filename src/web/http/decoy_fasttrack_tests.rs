@@ -67,10 +67,10 @@ async fn observe_http_origin(
     let mut config = runtime_config_with_fasttrack(capability, WebCarrier::Https, mode);
     let runtime_config = Arc::get_mut(config.web.runtime.as_mut().unwrap()).unwrap();
     let vhost = Arc::get_mut(runtime_config.vhosts.get_mut("proxy.example.com").unwrap()).unwrap();
-    vhost.decoy = WebRuntimeDecoy::HttpUpstream {
+    vhost.decoy = Arc::new(WebRuntimeDecoy::HttpUpstream {
         addr: origin.local_addr().unwrap(),
         authority: "decoy.example".to_string(),
-    };
+    });
     let generation = test_runtime_generation(1, config);
     let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&generation)));
     let runtime = WebProcessRuntime::start(active_runtime);

@@ -6,6 +6,7 @@ pub(super) async fn handle_up(
     request: Request<RequestBody>,
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
+    host: &str,
     token_hash: crate::web::manager::TokenHash,
 ) -> HttpResponse {
     if !matches!(*request.method(), Method::POST | Method::PUT) || !binary_content_type(&request) {
@@ -15,7 +16,7 @@ pub(super) async fn handle_up(
     else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
-    let Ok(session) = runtime.get_session(token_hash, &vhost.host) else {
+    let Ok(session) = runtime.get_session(token_hash, host) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
     if session.carrier().uses_websocket() {

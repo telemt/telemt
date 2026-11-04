@@ -36,7 +36,9 @@ fn known_config_keys_for_suggestion() -> Vec<&'static str> {
         CONNTRACK_CONTROL_CONFIG_KEYS,
         LISTENER_CONFIG_KEYS,
         WEB_CONFIG_KEYS,
+        WEB_RETRY_JITTER_KEYS,
         WEB_LIMITS_CONFIG_KEYS,
+        WEB_WILDCARD_LIMITS_CONFIG_KEYS,
         WEB_DEBUG_CONFIG_KEYS,
         WEB_TIMEOUTS_CONFIG_KEYS,
         WEB_VHOST_CONFIG_KEYS,
@@ -239,8 +241,22 @@ pub(super) fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<Unkn
         parsed_toml,
         &mut unknown,
         &known_for_suggestion,
+        &["web", "retry_jitter"],
+        WEB_RETRY_JITTER_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
         &["web", "limits"],
         WEB_LIMITS_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["web", "limits", "wildcard"],
+        WEB_WILDCARD_LIMITS_CONFIG_KEYS,
     );
     check_known_table(
         parsed_toml,

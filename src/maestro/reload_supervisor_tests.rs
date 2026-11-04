@@ -6,6 +6,10 @@ use crate::stats::QuotaStore;
 use tokio::sync::Notify;
 use tracing_subscriber::{EnvFilter, Registry};
 
+// Shared-authority regressions exercise admission through actual runtime activation.
+#[path = "reload_supervisor_admission_tests.rs"]
+mod admission_tests;
+
 struct ReloadFixture {
     supervisor: Arc<ReloadSupervisor>,
     control: ReloadControl,

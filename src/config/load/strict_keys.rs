@@ -260,7 +260,11 @@ const LISTENER_CONFIG_KEYS: &[&str] = &[
     "web_trusted_proxy_cidrs",
 ];
 
+const WEB_RETRY_JITTER_KEYS: &[&str] = &["enabled", "min_ms", "max_ms", "distribution", "peak_ms"];
+
 const WEB_CONFIG_KEYS: &[&str] = &[
+    "retry_jitter",
+    "allow_wildcard_hosts",
     "enabled",
     "carrier",
     "carrier_method",
@@ -277,6 +281,7 @@ const WEB_CONFIG_KEYS: &[&str] = &[
 ];
 
 const WEB_LIMITS_CONFIG_KEYS: &[&str] = &[
+    "wildcard",
     "max_header_bytes",
     "max_body_bytes",
     "max_frame_payload_bytes",
@@ -368,7 +373,14 @@ const WEB_TIMEOUTS_CONFIG_KEYS: &[&str] = &[
     "decoy_resolve_secs",
 ];
 
-const WEB_VHOST_CONFIG_KEYS: &[&str] = &["host", "base_path", "public_addr", "decoy", "profiles"];
+const WEB_VHOST_CONFIG_KEYS: &[&str] = &[
+    "host",
+    "hosts",
+    "base_path",
+    "public_addr",
+    "decoy",
+    "profiles",
+];
 const WEB_DECOY_CONFIG_KEYS: &[&str] = &["mode", "upstream", "directory", "index", "resolve"];
 const WEB_PROFILE_CONFIG_KEYS: &[&str] = &[
     "user",
@@ -446,6 +458,7 @@ const ACCESS_CONFIG_KEYS: &[&str] = &[
     "user_max_tcp_conns_global_each",
     "user_expirations",
     "user_data_quota",
+    "user_quota_periods",
     "user_rate_limits",
     "cidr_rate_limits",
     "user_max_unique_ips",
@@ -528,3 +541,12 @@ pub(super) fn handle_unknown_config_keys(parsed_toml: &toml::Value) -> Result<()
 
     Ok(())
 }
+
+const WEB_WILDCARD_LIMITS_CONFIG_KEYS: &[&str] = &[
+    "max_rules",
+    "max_profiles_per_request",
+    "cache_hosts",
+    "cache_bytes",
+    "cold_hmac_per_minute",
+    "cold_hmac_burst",
+];

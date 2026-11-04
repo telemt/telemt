@@ -1,6 +1,7 @@
 use super::*;
 
 /// Handles a bad client with shared pre-auth fallback admission state.
+#[cfg(test)]
 pub(crate) async fn handle_bad_client_with_shared<R, W>(
     reader: R,
     writer: W,

@@ -38,9 +38,9 @@ mod validate_server;
 mod validate_web;
 mod validation;
 
-use self::includes::{
-    hash_rendered_snapshot, normalize_config_path, preprocess_includes, read_config_source,
-};
+#[cfg(test)]
+use self::includes::normalize_config_path;
+use self::includes::{hash_rendered_snapshot, preprocess_includes, read_config_source};
 use self::normalize::{
     is_valid_ad_tag, is_valid_tls_domain_name, normalize_domain_to_ascii,
     normalize_exclusive_mask_target, normalize_mask_host_to_ascii, parse_exclusive_mask_target,
@@ -156,6 +156,10 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub default_dc: Option<u8>,
 
+    /// Monotonic start of source acquisition, used only for cold quota policy fencing.
+    #[serde(skip)]
+    pub(crate) quota_source_read_at: Option<std::time::Instant>,
+
     /// Precomputed authentication snapshot for handshake hot paths.
     #[serde(skip)]
     pub(crate) runtime_user_auth: Option<Arc<UserAuthSnapshot>>,
@@ -163,22 +167,28 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     /// Loads runtime configuration from a TOML file.
+    #[cfg(test)]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::load_with_metadata(path).map(|loaded| loaded.config)
     }
 
     /// Loads typed configuration together with its source and rendered metadata.
+    #[cfg(test)]
     pub(crate) fn load_with_metadata<P: AsRef<Path>>(path: P) -> Result<LoadedConfig> {
         Self::load_with_source_overrides(path, &BTreeMap::new())
     }
 
     /// Loads a typed snapshot while replacing selected captured source documents.
+    #[cfg(test)]
     pub(crate) fn load_with_source_overrides<P: AsRef<Path>>(
         path: P,
         source_overrides: &BTreeMap<PathBuf, String>,
     ) -> Result<LoadedConfig> {
+        let read_at = std::time::Instant::now();
         let graph = Self::read_source_graph_with_overrides(path, source_overrides)?;
-        Self::load_source_graph(graph)
+        let mut loaded = Self::load_source_graph(graph)?;
+        loaded.config.quota_source_read_at = Some(read_at);
+        Ok(loaded)
     }
 
     /// Captures the raw include graph without requiring typed config validity.
@@ -240,6 +250,7 @@ impl ProxyConfig {
         })
     }
 
+    #[cfg(test)]
     fn load_source_graph(graph: ConfigSourceGraph) -> Result<LoadedConfig> {
         pipeline::load_source_graph(graph)
     }
@@ -259,7 +270,11 @@ impl ProxyConfig {
         path: P,
         overrides: &BTreeMap<PathBuf, String>,
     ) -> Result<ParsedConfigSource> {
-        pipeline::parse_source_graph(Self::read_source_graph_with_overrides(path, overrides)?)
+        let read_at = std::time::Instant::now();
+        let mut parsed =
+            pipeline::parse_source_graph(Self::read_source_graph_with_overrides(path, overrides)?)?;
+        parsed.config.quota_source_read_at = Some(read_at);
+        Ok(parsed)
     }
 
     /// Loads and prepares a complete runtime candidate without blocking async workers.
@@ -318,6 +333,7 @@ impl ProxyConfig {
 
     /// Validates cross-field configuration invariants after deserialization.
     pub fn validate(&self) -> Result<()> {
+        self.access.validate_quota_periods()?;
         if self.access.users.is_empty() {
             return Err(ProxyError::Config("No users configured".to_string()));
         }

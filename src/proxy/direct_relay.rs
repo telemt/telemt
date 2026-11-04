@@ -43,9 +43,9 @@ mod relay;
 // Telegram DC resolution and upstream handshake.
 mod routing;
 
-pub(crate) use relay::{
-    handle_via_direct, handle_via_direct_with_shared, handle_via_direct_with_shared_and_conntrack,
-};
+#[cfg(test)]
+pub(crate) use relay::handle_via_direct;
+pub(crate) use relay::handle_via_direct_with_shared_and_conntrack;
 use routing::*;
 const UNKNOWN_DC_LOG_DISTINCT_LIMIT: usize = 1024;
 static LOGGED_UNKNOWN_DCS: OnceLock<Mutex<HashSet<i16>>> = OnceLock::new();
