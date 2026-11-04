@@ -6,11 +6,11 @@ use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::config::ProxyConfig;
+use crate::config::{ConntrackBackend, ProxyConfig};
 use crate::maestro::control_plane::ProcessControlPlane;
 use crate::stats::Stats;
 
-use super::command::{CommandError, FirewallCommandRunner, SystemCommandRunner};
+use super::command::{CommandError, CommandSpec, FirewallCommandRunner, SystemCommandRunner};
 use super::model::{AppliedPlan, AppliedState, DesiredPolicy, DesiredState};
 use super::transaction::{InterruptibleRunner, reconcile_once, recover_to_empty};
 
@@ -27,6 +27,44 @@ const RETRY_DELAYS: [Duration; 6] = [
 ];
 
 /// Reports whether a generation's desired firewall policy was confirmed.
+struct BackendScopedRunner<'a, R> {
+    inner: &'a R,
+    backend: Option<ConntrackBackend>,
+}
+
+impl<R> BackendScopedRunner<'_, R> {
+    fn permits(&self, binary: &str) -> bool {
+        match self.backend {
+            Some(ConntrackBackend::Auto) => true,
+            Some(ConntrackBackend::Nftables) => binary == "nft",
+            Some(ConntrackBackend::Iptables) => matches!(
+                binary,
+                "iptables" | "ip6tables" | "iptables-restore" | "ip6tables-restore"
+            ),
+            None => false,
+        }
+    }
+}
+
+impl<R: FirewallCommandRunner> FirewallCommandRunner for BackendScopedRunner<'_, R> {
+    fn available(&self, binary: &str) -> bool {
+        self.permits(binary) && self.inner.available(binary)
+    }
+
+    fn has_cap_net_admin(&self) -> bool {
+        self.inner.has_cap_net_admin()
+    }
+
+    async fn run(&self, spec: CommandSpec) -> Result<(), CommandError> {
+        if !self.permits(spec.binary) {
+            return Err(CommandError::failed(
+                "firewall command is outside the managed conntrack backend scope",
+            ));
+        }
+        self.inner.run(spec).await
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReconcileOutcome {
     /// The applied policy matches the accepted generation's desired policy.
@@ -204,6 +242,7 @@ pub(super) struct FirewallReconciler<R> {
     completion: CompletionGuard,
     cleanup_succeeded: Arc<AtomicBool>,
     applied: AppliedState,
+    recovery_backend: Option<ConntrackBackend>,
     last_generation: u64,
     last_policy: Option<DesiredPolicy>,
     last_stats: Option<Arc<Stats>>,
@@ -236,6 +275,7 @@ where
             },
             cleanup_succeeded,
             applied: AppliedState::Unknown,
+            recovery_backend: None,
             last_generation: 0,
             last_policy: None,
             last_stats: None,
@@ -265,8 +305,29 @@ where
             }
 
             let desired = current.as_ref().expect("desired state is present").clone();
+            if let DesiredPolicy::Rules {
+                configured_backend, ..
+            } = &desired.policy {
+                if self.recovery_backend.is_none() {
+                    // The first managed policy must recover stale rules, even after an empty startup.
+                    self.applied = AppliedState::Unknown;
+                }
+                self.recovery_backend = Some(match self.recovery_backend {
+                    None => *configured_backend,
+                    Some(previous) if previous == *configured_backend => previous,
+                    // A live migration may leave owned objects in either backend.
+                    Some(_) => ConntrackBackend::Auto,
+                });
+            } else if self.recovery_backend.is_none() {
+                // No firewall authority has been exercised by this process.
+                self.applied = AppliedState::Known(AppliedPlan::Empty);
+            }
+            let scoped = BackendScopedRunner {
+                inner: &self.runner,
+                backend: self.recovery_backend,
+            };
             let interruptible =
-                InterruptibleRunner::new(&self.runner, &self.terminal, &process_cancellation);
+                InterruptibleRunner::new(&scoped, &self.terminal, &process_cancellation);
             let result =
                 reconcile_once(&interruptible, &interruptible, &mut self.applied, &desired).await;
             match result {
@@ -351,8 +412,12 @@ where
         if let Some(stats) = &self.last_stats {
             stats.set_conntrack_rule_apply_ok(false);
         }
+        let scoped = BackendScopedRunner {
+            inner: &self.runner,
+            backend: self.recovery_backend,
+        };
         if let Err(error) =
-            tokio::time::timeout(SHUTDOWN_CLEANUP_TIMEOUT, recover_to_empty(&self.runner))
+            tokio::time::timeout(SHUTDOWN_CLEANUP_TIMEOUT, recover_to_empty(&scoped))
                 .await
                 .unwrap_or_else(|_| {
                     Err(CommandError::failed("firewall shutdown cleanup timed out"))
