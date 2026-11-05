@@ -69,7 +69,7 @@ fn parse_patch(
         ));
     }
 
-    // 2. convert + reject access / unknown sections / forbidden server fields
+    // 2. Reject access, unknown sections and forbidden partial-section fields.
     let mut patch_toml = json_to_toml(patch_json)
         .map_err(|e| ApiFailure::bad_request(format!("invalid patch: {}", e)))?;
     let patch_table = patch_toml
@@ -92,6 +92,8 @@ fn parse_patch(
         }
         if key == "server" {
             validate_server_patch(value)?;
+        } else if key == "network" {
+            validate_network_patch(&patch_json["network"])?;
         }
     }
     let touched: Vec<String> = patch_table
@@ -130,6 +132,8 @@ fn parse_patch(
         .map(|section| {
             if section == "server" {
                 "server.listeners"
+            } else if section == "network" {
+                "network.dns_overrides"
             } else {
                 section.as_str()
             }
@@ -147,6 +151,9 @@ fn parse_patch(
         if *section == "server" {
             let rendered = render_server_listeners(&requested_cfg)?;
             owner_contents = upsert_toml_table(&owner_contents, "server.listeners", &rendered);
+        } else if *section == "network" {
+            owner_contents =
+                upsert_dns_overrides(&owner_contents, &requested_cfg.network.dns_overrides)?;
         } else {
             let rendered = render_top_level_section(&requested_cfg, section)?;
             owner_contents = upsert_toml_table(&owner_contents, section, &rendered);

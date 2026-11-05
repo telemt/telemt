@@ -73,7 +73,7 @@ fn deep_merge_overlays_tables_and_replaces_scalars() {
 
 use std::path::PathBuf;
 
-fn temp_config(body: &str) -> (PathBuf, tempfile::TempDir) {
+pub(super) fn temp_config(body: &str) -> (PathBuf, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     std::fs::write(&path, body).unwrap();
@@ -228,7 +228,7 @@ async fn invalid_web_patch_does_not_modify_the_source() {
 
 #[tokio::test]
 async fn read_managed_config_returns_only_editable_sections() {
-    // Full server (api/port) and network must not leak. Listeners-only server
+    // Server identity and network siblings must not leak. Listeners-only server
     // is returned via the nested allowlist (covered in a dedicated test).
     let (path, _d) = temp_config(concat!(
         "[censorship]\ntls_domain = \"a\"\n",
@@ -243,7 +243,10 @@ async fn read_managed_config_returns_only_editable_sections() {
     assert!(server.contains_key("listeners"));
     assert!(!server.contains_key("api"));
     assert!(!server.contains_key("port"));
-    assert!(!table.contains_key("network"));
+    assert_eq!(
+        serde_json::to_value(&table["network"]).unwrap(),
+        serde_json::json!({"dns_overrides": []})
+    );
     assert!(!table.contains_key("access"));
 }
 

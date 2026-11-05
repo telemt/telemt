@@ -5,7 +5,9 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::config_store::{EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS};
+use super::super::config_store::{
+    EDITABLE_NETWORK_FIELDS, EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS,
+};
 use super::super::model::ApiFailure;
 use super::SCHEMA_VERSION;
 
@@ -199,6 +201,9 @@ fn default_at<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
 fn field_api(path: &str) -> FieldApi {
     let top = path.split(['.', '[']).next().unwrap_or("");
     let config_editable = EDITABLE_SECTIONS.contains(&top)
+        || path
+            .strip_prefix("network.")
+            .is_some_and(|field| EDITABLE_NETWORK_FIELDS.contains(&field))
         || (top == "server"
             && EDITABLE_SERVER_FIELDS.iter().any(|field| {
                 let prefix = format!("server.{field}");
@@ -248,7 +253,7 @@ fn field_api(path: &str) -> FieldApi {
     } else {
         api.non_editable_reason = Some(match top {
             "access" => "access_policy_is_file_only",
-            "network" => "network_section_is_file_only",
+            "network" => "network_field_not_in_config_api_allowlist",
             "server" => "server_field_not_in_config_api_allowlist",
             "logging" => "logging_section_is_file_only",
             "show_link" => "use_general_links_show",

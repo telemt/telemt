@@ -138,7 +138,28 @@ fn api_ownership_aliases_and_null_contracts_match_existing_surfaces() {
             .api
             .config_write
     );
-    assert!(!field(schema, "network.dns_overrides").api.config_read);
+    assert!(field(schema, "network.dns_overrides").api.config_read);
+    assert!(field(schema, "network.dns_overrides").api.config_write);
+    assert_eq!(
+        field(schema, "network.dns_overrides")
+            .api
+            .non_editable_reason,
+        None
+    );
+    for path in [
+        "network",
+        "network.ipv4",
+        "network.ipv6",
+        "network.prefer",
+        "network.stun_servers",
+    ] {
+        assert!(!field(schema, path).api.config_read);
+        assert!(!field(schema, path).api.config_write);
+        assert_eq!(
+            field(schema, path).api.non_editable_reason,
+            Some("network_field_not_in_config_api_allowlist")
+        );
+    }
     assert_eq!(
         field(schema, "access.user_rate_limits.{username}.up_bps")
             .api

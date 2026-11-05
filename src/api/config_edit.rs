@@ -1,15 +1,16 @@
 //! Config-editing API: read managed sections and apply sparse field patches.
 //! `access.*` is intentionally not editable here (owned by the users API).
 //! `[server]` is only partially editable — see [`EDITABLE_SERVER_FIELDS`].
+//! `[network]` exposes only [`EDITABLE_NETWORK_FIELDS`].
 
 use serde_json::Value as Json;
 use toml::Value as Toml;
 
 use super::ApiShared;
 use super::config_store::{
-    EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS, compute_snapshot_revision, is_editable_section,
-    load_config_snapshot, render_server_listeners, render_top_level_section,
-    resolve_single_source_owner, upsert_toml_table,
+    EDITABLE_NETWORK_FIELDS, EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS, compute_snapshot_revision,
+    is_editable_section, load_config_snapshot, render_server_listeners, render_top_level_section,
+    resolve_single_source_owner, upsert_dns_overrides, upsert_toml_table,
 };
 #[cfg(test)]
 use super::config_store::{write_atomic, write_atomic_if_unchanged};
@@ -208,8 +209,7 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
         .unwrap_or_else(toml::value::Table::new);
     // Whitelist: return ONLY the editable sections. A blacklist (just removing
     // `access`) would leak `server.api` (auth_header) and `network` (per-node
-    // addresses). Mirror the PATCH contract, including the nested server
-    // field-level allowlist.
+    // addresses). Mirror the PATCH contract, including both nested allowlists.
     let mut table = toml::value::Table::new();
     for section in EDITABLE_SECTIONS {
         if let Some(value) = parsed_table.get(*section) {
@@ -220,6 +220,14 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
         if let Some(filtered) = filter_server_for_read(server) {
             table.insert("server".to_string(), filtered);
         }
+    }
+    if let Some(network) = parsed_table.get("network").and_then(Toml::as_table) {
+        let filtered = network
+            .iter()
+            .filter(|(key, _)| EDITABLE_NETWORK_FIELDS.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        table.insert("network".to_owned(), Toml::Table(filtered));
     }
 
     Ok((Toml::Table(table), revision))
@@ -279,6 +287,36 @@ fn validate_server_patch(server: &Toml) -> Result<(), ApiFailure> {
                 ),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_network_patch(network: &Json) -> Result<(), ApiFailure> {
+    let Some(table) = network.as_object() else {
+        return Err(ApiFailure::new(
+            hyper::StatusCode::BAD_REQUEST,
+            "section_not_editable",
+            "network patch must be a JSON object",
+        ));
+    };
+    // Check the original keys so even a forbidden null member cannot bypass
+    // the network allowlist during JSON-to-TOML null removal.
+    for key in table.keys() {
+        if !EDITABLE_NETWORK_FIELDS.contains(&key.as_str()) {
+            return Err(ApiFailure::new(
+                hyper::StatusCode::BAD_REQUEST,
+                "field_not_editable",
+                format!(
+                    "network.{key} is not editable via the config API; allowed network fields: {}",
+                    EDITABLE_NETWORK_FIELDS.join(", ")
+                ),
+            ));
+        }
+    }
+    if table.values().all(Json::is_null) {
+        return Err(ApiFailure::bad_request(
+            "empty network patch: provide dns_overrides (use [] to clear)",
+        ));
     }
     Ok(())
 }
@@ -363,3 +401,6 @@ mod quota_period_tests;
 
 #[cfg(test)]
 mod preflight_tests;
+
+#[cfg(test)]
+mod dns_overrides_tests;

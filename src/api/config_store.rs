@@ -9,6 +9,7 @@ use crate::config::{ConfigSourceGraph, LoadedConfig, ParsedConfigSource, ProxyCo
 use super::model::ApiFailure;
 
 // Source-preserving TOML rendering and atomic persistence helpers.
+mod dns_overrides;
 mod persistence;
 // Compare-and-replace file persistence and metadata preservation.
 mod atomic;
@@ -17,6 +18,7 @@ pub(in crate::api) use atomic::write_atomic;
 #[cfg(test)]
 pub(in crate::api) use atomic::write_atomic_if_unchanged;
 pub(in crate::api) use atomic::{CommitCheck, write_atomic_with_runtime_check};
+pub(in crate::api) use dns_overrides::upsert_dns_overrides;
 #[cfg(test)]
 pub(in crate::api) use persistence::save_access_sections_to_disk;
 #[cfg(test)]
@@ -156,6 +158,7 @@ pub(super) fn resolve_single_source_owner(
 
     for target in targets {
         let mut owners = BTreeSet::new();
+        let mut parent_owners = BTreeSet::new();
         for (path, content) in &loaded.source_contents {
             let parsed: toml::Value = toml::from_str(content).map_err(|error| {
                 ApiFailure::new(
@@ -170,6 +173,14 @@ pub(super) fn resolve_single_source_owner(
             if toml_path_exists(&parsed, target) {
                 owners.insert(path.clone());
             }
+            if *target == "network.dns_overrides" && toml_path_exists(&parsed, "network") {
+                parent_owners.insert(path.clone());
+            }
+        }
+        // A new DNS key belongs to the existing network table, which may live
+        // in an include. Existing leaf ownership takes precedence over siblings.
+        if owners.is_empty() && *target == "network.dns_overrides" {
+            owners = parent_owners;
         }
         match owners.len() {
             0 => {
@@ -306,7 +317,6 @@ pub(super) async fn save_config_to_disk(
 /// identity invariant at the Telemt layer too):
 ///
 ///   - `access`    : owned by the users API.
-///   - `network`   : carries per-node identity (`ipv4`/`ipv6`).
 ///   - `show_link` : legacy top-level scalar/array (not a `[table]`), superseded
 ///                   by the editable `general.links.show` sub-table. The
 ///                   section-upsert machinery here only handles `[table]` /
@@ -316,10 +326,8 @@ pub(super) async fn save_config_to_disk(
 /// `server` is partially editable: only the nested fields listed in
 /// [`EDITABLE_SERVER_FIELDS`] (currently `listeners`) may appear in GET/PATCH.
 /// Secrets and bind identity (`api`/`admin_api`, `port`, unix sockets, …) stay
-/// blocked. See also the field-level allowlist note below for `network.*`.
-///
-/// A future field-level allowlist can re-admit specific safe fields
-/// (e.g. `network.dns_overrides`) without opening the whole section.
+/// blocked. `network` is also partial: only [`EDITABLE_NETWORK_FIELDS`] are
+/// exposed, retaining the boundary around per-node identity and routing policy.
 pub(super) const EDITABLE_SECTIONS: &[&str] = &[
     "general",
     "timeouts",
@@ -335,12 +343,15 @@ pub(super) const EDITABLE_SECTIONS: &[&str] = &[
 /// merge semantics for non-table values.
 pub(super) const EDITABLE_SERVER_FIELDS: &[&str] = &["listeners"];
 
+/// Only the generation resolver's overrides may be read/patched under `network`.
+pub(super) const EDITABLE_NETWORK_FIELDS: &[&str] = &["dns_overrides"];
+
 /// Whether `key` is an allowed top-level PATCH/GET section name.
 ///
-/// Fully editable sections from [`EDITABLE_SECTIONS`], plus `server` which is
-/// further restricted by [`EDITABLE_SERVER_FIELDS`].
+/// Fully editable sections plus `server` and `network`, each further restricted
+/// by its nested field allowlist.
 pub(super) fn is_editable_section(key: &str) -> bool {
-    EDITABLE_SECTIONS.contains(&key) || key == "server"
+    EDITABLE_SECTIONS.contains(&key) || matches!(key, "server" | "network")
 }
 
 #[cfg(test)]
