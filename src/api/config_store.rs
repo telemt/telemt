@@ -10,6 +10,7 @@ use super::model::ApiFailure;
 
 // Source-preserving TOML rendering and atomic persistence helpers.
 mod dns_overrides;
+mod field_edits;
 mod persistence;
 // Compare-and-replace file persistence and metadata preservation.
 mod atomic;
@@ -19,13 +20,14 @@ pub(in crate::api) use atomic::write_atomic;
 pub(in crate::api) use atomic::write_atomic_if_unchanged;
 pub(in crate::api) use atomic::{CommitCheck, write_atomic_with_runtime_check};
 pub(in crate::api) use dns_overrides::upsert_dns_overrides;
+pub(in crate::api) use field_edits::{FieldEdit, prepare_field_edits};
 #[cfg(test)]
 pub(in crate::api) use persistence::save_access_sections_to_disk;
 #[cfg(test)]
 use persistence::{find_toml_table_bounds, render_access_section, save_sections_to_disk};
 pub(in crate::api) use persistence::{
-    render_server_listeners, render_top_level_section, save_access_sections_to_disk_if_revision,
-    upsert_toml_table,
+    render_server_listeners, render_top_level_section, save_access_sections_and_fields_if_revision,
+    save_access_sections_to_disk_if_revision, upsert_toml_table,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

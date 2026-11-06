@@ -40,6 +40,8 @@
   {"id": "config_state","method": "GET","path": "/v1/config/state","gate": "always","success": [200]},
   {"id": "config_validate","method": "POST","path": "/v1/config/validate","gate": "always","success": [200],"body": "PatchConfigRequest","if_match": true,"if_runtime_match": true,"read_only_operation": true},
   {"id": "config_patch","if_runtime_match": true,"method": "PATCH","path": "/v1/config","gate": "always","success": [200,202],"body": "PatchConfigRequest","if_match": true},
+  {"id": "access_policy_get","method": "GET","path": "/v1/access/policy","gate": "always","success": [200]},
+  {"id": "access_policy_patch","method": "PATCH","path": "/v1/access/policy","gate": "always","success": [200],"body": "AccessPolicyPatch","if_match": true,"if_runtime_match": true},
   {"id": "reload","method": "POST","path": "/v1/system/reload","gate": "always","success": [202],"body": "ReloadRequest","optional_body": true,"if_match": true},
   {"id": "reload_status","method": "GET","path": "/v1/system/reload/{id}","gate": "always","success": [200]},
   {"id": "users_list","method": "GET","path": "/v1/users","gate": "always","success": [200],"aliases": ["/v1/stats/users"],"credential_bearing": true},

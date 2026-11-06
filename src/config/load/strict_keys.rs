@@ -452,6 +452,7 @@ const TLS_FETCH_CONFIG_KEYS: &[&str] = &[
 
 const ACCESS_CONFIG_KEYS: &[&str] = &[
     "users",
+    "user_source_deny",
     "user_enabled",
     "user_ad_tags",
     "user_max_tcp_conns",

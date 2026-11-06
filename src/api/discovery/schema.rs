@@ -211,6 +211,13 @@ fn field_api(path: &str) -> FieldApi {
                     || path.starts_with(&format!("{prefix}["))
                     || path.starts_with(&format!("{prefix}."))
             }));
+    let policy_field = path.strip_prefix("access.").and_then(|path| {
+        let field = path.split('.').next()?;
+        crate::api::access_policy::FIELDS
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == field)
+    });
     let user_field = path
         .strip_prefix("access.")
         .and_then(|path| path.split('.').next())
@@ -223,6 +230,7 @@ fn field_api(path: &str) -> FieldApi {
             "user_data_quota" => Some("data_quota_bytes"),
             "user_quota_periods" => Some("quota_period"),
             "user_max_unique_ips" => Some("max_unique_ips"),
+            "user_source_deny" => Some("source_deny"),
             "user_rate_limits" if path.ends_with(".up_bps") => Some("rate_limit_up_bps"),
             "user_rate_limits" if path.ends_with(".down_bps") => Some("rate_limit_down_bps"),
             _ => None,
@@ -240,6 +248,16 @@ fn field_api(path: &str) -> FieldApi {
         api.read_routes.push("GET /v1/config");
         api.write_routes.push("PATCH /v1/config");
         api.null_behavior = "ignored_member_then_validate_candidate";
+    } else if let Some(field) = policy_field {
+        api.read_routes.push("GET /v1/access/policy");
+        api.write_routes.push("PATCH /v1/access/policy");
+        api.request_field = Some(field);
+        api.non_editable_reason = Some("managed_via_access_policy_api");
+        api.null_behavior = if field == "cidr_rate_limits" {
+            "clear_map_or_remove_null_entries"
+        } else {
+            "remove_authored_value_restore_type_default"
+        };
     } else if let Some(field) = user_field {
         api.read_routes.push("GET /v1/users/{username}");
         api.write_routes

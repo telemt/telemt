@@ -74,7 +74,7 @@ impl RuntimeFence {
         }
     }
 
-    pub(super) fn commit_check(&self) -> CommitCheck {
+    pub(in crate::api) fn commit_check(&self) -> CommitCheck {
         let fence = self.clone();
         Arc::new(move || fence.matches())
     }

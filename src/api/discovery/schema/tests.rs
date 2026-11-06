@@ -172,11 +172,9 @@ fn api_ownership_aliases_and_null_contracts_match_existing_surfaces() {
             .null_behavior,
         "remove_user_override_on_patch"
     );
-    assert!(
-        field(schema, "access.user_source_deny")
-            .api
-            .write_routes
-            .is_empty()
+    assert_eq!(
+        field(schema, "access.user_source_deny").api.write_routes,
+        ["POST /v1/users", "PATCH /v1/users/{username}"]
     );
     assert!(
         field(schema, "server.api.listen")

@@ -36,6 +36,7 @@ use crate::transport::middle_proxy::MePool;
 use crate::web::control::WebRuntimePublication;
 use crate::web::trace::WebTraceStore;
 
+mod access_policy;
 mod config_edit;
 mod config_projection;
 mod config_state;
@@ -306,7 +307,7 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         "/v1/system/reload" => Some(ALLOW_POST),
         "/v1/config/validate" => Some(ALLOW_POST),
         "/v1/users" => Some(ALLOW_GET_POST),
-        "/v1/config" => Some(ALLOW_GET_PATCH),
+        "/v1/config" | "/v1/access/policy" => Some(ALLOW_GET_PATCH),
         _ if user_action_route_matches(path, "/reset-quota") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/rotate-secret") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/enable") => Some(ALLOW_POST),
