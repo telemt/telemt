@@ -38,10 +38,10 @@ applies `whitelist`, `gray_action`, `auth_header`, `request_body_limit_bytes`,
 `minimal_runtime_enabled`, `minimal_runtime_cache_ttl_ms`,
 `runtime_edge_enabled`, `runtime_edge_cache_ttl_ms`, `runtime_edge_top_n`, and
 `read_only`. `enabled`, `listen`, and `runtime_edge_events_capacity` remain
-process-owned and require a process restart. These fields are configured in the
-owning TOML source; `PATCH /v1/config` currently accepts only `server.listeners`
-under `server`. A client polling after an authentication change must use the new
-header explicitly.
+process-owned and require a process restart. The five [observability settings](#api-observability-settings)
+are editable through `PATCH /v1/config`; other API settings require editing the
+owning TOML source. A client polling after an authentication change must use the
+new header explicitly.
 
 ## Protocol Contract
 
@@ -100,7 +100,7 @@ Notes:
 
 ## Python client and CLI
 
-The standard-library [Python client](../../../tools/telemt_api.py) covers the 51
+The standard-library [Python client](../../../tools/telemt_api.py) covers the 53
 JSON operations, including discovery, preflight/state, user quota/period/rates,
 generation reload and WEB lifecycle/session controls. The HTML `/web-status`
 viewer remains a browser endpoint. See the [client guide](PYTHON_CLIENT.md) for
@@ -155,6 +155,8 @@ operations or pending publication; they are not silently promoted to success.
 | `GET` | `/v1/stats/users/active-ips` | none | `200` | `UserActiveIps[]` |
 | `GET` | `/v1/stats/users` | none | `200` | `UserInfo[]` |
 | `GET` | `/v1/stats/users/quota` | none | `200` | User quota counters and recurring schedule status in `data.users`. |
+| `GET` | `/v1/access/policy` | none | `200` | Desired/effective access policy |
+| `PATCH` | `/v1/access/policy` | `AccessPolicyPatch` | `200` | Desired/effective access policy with changed paths |
 | `GET` | `/v1/config` | none | `200` | `ConfigData` |
 | `PATCH` | `/v1/config` | sparse JSON object; optional reload query | `200` or `202` | `PatchConfigResponse` |
 | `POST` | `/v1/config/validate` | same sparse patch, preconditions and reload query | `200` | `ConfigValidationData` |
@@ -210,6 +212,8 @@ operations or pending publication; they are not silently promoted to success.
 | `POST /v1/runtime/web/lifecycle/resume` | Cancels an active drain, if any, and reopens only the operator-owned admission fence. |
 | `GET /v1/stats/users/active-ips` | Returns users that currently have non-empty active source-IP lists. |
 | `GET /v1/stats/users` | Alias of `GET /v1/users`; returns disk-first user views with runtime lag flag. |
+| `GET /v1/access/policy` | Desired and published shared access limits and CIDR rate rules, with source revision and runtime token. |
+| `PATCH /v1/access/policy` | Atomic policy edit; optional `If-Match` and `If-Runtime-Match`. Watcher publication is asynchronous. |
 | `GET /v1/config` | Returns the current editable config sections as JSON (no `access.*`) plus the revision. |
 | `PATCH /v1/config` | Applies a sparse patch and optionally submits an in-process runtime reload to Maestro. |
 | `POST /v1/config/validate` | Prepares and classifies a candidate without persistence or runtime publication; allowed in read-only mode. |
@@ -232,7 +236,7 @@ operations or pending publication; they are not silently promoted to success.
 | `400` | `bad_request` | Invalid JSON, validation failures, malformed request body. |
 | `400` | `access_not_editable` | `PATCH /v1/config` body contains an `access` key (managed via users API). |
 | `400` | `section_not_editable` | `PATCH /v1/config` body contains an unknown top-level key or a non-null, non-object partial section. |
-| `400` | `field_not_editable` | `PATCH /v1/config` body contains a forbidden nested field under a partially editable section (e.g. `server.api`, `server.port`, `network.ipv4`). |
+| `400` | `field_not_editable` | `PATCH /v1/config` body contains a forbidden nested field under a partially editable section (e.g. `server.api.auth_header`, `server.port`, `network.ipv4`). |
 | `401` | `unauthorized` | Missing/invalid `Authorization` when `auth_header` is configured. |
 | `403` | `forbidden` | Source IP is not allowed by whitelist. |
 | `403` | `read_only` | Mutating endpoint called while `read_only=true`. |
@@ -416,6 +420,7 @@ compatible; incompatible discovery changes require a new `schema_version`.
 | `rate_limit_down_bps` | `u64` | no | Per-user download rate limit in bits per second. |
 | `max_unique_ips` | `usize` | no | Per-user unique source IP limit. |
 | `enabled` | `bool` | no | User enable flag. Missing means enabled. `false` persists a disabled override. |
+| `source_deny` | `string[]` or `null` | no | CIDR list; omission retains any orphan rule, null removes it. Generation reload required. |
 
 ### `PatchUserRequest`
 | Field | Type | Required | Description |
@@ -430,20 +435,109 @@ compatible; incompatible discovery changes require a new `schema_version`.
 | `rate_limit_down_bps` | `u64` or `null` | no | Per-user download rate limit in bits per second; `null` removes the download direction limit. |
 | `max_unique_ips` | `usize` or `null` | no | Per-user unique source IP limit; `null` removes the per-user override. |
 | `enabled` | `bool` or `null` | no | `false` disables the user. `true` or `null` removes the disabled override, so the user is enabled. |
+| `source_deny` | `string[]` or `null` | no | Replace the CIDR list; omission preserves it, null removes the entry. Generation reload required. |
+
+### Shared access policy
+
+`GET /v1/access/policy` and `PATCH /v1/access/policy` use the ordinary
+administrative authorization and whitelist; mutations require `read_only=false`.
+Both return `200` with `data.desired`, `data.effective`, `data.runtime`
+(`active_generation`, `config_epoch`, `runtime_match`), `published_match`,
+`effective_scope="active_config_snapshot"`, `subsystem_convergence="unknown"`,
+`apply_mode="watcher"`, and the source-manifest `revision`. PATCH also returns
+`changed_paths`. These snapshots do not acknowledge completion by every consumer.
+
+The policy contains exactly five fields:
+
+- `user_max_tcp_conns_global_each`: nonnegative per-user TCP default; `0` is unlimited.
+- `user_max_unique_ips_global_each`: nonnegative per-user unique-IP default; `0` is unlimited.
+- `user_max_unique_ips_mode`: `active_window`, `time_window`, or `combined`.
+- `user_max_unique_ips_window_secs`: positive recent-IP window in seconds.
+- `cidr_rate_limits`: a map of explicit IPv4/IPv6 CIDRs or `*4/N`, `*6/N`, `*/N` templates
+  to `{ "up_bps": ..., "down_bps": ... }`, in **bits per second**.
+
+Omission preserves a field. Scalar `null` removes its authored setting and restores
+its type default. A non-null CIDR map merges entries: `null` removes that entry,
+and a rate object replaces the whole pair (omitted directions become `0`, meaning
+unlimited). At least one direction must be positive, and neither may exceed
+`100000000000`. A whole-map `null` clears all CIDR rules. Empty patches are rejected.
+Unknown fields, invalid prefixes/rates and duplicate normalized auto templates
+return `400`. Explicit CIDRs retain longest-prefix precedence over auto templates;
+`*/N` expands to IPv4 `/N` and IPv6 `/(N * 4)`. Existing bounded bursts are unchanged.
+
+```json
+{
+  "user_max_tcp_conns_global_each": 12,
+  "cidr_rate_limits": {
+    "192.0.2.0/24": {"up_bps": 8000000, "down_bps": 16000000},
+    "*6/64": {"down_bps": 16000000},
+    "203.0.113.0/24": null
+  }
+}
+```
+
+Edits use the exact field's source owner, or the nearest existing parent for
+insertion. Literal map keys are preserved. All changes in one request must belong
+to one independently writable source; ambiguous or multiple owners return
+`409 config_patch_not_atomic` without writing. The complete candidate is validated
+before atomic replacement. Other source files remain unchanged; the owner is
+edited structurally with comments retained where supported by the TOML editor.
+Stale `If-Match` returns `409 revision_conflict`; stale `If-Runtime-Match` returns
+`409 runtime_conflict`. Query parameters, including automatic reload, are rejected.
+Users, credentials, replay limits and `ignore_time_skew` are outside this endpoint.
+The legacy `PATCH /v1/config` still rejects the entire `access` section.
+
+`UserInfo.limits` contains `desired` and nullable `effective` snapshots for
+`max_tcp_conns` and `max_unique_ips`. Each has `value` (null means unlimited),
+`configured_override` (null means no authored entry), `global_value`, and `origin`
+(`user_override`, `global_default`, `unlimited`). A zero user override inherits the
+global default. `effective` is null when the user is absent from the sampled runtime
+or no runtime snapshot was supplied. The scope is `active_config_snapshot` and
+`subsystem_convergence` is `unknown`; legacy top-level limit fields retain their
+desired-config fallback behavior. Policy edits do not cancel sessions or reset
+quota usage; subsequent admission/publication follows existing runtime behavior.
 
 ### `access.user_source_deny` via API
-- In current API surface, per-user deny-list is **not** exposed as a dedicated field in `CreateUserRequest` / `PatchUserRequest`.
-- Configure it in `config.toml` under `[access.user_source_deny]` and apply via normal config reload path.
-- Runtime behavior after apply:
-  - auth succeeds for username/secret
-  - source IP is checked against `access.user_source_deny[username]`
-  - on match, handshake is rejected with the same fail-closed outcome as invalid auth
 
-Example config:
-```toml
-[access.user_source_deny]
-alice = ["203.0.113.0/24", "2001:db8:abcd::/48"]
-bob = ["198.51.100.42/32"]
+User GET/create/PATCH expose `source_deny`, an IPv4/IPv6 CIDR array. Omission
+preserves the existing rule, an array replaces the entire list (`[]` means no
+denied networks), and explicit `null` removes that user's authored entry.
+Strict configuration accepts `[access.user_source_deny]`. Malformed networks or
+non-array values return `400` before writing. Changes to a username containing
+dots edit that literal key, preserving other users' deny rows.
+
+`UserInfo.source_deny` is the desired list (empty when absent).
+`source_deny_status` contains `effective` (the list in the sampled request
+generation), `runtime_reload_required` (whether the lists differ),
+`apply_mode="generation_reload"`, `effective_scope="request_generation_snapshot"`,
+and `reload_endpoint="POST /v1/system/reload"`. Effective/reload fields are null
+when no runtime snapshot is available. Existing `in_runtime` and HTTP `200/202`
+only describe username membership; they do not prove deny-policy enforcement.
+
+After persistence, explicitly submit an instant or drain generation reload using
+its returned source revision, then inspect reload status and the user's effective
+list. The watcher does not overlay these rules. Saving a list does not cancel
+sessions; retirement follows the selected reload mode. A reload that captured an
+older revision may still activate that older policy: the desired/effective
+comparison remains pending until a generation using the new revision is active.
+This comparison does not describe still-draining older generations.
+
+User deletion retains source-deny rows. Recreating the same name with the field
+omitted inherits the retained row, including a rule already present in runtime.
+To remove it, PATCH `{"source_deny":null}` before deletion, or include
+`"source_deny":null` when recreating the user; removal also needs generation
+reload. A PATCH of a missing username still returns `404`.
+
+The mutation edits the exact owning source, or the nearest existing parent for
+insertion. A request combining user-table and deny-rule changes in different
+files returns `409 config_patch_not_atomic` and writes neither file. Source
+revision fencing covers the entire include graph. After successful authentication,
+the existing TLS/MTProto source check still rejects matching addresses through
+the invalid-auth/fallback path without writing a protocol error or modifying the
+original ClientHello.
+
+```json
+{"source_deny":["203.0.113.0/24","2001:db8:abcd::/48"]}
 ```
 
 ### `PatchConfigRequest`
@@ -1664,6 +1758,9 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `username` | `string` | Username. |
 | `enabled` | `bool` | Effective user enable flag. Missing config entry is reported as `true`. |
 | `in_runtime` | `bool` | Whether current runtime config already contains this user. |
+| `limits` | `object` | Desired/published TCP and unique-IP limits with override/global/unlimited origins; see shared access policy. |
+| `source_deny` | `string[]` | Desired source CIDRs; empty if no rule exists. |
+| `source_deny_status` | `object` | Effective list and generation reload requirement; see source-deny contract. |
 | `user_ad_tag` | `string?` | Optional ad tag (32 hex chars). |
 | `max_tcp_conns` | `usize?` | Optional max concurrent TCP limit. |
 | `expiration_rfc3339` | `string?` | Optional expiration timestamp. |
@@ -2036,7 +2133,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. It covers the complete recursive include graph. If supplied and it does not match the current source manifest, returns `409 revision_conflict`. Omitting it removes the caller precondition, but the internal graph/owner race fence can still return the same conflict. |
 | `If-Runtime-Match: <runtime_match>` | no | Token from `POST /v1/config/validate` or `GET /v1/config/state`, quoted or unquoted. A stale publication returns `409 runtime_conflict`; malformed/repeated headers return `400`. Even without it, active state is rechecked during preparation and immediately before the source rename. |
 
-**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`, plus partially editable `server` (only nested `listeners`) and `network` (only nested `dns_overrides`).
+**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`, plus partially editable `server` (`listeners` and five [API observability settings](#api-observability-settings)) and `network` (only nested `dns_overrides`).
 
 **Rejected keys and their error codes:**
 
@@ -2045,7 +2142,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `access` | `400` | `access_not_editable` |
 | Unknown top-level key or non-null, non-object `server`/`network` | `400` | `section_not_editable` |
 | `network` with keys other than `dns_overrides` (including null members) | `400` | `field_not_editable` |
-| `server` with keys other than `listeners` | `400` | `field_not_editable` |
+| `server` with keys other than `listeners`/`api`, or `server.api` with keys outside its five-field allowlist (including null members) | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
 | Unknown nested field or inapplicable variant field | `400` | `bad_request`, with `error.details` |
 
@@ -2219,7 +2316,7 @@ Deployment, TLS-terminator examples, links, and WEB-specific verification are do
 | `POST /v1/users/{username}/enable` | Enables the user idempotently by removing the `access.user_enabled[username]` override and updating the runtime admission state immediately. |
 | `POST /v1/users/{username}/disable` | Disables the user idempotently by writing `access.user_enabled[username] = false`, updating runtime admission immediately, and cancelling active sessions for that username. |
 | `POST /v1/users/{username}/reset-quota` | Persists the quota checkpoint to `general.quota_state_path` before resetting live accounting for the route username; does not modify user config. |
-| `DELETE /v1/users/{username}` | Deletes only the specified user, removes it from API-managed optional `access.user_*` maps, blocks last-user deletion, stages a deletion tombstone that cancels active owners, and atomically updates only related API-managed `access.*` TOML tables. It leaves `access.user_source_deny` untouched; manage that table manually in TOML. |
+| `DELETE /v1/users/{username}` | Deletes only the specified user, removes it from API-managed optional `access.user_*` maps, blocks last-user deletion, stages a deletion tombstone that cancels active owners, and atomically updates only related API-managed `access.*` TOML tables. It leaves `access.user_source_deny` untouched; explicitly clear `source_deny` before deletion or during recreation, then reload the generation. |
 
 All accepted durable config, user, and quota mutations:
 - Respect `read_only` mode.
