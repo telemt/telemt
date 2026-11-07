@@ -2228,10 +2228,23 @@ Generationsreload übernimmt `whitelist`, `gray_action`, `auth_header`,
 `enabled`, `listen` und `runtime_edge_events_capacity` erfordern einen
 Neustart des Prozesses.
 
-Ändern Sie die zuständige TOML-Datei und rufen Sie für Felder, die ein
-Generationsreload übernehmen kann, `POST /v1/system/reload` auf.
-`PATCH /v1/config` erlaubt unter `server` derzeit nur `server.listeners` und
-kann `server.api.*` nicht ändern. `GET /v1/config/schema` beschreibt für jedes
+`GET /v1/config`, `PATCH /v1/config` und `POST /v1/config/validate` stellen unter
+`server.api` nur `minimal_runtime_enabled`, `minimal_runtime_cache_ttl_ms`,
+`runtime_edge_enabled`, `runtime_edge_cache_ttl_ms` und `runtime_edge_top_n`
+bereit, zusätzlich zu `server.listeners`. GET enthält die Standardwerte;
+PATCH erhält benachbarte API-Einstellungen. Beide TTLs erlauben `0..60000` ms
+(`0` deaktiviert das Caching), top-N erlaubt `1..1000`. Ausgelassene Felder und
+zulässige Felder mit `null` behalten ihre Werte. Verbotene Felder werden auch
+bei `null` abgelehnt. Ein server-Patch ohne konkreten bearbeitbaren Wert wird
+abgelehnt. Speichern allein aktiviert diese Einstellungen nicht: Verwenden Sie
+`?reload=instant`, `?reload=drain` oder `POST /v1/system/reload` und warten Sie
+auf die Aktivierung der Generation. Auch bei gemischten Änderungen behält der
+Dateiwächter die bisherigen Werte bei. API-Listener und Ereignispufferkapazität
+bleiben an den Prozess gebunden; verspätete Cache-Schreibvorgänge können einer
+Anfrage keine Daten einer anderen Generation liefern. Andere API-Einstellungen
+müssen weiterhin in der zuständigen TOML-Datei geändert werden. Siehe
+[API-Diagnoseeinstellungen](../Architecture/API/API.md#api-observability-settings).
+`GET /v1/config/schema` beschreibt für jedes
 Feld die API-Verfügbarkeit und das Übernahmeverhalten. `GET /v1/config/state`
 zeigt Unterschiede zwischen Sollzustand und veröffentlichtem Zustand, ohne zu
 bestätigen, dass alle Verbraucher die Einstellungen bereits übernommen haben.

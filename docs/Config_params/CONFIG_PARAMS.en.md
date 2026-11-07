@@ -2227,9 +2227,19 @@ active API settings. Explicit generation reload applies `whitelist`,
 `read_only`. `enabled`, `listen`, and `runtime_edge_events_capacity` require a
 process restart.
 
-Edit the owning TOML source, then use `POST /v1/system/reload` for fields that a
-generation reload can apply. `PATCH /v1/config` currently permits only
-`server.listeners` under `server`; it cannot write `server.api.*`.
+`GET /v1/config`, `PATCH /v1/config`, and `POST /v1/config/validate` expose only
+`minimal_runtime_enabled`, `minimal_runtime_cache_ttl_ms`, `runtime_edge_enabled`,
+`runtime_edge_cache_ttl_ms`, and `runtime_edge_top_n` under `server.api`, alongside
+`server.listeners`. GET includes defaults; sparse PATCH preserves API siblings.
+Both TTLs accept `0..60000` ms (`0` disables caching); top-N accepts `1..1000`.
+Omission and allowed `null` members retain values. Forbidden fields are rejected
+even when `null`. A server patch without a concrete editable value is rejected.
+Saving alone leaves these settings pending: use `?reload=instant`, `?reload=drain`,
+or `POST /v1/system/reload` and wait for activation. The watcher retains them even
+in mixed changes. The API listener and event-ring capacity remain process-owned;
+late cache writes cannot cross request-generation boundaries. Other API settings
+still require editing the owning TOML source. See
+[API observability settings](../Architecture/API/API.md#api-observability-settings).
 `GET /v1/config/schema` describes each field's exposure and application policy.
 `GET /v1/config/state` reports desired/published differences without claiming
 complete consumer convergence. See the [API reference](../Architecture/API/API.md)
