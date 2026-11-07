@@ -542,13 +542,13 @@ original ClientHello.
 
 ### `PatchConfigRequest`
 
-A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`) or the partially editable objects `server` (only `listeners`) and `network` (only `dns_overrides`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched table bodies and other source files remain byte-identical; touched TOML table bodies are reserialized, except for the DNS value edit described below, so comments and formatting inside a rewritten body can change.
+A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`) or the partially editable objects `server` (`listeners` and five API observability fields) and `network` (only `dns_overrides`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched table bodies and other source files remain byte-identical; touched TOML table bodies are reserialized, except for the field edits described below, so comments and formatting inside a rewritten body can change.
 
 **Rejected keys:**
 - `access` → `400 access_not_editable` (users/secrets are managed via `POST/PATCH /v1/users`).
 - An unknown top-level key or a non-null, non-object `server`/`network` value → `400 section_not_editable`.
 - `network` with any key other than `dns_overrides`, even when that key is null, → `400 field_not_editable`.
-- `server` with any key other than `listeners` (e.g. `port`, `api`, `admin_api`) → `400 field_not_editable`.
+- `server` with any key other than `listeners`/`api` (e.g. `port`, `admin_api`), or `server.api` with a key outside its five-field allowlist, even when null, → `400 field_not_editable`.
 - An object with no editable keys → `400 bad_request` (empty patch).
 - Within otherwise editable sections/fields, unknown nested fields, including fields with null values, → `400 bad_request` with `error.details[].code=unknown_field`, independently of `general.config_strict`. Known fields from an incompatible upstream/decoy variant are rejected with `field_not_applicable`. Open DC/domain maps remain supported; `upstreams[].force_bind` remains an alias of `bindtodevice`.
 
@@ -561,6 +561,53 @@ Example — replace `[[server.listeners]]` (other `[server]` fields including `[
 ```json
 {"server": {"listeners": [{"ip": "0.0.0.0", "port": 443, "client_mss": "92"}]}}
 ```
+
+#### API observability settings
+
+`GET /v1/config`, `PATCH /v1/config`, and `POST /v1/config/validate` expose
+exactly these nested settings, including their typed defaults in GET:
+
+| Path | Type / bounds | Default |
+| --- | --- | --- |
+| `server.api.minimal_runtime_enabled` | Boolean | `true` |
+| `server.api.minimal_runtime_cache_ttl_ms` | Integer, `0..60000` | `1000` |
+| `server.api.runtime_edge_enabled` | Boolean | `false` |
+| `server.api.runtime_edge_cache_ttl_ms` | Integer, `0..60000` | `1000` |
+| `server.api.runtime_edge_top_n` | Integer, `1..1000` | `10` |
+
+```json
+{"server":{"api":{"runtime_edge_enabled":true,"runtime_edge_cache_ttl_ms":0,"runtime_edge_top_n":20}}}
+```
+
+Omitted fields and allowed null members retain their values; a server object
+without a concrete editable value is rejected. TTL `0` disables cache reuse.
+Other API fields, including `auth_header`, `whitelist`, `gray_action`, `read_only`,
+`enabled`, `listen`, `request_body_limit_bytes`, and `runtime_edge_events_capacity`,
+remain excluded. Forbidden keys are rejected even when null. Authentication and
+read-only checks still apply to these mutations.
+
+Each setting edits its exact source owner, using the nearest existing parent
+for insertion. API siblings, listener definitions and other source files survive.
+Inline, dotted and quoted TOML forms are supported. PATCH uses `server.api` even
+when the source retains the legacy `[server.admin_api]` spelling. Ambiguous or
+multiple owners return `409 config_patch_not_atomic` without writing.
+
+Saving reports `runtime_reload_required=true` while active values differ; these
+settings also retain the legacy `restart_required=true` classification when the
+desired source changes, without requiring a process restart. The watcher never
+overlays them, including in mixed patches. Use `?reload=instant` or
+`?reload=drain&timeout_secs=30`, or submit `POST /v1/system/reload` with the saved revision.
+Acceptance is asynchronous: inspect reload status and `GET /v1/config/state` for
+activation. The existing API listener and event-ring capacity are retained.
+
+After activation, diagnostic endpoints and capabilities reflect the new flags.
+Disabled diagnostics return their existing payload with `reason=feature_disabled`;
+enabled ME diagnostics can still report `source_unavailable` when no pool exists.
+Cache entries are checked against each request's pinned generation, including
+stale edge-cache fallback, so a late old-generation calculation cannot supply a
+new-generation response. Requests already in flight may finish using their
+original generation. Recompute contention without a matching cache can report
+`source_unavailable`.
 
 #### DNS overrides
 
@@ -633,9 +680,9 @@ Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the 
 | `dc_overrides` | `object` | Complete normalized DC override map, including the synthesized DC 203 endpoint when it is not authored. |
 | `web` | `object` | Complete normalized `[web]` section, including defaults. Each `web.vhosts[]` item preserves either `host` or `hosts` and includes `base_path` (empty string when omitted in TOML); hostname lists remain grouped. The derived runtime-only `web.runtime` field is excluded. |
 | `network` | `object` | Only `dns_overrides`, a `string[]` defaulting to `[]`; other network fields are excluded. |
-| `server` | `object?` | Partial `[server]` view when editable nested fields are present. Currently only `listeners` may appear; `api`/`admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
+| `server` | `object` | Partial `[server]` view: `listeners` and the five allowlisted `api` observability settings. API secrets, access controls, `admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
 
-The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) is excluded, and `network` exposes only `dns_overrides`, including its default empty array. Under `server`, only the nested field-level allowlist (`listeners`) is exposed, and an empty listener array is omitted. Changes to `web.allow_wildcard_hosts` and `[web.limits]` remain process-deferred; the patch response reports them in `deferred_process_fields` until restart. Wildcard patterns require the flag to be enabled in the active process; staging the flag does not authorize patterns before restart.
+The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) is excluded, and `network` exposes only `dns_overrides`, including its default empty array. Under `server`, only the nested allowlists (`listeners` and five `api` fields) are exposed, and an empty listener array is omitted. Changes to `web.allow_wildcard_hosts` and `[web.limits]` remain process-deferred; the patch response reports them in `deferred_process_fields` until restart. Wildcard patterns require the flag to be enabled in the active process; staging the flag does not authorize patterns before restart.
 
 ### WEB runtime identity and lifecycle
 
@@ -2219,7 +2266,7 @@ A valid base-path-only change reports `restart_required=false`, `runtime_reload_
 | `400` | `bad_request` | Invalid JSON, empty patch, or config validation/deserialization failure. |
 | `400` | `access_not_editable` | Patch contains an `access` key. |
 | `400` | `section_not_editable` | Patch contains an unknown top-level key or a non-null, non-object partial section. |
-| `400` | `field_not_editable` | Patch contains a forbidden nested `server.*` or `network.*` field; only `server.listeners` and `network.dns_overrides` are allowed. |
+| `400` | `field_not_editable` | Patch contains a nested field outside `server.listeners`, the five `server.api` observability fields, or `network.dns_overrides`. |
 | `401` | `unauthorized` | Missing or invalid `Authorization` header. |
 | `403` | `read_only` | API is in read-only mode. |
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |
@@ -2406,13 +2453,13 @@ The current runtime exports these additional bounded-cardinality families. All u
 | Bind failure | Failed API bind logs warning and API task exits (no auto-retry loop). |
 | ME runtime status endpoints | `/v1/stats/me-writers`, `/v1/stats/dcs`, `/v1/stats/minimal/all` require `[server.api].minimal_runtime_enabled=true`; otherwise they return disabled payload with `reason=feature_disabled`. |
 | Upstream runtime endpoint | `/v1/stats/upstreams` always returns `zero`, but runtime fields (`summary`, `upstreams`) require `[server.api].minimal_runtime_enabled=true`. |
-| Restart requirements | `server.api` changes are restart-required for predictable behavior. |
-| Hot-reload nuance | A pure `server.api`-only config change may not propagate through watcher broadcast; a mixed change (with hot fields) may propagate API flags while still warning that restart is required. |
-| Runtime apply path | Successful writes are picked up by existing config watcher/hot-reload path. |
+| API observability settings | The five editable `server.api` settings need explicit generation reload. API listener identity and event-ring capacity remain process-owned. |
+| Watcher behavior | The watcher retains every `server.api` field, including in mixed changes with watcher-supported settings. |
+| Runtime apply path | Saving updates desired state. Watcher-supported fields publish asynchronously; generation-owned fields require explicit reload. |
 | Exposure | Built-in TLS/mTLS is not provided. Use loopback bind + reverse proxy if needed. |
 | Pagination | User list currently has no pagination/filtering. |
 | Serialization side effect | Updated TOML table bodies are re-serialized on write. Endpoints that persist full config can still rewrite broader formatting/comments. |
 
 ## Known Limitations (Current Release)
 
-- API runtime controls under `server.api` are documented as restart-required; hot-reload behavior for these fields is not strictly uniform in all change combinations.
+- API observability settings require explicit generation reload; saving them alone leaves diagnostics unchanged in the active generation.
