@@ -8,9 +8,9 @@ use toml::Value as Toml;
 
 use super::ApiShared;
 use super::config_store::{
-    EDITABLE_NETWORK_FIELDS, EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS, compute_snapshot_revision,
-    is_editable_section, load_config_snapshot, render_server_listeners, render_top_level_section,
-    resolve_single_source_owner, upsert_dns_overrides, upsert_toml_table,
+    EDITABLE_NETWORK_FIELDS, EDITABLE_SECTIONS, EDITABLE_SERVER_API_FIELDS, EDITABLE_SERVER_FIELDS,
+    compute_snapshot_revision, is_editable_section, load_config_snapshot, render_server_listeners,
+    render_top_level_section, resolve_single_source_owner, upsert_dns_overrides, upsert_toml_table,
 };
 #[cfg(test)]
 use super::config_store::{write_atomic, write_atomic_if_unchanged};
@@ -25,6 +25,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(test)]
+mod api_observability_tests;
 mod diagnostics;
 mod preflight;
 mod preparation;
@@ -250,7 +252,23 @@ fn filter_server_for_read(server: &Toml) -> Option<Toml> {
                     }
                 }
             }
-            out.insert((*field).to_string(), value.clone());
+            if *field == "api" {
+                if let Some(api) = value.as_table() {
+                    out.insert(
+                        "api".to_owned(),
+                        Toml::Table(
+                            api.iter()
+                                .filter(|(key, _)| {
+                                    EDITABLE_SERVER_API_FIELDS.contains(&key.as_str())
+                                })
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+            } else {
+                out.insert((*field).to_string(), value.clone());
+            }
         }
     }
     if out.is_empty() {
@@ -261,20 +279,15 @@ fn filter_server_for_read(server: &Toml) -> Option<Toml> {
 }
 
 /// Reject any `[server]` patch keys outside [`EDITABLE_SERVER_FIELDS`].
-fn validate_server_patch(server: &Toml) -> Result<(), ApiFailure> {
-    let Some(table) = server.as_table() else {
+fn validate_server_patch(server: &Json) -> Result<(), ApiFailure> {
+    let Some(table) = server.as_object() else {
         return Err(ApiFailure::new(
             hyper::StatusCode::BAD_REQUEST,
             "section_not_editable",
             "server patch must be a JSON object",
         ));
     };
-    if table.is_empty() {
-        return Err(ApiFailure::bad_request(
-            "empty server patch: provide at least one editable field \
-             (currently: listeners)",
-        ));
-    }
+    // Validate original keys before null removal, including forbidden siblings.
     for key in table.keys() {
         if !EDITABLE_SERVER_FIELDS.contains(&key.as_str()) {
             return Err(ApiFailure::new(
@@ -287,6 +300,30 @@ fn validate_server_patch(server: &Toml) -> Result<(), ApiFailure> {
                 ),
             ));
         }
+    }
+    if let Some(api) = table.get("api").filter(|api| !api.is_null()) {
+        let fields = api
+            .as_object()
+            .ok_or_else(|| ApiFailure::bad_request("server.api patch must be a JSON object"))?;
+        for key in fields.keys() {
+            if !EDITABLE_SERVER_API_FIELDS.contains(&key.as_str()) {
+                return Err(ApiFailure::new(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "field_not_editable",
+                    format!("server.api.{key} is not editable via the config API"),
+                ));
+            }
+        }
+    }
+    let has_listeners = table.get("listeners").is_some_and(|value| !value.is_null());
+    let has_api_fields = table
+        .get("api")
+        .and_then(Json::as_object)
+        .is_some_and(|fields| fields.values().any(|value| !value.is_null()));
+    if !has_listeners && !has_api_fields {
+        return Err(ApiFailure::bad_request(
+            "empty server patch: provide listeners or an editable server.api field",
+        ));
     }
     Ok(())
 }

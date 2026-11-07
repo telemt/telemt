@@ -1,5 +1,6 @@
 //! One source-preserving candidate pipeline shared by preview and commit.
 use super::*;
+use crate::api::config_store::{FieldEdit, prepare_field_edits};
 use crate::config::{LoadedConfig, ParsedConfigSource};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -82,7 +83,7 @@ fn parse_patch(
             "access.* is managed via the users API, not editable here",
         ));
     }
-    for (key, value) in patch_table {
+    for key in patch_table.keys() {
         if !is_editable_section(key.as_str()) {
             return Err(ApiFailure::new(
                 hyper::StatusCode::BAD_REQUEST,
@@ -91,7 +92,7 @@ fn parse_patch(
             ));
         }
         if key == "server" {
-            validate_server_patch(value)?;
+            validate_server_patch(&patch_json["server"])?;
         } else if key == "network" {
             validate_network_patch(&patch_json["network"])?;
         }
@@ -127,30 +128,59 @@ fn parse_patch(
         .validate()
         .map_err(|error| diagnostics::validation_error("constraint_violation", "$", error))?;
 
+    let api_edits = api_field_edits(&loaded, &patch_toml)?;
+    let api_source = prepare_field_edits(&loaded, config_path, &api_edits)
+        .map_err(diagnostics::source_conflict)?;
+    let patch_listeners = patch_toml
+        .get("server")
+        .is_some_and(|server| server.get("listeners").is_some());
     let ownership_targets: Vec<&str> = touched
         .iter()
-        .map(|section| {
+        .filter_map(|section| {
             if section == "server" {
-                "server.listeners"
+                patch_listeners.then_some("server.listeners")
             } else if section == "network" {
-                "network.dns_overrides"
+                Some("network.dns_overrides")
             } else {
-                section.as_str()
+                Some(section.as_str())
             }
         })
         .collect();
-    let owner_path = resolve_single_source_owner(&loaded, config_path, &ownership_targets)
-        .map_err(diagnostics::source_conflict)?;
+    let section_owner = if ownership_targets.is_empty() {
+        None
+    } else {
+        Some(
+            resolve_single_source_owner(&loaded, config_path, &ownership_targets)
+                .map_err(diagnostics::source_conflict)?,
+        )
+    };
+    if let (Some(owner), Some(api)) = (&section_owner, &api_source) {
+        if *owner != api.owner_path {
+            return Err(ApiFailure::new(
+                hyper::StatusCode::CONFLICT,
+                "config_patch_not_atomic",
+                "Mutation requires one independently writable config source",
+            ));
+        }
+    }
+    let owner_path = section_owner
+        .or_else(|| api_source.as_ref().map(|source| source.owner_path.clone()))
+        .ok_or_else(|| ApiFailure::bad_request("empty patch: no editable fields"))?;
     let mut owner_contents = loaded
         .source_contents
         .get(&owner_path)
         .cloned()
         .ok_or_else(|| ApiFailure::internal("config source owner is missing from snapshot"))?;
     let expected_owner_contents = owner_contents.clone();
+    if let Some(api) = api_source {
+        owner_contents = api.owner_contents;
+    }
     for section in &touched {
         if *section == "server" {
-            let rendered = render_server_listeners(&requested_cfg)?;
-            owner_contents = upsert_toml_table(&owner_contents, "server.listeners", &rendered);
+            if patch_listeners {
+                let rendered = render_server_listeners(&requested_cfg)?;
+                owner_contents = upsert_toml_table(&owner_contents, "server.listeners", &rendered);
+            }
         } else if *section == "network" {
             owner_contents =
                 upsert_dns_overrides(&owner_contents, &requested_cfg.network.dns_overrides)?;
@@ -164,7 +194,7 @@ fn parse_patch(
     overrides.insert(owner_path.clone(), owner_contents.clone());
     let candidate = ProxyConfig::parse_source_with_overrides(config_path, &overrides)
         .map_err(|error| diagnostics::validation_error("constraint_violation", "$", error))?;
-    if touched.iter().any(|section| section == "server")
+    if patch_listeners
         && serde_json::to_value(&candidate.config.server.listeners).ok()
             != serde_json::to_value(&requested_cfg.server.listeners).ok()
     {
@@ -189,6 +219,44 @@ fn parse_patch(
             alias_effects,
         },
     ))
+}
+
+fn api_field_edits(
+    loaded: &ParsedConfigSource,
+    patch: &Toml,
+) -> Result<Vec<FieldEdit>, ApiFailure> {
+    let Some(fields) = patch
+        .get("server")
+        .and_then(|server| server.get("api"))
+        .and_then(Toml::as_table)
+    else {
+        return Ok(Vec::new());
+    };
+    if fields.is_empty() {
+        return Ok(Vec::new());
+    }
+    // PATCH uses canonical paths, while an authored legacy table keeps its name.
+    let mut table_name = "api";
+    for source in loaded.source_contents.values() {
+        let document: Toml = toml::from_str(source).map_err(|_| {
+            ApiFailure::new(
+                hyper::StatusCode::CONFLICT,
+                "config_patch_not_atomic",
+                "Mutation requires one independently writable config source",
+            )
+        })?;
+        if document
+            .get("server")
+            .and_then(|server| server.get("admin_api"))
+            .is_some()
+        {
+            table_name = "admin_api";
+        }
+    }
+    Ok(fields
+        .iter()
+        .map(|(field, value)| FieldEdit::new(&["server", table_name, field], Some(value.clone())))
+        .collect())
 }
 
 fn finish(

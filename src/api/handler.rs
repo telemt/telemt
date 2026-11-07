@@ -15,6 +15,7 @@ pub(super) async fn handle(
     let runtime = shared.active_runtime.load_full();
     let previous_cache_generation = shared.cache_generation.swap(runtime.id, Ordering::AcqRel);
     if previous_cache_generation != runtime.id {
+        // Entry generation checks also reject late writes from in-flight requests.
         *shared.minimal_cache.lock().await = None;
         *shared.runtime_edge_connections_cache.lock().await = None;
     }

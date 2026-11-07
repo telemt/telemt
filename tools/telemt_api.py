@@ -67,6 +67,9 @@ class APIResponse:
 # Main client
 # ---------------------------------------------------------------------------
 
+_UNSET = object()
+
+
 class TelemtAPI:
     """
     HTTP client for the Telemt Control API.
@@ -228,6 +231,17 @@ class TelemtAPI:
                 raise ValueError("sections must contain unique known section names")
             query = {"sections": ",".join(sections)}
         return self._get("/v1/config/state", query)
+
+    def access_policy(self) -> APIResponse:
+        """Desired/published access defaults and CIDR shaping, without credentials."""
+        return self._get("/v1/access/policy")
+
+    def patch_access_policy(self, patch: dict, *, if_match: str | None = None,
+                            if_runtime_match: str | None = None) -> APIResponse:
+        """Preserve explicit null resets and CIDR entry deletion semantics."""
+        _object(patch, "patch")
+        return self._request("PATCH", "/v1/access/policy", patch, if_match,
+                             if_runtime_match=if_runtime_match)
 
     def patch_config(self, patch: dict, *, if_match: str | None = None,
                      if_runtime_match: str | None = None, reload: str | None = None,
@@ -413,6 +427,7 @@ class TelemtAPI:
             rate_limit_up_bps: int | None = None,
             rate_limit_down_bps: int | None = None,
             enabled: bool | None = None,
+            source_deny: list[str] | None | object = _UNSET,
             if_match: str | None = None,
     ) -> APIResponse:
         """POST /v1/users — create a new user.
@@ -436,9 +451,12 @@ class TelemtAPI:
         quota_period:
             Optional UTC recurring period: daily, weekly or monthly.
         rate_limit_up_bps, rate_limit_down_bps:
-            Per-user upload/download byte rates; zero values are transmitted.
+            Per-user upload/download bit rates; zero values are transmitted.
         enabled:
             Optional admission flag; False is transmitted.
+        source_deny:
+            Source CIDRs; omission retains an orphan rule, None removes it.
+            Changes require a generation reload.
         if_match:
             Optional ``If-Match`` revision for optimistic concurrency.
         """
@@ -453,6 +471,8 @@ class TelemtAPI:
         _opt(body, "rate_limit_up_bps", rate_limit_up_bps)
         _opt(body, "rate_limit_down_bps", rate_limit_down_bps)
         _opt(body, "enabled", enabled)
+        if source_deny is not _UNSET:
+            body["source_deny"] = source_deny
         return self._post("/v1/users", body=body, if_match=if_match)
 
     def patch_user(
@@ -469,6 +489,7 @@ class TelemtAPI:
             rate_limit_up_bps: int | None = None,
             rate_limit_down_bps: int | None = None,
             enabled: bool | None = None,
+            source_deny: list[str] | None = None,
             if_match: str | None = None,
     ) -> APIResponse:
         """PATCH /v1/users/{username} — partial update; only provided fields change.
@@ -490,8 +511,10 @@ class TelemtAPI:
         max_unique_ips:
             New unique IP limit.
         quota_period, rate_limit_up_bps, rate_limit_down_bps, enabled:
-            Recurring quota, byte rates and admission flag. None omits a field,
+            Recurring quota, bit rates and admission flag. None omits a field,
             preserving the legacy helper contract; use patch_user_fields to clear.
+        source_deny:
+            Replace the source CIDR list; use patch_user_fields to send null.
         if_match:
             Optional ``If-Match`` revision.
         """
@@ -506,6 +529,7 @@ class TelemtAPI:
         _opt(body, "rate_limit_up_bps", rate_limit_up_bps)
         _opt(body, "rate_limit_down_bps", rate_limit_down_bps)
         _opt(body, "enabled", enabled)
+        _opt(body, "source_deny", source_deny)
         return self.patch_user_fields(username, body, if_match=if_match)
 
     def patch_user_fields(self, username: str, fields: dict, *, if_match: str | None = None) -> APIResponse:
@@ -665,7 +689,7 @@ class TelemtAPI:
 # ---------------------------------------------------------------------------
 
 USER_FIELDS = {"secret", "user_ad_tag", "max_tcp_conns", "expiration_rfc3339", "data_quota_bytes",
-               "quota_period", "rate_limit_up_bps", "rate_limit_down_bps", "max_unique_ips", "enabled"}
+               "quota_period", "rate_limit_up_bps", "rate_limit_down_bps", "max_unique_ips", "enabled", "source_deny"}
 
 
 def _safe(value: str) -> str:

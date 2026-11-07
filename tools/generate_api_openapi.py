@@ -41,6 +41,7 @@ def build_document():
         "quota_period": nullable({"enum": ["daily", "weekly", "monthly"]}),
         "rate_limit_up_bps": nullable(count), "rate_limit_down_bps": nullable(count),
         "max_unique_ips": nullable(count), "enabled": nullable(boolean),
+        "source_deny": nullable({"type": "array", "items": {"type": "string", "format": "cidr"}}),
     }
     schemas = {
         "SuccessEnvelope": object_schema({"ok": {"const": True}, "data": {},
@@ -58,7 +59,17 @@ def build_document():
             **{k: nullable({"type": "object"}) for k in
                ("general", "timeouts", "censorship", "dc_overrides", "web")},
             "upstreams": nullable({"type": "array", "items": {"type": "object"}}),
-            "server": nullable(object_schema({"listeners": nullable({"type": "array", "items": {"type": "object"}})})),
+            "server": nullable(object_schema({
+                "listeners": nullable({"type": "array", "items": {"type": "object"}}),
+                "api": nullable(object_schema({
+                    "minimal_runtime_enabled": nullable(boolean),
+                    "minimal_runtime_cache_ttl_ms": nullable({"type": "integer", "minimum": 0, "maximum": 60000}),
+                    "runtime_edge_enabled": nullable(boolean),
+                    "runtime_edge_cache_ttl_ms": nullable({"type": "integer", "minimum": 0, "maximum": 60000}),
+                    "runtime_edge_top_n": nullable({"type": "integer", "minimum": 1, "maximum": 1000}),
+                })),
+            })),
+            "network": nullable(object_schema({"dns_overrides": nullable({"type": "array", "items": string, "maxItems": 4096})})),
         }),
         "ReloadRequest": object_schema({
             "mode": {"enum": ["instant", "drain"], "default": "instant"},
@@ -128,6 +139,23 @@ def build_document():
         "code": {"enum": ["normalized", "null_ignored", "alias_canonicalized"]}}, ("path", "code"))
     schemas["RuntimeBaseline"] = object_schema({"active_generation": count, "config_epoch": count,
         "runtime_match": string}, ("active_generation", "config_epoch", "runtime_match"))
+    rates = object_schema({"up_bps": {**count, "maximum": 100000000000},
+                           "down_bps": {**count, "maximum": 100000000000}})
+    policy = {"user_max_tcp_conns_global_each": count, "user_max_unique_ips_global_each": count,
+              "user_max_unique_ips_mode": {"enum": ["active_window", "time_window", "combined"]},
+              "user_max_unique_ips_window_secs": {"type": "integer", "minimum": 1},
+              "cidr_rate_limits": {"type": "object", "additionalProperties": rates}}
+    schemas["AccessPolicy"] = object_schema(policy, policy.keys())
+    schemas["AccessPolicyPatch"] = {**object_schema({key: nullable(value) for key, value in policy.items()}),
+        "minProperties": 1, "description": "Omitted fields stay unchanged. Scalar null restores the type default. cidr_rate_limits null clears the map; otherwise keys merge, null entries delete, and non-null entries replace the whole rate pair in bits/second. At least one direction must be positive. One writable source per mutation."}
+    schemas["AccessPolicyPatch"]["properties"]["cidr_rate_limits"] = nullable({"type": "object", "additionalProperties": nullable(rates)})
+    policy_state = {"desired": ref("AccessPolicy"), "effective": ref("AccessPolicy"),
+        "runtime": ref("RuntimeBaseline"), "published_match": boolean,
+        "effective_scope": {"const": "active_config_snapshot"}, "subsystem_convergence": {"const": "unknown"},
+        "apply_mode": {"const": "watcher"}, "changed_paths": strings}
+    schemas["AccessPolicyData"] = object_schema(policy_state, [key for key in policy_state if key != "changed_paths"])
+    schemas["AccessPolicyResponse"] = object_schema({"ok": {"const": True}, "data": ref("AccessPolicyData"),
+        "revision": string}, ("ok", "data", "revision"))
     impact = {**{k: strings for k in ("watcher_paths", "generation_paths", "process_restart_paths", "deferred_process_fields")},
               **{k: boolean for k in ("restart_required", "runtime_reload_required", "process_restart_required")}}
     schemas["ApplyImpact"] = object_schema(impact, impact.keys())
@@ -231,6 +259,7 @@ def build_document():
                     "description": "Comma-separated sections; omitted selects all. One parameter only, at most 256 query bytes. Snapshots are independently sampled; comparison is not a convergence acknowledgment."})
             response_schema = {"capabilities": "CapabilitiesResponse", "config_schema": "ConfigSchemaResponse",
                                "config_validate": "ConfigValidationResponse",
+                               "access_policy_get": "AccessPolicyResponse", "access_policy_patch": "AccessPolicyResponse",
                                "config_state": "ConfigStateResponse"}.get(operation["id"], "SuccessEnvelope")
             responses = {str(status): {"description": "Success or documented state payload",
                          "content": {"application/json": {"schema": ref(response_schema)}}}

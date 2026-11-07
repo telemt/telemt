@@ -133,11 +133,13 @@ fn api_ownership_aliases_and_null_contracts_match_existing_surfaces() {
     let schema = config_schema().unwrap();
     assert!(field(schema, "web.vhosts[].base_path").api.config_write);
     assert!(field(schema, "server.listeners[].port").api.config_write);
-    assert!(
-        !field(schema, "server.api.runtime_edge_enabled")
-            .api
-            .config_write
-    );
+    for entry in &schema.fields {
+        if let Some(key) = entry.spec.path.strip_prefix("server.api.") {
+            let editable = EDITABLE_SERVER_API_FIELDS.contains(&key);
+            assert_eq!(entry.api.config_read, editable, "{key}");
+            assert_eq!(entry.api.config_write, editable, "{key}");
+        }
+    }
     assert!(field(schema, "network.dns_overrides").api.config_read);
     assert!(field(schema, "network.dns_overrides").api.config_write);
     assert_eq!(

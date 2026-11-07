@@ -16,7 +16,7 @@ else:
 
 READ_COMMANDS = {
     "health": "health", "ready": "health_ready", "capabilities": "capabilities",
-    "schema": "config_schema", "config": "get_config", "info": "system_info",
+    "access-policy": "access_policy", "schema": "config_schema", "config": "get_config", "info": "system_info",
     "status": "runtime_gates", "init": "runtime_initialization", "limits": "limits_effective",
     "posture": "security_posture", "whitelist": "security_whitelist", "summary": "stats_summary",
     "zero": "stats_zero_all", "upstreams": "stats_upstreams", "minimal": "stats_minimal_all",
@@ -85,6 +85,9 @@ def build_parser():
         _reload_args(sub)
         if name == "config-patch":
             _poll_args(sub, optional=True)
+    sub = command("access-policy-patch")
+    sub.add_argument("--json", required=True, metavar="FILE")
+    sub.add_argument("--if-runtime-match")
     sub = command("reload")
     _reload_args(sub, submission=True)
     _poll_args(sub, optional=True)
@@ -101,6 +104,12 @@ def build_parser():
             for option, (field, kind) in USER_OPTIONS.items():
                 sub.add_argument(option, dest=field, type=kind, default=argparse.SUPPRESS,
                                  **({"choices": ("daily", "weekly", "monthly")} if field == "quota_period" else {}))
+            deny = sub.add_mutually_exclusive_group()
+            deny.add_argument("--source-deny", action="append", default=argparse.SUPPRESS, metavar="CIDR",
+                              help="Replace the source deny list (repeat for multiple CIDRs); generation reload required")
+            if name == "create":
+                deny.add_argument("--clear-source-deny", dest="source_deny", action="store_const", const=None,
+                                  default=argparse.SUPPRESS, help="Remove a retained rule when recreating this username")
             enabled = sub.add_mutually_exclusive_group()
             enabled.add_argument("--enabled", dest="enabled", action="store_const", const=True, default=argparse.SUPPRESS)
             enabled.add_argument("--disabled", dest="enabled", action="store_const", const=False, default=argparse.SUPPRESS)
@@ -177,6 +186,9 @@ def _dispatch(api, args):
         if getattr(args, "wait", False) and response.http_status == 202:
             raise TelemtAPIError("Accepted config patch lacks reload metadata", code="invalid_response", last_response=response)
         return response
+    if command == "access-policy-patch":
+        return api.patch_access_policy(_json_file(args.json), if_match=revision,
+                                       if_runtime_match=args.if_runtime_match)
     if command == "reload":
         response = api.reload(args.mode, timeout_secs=args.timeout_secs, failure_policy=args.failure_policy, if_match=revision)
         if args.wait:

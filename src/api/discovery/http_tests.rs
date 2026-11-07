@@ -38,6 +38,7 @@ impl Fixture {
         }];
         let runtime = test_runtime_generation(1, config.clone());
         let shared = ApiShared {
+            runtime_generation: runtime.id,
             stats: runtime.stats.clone(),
             ip_tracker: runtime.ip_tracker.clone(),
             me_pool: runtime.me_pool_runtime.clone(),

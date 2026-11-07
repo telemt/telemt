@@ -47,6 +47,8 @@ mod http_utils;
 // Authenticated request admission and route dispatch.
 mod handler;
 mod model;
+#[cfg(test)]
+mod observability_cache_tests;
 mod patch;
 #[cfg(test)]
 mod reload_tests;
@@ -116,6 +118,8 @@ pub(super) struct ApiRuntimeState {
 
 #[derive(Clone)]
 pub(super) struct ApiShared {
+    /// Generation pinned by this request, including cache reads and publication.
+    pub(super) runtime_generation: u64,
     pub(super) stats: Arc<Stats>,
     pub(super) ip_tracker: Arc<UserIpTracker>,
     pub(super) me_pool: Arc<RwLock<Option<Arc<MePool>>>>,
@@ -154,6 +158,7 @@ impl ApiShared {
 
     fn for_runtime(&self, runtime: &RuntimeGeneration) -> Self {
         Self {
+            runtime_generation: runtime.id,
             stats: runtime.stats.clone(),
             ip_tracker: runtime.ip_tracker.clone(),
             me_pool: runtime.me_pool_runtime.clone(),
@@ -377,6 +382,7 @@ pub(crate) async fn serve(
     });
 
     let shared = Arc::new(ApiShared {
+        runtime_generation: active_runtime.load().id,
         stats,
         ip_tracker,
         me_pool,

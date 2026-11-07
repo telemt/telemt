@@ -228,8 +228,7 @@ async fn invalid_web_patch_does_not_modify_the_source() {
 
 #[tokio::test]
 async fn read_managed_config_returns_only_editable_sections() {
-    // Server identity and network siblings must not leak. Listeners-only server
-    // is returned via the nested allowlist (covered in a dedicated test).
+    // Server identity and network siblings must not leak through nested allowlists.
     let (path, _d) = temp_config(concat!(
         "[censorship]\ntls_domain = \"a\"\n",
         "[server]\nport = 443\n[server.api]\nauth_header = \"SECRET\"\n",
@@ -241,7 +240,8 @@ async fn read_managed_config_returns_only_editable_sections() {
     assert!(table.contains_key("censorship"));
     let server = table["server"].as_table().unwrap();
     assert!(server.contains_key("listeners"));
-    assert!(!server.contains_key("api"));
+    assert_eq!(server["api"].as_table().unwrap().len(), 5);
+    assert!(server["api"].get("auth_header").is_none());
     assert!(!server.contains_key("port"));
     assert_eq!(
         serde_json::to_value(&table["network"]).unwrap(),
@@ -251,7 +251,7 @@ async fn read_managed_config_returns_only_editable_sections() {
 }
 
 #[tokio::test]
-async fn read_managed_config_returns_server_listeners_only() {
+async fn read_managed_config_returns_server_listeners_and_api_observability() {
     let (path, _d) = temp_config(concat!(
         "[censorship]\ntls_domain = \"a\"\n",
         "[server]\nport = 443\n",
@@ -266,7 +266,8 @@ async fn read_managed_config_returns_server_listeners_only() {
         .as_table()
         .unwrap();
     assert!(server.contains_key("listeners"));
-    assert!(!server.contains_key("api"));
+    assert_eq!(server["api"].as_table().unwrap().len(), 5);
+    assert!(server["api"].get("auth_header").is_none());
     assert!(!server.contains_key("port"));
     let listeners = server["listeners"].as_array().unwrap();
     assert_eq!(listeners.len(), 1);

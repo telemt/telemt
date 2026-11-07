@@ -49,6 +49,7 @@ impl Fixture {
         mutable.proxy_shared = proxy_shared.clone();
         mutable.config_rx = config_rx;
         let shared = ApiShared {
+            runtime_generation: runtime.id,
             stats,
             ip_tracker: runtime.ip_tracker.clone(),
             me_pool: runtime.me_pool_runtime.clone(),

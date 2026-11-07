@@ -326,9 +326,9 @@ pub(super) async fn save_config_to_disk(
 ///                   located or replaced safely, so it is edited via `general`.
 ///
 /// `server` is partially editable: only the nested fields listed in
-/// [`EDITABLE_SERVER_FIELDS`] (currently `listeners`) may appear in GET/PATCH.
-/// Secrets and bind identity (`api`/`admin_api`, `port`, unix sockets, …) stay
-/// blocked. `network` is also partial: only [`EDITABLE_NETWORK_FIELDS`] are
+/// [`EDITABLE_SERVER_FIELDS`] may appear in GET/PATCH; `api` is further restricted
+/// to [`EDITABLE_SERVER_API_FIELDS`]. Secrets and bind identity stay blocked.
+/// `network` is also partial: only [`EDITABLE_NETWORK_FIELDS`] are
 /// exposed, retaining the boundary around per-node identity and routing policy.
 pub(super) const EDITABLE_SECTIONS: &[&str] = &[
     "general",
@@ -343,7 +343,16 @@ pub(super) const EDITABLE_SECTIONS: &[&str] = &[
 ///
 /// Arrays (e.g. `listeners`) replace wholesale on PATCH, matching the existing
 /// merge semantics for non-table values.
-pub(super) const EDITABLE_SERVER_FIELDS: &[&str] = &["listeners"];
+pub(super) const EDITABLE_SERVER_FIELDS: &[&str] = &["listeners", "api"];
+
+/// Diagnostics settings applied by explicit generation reload, not the watcher.
+pub(super) const EDITABLE_SERVER_API_FIELDS: &[&str] = &[
+    "minimal_runtime_enabled",
+    "minimal_runtime_cache_ttl_ms",
+    "runtime_edge_enabled",
+    "runtime_edge_cache_ttl_ms",
+    "runtime_edge_top_n",
+];
 
 /// Only the generation resolver's overrides may be read/patched under `network`.
 pub(super) const EDITABLE_NETWORK_FIELDS: &[&str] = &["dns_overrides"];

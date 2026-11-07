@@ -24,7 +24,7 @@ class ClientTests(unittest.TestCase):
 
     def test_all_json_operations_match_the_rust_catalog(self):
         reads = {
-            "health": "health", "health_ready": "health_ready", "capabilities": "capabilities",
+            "access_policy_get": "access_policy", "health": "health", "health_ready": "health_ready", "capabilities": "capabilities",
             "config_schema": "config_schema", "system_info": "system_info", "runtime_gates": "runtime_gates",
             "runtime_initialization": "runtime_initialization", "limits_effective": "limits_effective",
             "security_posture": "security_posture", "security_whitelist": "security_whitelist",
@@ -48,6 +48,7 @@ class ClientTests(unittest.TestCase):
             "web_drain": ("web_drain", (INSTANCE, 30), {}, {"runtime_instance": INSTANCE, "timeout_secs": 30}),
             "config_validate": ("validate_config", ({"general": {"log_level": "debug"}},), {}, {"general": {"log_level": "debug"}}),
             "config_patch": ("patch_config", ({"web": {"enabled": False}},), {}, {"web": {"enabled": False}}),
+            "access_policy_patch": ("patch_access_policy", ({"user_max_tcp_conns_global_each": None, "cidr_rate_limits": {"192.0.2.0/24": None}},), {}, {"user_max_tcp_conns_global_each": None, "cidr_rate_limits": {"192.0.2.0/24": None}}),
             "reload": ("reload", (), {}, {"mode": "instant"}),
             "reload_status": ("reload_status", (7,), {}, None),
             "users_create": ("create_user", ("alice",), {}, {"username": "alice"}),
@@ -85,7 +86,10 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(USER_FIELDS, set(artifact["components"]["schemas"]["PatchUserRequest"]["properties"]))
 
     def test_config_sparse_body_queries_and_both_preconditions_are_unchanged(self):
-        body = {"general": {"ad_tag": None, "me_keepalive_enabled": False}, "upstreams": []}
+        body = {"general": {"ad_tag": None, "me_keepalive_enabled": False}, "upstreams": [],
+                "server": {"api": {"minimal_runtime_enabled": False, "minimal_runtime_cache_ttl_ms": 0,
+                                   "runtime_edge_enabled": True, "runtime_edge_cache_ttl_ms": None,
+                                   "runtime_edge_top_n": 1}}}
         for method in (self.api.validate_config, self.api.patch_config):
             self.peer.reply({"reload": {"reload_id": 7}}, 202 if method == self.api.patch_config else 200)
             method(body, if_match='"source"', if_runtime_match='"process:1:2"', reload="drain", timeout_secs=30, failure_policy="rollback")
@@ -116,6 +120,22 @@ class ClientTests(unittest.TestCase):
         self.peer.reply({"secret": "0" * 32})
         self.api.rotate_secret("alice", secret="0" * 32)
         self.assertEqual(self.peer.requests[-1]["body"], {"secret": "0" * 32})
+
+    def test_source_deny_creation_distinguishes_omitted_null_and_empty(self):
+        for options, expected in [({}, {"username": "alice"}),
+                                  ({"source_deny": None}, {"username": "alice", "source_deny": None}),
+                                  ({"source_deny": []}, {"username": "alice", "source_deny": []}),
+                                  ({"source_deny": ["192.0.2.0/24", "2001:db8::/32"]},
+                                   {"username": "alice", "source_deny": ["192.0.2.0/24", "2001:db8::/32"]})]:
+            self.peer.reply({})
+            self.api.create_user("alice", **options)
+            self.assertEqual(self.peer.requests[-1]["body"], expected)
+        self.peer.reply({})
+        self.api.patch_user("alice", source_deny=[])
+        self.assertEqual(self.peer.requests[-1]["body"], {"source_deny": []})
+        self.peer.reply({})
+        self.api.patch_user_fields("alice", {"source_deny": None})
+        self.assertEqual(self.peer.requests[-1]["body"], {"source_deny": None})
 
     def test_ready_503_and_web_410_are_data_only_on_the_documented_routes(self):
         for status, method, args, data in [(503, self.api.health_ready, (), {"ready": False}),

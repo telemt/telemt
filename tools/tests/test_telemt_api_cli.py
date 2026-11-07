@@ -78,6 +78,38 @@ class CLITests(unittest.TestCase):
             self.assertEqual(request["headers"]["if-runtime-match"], ["opaque"])
             self.assertEqual(parse_qs(urlsplit(request["path"]).query), {"reload": ["drain"], "timeout_secs": ["12"], "failure_policy": ["rollback"]})
 
+    def test_access_policy_preserves_null_entries_and_both_fences(self):
+        body = {"user_max_tcp_conns_global_each": None, "cidr_rate_limits": {"192.0.2.0/24": None}}
+        self.peer.reply({})
+        result = self.run_cli(["access-policy-patch", "--json", "-", "--if-match", "source",
+                               "--if-runtime-match", "runtime"], json.dumps(body))
+        self.assertEqual(result[0], 0, result[2])
+        request = self.peer.requests[-1]
+        self.assertEqual(request["path"], "/v1/access/policy")
+        self.assertEqual(request["body"], body)
+        self.assertEqual(request["headers"]["if-match"], ["source"])
+        self.assertEqual(request["headers"]["if-runtime-match"], ["runtime"])
+        self.peer.reply({})
+        self.assertEqual(self.run_cli(["access-policy"])[0], 0)
+        self.assertEqual(self.peer.requests[-1]["method"], "GET")
+
+    def test_source_deny_replacement_and_explicit_removal_on_recreation(self):
+        for command in ("create", "patch"):
+            self.peer.reply({})
+            result = self.run_cli([command, "alice", "--source-deny", "192.0.2.0/24",
+                                   "--source-deny", "2001:db8::/32"])
+            self.assertEqual(result[0], 0, result[2])
+            self.assertEqual(self.peer.requests[-1]["body"]["source_deny"], ["192.0.2.0/24", "2001:db8::/32"])
+        for command, option in [("create", "--clear-source-deny"), ("patch", "--clear")]:
+            self.peer.reply({})
+            result = self.run_cli([command, "alice", option, *(["source_deny"] if command == "patch" else [])])
+            self.assertEqual(result[0], 0, result[2])
+            self.assertIsNone(self.peer.requests[-1]["body"]["source_deny"])
+        count = len(self.peer.requests)
+        self.assertEqual(self.run_cli(["create", "alice", "--source-deny", "192.0.2.0/24", "--clear-source-deny"])[0], 2)
+        self.assertEqual(self.run_cli(["patch", "alice", "--source-deny", "192.0.2.0/24", "--clear", "source_deny"])[0], 2)
+        self.assertEqual(len(self.peer.requests), count)
+
     def test_reload_waits_for_terminal_state_and_reports_failure(self):
         self.peer.reply({"reload_id": 7, "config_revision": "target", "state": "accepted"}, 202)
         self.peer.reply({"reload_id": 7, "config_revision": "target", "state": "draining"})

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::super::config_store::{
-    EDITABLE_NETWORK_FIELDS, EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS,
+    EDITABLE_NETWORK_FIELDS, EDITABLE_SECTIONS, EDITABLE_SERVER_API_FIELDS, EDITABLE_SERVER_FIELDS,
 };
 use super::super::model::ApiFailure;
 use super::SCHEMA_VERSION;
@@ -204,13 +204,19 @@ fn field_api(path: &str) -> FieldApi {
         || path
             .strip_prefix("network.")
             .is_some_and(|field| EDITABLE_NETWORK_FIELDS.contains(&field))
+        || path
+            .strip_prefix("server.api.")
+            .is_some_and(|field| EDITABLE_SERVER_API_FIELDS.contains(&field))
         || (top == "server"
-            && EDITABLE_SERVER_FIELDS.iter().any(|field| {
-                let prefix = format!("server.{field}");
-                path == prefix
-                    || path.starts_with(&format!("{prefix}["))
-                    || path.starts_with(&format!("{prefix}."))
-            }));
+            && EDITABLE_SERVER_FIELDS
+                .iter()
+                .filter(|field| **field != "api")
+                .any(|field| {
+                    let prefix = format!("server.{field}");
+                    path == prefix
+                        || path.starts_with(&format!("{prefix}["))
+                        || path.starts_with(&format!("{prefix}."))
+                }));
     let policy_field = path.strip_prefix("access.").and_then(|path| {
         let field = path.split('.').next()?;
         crate::api::access_policy::FIELDS
