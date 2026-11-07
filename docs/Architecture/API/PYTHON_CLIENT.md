@@ -69,7 +69,7 @@ Existing statistics commands retain their names: `health`, `info`, `status`,
 | `web-resume --runtime-instance INSTANCE` | `web_resume(instance)` | Resumes operator admission subject to other policy gates. |
 | `gen-secret` | `TelemtAPI.generate_secret()` | Generates a new 32-hex secret locally. |
 
-The client covers all 51 JSON operations in the operation catalog. Open the
+The client covers all 53 JSON operations in the operation catalog. Open the
 HTML `/web-status` viewer in a browser; it is not decoded as a JSON response.
 Feature gates and missing runtime planes still return the server's documented
 errors. Discovery availability is a snapshot, not a reservation.
@@ -79,7 +79,15 @@ errors. Discovery availability is a snapshot, not a reservation.
 `create`/`patch` accept `--secret`, `--ad-tag`, `--max-conns`, `--expires`,
 `--quota`, `--max-ips`, `--quota-period daily|weekly|monthly`, `--rate-up`,
 `--rate-down`, and mutually exclusive `--enabled`/`--disabled`. Rate units are
-bytes per second. A zero or false option is transmitted explicitly.
+bits per second. A zero or false option is transmitted explicitly.
+
+Shared access policy is available through `api.access_policy()` and
+`api.patch_access_policy(body, if_match=..., if_runtime_match=...)`, or CLI
+`access-policy` / `access-policy-patch --json FILE --if-runtime-match TOKEN`.
+JSON null is transmitted unchanged: scalar null restores a default, a null CIDR
+entry deletes that rule, and `cidr_rate_limits=null` clears the map. A rate object
+replaces both directions, with omitted directions unlimited. Inspect
+`desired` / `effective` and the runtime token before relying on publication.
 
 For backward compatibility, `patch_user(..., field=None)` continues to omit that
 convenience argument. Use `patch_user_fields` or CLI JSON/`--clear` to transmit
@@ -109,6 +117,21 @@ python3 tools/telemt_api.py patch alice --clear quota_period --clear rate_limit_
 printf '%s\n' '{"quota_period":null,"enabled":false}' | python3 tools/telemt_api.py patch alice --json -
 ```
 
+Source-deny lists use `source_deny=["192.0.2.0/24", "2001:db8::/32"]`,
+`create/patch --source-deny CIDR` (repeatable), or exact PATCH JSON.
+`patch alice --clear source_deny` removes the authored row. User deletion retains
+that row; `create_user("alice", source_deny=None)` or CLI
+`create alice --clear-source-deny` explicitly removes it on recreation. Omitting
+the creation argument retains any old rule. The older `patch_user(...,
+source_deny=None)` convenience call omits the field; use `patch_user_fields`
+for null removal. Empty arrays replace the list with no denied networks.
+
+These changes need explicit generation reload. Inspect
+`source_deny_status.runtime_reload_required`, submit `reload` with the returned
+revision, and check reload status plus the effective list. Saving alone does not
+cancel sessions or change rules in a running generation; a reload already in
+progress may have captured an older source revision.
+
 Rotation returns the new raw credential, cancels owners tied to the old
 credential identity and relies on asynchronous owner/watcher work for subsequent
 publication. `UserInfo.in_runtime` only tests username membership. It does not
@@ -129,6 +152,17 @@ list, and `{"network":{"dns_overrides":[]}}` clears it. Other `network` fields
 remain rejected. PATCH without a reload query leaves publication to the existing
 watcher; it does not wait for the resolver update or move established connections.
 See [DNS overrides](API.md#dns-overrides) for limits and source ownership.
+
+The same methods and CLI JSON input accept the five
+[API observability settings](API.md#api-observability-settings). For example,
+`{"server":{"api":{"runtime_edge_enabled":true,"runtime_edge_cache_ttl_ms":0,"runtime_edge_top_n":20}}}`
+enables edge diagnostics with caching disabled after generation activation.
+Preview and PATCH the identical body with `reload="instant"`, or `reload="drain"`
+and a required `timeout_secs` value, then poll the returned reload ID.
+Saving without a reload leaves these settings
+pending; the watcher never applies them. `false` and `0` are preserved, while
+`null` retains an allowed field's previous value. API security settings and
+listener identity remain outside this write surface.
 
 State projections are inspection DTOs and must not be used as PATCH bodies.
 
