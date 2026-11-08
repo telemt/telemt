@@ -1903,11 +1903,12 @@ Gültige öffentliche SOCKS-Werte `BND.ADDR/BND.PORT` mit einem Port ungleich nu
     cache_public_ip_path = "cache/public_ip.txt"
     ```
 ## dns_overrides
-  - **Einschränkungen / Validierung**: `String[]`. Jeder Eintrag muss das Format `host:port:ip` verwenden.
- – `host`: Domänenname (darf nicht leer sein und darf nicht `:` enthalten)
- – `port`: `u16`
- – `ip`: IPv4 (`1.2.3.4`) oder in Klammern IPv6 (`[2001:db8::1]`). **Ungeklammertes IPv6 wird abgelehnt**.
-  - **Beschreibung**: Runtime DNS-Overrideen für `host:port`-Ziele. Nützlich, um bestimmte IP-Adressen für bestimmte Upstream-Domänen zu erzwingen, ohne das System-DNS zu berühren.
+  - **Einschränkungen / Validierung**: `String[]`, höchstens `4096` Einträge. Jeder Eintrag muss das Format `host:port:ip` verwenden.
+    - `host`: nichtleerer Domainname ohne `:`.
+    - `port`: `u16`.
+    - `ip`: IPv4 (`1.2.3.4`) oder IPv6 in eckigen Klammern (`[2001:db8::1]`). IPv6 ohne Klammern wird abgelehnt.
+  - **Beschreibung**: Überschreibt künftige `host:port`-Auflösungen über den Resolver der Generation, ohne das System-DNS zu ändern. Hostnamen werden ohne Beachtung der Groß-/Kleinschreibung verglichen; der Port muss übereinstimmen. Bei mehrfacher Angabe desselben Hosts und Ports gilt der letzte Eintrag. Der bestehende Dateiwächter veröffentlicht Änderungen; bereits aufgebaute Verbindungen behalten ihre Zieladressen.
+  - **Control API**: `GET /v1/config` liefert aus `[network]` nur `network.dns_overrides`, einschließlich des Standardwerts `[]`. `PATCH /v1/config` und `POST /v1/config/validate` akzeptieren dieses Feld; andere Netzwerkfelder werden weiterhin abgelehnt. Das Array ersetzt die gesamte Liste; `[]` leert sie, `null` dagegen nicht. Beim Speichern wird nur der Wert ersetzt oder die Schlüsselzuweisung in die zuständige Quelldatei eingefügt. Benachbarte Einstellungen und andere Include-Dateien bleiben erhalten. Uneindeutige Zuständigkeit oder mehrere betroffene Quelldateien führen zu `409 config_patch_not_atomic`. PATCH wartet nicht auf die Veröffentlichung durch den Dateiwächter; `GET /v1/config/state?sections=network` zeigt den Veröffentlichungsstand. Siehe [DNS overrides in der API](../Architecture/API/API.md#dns-overrides).
   - **Beispiel**:
 
     ```toml
@@ -2216,8 +2217,39 @@ Hinweis: Der conntrack-control Worker wird **nur auf Linux** ausgeführt. Auf an
 
 # [server.api]
 
-Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` (gleiches Schema wie `[server.api]`).
+Der ältere Alias `[server.admin_api]` verwendet dasselbe Schema.
 
+Alle Felder dieses Abschnitts sind mit `Hot-Reload = ✘` gekennzeichnet: Der
+Dateiwächter behält die aktiven API-Einstellungen bei. Ein expliziter
+Generationsreload übernimmt `whitelist`, `gray_action`, `auth_header`,
+`request_body_limit_bytes`, `minimal_runtime_enabled`,
+`minimal_runtime_cache_ttl_ms`, `runtime_edge_enabled`,
+`runtime_edge_cache_ttl_ms`, `runtime_edge_top_n` und `read_only`.
+`enabled`, `listen` und `runtime_edge_events_capacity` erfordern einen
+Neustart des Prozesses.
+
+`GET /v1/config`, `PATCH /v1/config` und `POST /v1/config/validate` stellen unter
+`server.api` nur `minimal_runtime_enabled`, `minimal_runtime_cache_ttl_ms`,
+`runtime_edge_enabled`, `runtime_edge_cache_ttl_ms` und `runtime_edge_top_n`
+bereit, zusätzlich zu `server.listeners`. GET enthält die Standardwerte;
+PATCH erhält benachbarte API-Einstellungen. Beide TTLs erlauben `0..60000` ms
+(`0` deaktiviert das Caching), top-N erlaubt `1..1000`. Ausgelassene Felder und
+zulässige Felder mit `null` behalten ihre Werte. Verbotene Felder werden auch
+bei `null` abgelehnt. Ein server-Patch ohne konkreten bearbeitbaren Wert wird
+abgelehnt. Speichern allein aktiviert diese Einstellungen nicht: Verwenden Sie
+`?reload=instant`, `?reload=drain` oder `POST /v1/system/reload` und warten Sie
+auf die Aktivierung der Generation. Auch bei gemischten Änderungen behält der
+Dateiwächter die bisherigen Werte bei. API-Listener und Ereignispufferkapazität
+bleiben an den Prozess gebunden; verspätete Cache-Schreibvorgänge können einer
+Anfrage keine Daten einer anderen Generation liefern. Andere API-Einstellungen
+müssen weiterhin in der zuständigen TOML-Datei geändert werden. Siehe
+[API-Diagnoseeinstellungen](../Architecture/API/API.md#api-observability-settings).
+`GET /v1/config/schema` beschreibt für jedes
+Feld die API-Verfügbarkeit und das Übernahmeverhalten. `GET /v1/config/state`
+zeigt Unterschiede zwischen Sollzustand und veröffentlichtem Zustand, ohne zu
+bestätigen, dass alle Verbraucher die Einstellungen bereits übernommen haben.
+Siehe [API-Referenz](../Architecture/API/API.md) und
+[Python-Client-Anleitung](../Architecture/API/PYTHON_CLIENT.md).
 
 | Schlüssel | Typ | Default | Hot-Reload |
 | --- | --- | --- | --- |
@@ -2246,7 +2278,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     ```
 ## gray_action
   - **Einschränkungen / Validierung**: `"drop"`, `"api"` oder `"200"`.
-  - **Beschreibung**: API-Antwortrichtlinie für graue/eingeschränkte Staaten: Anfrage verwerfen, normale API-Antwort bereitstellen oder `200 OK` erzwingen.
+  - **Beschreibung**: Gilt nur für direkte TCP-Peers außerhalb von `whitelist`: `"drop"` schließt die Verbindung ohne HTTP-Antwort, `"api"` liefert ein strukturiertes `403 forbidden`, und `"200"` liefert ein leeres `200 OK` mit `text/html; charset=utf-8`. Die Einstellung gewährt keinen API-Zugriff. Erlaubte Peers durchlaufen weiterhin die Authentifizierung und die Prüfung des read-only-Modus; eine leere Antwort ist kein JSON-Erfolgsnachweis.
   - **Beispiel**:
 
     ```toml
@@ -2281,7 +2313,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     auth_header = "Bearer MY_TOKEN"
     ```
 ## request_body_limit_bytes
-  - **Einschränkungen / Validierung**: Muss `> 0` (Byte) sein.
+  - **Einschränkungen / Validierung**: `1..=1048576` (Bytes).
   - **Beschreibung**: Maximal akzeptierte HTTP-Anfragetextgröße (Byte).
   - **Beispiel**:
 
@@ -3589,6 +3621,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     alice = 500
     ```
 ## user_max_tcp_conns_global_each
+  - **API**: Das Feld ist über `GET/PATCH /v1/access/policy` verfügbar. Auslassen behält den Wert bei; `null` setzt ihn auf den Typstandard zurück. Die Veröffentlichung erfolgt über den Watcher; die Antwort trennt die Snapshots `desired` und `effective`.
   - **Einschränkungen / Validierung**: `usize`. `0` deaktiviert das geerbte Limit.
   - **Beschreibung**: Globale maximale Anzahl gleichzeitiger TCP-Verbindungen pro User, angewendet, wenn ein User **keinen positiven** Eintrag in `[access.user_max_tcp_conns]` hat (ein fehlender Schlüssel oder ein Wert von `0`, beides fällt auf diese Einstellung). Grenzwerte pro User, die größer als `0` in `user_max_tcp_conns` sind, haben Vorrang.
   - **Beispiel**:
@@ -3651,6 +3684,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     alice = 16
     ```
 ## user_max_unique_ips_global_each
+  - **API**: Das Feld ist über `GET/PATCH /v1/access/policy` verfügbar. Auslassen behält den Wert bei; `null` setzt ihn auf den Typstandard zurück. Die Veröffentlichung erfolgt über den Watcher; die Antwort trennt die Snapshots `desired` und `effective`.
   - **Einschränkungen / Validierung**: `usize`. `0` deaktiviert das geerbte Limit.
   - **Beschreibung**: Globales eindeutiges IP-Limit pro User, das angewendet wird, wenn ein User in `[access.user_max_unique_ips]` keine individuelle Override hat.
   - **Beispiel**:
@@ -3660,6 +3694,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     user_max_unique_ips_global_each = 8
     ```
 ## user_max_unique_ips_mode
+  - **API**: Das Feld ist über `GET/PATCH /v1/access/policy` verfügbar. Auslassen behält den Wert bei; `null` setzt ihn auf den Typstandard zurück. Die Veröffentlichung erfolgt über den Watcher; die Antwort trennt die Snapshots `desired` und `effective`.
   - **Einschränkungen / Validierung**: Muss einer von `"active_window"`, `"time_window"`, `"combined"` sein.
   - **Beschreibung**: Eindeutiger Source-IP-Limit-Abrechnungsmodus.
   - **Beispiel**:
@@ -3669,6 +3704,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     user_max_unique_ips_mode = "active_window"
     ```
 ## user_max_unique_ips_window_secs
+  - **API**: Das Feld ist über `GET/PATCH /v1/access/policy` verfügbar. Auslassen behält den Wert bei; `null` setzt ihn auf den Typstandard zurück. Die Veröffentlichung erfolgt über den Watcher; die Antwort trennt die Snapshots `desired` und `effective`.
   - **Einschränkungen / Validierung**: Muss `> 0` sein.
   - **Beschreibung**: Fenstergröße (Sekunden), die von Abrechnungsmodi mit eindeutiger IP verwendet wird, die ein Zeitfenster enthalten (`"time_window"` und `"combined"`).
   - **Beispiel**:
@@ -3678,6 +3714,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     user_max_unique_ips_window_secs = 30
     ```
 ## user_source_deny
+  - **API**: `source_deny` in Benutzer-GET/create/PATCH stellt diese Liste bereit. Auslassen behält sie bei, ein Array ersetzt sie vollständig und `null` entfernt den konfigurierten Eintrag. Die strikte Validierung akzeptiert diese Map. `source_deny_status.runtime_reload_required` vergleicht gewünschte und veröffentlichte Regeln; angewendet werden sie mit `POST /v1/system/reload`. Der Watcher aktualisiert diese Regeln nicht; Speichern beendet keine Sitzungen. Beim Löschen eines Benutzers bleibt die Regel erhalten. Ein erneut angelegter Name übernimmt sie, sofern nicht ausdrücklich `source_deny=null` angegeben wird.
   - **Einschränkungen / Validierung**: Tabelle `username -> IpNetwork[]`. Jedes Netzwerk muss als CIDR parsen (zum Beispiel `203.0.113.0/24` oder `2001:db8::/32`).
   - **Beschreibung**: Source-IP/CIDR-Verweigerungsliste pro User wird **nach erfolgreicher Authentifizierung** in den Handshake-Pfaden TLS und MTProto angewendet. Eine übereinstimmende Source-IP wird über denselben Fail-Closed-Pfad wie eine ungültige Authentifizierung abgelehnt.
   - **Beispiel**:
@@ -3730,6 +3767,7 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     alice = { up_bps = 1048576, down_bps = 2097152 }
     ```
 ## cidr_rate_limits
+  - **API**: Das Feld ist über `GET/PATCH /v1/access/policy` verfügbar. Auslassen behält den Wert bei; `null` setzt einen Skalar auf den Typstandard zurück. Bei `cidr_rate_limits` werden Schlüssel zusammengeführt, ein null-Eintrag löscht eine Regel und `null` für die gesamte Map löscht alle Regeln. Ratenobjekte ersetzen beide Richtungen, angegeben in Bit pro Sekunde. Die Veröffentlichung erfolgt über den Watcher; die Antwort trennt die Snapshots `desired` und `effective`.
   - **Einschränkungen / Validierung**: Tabelle `CIDR oder Auto-Template -> { up_bps, down_bps }`. Jede Richtung muss in `0..=100000000000` liegen; `0` bedeutet für diese Richtung unbegrenzt, und mindestens eine Richtung muss ungleich Null sein. Explizite CIDR-Schlüssel müssen als `IpNetwork` parsbar sein; Auto-Template-Schlüssel müssen `*4/N` (`N=0..32`), `*6/N` (`N=0..128`) oder `*/N` (`N=0..32`) verwenden. Doppelte normalisierte Auto-Templates werden abgelehnt.
   - **Beschreibung**: Source-Subnetz-Bandbreitenlimits, die zusätzlich zu Per-User-Limits greifen. Explizite CIDR-Regeln verwenden Longest-Prefix-Wins und haben Vorrang vor Auto-Templates. Auto-Templates erzeugen Buckets lazy pro passendem Source-Subnetz: `*4/N` für IPv4, `*6/N` für IPv6 und `*/N` als Dual-Stack-Shorthand, bei dem IPv4 `/N` und IPv6 `/(N * 4)` nutzt.
   - **Beispiel**:

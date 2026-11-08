@@ -70,6 +70,7 @@ pub(super) struct RuntimeEdgeConnectionsSummaryData {
 
 #[derive(Clone)]
 pub(crate) struct EdgeConnectionsCacheEntry {
+    pub(super) generation: u64,
     pub(super) expires_at: Instant,
     pub(super) payload: RuntimeEdgeConnectionsSummaryPayload,
     pub(super) generated_at_epoch_secs: u64,
@@ -270,6 +271,7 @@ async fn get_connections_payload_cached(
         let now = Instant::now();
         let cached = shared.runtime_edge_connections_cache.lock().await.clone();
         if let Some(entry) = cached
+            && entry.generation == shared.runtime_generation
             && now < entry.expires_at
         {
             let mut payload = entry.payload;
@@ -281,7 +283,10 @@ async fn get_connections_payload_cached(
 
     let Ok(_guard) = shared.runtime_edge_recompute_lock.try_lock() else {
         let cached = shared.runtime_edge_connections_cache.lock().await.clone();
-        if let Some(entry) = cached {
+        if let Some(entry) = cached
+            && cache_ttl_ms > 0
+            && entry.generation == shared.runtime_generation
+        {
             let mut payload = entry.payload;
             payload.cache.served_from_cache = true;
             payload.cache.stale_cache_used = true;
@@ -295,6 +300,7 @@ async fn get_connections_payload_cached(
 
     if cache_ttl_ms > 0 {
         let entry = EdgeConnectionsCacheEntry {
+            generation: shared.runtime_generation,
             expires_at: Instant::now() + Duration::from_millis(cache_ttl_ms),
             payload: payload.clone(),
             generated_at_epoch_secs,

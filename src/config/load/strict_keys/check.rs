@@ -148,6 +148,20 @@ fn check_nested_table_value(
 /// Collects unknown keys across every supported nested configuration table.
 pub(super) fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<UnknownConfigKey> {
     let known_for_suggestion = known_config_keys_for_suggestion();
+    collect(parsed_toml, &known_for_suggestion)
+}
+
+pub(super) fn unknown_paths(parsed_toml: &toml::Value) -> Vec<String> {
+    collect(parsed_toml, &[])
+        .into_iter()
+        .map(|key| key.path)
+        .collect()
+}
+
+fn collect(
+    parsed_toml: &toml::Value,
+    known_for_suggestion: &[&'static str],
+) -> Vec<UnknownConfigKey> {
     let mut unknown = Vec::new();
 
     if let Some(root) = parsed_toml.as_table() {

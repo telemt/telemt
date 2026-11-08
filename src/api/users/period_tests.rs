@@ -49,6 +49,7 @@ impl Fixture {
         mutable.proxy_shared = proxy_shared.clone();
         mutable.config_rx = config_rx;
         let shared = ApiShared {
+            runtime_generation: runtime.id,
             stats,
             ip_tracker: runtime.ip_tracker.clone(),
             me_pool: runtime.me_pool_runtime.clone(),
@@ -57,6 +58,8 @@ impl Fixture {
             quota_state: QuotaStateOwner::new(dir.path().join("quota.json"), store.clone()),
             detected_ips_rx: watch::channel((None, None)).1,
             mutation_lock: Arc::new(Mutex::new(())),
+            config_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            config_state_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             minimal_cache: Arc::new(Mutex::new(None)),
             runtime_edge_connections_cache: Arc::new(Mutex::new(None)),
             runtime_edge_recompute_lock: Arc::new(Mutex::new(())),

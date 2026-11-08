@@ -119,6 +119,7 @@ async fn create_user_to_completion(
             .user_quota_periods
             .insert(body.username.clone(), period);
     }
+    let source_deny_edits = apply_source_deny(&mut cfg, &body.username, body.source_deny)?;
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
 
@@ -154,10 +155,11 @@ async fn create_user_to_completion(
         .prepare_user_creation_locked(&body.username, quota_guard)
         .await
         .map_err(|error| ApiFailure::internal(format!("failed to prepare user quota: {error}")))?;
-    let revision = save_access_sections_to_disk_if_revision(
+    let revision = save_access_sections_and_fields_if_revision(
         &shared.config_path,
         &cfg,
         &touched_sections,
+        source_deny_edits,
         Some(&base_revision),
     )
     .await?;
@@ -196,33 +198,7 @@ async fn create_user_to_completion(
     let user = users
         .into_iter()
         .find(|entry| entry.username == body.username)
-        .unwrap_or(UserInfo {
-            username: body.username.clone(),
-            enabled: cfg.access.is_user_enabled(&body.username),
-            in_runtime: false,
-            user_ad_tag: None,
-            max_tcp_conns: cfg
-                .access
-                .user_max_tcp_conns
-                .get(&body.username)
-                .copied()
-                .filter(|limit| *limit > 0)
-                .or((cfg.access.user_max_tcp_conns_global_each > 0)
-                    .then_some(cfg.access.user_max_tcp_conns_global_each)),
-            expiration_rfc3339: None,
-            data_quota_bytes: None,
-            quota_period: body.quota_period,
-            rate_limit_up_bps: body.rate_limit_up_bps.filter(|limit| *limit > 0),
-            rate_limit_down_bps: body.rate_limit_down_bps.filter(|limit| *limit > 0),
-            max_unique_ips: updated_limit,
-            current_connections: 0,
-            active_unique_ips: 0,
-            active_unique_ips_list: Vec::new(),
-            recent_unique_ips: 0,
-            recent_unique_ips_list: Vec::new(),
-            total_octets: 0,
-            links: build_user_links(&cfg, &secret, detected_ip_v4, detected_ip_v6),
-        });
+        .ok_or_else(|| ApiFailure::internal("Created user is missing from config view"))?;
 
     Ok((CreateUserResponse { user, secret }, revision))
 }

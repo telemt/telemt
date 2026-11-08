@@ -32,7 +32,7 @@ pub(super) async fn create_user_route(
         }
     };
     let runtime_cfg = config_rx.borrow().clone();
-    data.user.in_runtime = runtime_cfg.access.users.contains_key(&data.user.username);
+    users::refresh_runtime_view(&mut data.user, &runtime_cfg);
     shared.runtime_events.record(
         "api.user.create.ok",
         format!("username={}", data.user.username),
@@ -107,9 +107,18 @@ pub(super) async fn patch_config_route(
         ));
     }
     let expected_revision = parse_if_match(req.headers());
+    let expected_runtime = config_edit::parse_runtime_match(req.headers())?;
     let reload_request = ReloadRequest::from_query(query).map_err(ApiFailure::bad_request)?;
     let body = read_json::<serde_json::Value>(req.into_body(), body_limit).await?;
-    match config_edit::patch_config(body, expected_revision, reload_request, shared).await {
+    match config_edit::patch_config(
+        body,
+        expected_revision,
+        expected_runtime,
+        reload_request,
+        shared,
+    )
+    .await
+    {
         Ok(resp) => {
             let revision = resp.revision.clone();
             let status = if resp.reload.is_some() {
@@ -126,4 +135,26 @@ pub(super) async fn patch_config_route(
             Err(error)
         }
     }
+}
+
+pub(super) async fn validate_config_route(
+    req: Request<Incoming>,
+    shared: &Arc<ApiShared>,
+    query: Option<&str>,
+    body_limit: usize,
+) -> Result<Response<Full<Bytes>>, ApiFailure> {
+    let expected_revision = parse_if_match(req.headers());
+    let expected_runtime = config_edit::parse_runtime_match(req.headers())?;
+    let reload_request = ReloadRequest::from_query(query).map_err(ApiFailure::bad_request)?;
+    let body = read_json::<serde_json::Value>(req.into_body(), body_limit).await?;
+    let response = config_edit::validate_config(
+        body,
+        expected_revision,
+        expected_runtime,
+        reload_request,
+        shared,
+    )
+    .await?;
+    let revision = response.base_revision.clone();
+    Ok(success_response(StatusCode::OK, response, revision))
 }

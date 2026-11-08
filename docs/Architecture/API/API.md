@@ -12,6 +12,7 @@ API runtime is configured in `[server.api]`.
 | `enabled` | `bool` | `true` | Enables REST API listener. |
 | `listen` | `string` (`IP:PORT`) | `0.0.0.0:9091` | API bind address. |
 | `whitelist` | `CIDR[]` | `127.0.0.0/8` | Source IP allowlist. Empty list means allow all. |
+| `gray_action` | `"drop"`, `"api"`, `"200"` | `"drop"` | Response to a direct peer outside the whitelist: close without HTTP, structured `403 forbidden`, or empty `200` respectively. |
 | `auth_header` | `string` | `""` | Exact value for `Authorization` header. Empty disables header auth. |
 | `request_body_limit_bytes` | `usize` | `65536` | Maximum request body size. Must be within `[1, 1048576]`. |
 | `minimal_runtime_enabled` | `bool` | `true` | Enables runtime snapshot endpoints requiring ME pool read-lock aggregation. |
@@ -32,6 +33,16 @@ Runtime validation for API config:
 - `server.api.runtime_edge_top_n` must be within `[1, 1000]`.
 - `server.api.runtime_edge_events_capacity` must be within `[16, 4096]`.
 
+The file watcher retains every `server.api.*` field. Explicit generation reload
+applies `whitelist`, `gray_action`, `auth_header`, `request_body_limit_bytes`,
+`minimal_runtime_enabled`, `minimal_runtime_cache_ttl_ms`,
+`runtime_edge_enabled`, `runtime_edge_cache_ttl_ms`, `runtime_edge_top_n`, and
+`read_only`. `enabled`, `listen`, and `runtime_edge_events_capacity` remain
+process-owned and require a process restart. The five [observability settings](#api-observability-settings)
+are editable through `PATCH /v1/config`; other API settings require editing the
+owning TOML source. A client polling after an authentication change must use the
+new header explicitly.
+
 ## Protocol Contract
 
 | Item | Value |
@@ -51,6 +62,10 @@ Runtime validation for API config:
 }
 ```
 
+`GET /v1/config/state` is the additive exception to the non-null revision: its
+`revision` equals `data.desired_revision` and is `null` when the desired source
+cannot be captured. Its effective runtime identity remains available.
+
 ### Error Envelope
 ```json
 {
@@ -67,7 +82,9 @@ Runtime validation for API config:
 
 Requests are processed in this order:
 1. `api_enabled` gate (`503 api_disabled` if disabled).
-2. Source IP whitelist gate (`403 forbidden`).
+2. Source IP whitelist gate: `gray_action="drop"` closes without an HTTP
+   response, `"api"` returns `403 forbidden`, and `"200"` returns an empty
+   `200 OK` with `text/html; charset=utf-8`.
 3. `Authorization` header gate when configured (`401 unauthorized`).
 4. Route and method matching (`404 not_found` or `405 method_not_allowed`).
 5. `read_only` gate for mutating routes (`403 read_only`).
@@ -77,6 +94,24 @@ Requests are processed in this order:
 Notes:
 - Whitelist is evaluated against the direct TCP peer IP (`SocketAddr::ip`), without `X-Forwarded-For` support.
 - `Authorization` check is exact constant-time byte equality against configured `auth_header`.
+- `gray_action` does not grant API access and does not mask authentication or
+  read-only failures for allowed peers. An empty gray `200` is not a JSON success
+  envelope; clients must not interpret it as a successful operation.
+
+## Python client and CLI
+
+The standard-library [Python client](../../../tools/telemt_api.py) covers the 53
+JSON operations, including discovery, preflight/state, user quota/period/rates,
+generation reload and WEB lifecycle/session controls. The HTML `/web-status`
+viewer remains a browser endpoint. See the [client guide](PYTHON_CLIENT.md) for
+command and method mappings, exact sparse/null updates, source/runtime
+preconditions, process references and polling examples.
+
+`APIResponse.http_status` retains HTTP status independently from the JSON `ok`
+flag. Readiness `503` and WEB tombstone `410` with `ok=true` are returned as data
+only by their documented wrappers. Mutations returning `202` remain accepted
+operations or pending publication; they are not silently promoted to success.
+`TelemtAPIError` retains `http_status`, `code`, `request_id` and field `details`.
 
 ## Endpoint Matrix
 
@@ -84,6 +119,9 @@ Notes:
 | --- | --- | --- | --- | --- |
 | `GET` | `/v1/health` | none | `200` | `HealthData` |
 | `GET` | `/v1/health/ready` | none | `200` or `503` | `HealthReadyData` |
+| `GET` | `/v1/capabilities` | none | `200` | `CapabilitiesData` |
+| `GET` | `/v1/config/schema` | none | `200` | `ConfigSchemaData` |
+| `GET` | `/v1/config/state` | optional `sections` query | `200` | `ConfigStateData`, including partial results |
 | `GET` | `/v1/system/info` | none | `200` | `SystemInfoData` |
 | `GET` | `/v1/runtime/gates` | none | `200` | `RuntimeGatesData` |
 | `GET` | `/v1/runtime/initialization` | none | `200` | `RuntimeInitializationData` |
@@ -117,8 +155,11 @@ Notes:
 | `GET` | `/v1/stats/users/active-ips` | none | `200` | `UserActiveIps[]` |
 | `GET` | `/v1/stats/users` | none | `200` | `UserInfo[]` |
 | `GET` | `/v1/stats/users/quota` | none | `200` | User quota counters and recurring schedule status in `data.users`. |
+| `GET` | `/v1/access/policy` | none | `200` | Desired/effective access policy |
+| `PATCH` | `/v1/access/policy` | `AccessPolicyPatch` | `200` | Desired/effective access policy with changed paths |
 | `GET` | `/v1/config` | none | `200` | `ConfigData` |
 | `PATCH` | `/v1/config` | sparse JSON object; optional reload query | `200` or `202` | `PatchConfigResponse` |
+| `POST` | `/v1/config/validate` | same sparse patch, preconditions and reload query | `200` | `ConfigValidationData` |
 | `POST` | `/v1/system/reload` | `ReloadRequest` or empty body | `202` | `ReloadAccepted` |
 | `GET` | `/v1/system/reload/{id}` | none | `200` | `ReloadStatus` |
 | `GET` | `/v1/users` | none | `200` | `UserInfo[]` |
@@ -137,6 +178,9 @@ Notes:
 | --- | --- |
 | `GET /v1/health` | Returns basic API liveness and current `read_only` flag. |
 | `GET /v1/health/ready` | Returns readiness based on admission state and upstream health; returns `503` when not ready. |
+| `GET /v1/capabilities` | Lists implemented operations, feature gates, runtime prerequisites and mutation policy. |
+| `GET /v1/config/schema` | Lists configuration paths and their static value, exposure and application contracts without configured values. |
+| `GET /v1/config/state` | Compares redacted desired and published snapshots, with generation/epoch, pending fields and owner outcomes; permits read-only mode. |
 | `GET /v1/system/info` | Returns binary/build metadata, process uptime, config path/hash, and reload counters. |
 | `GET /v1/runtime/gates` | Returns admission, ME readiness, fallback/reroute, and startup gate state. |
 | `GET /v1/runtime/initialization` | Returns startup progress, ME initialization status, and per-component timeline. |
@@ -168,8 +212,11 @@ Notes:
 | `POST /v1/runtime/web/lifecycle/resume` | Cancels an active drain, if any, and reopens only the operator-owned admission fence. |
 | `GET /v1/stats/users/active-ips` | Returns users that currently have non-empty active source-IP lists. |
 | `GET /v1/stats/users` | Alias of `GET /v1/users`; returns disk-first user views with runtime lag flag. |
+| `GET /v1/access/policy` | Desired and published shared access limits and CIDR rate rules, with source revision and runtime token. |
+| `PATCH /v1/access/policy` | Atomic policy edit; optional `If-Match` and `If-Runtime-Match`. Watcher publication is asynchronous. |
 | `GET /v1/config` | Returns the current editable config sections as JSON (no `access.*`) plus the revision. |
 | `PATCH /v1/config` | Applies a sparse patch and optionally submits an in-process runtime reload to Maestro. |
+| `POST /v1/config/validate` | Prepares and classifies a candidate without persistence or runtime publication; allowed in read-only mode. |
 | `POST /v1/system/reload` | Loads and validates the current on-disk config, then asks Maestro to prepare and activate a new runtime generation. |
 | `GET /v1/system/reload/{id}` | Returns one retained reload status; the coordinator retains the most recent 32 operations. |
 | `GET /v1/users` | Returns disk-first user views sorted by username. |
@@ -188,14 +235,17 @@ Notes:
 | --- | --- | --- |
 | `400` | `bad_request` | Invalid JSON, validation failures, malformed request body. |
 | `400` | `access_not_editable` | `PATCH /v1/config` body contains an `access` key (managed via users API). |
-| `400` | `section_not_editable` | `PATCH /v1/config` body contains `network` or an unknown top-level key. |
-| `400` | `field_not_editable` | `PATCH /v1/config` body contains a forbidden nested field under a partially editable section (e.g. `server.api`, `server.port`). |
+| `400` | `section_not_editable` | `PATCH /v1/config` body contains an unknown top-level key or a non-null, non-object partial section. |
+| `400` | `field_not_editable` | `PATCH /v1/config` body contains a forbidden nested field under a partially editable section (e.g. `server.api.auth_header`, `server.port`, `network.ipv4`). |
 | `401` | `unauthorized` | Missing/invalid `Authorization` when `auth_header` is configured. |
 | `403` | `forbidden` | Source IP is not allowed by whitelist. |
 | `403` | `read_only` | Mutating endpoint called while `read_only=true`. |
 | `404` | `not_found` | Unknown route, unknown user, or unsupported sub-route. |
 | `405` | `method_not_allowed` | Unsupported method for `/v1/users/{username}` route shape. |
 | `409` | `revision_conflict` | `If-Match` mismatch, or the source graph/owner changed during a fenced write. |
+| `409` | `runtime_conflict` | Active generation/config publication changed during config preparation, or `If-Runtime-Match` is stale. |
+| `429` | `config_preflight_busy` | Both config preflight preparation slots are occupied. |
+| `504` | `config_preflight_timeout` | Config preflight exceeded its 30-second deadline. |
 | `409` | `reload_in_progress` | Another reload operation is non-terminal. |
 | `409` | `web_runtime_mismatch` | A runtime instance, session reference, or operation reference belongs to another WEB process instance. |
 | `409` | `web_issuance_enabled` | A WEB close-all operation was requested while effective issuance remained enabled. |
@@ -226,6 +276,115 @@ Notes:
 | `POST /v1/users/{username}/enable/` | Trailing slash is trimmed and the route matches `enable`. |
 | `POST /v1/users/{username}/disable/` | Trailing slash is trimmed and the route matches `disable`. |
 | `POST /v1/users/{username}/reset-quota/` | Trailing slash is trimmed and the route matches `reset-quota`. |
+
+## Discovery
+
+`GET /v1/capabilities` and `GET /v1/config/schema` use the common success envelope
+and the same enabled, direct-peer whitelist and Authorization gates as other API
+routes. Both work with `read_only=true`, reject nonempty query strings with
+`400 bad_request`, and reject other methods with `405` and `Allow: GET`. Whitelist
+denial follows the configured `gray_action`: `api` returns `403`, `200` returns an
+empty response, and `drop` closes the connection. Discovery grants no separate
+observer role.
+
+The envelope revision remains the current recursive **disk source** revision.
+It does not identify a runtime generation or prove that desired values have been
+applied. Reading that revision requires the source graph to remain readable.
+
+### CapabilitiesData
+
+Top-level fields are `api_version` (`v1`), `schema_version` (`1`),
+`software_version`, `config_schema`, `openapi_artifact`, `read_only`,
+`availability_scope`, and `operations`. `openapi_artifact` identifies the versioned
+repository artifact; it is not another HTTP route.
+
+Each operation has a stable `id`, `method`, canonical `path`, optional `aliases`,
+`gate`, possible success status codes in `success`, `credential_bearing`, optional
+request `body` schema name, `optional_body`, `exact_json_content_type`, and
+`if_match`. The last flag means the route accepts an optional source revision;
+WEB controls instead use their existing process-instance fence.
+
+| Field | Meaning |
+| --- | --- |
+| `supported` | This build implements the operation; currently always `true` for listed entries. |
+| `enabled` | The API and this operation's diagnostic feature gate are enabled. A diagnostic route may still return HTTP 200 with a disabled-state payload. |
+| `available` | `true` or `false` for sampled feature/runtime-source prerequisites; `null` when a source was not sampled or its lock was busy. |
+| `mutable` | This is a mutation and the API allows writes. It is independent of runtime availability and request validation. |
+| `disabled_reason` | Present for `api_disabled` or `feature_disabled`. |
+| `unavailable_reason` | Present for `source_unavailable`, `web_runtime_unavailable`, `snapshot_busy`, or `availability_not_sampled`. |
+| `mutation_blocked_reason` | `read_only` when the write policy blocks a mutation. |
+| `read_only_operation` | Explicitly non-mutating operation despite its method; currently config validation uses POST. It remains `mutable=false` without a read-only rejection. |
+| `if_runtime_match` | Supports the optional active-publication precondition from config validation. |
+
+Availability describes prerequisites at the time of sampling, not health or the
+outcome of a later request. Discovery does not run self-tests, enumerate sessions,
+aggregate upstream statistics, or wait for the ME pool lock. WEB reads require a
+published runtime in `Running` or `Draining`; controls require `Running`.
+Resource identity, exact snapshot contention, admission fences and operation
+capacity are checked by the requested operation itself.
+
+The `minimal` gate on `/v1/stats/upstreams` describes its optional runtime
+snapshot; its existing counters remain readable when that snapshot is disabled.
+`/v1/runtime/upstream_quality` has no minimal-feature gate; discovery leaves its
+optional source availability unsampled. `/v1/runtime/web/status` remains available
+to report an absent WEB runtime. Existing endpoint-local `enabled` fields retain
+their original meanings.
+
+### ConfigSchemaData
+
+`fields` contains canonical paths for the full serialized configuration model,
+including file-only policy. Dot notation selects members, `[]` selects an array
+element, and `{username}`, `{cidr}`, `{hostname}` or `{dc}` denotes a dynamic map
+key. A path entry describes a field; it is not a JSON Pointer or a PATCH request.
+
+| Field | Meaning |
+| --- | --- |
+| `path`, `aliases`, `description` | Canonical field identity, accepted source aliases where applicable, and purpose. |
+| `value`, `unit` | JSON Schema 2020-12 vocabulary for non-null canonical values, including known enums and bounds, plus a unit when applicable. Absence and null are described separately by `default_kind` and `api.null_behavior`; source shorthand and normalization may accept additional forms. |
+| `default_kind`, `default` | Unconfigured type defaults, before loader normalization. `unset` has a null default; `required`, `nested_fields`, `map_entry` and `redacted` omit the value. |
+| `sensitivity` | `public`, `deployment` or `credential`. This classifies the field without exposing its configured value. |
+| `dependencies`, `constraints` | Referenced fields and relevant validation or normalization rules. Complete candidate validation remains authoritative. |
+| `api.config_read`, `api.config_write` | Static config GET/PATCH allowlist membership, independent of current read-only policy. Partially exposed containers must be inspected through their child entries. |
+| `api.read_routes`, `api.write_routes`, `api.request_field` | Related API views/mutations and a users DTO field where applicable. A user view is not a lossless export of the source map. |
+| `api.non_editable_reason`, `api.null_behavior` | Why config PATCH does not own a field and how its applicable mutation treats null. |
+| `apply.watcher`, `apply.reload`, `apply.effect` | Application support and the relevant consumption boundary. |
+
+`apply.watcher` is `supported`, `unsupported`, `conditional`, `mixed` for a
+container, or `not_applicable` for source-only validation. `apply.reload` uses
+`supported`, `process_restart`, `conditional`, `mixed`, or `not_applicable`.
+Conditional decisions require the complete candidate and active process policy;
+schema discovery does not preview them. Watcher publication also does not imply
+that existing connections reconstruct their buffers or session policy. Effects
+identify new-connection consumption, subsequent ME policy updates, preserved
+session contracts, or the instant/drain generation policy as applicable.
+
+The schema is built once from unconfigured types and checked metadata. It never
+receives the active configuration or serialized disk contents. Credentials have
+no default payload, including the built-in example user secret. Loader-derived
+values, environment-derived capacities and effective process state are not
+reported as defaults. Tagged upstream and WEB decoy fields apply only to their
+respective variant, as described by their constraints.
+
+`config_patch` states the existing shared semantics: objects merge recursively,
+arrays replace wholesale, object null members are ignored before candidate
+validation, and reset is unsupported. One mutation may touch only one independently
+writable source. This differs from supported user PATCH fields, where null
+removes an override. Discovery does not expand either write allowlist.
+
+### Versioned artifact and maintenance
+
+[openapi-v1.json](openapi-v1.json) publishes the implemented routes, aliases,
+request shapes and common response envelopes, with detailed schemas for both
+discovery responses. Legacy response payloads and query filters remain described
+in this reference. The artifact is intentionally not a complete configuration
+validator; `/v1/config/schema` supplements it with field contracts.
+
+Regenerate with `python3 tools/generate_api_openapi.py` and verify with
+`python3 tools/generate_api_openapi.py --check`. `cargo test --bin telemt
+api::discovery` checks route/field inventories, defaults, enums, application
+classification, credential exclusion and HTTP admission. Contract changes must
+update the registry and artifact together. Additive metadata and operations are
+compatible; incompatible discovery changes require a new `schema_version`.
 
 ## Body and JSON Semantics
 
@@ -261,6 +420,7 @@ Notes:
 | `rate_limit_down_bps` | `u64` | no | Per-user download rate limit in bits per second. |
 | `max_unique_ips` | `usize` | no | Per-user unique source IP limit. |
 | `enabled` | `bool` | no | User enable flag. Missing means enabled. `false` persists a disabled override. |
+| `source_deny` | `string[]` or `null` | no | CIDR list; omission retains any orphan rule, null removes it. Generation reload required. |
 
 ### `PatchUserRequest`
 | Field | Type | Required | Description |
@@ -275,31 +435,122 @@ Notes:
 | `rate_limit_down_bps` | `u64` or `null` | no | Per-user download rate limit in bits per second; `null` removes the download direction limit. |
 | `max_unique_ips` | `usize` or `null` | no | Per-user unique source IP limit; `null` removes the per-user override. |
 | `enabled` | `bool` or `null` | no | `false` disables the user. `true` or `null` removes the disabled override, so the user is enabled. |
+| `source_deny` | `string[]` or `null` | no | Replace the CIDR list; omission preserves it, null removes the entry. Generation reload required. |
+
+### Shared access policy
+
+`GET /v1/access/policy` and `PATCH /v1/access/policy` use the ordinary
+administrative authorization and whitelist; mutations require `read_only=false`.
+Both return `200` with `data.desired`, `data.effective`, `data.runtime`
+(`active_generation`, `config_epoch`, `runtime_match`), `published_match`,
+`effective_scope="active_config_snapshot"`, `subsystem_convergence="unknown"`,
+`apply_mode="watcher"`, and the source-manifest `revision`. PATCH also returns
+`changed_paths`. These snapshots do not acknowledge completion by every consumer.
+
+The policy contains exactly five fields:
+
+- `user_max_tcp_conns_global_each`: nonnegative per-user TCP default; `0` is unlimited.
+- `user_max_unique_ips_global_each`: nonnegative per-user unique-IP default; `0` is unlimited.
+- `user_max_unique_ips_mode`: `active_window`, `time_window`, or `combined`.
+- `user_max_unique_ips_window_secs`: positive recent-IP window in seconds.
+- `cidr_rate_limits`: a map of explicit IPv4/IPv6 CIDRs or `*4/N`, `*6/N`, `*/N` templates
+  to `{ "up_bps": ..., "down_bps": ... }`, in **bits per second**.
+
+Omission preserves a field. Scalar `null` removes its authored setting and restores
+its type default. A non-null CIDR map merges entries: `null` removes that entry,
+and a rate object replaces the whole pair (omitted directions become `0`, meaning
+unlimited). At least one direction must be positive, and neither may exceed
+`100000000000`. A whole-map `null` clears all CIDR rules. Empty patches are rejected.
+Unknown fields, invalid prefixes/rates and duplicate normalized auto templates
+return `400`. Explicit CIDRs retain longest-prefix precedence over auto templates;
+`*/N` expands to IPv4 `/N` and IPv6 `/(N * 4)`. Existing bounded bursts are unchanged.
+
+```json
+{
+  "user_max_tcp_conns_global_each": 12,
+  "cidr_rate_limits": {
+    "192.0.2.0/24": {"up_bps": 8000000, "down_bps": 16000000},
+    "*6/64": {"down_bps": 16000000},
+    "203.0.113.0/24": null
+  }
+}
+```
+
+Edits use the exact field's source owner, or the nearest existing parent for
+insertion. Literal map keys are preserved. All changes in one request must belong
+to one independently writable source; ambiguous or multiple owners return
+`409 config_patch_not_atomic` without writing. The complete candidate is validated
+before atomic replacement. Other source files remain unchanged; the owner is
+edited structurally with comments retained where supported by the TOML editor.
+Stale `If-Match` returns `409 revision_conflict`; stale `If-Runtime-Match` returns
+`409 runtime_conflict`. Query parameters, including automatic reload, are rejected.
+Users, credentials, replay limits and `ignore_time_skew` are outside this endpoint.
+The legacy `PATCH /v1/config` still rejects the entire `access` section.
+
+`UserInfo.limits` contains `desired` and nullable `effective` snapshots for
+`max_tcp_conns` and `max_unique_ips`. Each has `value` (null means unlimited),
+`configured_override` (null means no authored entry), `global_value`, and `origin`
+(`user_override`, `global_default`, `unlimited`). A zero user override inherits the
+global default. `effective` is null when the user is absent from the sampled runtime
+or no runtime snapshot was supplied. The scope is `active_config_snapshot` and
+`subsystem_convergence` is `unknown`; legacy top-level limit fields retain their
+desired-config fallback behavior. Policy edits do not cancel sessions or reset
+quota usage; subsequent admission/publication follows existing runtime behavior.
 
 ### `access.user_source_deny` via API
-- In current API surface, per-user deny-list is **not** exposed as a dedicated field in `CreateUserRequest` / `PatchUserRequest`.
-- Configure it in `config.toml` under `[access.user_source_deny]` and apply via normal config reload path.
-- Runtime behavior after apply:
-  - auth succeeds for username/secret
-  - source IP is checked against `access.user_source_deny[username]`
-  - on match, handshake is rejected with the same fail-closed outcome as invalid auth
 
-Example config:
-```toml
-[access.user_source_deny]
-alice = ["203.0.113.0/24", "2001:db8:abcd::/48"]
-bob = ["198.51.100.42/32"]
+User GET/create/PATCH expose `source_deny`, an IPv4/IPv6 CIDR array. Omission
+preserves the existing rule, an array replaces the entire list (`[]` means no
+denied networks), and explicit `null` removes that user's authored entry.
+Strict configuration accepts `[access.user_source_deny]`. Malformed networks or
+non-array values return `400` before writing. Changes to a username containing
+dots edit that literal key, preserving other users' deny rows.
+
+`UserInfo.source_deny` is the desired list (empty when absent).
+`source_deny_status` contains `effective` (the list in the sampled request
+generation), `runtime_reload_required` (whether the lists differ),
+`apply_mode="generation_reload"`, `effective_scope="request_generation_snapshot"`,
+and `reload_endpoint="POST /v1/system/reload"`. Effective/reload fields are null
+when no runtime snapshot is available. Existing `in_runtime` and HTTP `200/202`
+only describe username membership; they do not prove deny-policy enforcement.
+
+After persistence, explicitly submit an instant or drain generation reload using
+its returned source revision, then inspect reload status and the user's effective
+list. The watcher does not overlay these rules. Saving a list does not cancel
+sessions; retirement follows the selected reload mode. A reload that captured an
+older revision may still activate that older policy: the desired/effective
+comparison remains pending until a generation using the new revision is active.
+This comparison does not describe still-draining older generations.
+
+User deletion retains source-deny rows. Recreating the same name with the field
+omitted inherits the retained row, including a rule already present in runtime.
+To remove it, PATCH `{"source_deny":null}` before deletion, or include
+`"source_deny":null` when recreating the user; removal also needs generation
+reload. A PATCH of a missing username still returns `404`.
+
+The mutation edits the exact owning source, or the nearest existing parent for
+insertion. A request combining user-table and deny-rule changes in different
+files returns `409 config_patch_not_atomic` and writes neither file. Source
+revision fencing covers the entire include graph. After successful authentication,
+the existing TLS/MTProto source check still rejects matching addresses through
+the invalid-auth/fallback path without writing a protocol error or modifying the
+original ClientHello.
+
+```json
+{"source_deny":["203.0.113.0/24","2001:db8:abcd::/48"]}
 ```
 
 ### `PatchConfigRequest`
 
-A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`) or the partially editable `server` object (only `listeners` is allowed under `server`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched table bodies and other source files remain byte-identical; a touched TOML table body is reserialized, so comments and formatting inside it can change.
+A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`) or the partially editable objects `server` (`listeners` and five API observability fields) and `network` (only `dns_overrides`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched table bodies and other source files remain byte-identical; touched TOML table bodies are reserialized, except for the field edits described below, so comments and formatting inside a rewritten body can change.
 
 **Rejected keys:**
 - `access` → `400 access_not_editable` (users/secrets are managed via `POST/PATCH /v1/users`).
-- `network` or any unknown top-level key → `400 section_not_editable`.
-- `server` with any key other than `listeners` (e.g. `port`, `api`, `admin_api`) → `400 field_not_editable`.
+- An unknown top-level key or a non-null, non-object `server`/`network` value → `400 section_not_editable`.
+- `network` with any key other than `dns_overrides`, even when that key is null, → `400 field_not_editable`.
+- `server` with any key other than `listeners`/`api` (e.g. `port`, `admin_api`), or `server.api` with a key outside its five-field allowlist, even when null, → `400 field_not_editable`.
 - An object with no editable keys → `400 bad_request` (empty patch).
+- Within otherwise editable sections/fields, unknown nested fields, including fields with null values, → `400 bad_request` with `error.details[].code=unknown_field`, independently of `general.config_strict`. Known fields from an incompatible upstream/decoy variant are rejected with `field_not_applicable`. Open DC/domain maps remain supported; `upstreams[].force_bind` remains an alias of `bindtodevice`.
 
 Example — patch only the SNI domain:
 ```json
@@ -310,6 +561,88 @@ Example — replace `[[server.listeners]]` (other `[server]` fields including `[
 ```json
 {"server": {"listeners": [{"ip": "0.0.0.0", "port": 443, "client_mss": "92"}]}}
 ```
+
+#### API observability settings
+
+`GET /v1/config`, `PATCH /v1/config`, and `POST /v1/config/validate` expose
+exactly these nested settings, including their typed defaults in GET:
+
+| Path | Type / bounds | Default |
+| --- | --- | --- |
+| `server.api.minimal_runtime_enabled` | Boolean | `true` |
+| `server.api.minimal_runtime_cache_ttl_ms` | Integer, `0..60000` | `1000` |
+| `server.api.runtime_edge_enabled` | Boolean | `false` |
+| `server.api.runtime_edge_cache_ttl_ms` | Integer, `0..60000` | `1000` |
+| `server.api.runtime_edge_top_n` | Integer, `1..1000` | `10` |
+
+```json
+{"server":{"api":{"runtime_edge_enabled":true,"runtime_edge_cache_ttl_ms":0,"runtime_edge_top_n":20}}}
+```
+
+Omitted fields and allowed null members retain their values; a server object
+without a concrete editable value is rejected. TTL `0` disables cache reuse.
+Other API fields, including `auth_header`, `whitelist`, `gray_action`, `read_only`,
+`enabled`, `listen`, `request_body_limit_bytes`, and `runtime_edge_events_capacity`,
+remain excluded. Forbidden keys are rejected even when null. Authentication and
+read-only checks still apply to these mutations.
+
+Each setting edits its exact source owner, using the nearest existing parent
+for insertion. API siblings, listener definitions and other source files survive.
+Inline, dotted and quoted TOML forms are supported. PATCH uses `server.api` even
+when the source retains the legacy `[server.admin_api]` spelling. Ambiguous or
+multiple owners return `409 config_patch_not_atomic` without writing.
+
+Saving reports `runtime_reload_required=true` while active values differ; these
+settings also retain the legacy `restart_required=true` classification when the
+desired source changes, without requiring a process restart. The watcher never
+overlays them, including in mixed patches. Use `?reload=instant` or
+`?reload=drain&timeout_secs=30`, or submit `POST /v1/system/reload` with the saved revision.
+Acceptance is asynchronous: inspect reload status and `GET /v1/config/state` for
+activation. The existing API listener and event-ring capacity are retained.
+
+After activation, diagnostic endpoints and capabilities reflect the new flags.
+Disabled diagnostics return their existing payload with `reason=feature_disabled`;
+enabled ME diagnostics can still report `source_unavailable` when no pool exists.
+Cache entries are checked against each request's pinned generation, including
+stale edge-cache fallback, so a late old-generation calculation cannot supply a
+new-generation response. Requests already in flight may finish using their
+original generation. Recompute contention without a matching cache can report
+`source_unavailable`.
+
+#### DNS overrides
+
+`network.dns_overrides` is the only editable network field. GET includes the
+empty default array; PATCH and preflight use the same DNS entry validator as
+file configuration. Each of at most 4096 strings has the form `host:port:ip`,
+with a nonempty host without `:`, a `u16` port, and IPv4 or bracketed IPv6.
+Host matching is case-insensitive and port-specific; the last duplicate
+host/port entry wins. Other network fields remain unavailable through this API.
+
+```json
+{"network": {"dns_overrides": ["upstream.example:443:192.0.2.10", "v6.example:8443:[2001:db8::10]"]}}
+```
+
+The array replaces the whole override list. Clear it with
+`{"network":{"dns_overrides":[]}}`; null is not a removal operation, and a
+network object containing only null/omitted editable fields is an empty patch.
+The client can send this object through `validate_config`/`patch_config` or the
+CLI's `validate`/`config-patch --json FILE` commands.
+
+Persistence selects the source owning `network.dns_overrides`. If the key is
+absent, it selects the single source containing `network`, or the root when
+neither exists. Only the array value is replaced (or its declaration inserted),
+preserving sibling keys, comments outside the value, and other source files.
+Table, dotted-key, quoted-key and inline-table forms are supported. Ambiguous
+ownership or a patch spanning multiple files returns `409 config_patch_not_atomic`.
+
+Without a reload query, PATCH persists desired state and does not wait for the
+existing watcher. The watcher updates the active generation resolver for future
+lookups; established connections retain their endpoints. Inspect
+`GET /v1/config/state?sections=network` for snapshot publication;
+`subsystem_convergence` may remain `unknown`. No process restart is needed for DNS-only
+changes; `runtime_reload_required` can still be true before the watcher publishes
+because it compares desired and active snapshots. Explicit reload remains an
+optional generation change with the normal instant/drain contract.
 
 #### WEB retry jitter configuration
 
@@ -346,9 +679,10 @@ Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the 
 | `upstreams` | `object[]` | Complete normalized upstream array. When no upstream is authored, the loader inserts one enabled direct upstream. |
 | `dc_overrides` | `object` | Complete normalized DC override map, including the synthesized DC 203 endpoint when it is not authored. |
 | `web` | `object` | Complete normalized `[web]` section, including defaults. Each `web.vhosts[]` item preserves either `host` or `hosts` and includes `base_path` (empty string when omitted in TOML); hostname lists remain grouped. The derived runtime-only `web.runtime` field is excluded. |
-| `server` | `object?` | Partial `[server]` view when editable nested fields are present. Currently only `listeners` may appear; `api`/`admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
+| `network` | `object` | Only `dns_overrides`, a `string[]` defaulting to `[]`; other network fields are excluded. |
+| `server` | `object` | Partial `[server]` view: `listeners` and the five allowlisted `api` observability settings. API secrets, access controls, `admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
 
-The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed, and an empty listener array is omitted. Changes to `web.allow_wildcard_hosts` and `[web.limits]` remain process-deferred; the patch response reports them in `deferred_process_fields` until restart. Wildcard patterns require the flag to be enabled in the active process; staging the flag does not authorize patterns before restart.
+The editable typed sections are serialized from the fully defaulted configuration, even when omitted from the source files. Only the editable sections above are returned; `access` (users/secrets) is excluded, and `network` exposes only `dns_overrides`, including its default empty array. Under `server`, only the nested allowlists (`listeners` and five `api` fields) are exposed, and an empty listener array is omitted. Changes to `web.allow_wildcard_hosts` and `[web.limits]` remain process-deferred; the patch response reports them in `deferred_process_fields` until restart. Wildcard patterns require the flag to be enabled in the active process; staging the flag does not authorize patterns before restart.
 
 ### WEB runtime identity and lifecycle
 
@@ -486,6 +820,8 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | `process_restart_required` | `bool` | `true` when a process-owned field changed and remains deferred after an in-process reload. |
 | `deferred_process_fields` | `string[]` | Process-owned sockets, paths, capacities, or policies retained by the active process. |
 | `changed` | `string[]` | Top-level section names that differed between the old and new config (e.g. `["censorship"]`). |
+| `changed_paths` | `string[]` | Canonical changed field paths between old desired and candidate config; array indices and redacted map placeholders, without values. |
+| `normalization_effects` | `object[]` | `{path, code}` entries for `normalized`, `null_ignored` and `alias_canonicalized` fields, without values. |
 | `reload` | `ReloadAccepted?` | Present only when the patch included a valid reload query and Maestro accepted the operation. |
 
 ### `HealthData`
@@ -1469,6 +1805,9 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 | `username` | `string` | Username. |
 | `enabled` | `bool` | Effective user enable flag. Missing config entry is reported as `true`. |
 | `in_runtime` | `bool` | Whether current runtime config already contains this user. |
+| `limits` | `object` | Desired/published TCP and unique-IP limits with override/global/unlimited origins; see shared access policy. |
+| `source_deny` | `string[]` | Desired source CIDRs; empty if no rule exists. |
+| `source_deny_status` | `object` | Effective list and generation reload requirement; see source-deny contract. |
 | `user_ad_tag` | `string?` | Optional ad tag (32 hex chars). |
 | `max_tcp_conns` | `usize?` | Optional max concurrent TCP limit. |
 | `expiration_rfc3339` | `string?` | Optional expiration timestamp. |
@@ -1626,6 +1965,206 @@ The real `data` object contains every fully defaulted editable section; the exam
 
 ---
 
+### `GET /v1/config/state`
+
+Reads the normalized desired source and the active generation's published
+configuration. Authentication, direct-peer whitelist and the API enabled gate
+apply; `read_only=true` permits this request. Other methods return `405` with
+`Allow: GET`.
+
+The optional query selects comma-separated sections, for example
+`?sections=general,access,web`. Allowed values are `general`, `network`, `server`,
+`timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`, `access`, `logging`,
+and `root` (top-level scalars such as `default_dc`). Omission selects all eleven.
+Unknown, empty or repeated values, repeated parameters, other query parameters,
+and queries longer than 256 bytes return `400`.
+
+`ConfigStateData` has the following fields:
+
+| Field | Contract |
+| --- | --- |
+| `scope` | Always `published_configuration_not_subsystem_acknowledgment`. |
+| `sections` | Selected section names. Projections and comparison paths use this scope. |
+| `runtime.active_generation`, `runtime.config_epoch` | Identity of the actual active runtime and its published config snapshot. An epoch also changes for watcher publications within one generation. |
+| `runtime.runtime_match` | Opaque optimistic publication token, also accepted by PATCH and preflight as `If-Runtime-Match`. |
+| `runtime_sample_current` | Whether the captured generation/config still matched when the read was checked. `false` means the response describes an older sample; retry before making a decision. |
+| `desired_revision` | Captured recursive source-manifest hash, or `null` when unavailable. This is an input identity, never an applied-state acknowledgment. |
+| `desired_status` | `valid`, `invalid`, `unreadable`, `timeout`, `busy`, or `unavailable`. `valid` means normalized source validation succeeded; DNS, static acquisition and effective retained-policy validation were not attempted. |
+| `desired_error`, `projection_error` | Nullable bounded `{path, code, message}` diagnostics. Raw parser/reload messages, source excerpts and filesystem paths are omitted. |
+| `desired`, `effective` | Nullable `ConfigProjection` objects described below. Effective publication can remain readable when desired input is unavailable. |
+| `comparison` | Scoped differences and expected application boundaries, described below. |
+| `watcher` | Latest outcome from the active generation's watcher, or `null` if none is available. |
+| `watcher_matches_desired` | Whether that outcome considered the captured desired revision; `null` if either identity is unavailable. |
+| `reload`, `reload_observation` | Latest retained Maestro operation metadata; observation is `sampled`, `busy`, or `unknown`. A sampled `null` means no retained operation. |
+| `reload_matches_desired` | Whether that reload targeted the captured desired revision, or `null` if unavailable. |
+| `subsystem_convergence` | Always `unknown`: asynchronous consumers do not yet supply a complete acknowledgment contract. |
+
+The source, runtime, watcher and Maestro observations are independently sampled.
+Even `runtime_sample_current=true` is an optimistic check, not a freeze. A
+successful reload or equal snapshots cannot establish that every consumer has
+adopted a policy, that existing sessions use new credentials, or that an external
+resource is healthy. A publication racing the initial capture can return
+`409 runtime_conflict`; retry against a fresh runtime.
+
+`comparison.scope` is `selected_sections`. Its `status` is `unknown` when a
+comparison cannot be made, `published_match` when selected serialized values
+match, `process_deferred` when remaining differences require process restart,
+or `pending_publication` otherwise. `pending_paths` lists all differences;
+`watcher_pending_paths`, `generation_pending_paths` and `process_deferred_paths`
+classify the expected watcher/reload/process boundaries using the same overlay
+and retention rules as preflight. `deferred_process_fields` gives the retained
+policy groups. These are projections of policy, not proof that a future reload
+can prepare or bind successfully. Use preflight to validate a candidate.
+
+Each path list is capped at 512 entries and `comparison.truncated` signals
+omission. Dynamic identities are replaced with path placeholders, including
+`access.users.{entry}`, `dc_overrides.{dc}` and
+`censorship.exclusive_mask.{hostname}`. `runtime_derived_paths` excludes the
+random default `censorship.fake_cert_len` from drift: its desired value is
+undetermined, and the effective projection may show its currently published value.
+
+Each `ConfigProjection` contains `fields`, `truncated`, `provenance`,
+`source_revision` and `source_count`. Source metadata identifies input evidence;
+it does not attribute a mixed publication to the latest file. `provenance` is
+`normalized_source`, `mixed_publication`, or `unknown`. Mixed watcher overlays,
+retained process policy, CLI overrides and startup fallback use conservative
+unknown field provenance.
+
+Each field row has:
+
+| Field | Meaning |
+| --- | --- |
+| `path` | Canonical config path with array indices, at most 256 bytes. Dynamic maps are aggregated. |
+| `value` | Present only for allowed public booleans, numbers, nulls, known enum strings and bounded arrays of those values. |
+| `redacted` | Whether the value is omitted. Arbitrary strings, deployment identities and credential values are omitted even when a string could contain URL userinfo. |
+| `present` | Whether the value is non-null and nonempty. `false` and zero are present scalar values. |
+| `entries` | Array/map size, or `null` for a scalar. |
+| `differs` | Difference from the other projection, or `null` when unknown or runtime-derived. Secret rotation changes this metadata without revealing the secret. |
+| `origin` | `source`, `type_default`, `default_or_derived`, `inherited`, `runtime_derived`, `mixed_unknown`, or `unknown`. `source` refers to normalized input, not necessarily its original spelling. |
+| `inherited_from` | Included for a known inheritance relationship, currently an unset `upstreams[].prefer` inheriting `network.prefer`. |
+
+Explicit-source evidence retains at most 4096 paths of at most 256 bytes, plus
+the source count/hash. Incomplete provenance is reported as unknown. There are
+at most 1024 rows per projection, and the complete JSON envelope is capped at
+512 KiB; further rows are dropped with `truncated=true` if necessary. Projections
+are inspection DTOs, **not PATCH payloads**. No masked replacement secrets are
+generated, and this endpoint never writes them or any other configuration.
+
+Watcher metadata contains `sequence`, `observed_at_epoch_secs`, `phase`,
+`source_revision`, `published_config_epoch`, and a nullable fixed `error_code`.
+Phases distinguish `initial`, `preparing`, `published`, `published_partial`,
+`retained`, `unchanged`, `source_refreshed`, `rejected`, and `publication_failed`.
+The last two retain the prior effective publication. Only the latest record is
+retained per watcher; an unchanged source is not a new consumer acknowledgment.
+
+Reload metadata contains `reload_id`, `target_generation`, `source_revision`,
+`phase`, `source_generation`, `activated_generation`, `retiring_generation`,
+`retiring_config_epoch`, `retirement`, `error_present`, and `warning_count`.
+Activation and retirement identities remain null until the owner reaches those
+steps. After a swap, the new generation is active while the old generation is
+identified during `draining`. The retiring epoch is sampled at replacement.
+`retirement` is null, `retiring`, `draining`, `retired`, or `cleanup_timeout`.
+The final record retains the retired identity; `rolled_back`/`failed` before
+activation do not claim a swap. Raw error/warning text is excluded. This reads
+the latest operation from the existing bounded 32-operation store without
+waiting on its mutex.
+
+Inspection uses two process-shared slots and a five-second work budget.
+Source/projection workers run off Tokio's async workers; cancellation or timeout
+retains a slot until any detached blocking worker finishes. No source mutation
+lock, DNS lookup, static-asset load, listener bind or reload reservation is
+performed. Invalid or unreadable desired files produce `200` with an effective
+projection and a bounded desired error. Exhausted slots or an effective
+projection timeout still return `200` with runtime identity, partial metadata,
+and `comparison.status=unknown`; callers must inspect the status fields.
+
+Legacy `GET /v1/config` and user/link responses retain their existing contracts.
+They remain administratively sensitive and may include configured credentials
+or provisioning secrets. The redacted state endpoint does not change their
+defaults or replace the existing authorization requirement.
+
+---
+
+### `POST /v1/config/validate`
+
+Prepares the same candidate as `PATCH /v1/config`, including source ownership,
+normalization, DNS/static-asset acquisition, and resolution against retained
+process limits. Accepts the same `PatchConfigRequest`, optional `If-Match` and
+`If-Runtime-Match` headers, and `reload`, `timeout_secs`, `failure_policy` query
+parameters described below. Ordinary authentication, direct-peer whitelist and
+body limits apply. This POST is permitted with `read_only=true`. Other methods
+return `405` with `Allow: POST`.
+
+Preparation is limited to two concurrent requests per API server and a 30-second
+deadline. A cancelled/timed-out OS resolver or blocking file worker retains its
+slot until it exits; the deadline bounds the HTTP wait, not OS call termination.
+Exhaustion returns `429 config_preflight_busy`; the deadline returns
+`504 config_preflight_timeout`. Existing per-origin DNS and static-site limits
+still apply. Preview creates no source/lock/staging files, reload reservations,
+config publications, listeners, credential rotations or persistent tasks.
+
+Success is `200` with the standard envelope. Its `revision` is the unchanged
+`base_revision`. `data` contains:
+
+| Field | Meaning |
+| --- | --- |
+| `valid` | `true`; invalid candidates use the standard error envelope. |
+| `base_revision`, `candidate_revision` | Source-manifest hashes before and after the proposed source rendering. Candidate hash is not a runtime/DNS/static-content identity. |
+| `runtime.active_generation` | Sampled active Maestro generation. |
+| `runtime.config_epoch` | Process-local publication counter assigned by the configuration owner, including hot updates. It is not a subsystem convergence acknowledgment. |
+| `runtime.runtime_match` | Opaque process/generation/publication token to send back as `If-Runtime-Match`. A process restart invalidates it. |
+| `changed_paths` | Old desired source → prepared desired candidate. Paths only; this can be empty while active state still differs. |
+| `normalization_effects` | `{path, code}` for normalized values, ignored object nulls, and canonicalized aliases. |
+| `apply.watcher_paths` | Active → watcher overlay: fields the existing hot reload policy can apply. |
+| `apply.generation_paths` | Watcher overlay → resolved reload configuration: additional changes requiring generation activation. |
+| `apply.process_restart_paths` | Resolved reload configuration → desired: fields retained until process restart. |
+| `apply.restart_required` | Unchanged legacy watcher classification of old desired → candidate. |
+| `apply.runtime_reload_required` | Whether effective runtime-owned state differs from active, including hot fields. It does not imply a generation reload is always necessary. |
+| `apply.process_restart_required`, `apply.deferred_process_fields` | Deferred process classification and existing coarse field labels. |
+| `source_ownership`, `touched_sections` | `single_source` and sections to render. Multiple owners return `409 config_patch_not_atomic` with a `source_ownership_conflict` detail; paths to files are omitted. |
+| `reload` | Validated query options, or null; no operation is reserved or accepted. |
+| `warnings` | `{path, code, message}` entries for preparation reads, generation changes without an explicit reload, and deferred process fields. |
+
+Changed/application paths use indices such as `upstreams[0].password` and
+placeholders such as `dc_overrides.{dc}[0]` and
+`censorship.exclusive_mask.{hostname}`. They never contain old/new values or
+dynamic map identities. Each path list and the normalization list is bounded
+to 4096 entries; larger feedback returns `400`. Validation errors add optional
+`error.details` entries with `path`, `code`, and `message`; `$` denotes a
+whole-document failure when no safe specific field can be identified. Unknown
+field feedback is limited to 64 entries. Raw validator text, source excerpts,
+credentials and URL values are not returned.
+An unreadable or invalid current source retains PATCH's `500 internal_error`
+status, with a redacted `source_load_failed` detail.
+
+For example, an unknown nested key returns:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "bad_request",
+    "message": "Unknown configuration fields",
+    "details": [{
+      "path": "general.me_keepalive_enabld",
+      "code": "unknown_field",
+      "message": "Field is not part of the configuration contract"
+    }]
+  },
+  "request_id": 1
+}
+```
+
+Clients should preview with `If-Match`, then PATCH the identical body/query using
+both the returned `base_revision` and `runtime.runtime_match` as preconditions.
+PATCH reconstructs the candidate and rechecks the source graph and active
+publication before persistence; changes return `409 revision_conflict` or
+`409 runtime_conflict`. Both headers remain optional for existing clients.
+These are optimistic checks, not a lock freezing later runtime publication.
+Preview does not bind sockets or probe generation startup, and DNS/static assets
+may change before commit. Successful preflight therefore does not guarantee
+subsequent network startup or completed application by asynchronous subsystems.
+
 ### `PATCH /v1/config`
 
 Applies a sparse patch to the editable config sections. The merged config is fully validated before writing; if validation fails the file is not modified.
@@ -1639,21 +2178,24 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `Authorization` | when configured | Same token as all other endpoints. |
 | `Content-Type: application/json` | recommended | Not enforced, but body must be valid JSON. |
 | `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. It covers the complete recursive include graph. If supplied and it does not match the current source manifest, returns `409 revision_conflict`. Omitting it removes the caller precondition, but the internal graph/owner race fence can still return the same conflict. |
+| `If-Runtime-Match: <runtime_match>` | no | Token from `POST /v1/config/validate` or `GET /v1/config/state`, quoted or unquoted. A stale publication returns `409 runtime_conflict`; malformed/repeated headers return `400`. Even without it, active state is rechecked during preparation and immediately before the source rename. |
 
-**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`, plus partially editable `server` (only nested `listeners`).
+**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, `web`, plus partially editable `server` (`listeners` and five [API observability settings](#api-observability-settings)) and `network` (only nested `dns_overrides`).
 
 **Rejected keys and their error codes:**
 
 | Key | HTTP | `error.code` |
 | --- | --- | --- |
 | `access` | `400` | `access_not_editable` |
-| `network` or any unknown top-level key | `400` | `section_not_editable` |
-| `server` with keys other than `listeners` | `400` | `field_not_editable` |
+| Unknown top-level key or non-null, non-object `server`/`network` | `400` | `section_not_editable` |
+| `network` with keys other than `dns_overrides` (including null members) | `400` | `field_not_editable` |
+| `server` with keys other than `listeners`/`api`, or `server.api` with keys outside its five-field allowlist (including null members) | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
+| Unknown nested field or inapplicable variant field | `400` | `bad_request`, with `error.details` |
 
-**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. In particular, `web.vhosts` is an array: changing one vhost `base_path` requires sending the complete vhost array, including every retained vhost and each required hostname selector (`host` or non-empty `hosts`), `public_addr`, `decoy`, and profile field. A mutation is written to the single source file that owns every touched semantic section. Untouched table bodies, the root file when it is not the owner, and all other include files remain byte-identical; touched TOML table bodies are reserialized and may lose their internal formatting or comments. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
+**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. In particular, `web.vhosts` is an array: changing one vhost `base_path` requires sending the complete vhost array, including every retained vhost and each required hostname selector (`host` or non-empty `hosts`), `public_addr`, `decoy`, and profile field. A mutation is written to the single source file that owns every touched semantic section or allowlisted field. DNS overrides use the exact leaf owner (or its parent for insertion), preserving all bytes outside the edited value; see [DNS overrides](#dns-overrides). Untouched table bodies, the root file when it is not the owner, and all other include files remain byte-identical; other touched TOML table bodies are reserialized and may lose their internal formatting or comments. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
 
-**Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified. WEB host selectors are mutually exclusive; duplicate normalized names are rejected across all groups. The effective configuration must fit active process limits: `max_vhosts` counts exact hostname entries and `max_profiles` counts exact host/profile pairs plus one shared profile set per wildcard source group. Wildcard selectors count toward `web.limits.wildcard.max_rules`. Raising desired restart-only limits in the same patch cannot bypass the active ceilings.
+**Validation:** nested keys are checked before typed deserialization can discard them, then the full candidate is prepared and validated. Validation failures return `400` with redacted path/code/message details; the file is not modified. WEB host selectors are mutually exclusive; duplicate normalized names are rejected across all groups. The effective configuration must fit active process limits: `max_vhosts` counts exact hostname entries and `max_profiles` counts exact host/profile pairs plus one shared profile set per wildcard source group. Wildcard selectors count toward `web.limits.wildcard.max_rules`. Raising desired restart-only limits in the same patch cannot bypass the active ceilings.
 
 **Read-only mode:** returns `403 read_only` when the API runs with `read_only = true`.
 
@@ -1677,6 +2219,8 @@ Without a `reload` query parameter, the endpoint writes the patch and the file w
   "process_restart_required": false,
   "deferred_process_fields": [],
   "changed": ["censorship"],
+  "changed_paths": ["censorship.tls_domain"],
+  "normalization_effects": [],
   "reload": {
     "reload_id": 7,
     "target_generation": 2,
@@ -1721,13 +2265,14 @@ A valid base-path-only change reports `restart_required=false`, `runtime_reload_
 | `202` | — | Patch applied and runtime reload accepted. |
 | `400` | `bad_request` | Invalid JSON, empty patch, or config validation/deserialization failure. |
 | `400` | `access_not_editable` | Patch contains an `access` key. |
-| `400` | `section_not_editable` | Patch contains `network` or an unknown top-level key. |
-| `400` | `field_not_editable` | Patch contains a forbidden nested `server.*` field (anything other than `listeners`). |
+| `400` | `section_not_editable` | Patch contains an unknown top-level key or a non-null, non-object partial section. |
+| `400` | `field_not_editable` | Patch contains a nested field outside `server.listeners`, the five `server.api` observability fields, or `network.dns_overrides`. |
 | `401` | `unauthorized` | Missing or invalid `Authorization` header. |
 | `403` | `read_only` | API is in read-only mode. |
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |
 | `409` | `revision_conflict` | `If-Match` does not match, or the source graph/owner changes during the fenced write. |
 | `409` | `reload_in_progress` | Another runtime reload is active; the patch is not written. |
+| `409` | `runtime_conflict` | `If-Runtime-Match` is stale or active state changes during preparation/before persistence. |
 | `409` | `config_patch_not_atomic` | Touched semantic sections have multiple source owners or cannot be mutated as one source-file transaction. |
 | `500` | `internal_error` | I/O or serialization failure. |
 
@@ -1810,13 +2355,15 @@ Deployment, TLS-terminator examples, links, and WEB-specific verification are do
 | Endpoint | Notes |
 | --- | --- |
 | `PATCH /v1/config` | Deep-merges and validates the patch, writes touched sections via atomic `tmp + rename`, and optionally submits the exact written revision for an in-process Maestro reload. |
+| `GET /v1/config/state` | Returns bounded, redacted desired/effective projections and publication outcomes; partial results preserve runtime identity when source inspection is unavailable. |
+| `POST /v1/config/validate` | Returns a bounded, redacted preview with source/runtime preconditions and apply classification; allowed in read-only mode, without mutation side effects. |
 | `POST /v1/users` | Before saving any new user, including one without a recurring quota, reads existing quota state and durably clears any retired row; read/write failure returns `500` without creating the user. Creates and validates a user, atomically updates only affected `access.*` TOML tables, then stages the credential and enabled state in process-wide admission after the durable write. |
 | `PATCH /v1/users/{username}` | Partial update of provided fields only. Missing fields remain unchanged; explicit `null` removes optional entries. Admission is staged when `secret` or `enabled` is explicitly supplied, even if unchanged; an identity change or disable cancels current owners, while a metadata-only patch does not. Every accepted patch also fences quota policy freshness, including metadata-only or no-op patches. |
 | `POST /v1/users/{username}/rotate-secret` | Replaces the user's secret with a provided valid 32-hex value or a generated value, stages the new process-wide admission identity, cancels owners of the old identity, then returns the effective secret in `CreateUserResponse`. |
 | `POST /v1/users/{username}/enable` | Enables the user idempotently by removing the `access.user_enabled[username]` override and updating the runtime admission state immediately. |
 | `POST /v1/users/{username}/disable` | Disables the user idempotently by writing `access.user_enabled[username] = false`, updating runtime admission immediately, and cancelling active sessions for that username. |
 | `POST /v1/users/{username}/reset-quota` | Persists the quota checkpoint to `general.quota_state_path` before resetting live accounting for the route username; does not modify user config. |
-| `DELETE /v1/users/{username}` | Deletes only the specified user, removes it from API-managed optional `access.user_*` maps, blocks last-user deletion, stages a deletion tombstone that cancels active owners, and atomically updates only related API-managed `access.*` TOML tables. It leaves `access.user_source_deny` untouched; manage that table manually in TOML. |
+| `DELETE /v1/users/{username}` | Deletes only the specified user, removes it from API-managed optional `access.user_*` maps, blocks last-user deletion, stages a deletion tombstone that cancels active owners, and atomically updates only related API-managed `access.*` TOML tables. It leaves `access.user_source_deny` untouched; explicitly clear `source_deny` before deletion or during recreation, then reload the generation. |
 
 All accepted durable config, user, and quota mutations:
 - Respect `read_only` mode.
@@ -1906,13 +2453,13 @@ The current runtime exports these additional bounded-cardinality families. All u
 | Bind failure | Failed API bind logs warning and API task exits (no auto-retry loop). |
 | ME runtime status endpoints | `/v1/stats/me-writers`, `/v1/stats/dcs`, `/v1/stats/minimal/all` require `[server.api].minimal_runtime_enabled=true`; otherwise they return disabled payload with `reason=feature_disabled`. |
 | Upstream runtime endpoint | `/v1/stats/upstreams` always returns `zero`, but runtime fields (`summary`, `upstreams`) require `[server.api].minimal_runtime_enabled=true`. |
-| Restart requirements | `server.api` changes are restart-required for predictable behavior. |
-| Hot-reload nuance | A pure `server.api`-only config change may not propagate through watcher broadcast; a mixed change (with hot fields) may propagate API flags while still warning that restart is required. |
-| Runtime apply path | Successful writes are picked up by existing config watcher/hot-reload path. |
+| API observability settings | The five editable `server.api` settings need explicit generation reload. API listener identity and event-ring capacity remain process-owned. |
+| Watcher behavior | The watcher retains every `server.api` field, including in mixed changes with watcher-supported settings. |
+| Runtime apply path | Saving updates desired state. Watcher-supported fields publish asynchronously; generation-owned fields require explicit reload. |
 | Exposure | Built-in TLS/mTLS is not provided. Use loopback bind + reverse proxy if needed. |
 | Pagination | User list currently has no pagination/filtering. |
 | Serialization side effect | Updated TOML table bodies are re-serialized on write. Endpoints that persist full config can still rewrite broader formatting/comments. |
 
 ## Known Limitations (Current Release)
 
-- API runtime controls under `server.api` are documented as restart-required; hot-reload behavior for these fields is not strictly uniform in all change combinations.
+- API observability settings require explicit generation reload; saving them alone leaves diagnostics unchanged in the active generation.

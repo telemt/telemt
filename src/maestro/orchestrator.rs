@@ -51,6 +51,7 @@ pub(super) async fn run_telemt_core(
     if privilege_drop_requested && config.server.conntrack_control.inline_conntrack_control {
         warn!("Inline conntrack control is disabled when process privileges are dropped");
         config.server.conntrack_control.inline_conntrack_control = false;
+        config.provenance = crate::config::observation::ConfigProvenance::Mixed;
     }
 
     let quota_store = Arc::new(QuotaStore::default());
