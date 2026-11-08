@@ -21,7 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-pub(crate) use self::quota_store::{QuotaReservation, QuotaStore, UserQuotaHandle};
+pub(crate) use self::quota_store::{
+    QuotaReservation, QuotaScheduleCheckpoint, QuotaScheduleStatus, QuotaStore, UserQuotaHandle,
+};
 #[allow(unused_imports)]
 pub use self::replay::{ReplayChecker, ReplayStats};
 use self::telemetry::TelemetryPolicy;

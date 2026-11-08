@@ -19,6 +19,7 @@ const SOURCE_UNAVAILABLE_REASON: &str = "source_unavailable";
 
 #[derive(Clone)]
 pub(crate) struct MinimalCacheEntry {
+    pub(super) generation: u64,
     pub(super) expires_at: Instant,
     pub(super) payload: MinimalAllPayload,
     pub(super) generated_at_epoch_secs: u64,
@@ -342,6 +343,7 @@ async fn get_minimal_payload_cached(
         let now = Instant::now();
         let cached = shared.minimal_cache.lock().await.clone();
         if let Some(entry) = cached
+            && entry.generation == shared.runtime_generation
             && now < entry.expires_at
         {
             return Some((entry.generated_at_epoch_secs, entry.payload));
@@ -522,6 +524,7 @@ async fn get_minimal_payload_cached(
 
     if cache_ttl_ms > 0 {
         let entry = MinimalCacheEntry {
+            generation: shared.runtime_generation,
             expires_at: Instant::now() + Duration::from_millis(cache_ttl_ms),
             payload: payload.clone(),
             generated_at_epoch_secs,

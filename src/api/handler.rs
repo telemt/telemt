@@ -15,6 +15,7 @@ pub(super) async fn handle(
     let runtime = shared.active_runtime.load_full();
     let previous_cache_generation = shared.cache_generation.swap(runtime.id, Ordering::AcqRel);
     if previous_cache_generation != runtime.id {
+        // Entry generation checks also reject late writes from in-flight requests.
         *shared.minimal_cache.lock().await = None;
         *shared.runtime_edge_connections_cache.lock().await = None;
     }
@@ -158,11 +159,45 @@ async fn dispatch(
     }
 
     match (method.as_str(), normalized_path) {
+        ("GET" | "PATCH", "/v1/access/policy") => {
+            if query.is_some_and(|query| !query.is_empty()) {
+                return Err(ApiFailure::bad_request(
+                    "Access policy does not accept query parameters",
+                ));
+            }
+            let (data, revision) = if method == Method::GET {
+                access_policy::read(shared).await?
+            } else {
+                if cfg.server.api.read_only {
+                    return Err(ApiFailure::new(
+                        StatusCode::FORBIDDEN,
+                        "read_only",
+                        "API runs in read-only mode",
+                    ));
+                }
+                let expected = parse_if_match(req.headers());
+                let runtime = config_edit::parse_runtime_match(req.headers())?;
+                let body =
+                    read_json::<access_policy::PolicyPatch>(req.into_body(), body_limit).await?;
+                access_policy::patch(body, expected, runtime, shared)
+                    .await
+                    .map_err(|error| {
+                        shared
+                            .runtime_events
+                            .record("api.access.policy.patch.failed", error.code);
+                        error
+                    })?
+            };
+            Ok(success_response(StatusCode::OK, data, revision))
+        }
         ("POST", "/v1/users") => {
             fixed_routes::create_user_route(req, shared, cfg, config_rx, request_id, body_limit)
                 .await
         }
         ("GET", "/v1/config") => fixed_routes::get_config_route(shared).await,
+        ("POST", "/v1/config/validate") => {
+            fixed_routes::validate_config_route(req, shared, query, body_limit).await
+        }
         ("POST", "/v1/system/reload") => {
             fixed_routes::reload_route(req, shared, cfg, request_id, body_limit).await
         }

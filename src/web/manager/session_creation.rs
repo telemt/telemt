@@ -132,7 +132,7 @@ impl WebProcessRuntime {
                     candidate_count: automatic
                         .then(|| u8::try_from(entry.carrier_candidates.len()).unwrap_or(4)),
                     deadline_secs: automatic
-                        .then_some(entry.profile.carrier_negotiation_deadlines_secs[3]),
+                        .then_some(entry.profile.shared.carrier_negotiation_deadlines_secs[3]),
                     carrier_state: automatic.then_some(carrier_state),
                 };
                 let identity = session.trace_identity();
@@ -180,7 +180,7 @@ impl WebProcessRuntime {
             if entry.carrier_started_at.is_some_and(|started| {
                 now.saturating_duration_since(started)
                     >= Duration::from_secs(
-                        entry.profile.carrier_negotiation_deadlines_secs[deadline_index],
+                        entry.profile.shared.carrier_negotiation_deadlines_secs[deadline_index],
                     )
             }) {
                 return Err(ManagerError::Protocol);
@@ -225,14 +225,18 @@ impl WebProcessRuntime {
             .runtime
             .as_ref()
             .and_then(|runtime| matching_profile(runtime, &issued_profile))
-            .filter(|profile| generation.proxy_shared.is_user_enabled(&profile.user))
+            .filter(|profile| {
+                generation
+                    .proxy_shared
+                    .is_user_enabled(&profile.shared.user)
+            })
             .ok_or(ManagerError::Authentication)?;
         let profile_key = profile_key(&profile);
-        if carrier_request.is_automatic() && !profile.carrier_negotiation_enabled {
+        if carrier_request.is_automatic() && !profile.shared.carrier_negotiation_enabled {
             return Err(ManagerError::Protocol);
         }
         let capability_selection =
-            carrier_request.uses_capabilities() && profile.carrier_negotiation_enabled;
+            carrier_request.uses_capabilities() && profile.shared.carrier_negotiation_enabled;
         let learning_policy = (
             config.web.carrier_negotiation_enabled() && config.web.carrier_learning,
             config.web.carrier_negotiation_aggressiveness,
@@ -240,7 +244,7 @@ impl WebProcessRuntime {
             Duration::from_secs(config.web.timeouts.carrier_health_secs),
         );
         let (candidates, scores, learning_epoch, learning_disposition) =
-            if capability_selection && profile.carrier_learning && learning_policy.0 {
+            if capability_selection && profile.shared.carrier_learning && learning_policy.0 {
                 let learning = self.learning.lock();
                 match learning.epoch_for_policy(
                     generation.id,
@@ -252,7 +256,7 @@ impl WebProcessRuntime {
                     super::learning::CarrierLearningEpoch::Ready(epoch) => {
                         let (candidates, scores) = learning.rank(
                             now,
-                            &profile.carriers,
+                            &profile.shared.carriers,
                             carrier_request,
                             profile_key,
                             client_ip,
@@ -266,13 +270,13 @@ impl WebProcessRuntime {
                         (candidates, scores, Some(epoch), disposition)
                     }
                     super::learning::CarrierLearningEpoch::Pending => (
-                        supported_candidates(&profile.carriers, carrier_request),
+                        supported_candidates(&profile.shared.carriers, carrier_request),
                         [0; 4],
                         None,
                         WebCarrierSelectionDisposition::PolicyPending,
                     ),
                     super::learning::CarrierLearningEpoch::Exhausted => (
-                        supported_candidates(&profile.carriers, carrier_request),
+                        supported_candidates(&profile.shared.carriers, carrier_request),
                         [0; 4],
                         None,
                         WebCarrierSelectionDisposition::EpochExhausted,
@@ -280,7 +284,7 @@ impl WebProcessRuntime {
                 }
             } else if capability_selection {
                 (
-                    supported_candidates(&profile.carriers, carrier_request),
+                    supported_candidates(&profile.shared.carriers, carrier_request),
                     [0; 4],
                     None,
                     if learning_policy.0 {
@@ -290,12 +294,12 @@ impl WebProcessRuntime {
                     },
                 )
             } else if carrier_request.uses_capabilities()
-                && !carrier_request.supports(profile.carrier)
+                && !carrier_request.supports(profile.shared.carrier)
             {
                 return Err(ManagerError::Protocol);
             } else {
                 (
-                    vec![profile.carrier],
+                    vec![profile.shared.carrier],
                     [0; 4],
                     None,
                     WebCarrierSelectionDisposition::ProfileDisabled,
@@ -307,7 +311,7 @@ impl WebProcessRuntime {
         let _operator_admission = self.try_operator_admission()?;
         let Some(mut user_publication) = generation
             .proxy_shared
-            .claim_authenticated_user(&profile.user, profile.credential_id)
+            .claim_authenticated_user(&profile.shared.user, profile.shared.credential_id)
         else {
             return Err(ManagerError::Closed);
         };
@@ -328,9 +332,9 @@ impl WebProcessRuntime {
                 .record_rejection(crate::web::telemetry::WebRejectionReason::SessionCapacity);
             return Err(ManagerError::Limit);
         };
-        let carrier_deadline_at = carrier_request
-            .is_automatic()
-            .then_some(now + Duration::from_secs(profile.carrier_negotiation_deadlines_secs[3]));
+        let carrier_deadline_at = carrier_request.is_automatic().then_some(
+            now + Duration::from_secs(profile.shared.carrier_negotiation_deadlines_secs[3]),
+        );
         let learning_context = learning_epoch.map(|epoch| CarrierLearningContext {
             profile_key,
             client_ip,
@@ -412,7 +416,7 @@ impl WebProcessRuntime {
             candidate_count: carrier_request.is_automatic().then_some(candidate_count),
             deadline_secs: carrier_request
                 .is_automatic()
-                .then_some(profile.carrier_negotiation_deadlines_secs[3]),
+                .then_some(profile.shared.carrier_negotiation_deadlines_secs[3]),
             carrier_state: carrier_request
                 .is_automatic()
                 .then_some(CarrierChainPhase::Provisional.as_str()),

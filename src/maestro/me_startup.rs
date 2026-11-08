@@ -22,6 +22,9 @@ use crate::transport::middle_proxy::MePool;
 use super::generation::RuntimeTaskScope;
 use super::helpers::load_startup_proxy_config_snapshot;
 
+// Cleanup capacity follows the configured client admission semantics.
+mod capacity;
+
 // Restarting supervisors for long-lived ME maintenance tasks.
 mod supervisor;
 use supervisor::spawn_me_supervisors;
@@ -299,7 +302,7 @@ pub(crate) async fn initialize_me_pool(
                     config.general.me_route_blocking_send_timeout_ms,
                     config.general.me_route_inline_recovery_attempts,
                     config.general.me_route_inline_recovery_wait_ms,
-                    (config.server.max_connections as usize).saturating_add(128),
+                    capacity::me_connection_cleanup_capacity(config.server.max_connections),
                 );
                 startup_tracker
                     .complete_component(

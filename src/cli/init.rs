@@ -97,6 +97,9 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
 
     let init_system = service::detect_init_system();
     eprintln!("[+] Detected init system: {}", init_system);
+    let service_path = service::service_file_path(init_system);
+    // A port-managed rc script and its configuration must survive --init.
+    ensure_service_install_allowed(init_system, Path::new(service_path))?;
 
     let secret = match opts.secret {
         Some(s) => {
@@ -124,7 +127,7 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     let service_opts = ServiceOptions {
         exe_path: &exe_path,
         config_path: &config_path,
-        // Let the selected init system manage process identity.
+        // Preserve root startup unless an administrator configures a service identity.
         user: None,
         group: None,
         pid_file: "/var/run/telemt.pid",
@@ -132,7 +135,6 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
         description: "Telemt MTProxy - Telegram MTProto Proxy",
     };
 
-    let service_path = service::service_file_path(init_system);
     let service_content = service::generate_service_file(init_system, &service_opts);
     let service_mode = if init_system == InitSystem::OpenRC || init_system == InitSystem::FreeBSDRc
     {
@@ -216,6 +218,26 @@ pub fn run_init(opts: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     print_links(&opts.username, &secret, opts.port, &opts.domain);
     Ok(())
+}
+
+fn ensure_service_install_allowed(
+    init_system: crate::service::InitSystem,
+    path: &Path,
+) -> std::io::Result<()> {
+    if init_system != crate::service::InitSystem::FreeBSDRc {
+        return Ok(());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to replace existing FreeBSD service {}; manage it through its package or edit it explicitly",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn write_init_file(path: &Path, contents: &str, mode: u32) -> std::io::Result<()> {
@@ -361,4 +383,35 @@ fn print_links(username: &str, secret: &str, port: u16, domain: &str) {
     println!("The proxy will auto-detect and display the correct link on startup.");
     println!("Check: journalctl -u telemt.service | head -30");
     println!("===================");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::InitSystem;
+
+    #[test]
+    fn freebsd_init_preserves_existing_service_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemt");
+        ensure_service_install_allowed(InitSystem::FreeBSDRc, &path).unwrap();
+        std::fs::write(&path, b"package-managed service").unwrap();
+        let error = ensure_service_install_allowed(InitSystem::FreeBSDRc, &path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"package-managed service");
+        ensure_service_install_allowed(InitSystem::Systemd, &path).unwrap();
+        ensure_service_install_allowed(InitSystem::OpenRC, &path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn freebsd_init_rejects_dangling_service_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("telemt");
+        let target = dir.path().join("missing");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let error = ensure_service_install_allowed(InitSystem::FreeBSDRc, &path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+    }
 }

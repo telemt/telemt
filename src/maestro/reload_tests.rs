@@ -48,6 +48,11 @@ fn status_uses_documented_deferred_process_fields_key() {
         deferred_fields: vec!["server.listeners".to_string()],
         warnings: Vec::new(),
         error: None,
+        source_generation: Some(1),
+        activated_generation: Some(2),
+        retiring_generation: Some(1),
+        retiring_config_epoch: Some(3),
+        retirement: Some("retired"),
     };
     let value = serde_json::to_value(status).unwrap();
 
@@ -56,6 +61,27 @@ fn status_uses_documented_deferred_process_fields_key() {
         serde_json::json!(["server.listeners"])
     );
     assert!(value.get("deferred_fields").is_none());
+    for field in [
+        "source_generation",
+        "activated_generation",
+        "retiring_generation",
+        "retiring_config_epoch",
+        "retirement",
+    ] {
+        assert!(
+            value.get(field).is_none(),
+            "Legacy reload response gained {field}"
+        );
+    }
+}
+
+#[test]
+fn state_observation_never_waits_on_the_reload_status_lock() {
+    let (control, _receiver) = ReloadControl::channel(1);
+    let guard = control.status_store.state.lock();
+    assert!(control.observation().is_none());
+    drop(guard);
+    assert!(control.observation().unwrap().is_none());
 }
 
 #[tokio::test]

@@ -172,6 +172,9 @@ pub(super) async fn prepare_runtime(
     } else {
         let _ = use_middle_proxy;
         use_middle_proxy = false;
+        if config.general.use_middle_proxy {
+            config.provenance = crate::config::observation::ConfigProvenance::Mixed;
+        }
         config.general.use_middle_proxy = false;
         startup_tracker.set_transport_mode("direct").await;
         startup_tracker.set_degraded(true).await;

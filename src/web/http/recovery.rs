@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::request::{bearer_token_hash, compatible_cookie_header};
 use super::response::{full_response, insert_header};
 use super::{HttpResponse, RequestBody};
-use crate::config::{WebRuntimeProfile, WebRuntimeVhost};
+use crate::config::WebRuntimeProfile;
 use crate::web::manager::{BootstrapResult, TokenHash};
 
 pub(super) const MEDIA_TYPE: &str = "application/vnd.telemt.web-recovery+json";
@@ -71,7 +71,7 @@ pub(super) fn has_media_type(request: &Request<RequestBody>) -> bool {
 /// Builds the bounded no-store recovery representation.
 pub(super) fn response(
     bootstrap: &BootstrapResult,
-    vhost: &WebRuntimeVhost,
+    host: &str,
     profile: &WebRuntimeProfile,
     limits: &crate::config::WebLimitsConfig,
     timeouts: &crate::config::WebTimeoutsConfig,
@@ -83,7 +83,7 @@ pub(super) fn response(
             carrier_batch_bytes: limits.carrier_batch_bytes,
             pending_bytes_per_session: limits.pending_bytes_per_session,
             pending_items_per_session: limits.pending_items_per_session,
-            max_streams_per_session: profile.max_streams_per_session,
+            max_streams_per_session: profile.shared.max_streams_per_session,
         },
         timeouts: RecoveryTimeouts {
             long_poll_secs: timeouts.long_poll_secs,
@@ -94,14 +94,14 @@ pub(super) fn response(
             reconnect_grace_secs: timeouts.reconnect_grace_secs,
         },
         negotiation: RecoveryNegotiation {
-            enabled: profile.carrier_negotiation_enabled,
-            candidate_count: profile.carriers.len(),
-            deadlines_secs: profile.carrier_negotiation_deadlines_secs,
+            enabled: profile.shared.carrier_negotiation_enabled,
+            candidate_count: profile.shared.carriers.len(),
+            deadlines_secs: profile.shared.carrier_negotiation_deadlines_secs,
             carrier_probe_coalesce_ms: timeouts.carrier_probe_coalesce_ms,
         },
     };
     let body = serde_json::to_vec(&document).ok()?;
-    if body.len() > MAX_RESPONSE_BYTES || profile.host != vhost.host {
+    if body.len() > MAX_RESPONSE_BYTES || profile.host != host {
         return None;
     }
     let mut response = full_response(StatusCode::OK, Bytes::from(body));

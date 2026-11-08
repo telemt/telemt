@@ -1,19 +1,19 @@
 //! Config-editing API: read managed sections and apply sparse field patches.
 //! `access.*` is intentionally not editable here (owned by the users API).
 //! `[server]` is only partially editable — see [`EDITABLE_SERVER_FIELDS`].
+//! `[network]` exposes only [`EDITABLE_NETWORK_FIELDS`].
 
 use serde_json::Value as Json;
 use toml::Value as Toml;
 
 use super::ApiShared;
-#[cfg(test)]
-use super::config_store::write_atomic;
 use super::config_store::{
-    EDITABLE_SECTIONS, EDITABLE_SERVER_FIELDS, compute_snapshot_revision, is_editable_section,
-    load_candidate_snapshot, load_config_snapshot, render_server_listeners,
-    render_top_level_section, resolve_single_source_owner, upsert_toml_table,
-    write_atomic_if_unchanged,
+    EDITABLE_NETWORK_FIELDS, EDITABLE_SECTIONS, EDITABLE_SERVER_API_FIELDS, EDITABLE_SERVER_FIELDS,
+    compute_snapshot_revision, is_editable_section, load_config_snapshot, render_server_listeners,
+    render_top_level_section, resolve_single_source_owner, upsert_dns_overrides, upsert_toml_table,
 };
+#[cfg(test)]
+use super::config_store::{write_atomic, write_atomic_if_unchanged};
 use super::model::ApiFailure;
 use crate::config::ProxyConfig;
 use crate::config::hot_reload::classify_config_changes;
@@ -24,6 +24,15 @@ use crate::maestro::runtime_build::{
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+#[cfg(test)]
+mod api_observability_tests;
+mod diagnostics;
+mod preflight;
+mod preparation;
+pub(super) use preflight::{RuntimeBaseline, RuntimeFence};
+pub(super) use preflight::{parse_runtime_match, validate_config};
+use preparation::prepare_patch_to_path;
 
 /// Result of one validated managed-config mutation.
 #[derive(Debug, Serialize)]
@@ -40,6 +49,9 @@ pub(super) struct PatchConfigResponse {
     pub deferred_process_fields: Vec<String>,
     /// Top-level managed sections changed by the mutation.
     pub changed: Vec<String>,
+    /// Canonical changed leaf paths, without configuration values.
+    pub changed_paths: Vec<String>,
+    pub normalization_effects: Vec<diagnostics::NormalizationEffect>,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Accepted runtime reload when one was requested and required.
     pub reload: Option<ReloadAccepted>,
@@ -53,6 +65,8 @@ struct PreparedConfigPatch {
     owner_contents: String,
     desired_config: Arc<ProxyConfig>,
     response: PatchConfigResponse,
+    touched: Vec<String>,
+    _guard: preparation::PreparationLease,
 }
 
 /// Serializes config mutations behind `mutation_lock`, commits them, and records
@@ -60,6 +74,7 @@ struct PreparedConfigPatch {
 pub(super) async fn patch_config(
     patch_json: Json,
     expected_revision: Option<String>,
+    expected_runtime: Option<String>,
     reload_request: Option<ReloadRequest>,
     shared: &ApiShared,
 ) -> Result<PatchConfigResponse, ApiFailure> {
@@ -67,7 +82,14 @@ pub(super) async fn patch_config(
     shared
         .clone()
         .run_mutation_completion(async move {
-            patch_config_to_completion(patch_json, expected_revision, reload_request, &shared).await
+            patch_config_to_completion(
+                patch_json,
+                expected_revision,
+                expected_runtime,
+                reload_request,
+                &shared,
+            )
+            .await
         })
         .await
 }
@@ -75,18 +97,27 @@ pub(super) async fn patch_config(
 async fn patch_config_to_completion(
     patch_json: Json,
     expected_revision: Option<String>,
+    expected_runtime: Option<String>,
     reload_request: Option<ReloadRequest>,
     shared: &ApiShared,
 ) -> Result<PatchConfigResponse, ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
-    let active_config = shared.active_runtime.load_full().config();
-    let mut prepared =
+    let fence = preflight::RuntimeFence::capture(shared, expected_runtime.as_deref())?;
+    let prepared =
         prepare_patch_to_path(&shared.config_path, &patch_json, expected_revision).await?;
-    let resolved = reconcile_runtime_effect(
-        &mut prepared.response,
-        &active_config,
-        &prepared.desired_config,
-    )?;
+    let active_config = fence.config.clone();
+    let (mut prepared, resolved) = tokio::task::spawn_blocking(move || {
+        let mut prepared = prepared;
+        let resolved = reconcile_runtime_effect(
+            &mut prepared.response,
+            &active_config,
+            &prepared.desired_config,
+        )?;
+        Ok::<_, ApiFailure>((prepared, resolved))
+    })
+    .await
+    .map_err(|_| ApiFailure::internal("Mutation classification worker failed"))??;
+    fence.ensure_current()?;
     let reservation = if let Some(request) = reload_request.filter(|_| resolved.runtime_changed) {
         Some(
             shared
@@ -98,12 +129,13 @@ async fn patch_config_to_completion(
     } else {
         None
     };
-    prepared.response.revision = write_atomic_if_unchanged(
+    prepared.response.revision = super::config_store::write_atomic_with_runtime_check(
         prepared.config_path,
         prepared.expected_revision,
         prepared.owner_path,
         prepared.expected_owner_contents,
         prepared.owner_contents,
+        Some(fence.commit_check()),
     )
     .await?;
     if let Some(reservation) = reservation {
@@ -122,8 +154,8 @@ fn reconcile_runtime_effect(
     active_config: &ProxyConfig,
     desired_config: &ProxyConfig,
 ) -> Result<ResolvedReloadConfig, ApiFailure> {
-    let resolved =
-        resolve_reload_config(active_config, desired_config).map_err(ApiFailure::bad_request)?;
+    let resolved = resolve_reload_config(active_config, desired_config)
+        .map_err(|error| diagnostics::validation_error("effective_config_invalid", "web", error))?;
     response.runtime_reload_required = resolved.runtime_changed;
     response.process_restart_required = !resolved.deferred_process_fields.is_empty();
     response.deferred_process_fields = resolved.deferred_process_fields.clone();
@@ -149,145 +181,6 @@ pub(super) async fn apply_patch_to_path(
     .await?;
     prepared.response.revision = revision;
     Ok(prepared.response)
-}
-
-async fn prepare_patch_to_path(
-    config_path: &Path,
-    patch_json: &Json,
-    expected_revision: Option<String>,
-) -> Result<PreparedConfigPatch, ApiFailure> {
-    // 1. optimistic concurrency
-    let loaded = load_config_snapshot(config_path, false).await?;
-    let current = compute_snapshot_revision(&loaded.source_contents);
-    if expected_revision.is_some_and(|expected| expected != current) {
-        return Err(ApiFailure::new(
-            hyper::StatusCode::CONFLICT,
-            "revision_conflict",
-            "Config revision mismatch",
-        ));
-    }
-
-    // 2. convert + reject access / unknown sections / forbidden server fields
-    let patch_toml = json_to_toml(patch_json)
-        .map_err(|e| ApiFailure::bad_request(format!("invalid patch: {}", e)))?;
-    let patch_table = patch_toml
-        .as_table()
-        .ok_or_else(|| ApiFailure::bad_request("patch must be a JSON object"))?;
-    if patch_table.contains_key("access") {
-        return Err(ApiFailure::new(
-            hyper::StatusCode::BAD_REQUEST,
-            "access_not_editable",
-            "access.* is managed via the users API, not editable here",
-        ));
-    }
-    for (key, value) in patch_table {
-        if !is_editable_section(key.as_str()) {
-            return Err(ApiFailure::new(
-                hyper::StatusCode::BAD_REQUEST,
-                "section_not_editable",
-                format!("section not editable: {}", key),
-            ));
-        }
-        if key == "server" {
-            validate_server_patch(value)?;
-        }
-    }
-    let touched: Vec<&str> = patch_table
-        .keys()
-        .map(|k| k.as_str())
-        .filter(|k| is_editable_section(k))
-        .collect();
-    if touched.is_empty() {
-        return Err(ApiFailure::bad_request("empty patch: no editable sections"));
-    }
-
-    // 3. Merge against the fully expanded and normalized desired config. The
-    // source owner is resolved separately so included sections stay in their
-    // original file and unrelated source files remain byte-identical.
-    let old_cfg = loaded.config.clone();
-    let mut merged = Toml::try_from(&old_cfg)
-        .map_err(|e| ApiFailure::internal(format!("failed to serialize config: {}", e)))?;
-    deep_merge(&mut merged, &patch_toml);
-    ProxyConfig::validate_decoy_source_keys(&merged)
-        .map_err(|error| ApiFailure::bad_request(format!("invalid patched config: {error}")))?;
-
-    let requested_cfg: ProxyConfig = merged
-        .clone()
-        .try_into()
-        .map_err(|e| ApiFailure::bad_request(format!("config does not deserialize: {}", e)))?;
-    requested_cfg
-        .validate()
-        .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-
-    let ownership_targets: Vec<&str> = touched
-        .iter()
-        .map(|section| {
-            if *section == "server" {
-                "server.listeners"
-            } else {
-                *section
-            }
-        })
-        .collect();
-    let owner_path = resolve_single_source_owner(&loaded, config_path, &ownership_targets)?;
-    let mut owner_contents = loaded
-        .source_contents
-        .get(&owner_path)
-        .cloned()
-        .ok_or_else(|| ApiFailure::internal("config source owner is missing from snapshot"))?;
-    let expected_owner_contents = owner_contents.clone();
-    for section in &touched {
-        if *section == "server" {
-            let rendered = render_server_listeners(&requested_cfg)?;
-            owner_contents = upsert_toml_table(&owner_contents, "server.listeners", &rendered);
-        } else {
-            let rendered = render_top_level_section(&requested_cfg, section)?;
-            owner_contents = upsert_toml_table(&owner_contents, section, &rendered);
-        }
-    }
-
-    let candidate = load_candidate_snapshot(
-        config_path,
-        &loaded.source_contents,
-        owner_path.clone(),
-        owner_contents.clone(),
-    )
-    .await?;
-    if touched.contains(&"server")
-        && serde_json::to_value(&candidate.config.server.listeners).ok()
-            != serde_json::to_value(&requested_cfg.server.listeners).ok()
-    {
-        return Err(ApiFailure::new(
-            hyper::StatusCode::BAD_REQUEST,
-            "ambiguous_listeners",
-            "server.listeners normalizes to a different effective listener set",
-        ));
-    }
-
-    // 4. classify the validated, normalized candidate.
-    let revision = compute_snapshot_revision(&candidate.source_contents);
-    let new_cfg = candidate.config;
-    let class = classify_config_changes(&old_cfg, &new_cfg);
-    let deferred_process_fields =
-        deferred_process_fields(&old_cfg, &new_cfg).map_err(ApiFailure::bad_request)?;
-
-    Ok(PreparedConfigPatch {
-        config_path: config_path.to_path_buf(),
-        expected_revision: current,
-        owner_path,
-        expected_owner_contents,
-        owner_contents,
-        desired_config: Arc::new(new_cfg),
-        response: PatchConfigResponse {
-            revision,
-            restart_required: class.restart_required,
-            runtime_reload_required: class.restart_required,
-            process_restart_required: !deferred_process_fields.is_empty(),
-            deferred_process_fields,
-            changed: class.changed,
-            reload: None,
-        },
-    })
 }
 
 fn reload_submit_failure(error: ReloadSubmitError) -> ApiFailure {
@@ -318,8 +211,7 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
         .unwrap_or_else(toml::value::Table::new);
     // Whitelist: return ONLY the editable sections. A blacklist (just removing
     // `access`) would leak `server.api` (auth_header) and `network` (per-node
-    // addresses). Mirror the PATCH contract, including the nested server
-    // field-level allowlist.
+    // addresses). Mirror the PATCH contract, including both nested allowlists.
     let mut table = toml::value::Table::new();
     for section in EDITABLE_SECTIONS {
         if let Some(value) = parsed_table.get(*section) {
@@ -330,6 +222,14 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
         if let Some(filtered) = filter_server_for_read(server) {
             table.insert("server".to_string(), filtered);
         }
+    }
+    if let Some(network) = parsed_table.get("network").and_then(Toml::as_table) {
+        let filtered = network
+            .iter()
+            .filter(|(key, _)| EDITABLE_NETWORK_FIELDS.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        table.insert("network".to_owned(), Toml::Table(filtered));
     }
 
     Ok((Toml::Table(table), revision))
@@ -352,7 +252,23 @@ fn filter_server_for_read(server: &Toml) -> Option<Toml> {
                     }
                 }
             }
-            out.insert((*field).to_string(), value.clone());
+            if *field == "api" {
+                if let Some(api) = value.as_table() {
+                    out.insert(
+                        "api".to_owned(),
+                        Toml::Table(
+                            api.iter()
+                                .filter(|(key, _)| {
+                                    EDITABLE_SERVER_API_FIELDS.contains(&key.as_str())
+                                })
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+            } else {
+                out.insert((*field).to_string(), value.clone());
+            }
         }
     }
     if out.is_empty() {
@@ -363,20 +279,15 @@ fn filter_server_for_read(server: &Toml) -> Option<Toml> {
 }
 
 /// Reject any `[server]` patch keys outside [`EDITABLE_SERVER_FIELDS`].
-fn validate_server_patch(server: &Toml) -> Result<(), ApiFailure> {
-    let Some(table) = server.as_table() else {
+fn validate_server_patch(server: &Json) -> Result<(), ApiFailure> {
+    let Some(table) = server.as_object() else {
         return Err(ApiFailure::new(
             hyper::StatusCode::BAD_REQUEST,
             "section_not_editable",
             "server patch must be a JSON object",
         ));
     };
-    if table.is_empty() {
-        return Err(ApiFailure::bad_request(
-            "empty server patch: provide at least one editable field \
-             (currently: listeners)",
-        ));
-    }
+    // Validate original keys before null removal, including forbidden siblings.
     for key in table.keys() {
         if !EDITABLE_SERVER_FIELDS.contains(&key.as_str()) {
             return Err(ApiFailure::new(
@@ -389,6 +300,60 @@ fn validate_server_patch(server: &Toml) -> Result<(), ApiFailure> {
                 ),
             ));
         }
+    }
+    if let Some(api) = table.get("api").filter(|api| !api.is_null()) {
+        let fields = api
+            .as_object()
+            .ok_or_else(|| ApiFailure::bad_request("server.api patch must be a JSON object"))?;
+        for key in fields.keys() {
+            if !EDITABLE_SERVER_API_FIELDS.contains(&key.as_str()) {
+                return Err(ApiFailure::new(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "field_not_editable",
+                    format!("server.api.{key} is not editable via the config API"),
+                ));
+            }
+        }
+    }
+    let has_listeners = table.get("listeners").is_some_and(|value| !value.is_null());
+    let has_api_fields = table
+        .get("api")
+        .and_then(Json::as_object)
+        .is_some_and(|fields| fields.values().any(|value| !value.is_null()));
+    if !has_listeners && !has_api_fields {
+        return Err(ApiFailure::bad_request(
+            "empty server patch: provide listeners or an editable server.api field",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_network_patch(network: &Json) -> Result<(), ApiFailure> {
+    let Some(table) = network.as_object() else {
+        return Err(ApiFailure::new(
+            hyper::StatusCode::BAD_REQUEST,
+            "section_not_editable",
+            "network patch must be a JSON object",
+        ));
+    };
+    // Check the original keys so even a forbidden null member cannot bypass
+    // the network allowlist during JSON-to-TOML null removal.
+    for key in table.keys() {
+        if !EDITABLE_NETWORK_FIELDS.contains(&key.as_str()) {
+            return Err(ApiFailure::new(
+                hyper::StatusCode::BAD_REQUEST,
+                "field_not_editable",
+                format!(
+                    "network.{key} is not editable via the config API; allowed network fields: {}",
+                    EDITABLE_NETWORK_FIELDS.join(", ")
+                ),
+            ));
+        }
+    }
+    if table.values().all(Json::is_null) {
+        return Err(ApiFailure::bad_request(
+            "empty network patch: provide dns_overrides (use [] to clear)",
+        ));
     }
     Ok(())
 }
@@ -463,3 +428,16 @@ mod conveyor_tests;
 #[cfg(test)]
 #[path = "config_edit/decoy_dns_tests.rs"]
 mod decoy_dns_tests;
+
+// Exact host groups retain the source shape and process-deferred limit checks.
+#[cfg(test)]
+mod host_list_tests;
+
+#[cfg(test)]
+mod quota_period_tests;
+
+#[cfg(test)]
+mod preflight_tests;
+
+#[cfg(test)]
+mod dns_overrides_tests;

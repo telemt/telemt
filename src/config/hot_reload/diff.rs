@@ -85,6 +85,10 @@ pub(super) fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot
         warned = true;
         warn!("config reload: server listener settings changed; restart required");
     }
+    if old.web.allow_wildcard_hosts != new.web.allow_wildcard_hosts {
+        warned = true;
+        warn!("config reload: web.allow_wildcard_hosts changed; restart required");
+    }
     if old.web.decoy_fasttrack_mode != new.web.decoy_fasttrack_mode {
         warned = true;
         warn!("config reload: web.decoy_fasttrack_mode changed; restart required");

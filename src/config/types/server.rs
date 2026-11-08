@@ -269,12 +269,13 @@ pub struct ServerConfig {
     pub proxy_protocol_trusted_cidrs: Vec<IpNetwork>,
 
     /// Port for the Prometheus-compatible metrics endpoint.
-    /// Enables metrics when set; binds on all interfaces (dual-stack) by default.
+    /// Enables metrics when set; binds on IPv4 and IPv6 loopback by default.
     #[serde(default)]
     pub metrics_port: Option<u16>,
 
     /// Listen address for metrics in `IP:PORT` format (e.g. `"127.0.0.1:9090"`).
     /// When set, takes precedence over `metrics_port` and binds on the specified address only.
+    /// Docker port publishing requires an explicit container-reachable listen address.
     #[serde(default)]
     pub metrics_listen: Option<String>,
 

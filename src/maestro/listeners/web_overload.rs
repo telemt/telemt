@@ -13,7 +13,7 @@ use crate::web::manager::{HttpConnectionAdmissionError, WebProcessRuntime};
 use crate::web::telemetry::{WebHttpConnectionOverloadOutcome, WebRejectionReason};
 
 /// Exact bounded retryable response emitted before HTTP request parsing.
-pub(super) const SERVICE_UNAVAILABLE_RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nCache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\n\r\n";
+pub(super) const SERVICE_UNAVAILABLE_RESPONSE: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nCache-Control: no-store\r\nRetry-After: 1\r\nX-Telemt-Retry-After-Ms: 250\r\nConnection: close\r\n\r\n";
 
 /// Handles one accepted WEB socket outside ordinary connection capacity.
 #[allow(clippy::too_many_arguments)]
@@ -164,6 +164,11 @@ mod tests {
         let mut bytes = Vec::new();
         client.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, super::SERVICE_UNAVAILABLE_RESPONSE);
+        assert!(
+            bytes
+                .windows(b"X-Telemt-Retry-After-Ms: 250\r\n".len())
+                .any(|window| window == b"X-Telemt-Retry-After-Ms: 250\r\n")
+        );
     }
 
     #[tokio::test]
@@ -191,6 +196,11 @@ mod tests {
         let mut bytes = Vec::new();
         client.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, super::SERVICE_UNAVAILABLE_RESPONSE);
+        assert!(
+            bytes
+                .windows(b"X-Telemt-Retry-After-Ms: 250\r\n".len())
+                .any(|window| window == b"X-Telemt-Retry-After-Ms: 250\r\n")
+        );
         assert_eq!(
             runtime
                 .telemetry()

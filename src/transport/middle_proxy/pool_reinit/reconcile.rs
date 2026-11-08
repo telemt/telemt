@@ -169,15 +169,6 @@ impl MePool {
         }
     }
 
-    /// Reconciles one immutable endpoint snapshot without draining uncovered groups.
-    pub async fn zero_downtime_reinit_after_map_change(
-        self: &Arc<Self>,
-        rng: &SecureRandom,
-    ) -> bool {
-        let endpoint_snapshot = self.endpoint_snapshot.load_full();
-        self.reinit_endpoint_snapshot(rng, endpoint_snapshot).await
-    }
-
     /// Reconciles exactly the revision owned by the scheduler's retry objective.
     pub(in crate::transport::middle_proxy) async fn reinit_endpoint_snapshot(
         self: &Arc<Self>,
@@ -415,10 +406,5 @@ impl MePool {
             self.remove_writer_and_close_clients(writer_id).await;
         }
         true
-    }
-
-    /// Applies periodic rotation using the same coverage and generation fences as map changes.
-    pub async fn zero_downtime_reinit_periodic(self: &Arc<Self>, rng: &SecureRandom) -> bool {
-        self.zero_downtime_reinit_after_map_change(rng).await
     }
 }

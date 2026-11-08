@@ -269,6 +269,7 @@ impl DirectBufferBudget {
 }
 
 /// Returns the conservative ceiling used when memory discovery is unavailable.
+#[cfg(test)]
 pub(crate) fn fallback_direct_buffer_hard_limit() -> usize {
     AUTO_HARD_FALLBACK_BYTES
 }

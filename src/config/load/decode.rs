@@ -20,6 +20,8 @@ pub(super) fn decode_source_graph(graph: ConfigSourceGraph) -> Result<DecodedSou
         toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
     handle_unknown_config_keys(&parsed_toml)?;
     ProxyConfig::validate_decoy_source_keys(&parsed_toml)?;
+    let source_evidence =
+        crate::config::observation::SourceEvidence::capture(&parsed_toml, &source_contents);
     let general_table = parsed_toml
         .get("general")
         .and_then(|value| value.as_table());
@@ -65,6 +67,7 @@ pub(super) fn decode_source_graph(graph: ConfigSourceGraph) -> Result<DecodedSou
     let mut config: ProxyConfig = parsed_toml
         .try_into()
         .map_err(|e| ProxyError::Config(e.to_string()))?;
+    config.provenance = crate::config::observation::ConfigProvenance::Source(source_evidence);
     config
         .server
         .conntrack_control

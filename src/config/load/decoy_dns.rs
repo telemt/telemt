@@ -185,14 +185,26 @@ pub(super) fn build_upstream(
 impl ProxyConfig {
     /// Compares selected endpoints separately from source-only configuration equality.
     pub(crate) fn web_decoy_endpoints_equal(&self, other: &Self) -> bool {
-        fn selected(config: &ProxyConfig) -> impl Iterator<Item = (&String, SocketAddr)> {
+        fn selected(config: &ProxyConfig) -> impl Iterator<Item = ((u8, &str), SocketAddr)> {
             config
                 .web
                 .runtime
                 .iter()
-                .flat_map(|runtime| runtime.vhosts.iter())
-                .filter_map(|(host, vhost)| match vhost.decoy {
-                    WebRuntimeDecoy::HttpUpstream { addr, .. } => Some((host, addr)),
+                .flat_map(|runtime| {
+                    runtime
+                        .vhosts
+                        .iter()
+                        .map(|(host, vhost)| ((0, host.as_str()), vhost))
+                        .chain(
+                            runtime
+                                .wildcards
+                                .iter()
+                                .map(|(suffix, vhost)| ((1, suffix.as_str()), vhost)),
+                        )
+                        .chain(runtime.catch_all.iter().map(|vhost| ((2, "*"), vhost)))
+                })
+                .filter_map(|(host, vhost)| match vhost.decoy.as_ref() {
+                    WebRuntimeDecoy::HttpUpstream { addr, .. } => Some((host, *addr)),
                     WebRuntimeDecoy::StaticDirectory(_) => None,
                 })
         }

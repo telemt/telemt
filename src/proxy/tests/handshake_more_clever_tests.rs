@@ -746,3 +746,6 @@ fn ipv6_localhost_and_unspecified_normalization() {
     assert_eq!(norm_local, expected_bucket);
     assert_eq!(norm_unspec, expected_bucket);
 }
+
+#[path = "source_deny_handshake_tests.rs"]
+mod source_deny_tests;

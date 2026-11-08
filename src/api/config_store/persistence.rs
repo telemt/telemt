@@ -12,8 +12,8 @@ use super::atomic::write_atomic_if_unchanged;
 #[cfg(test)]
 use super::compute_revision;
 use super::{
-    AccessSection, compute_snapshot_revision, load_candidate_snapshot, load_config_snapshot,
-    resolve_single_source_owner, toml_path_exists,
+    AccessSection, FieldEdit, compute_snapshot_revision, load_candidate_snapshot,
+    load_config_snapshot, prepare_field_edits, resolve_single_source_owner, toml_path_exists,
 };
 use crate::api::model::ApiFailure;
 
@@ -97,6 +97,7 @@ pub(in crate::api) fn render_server_listeners(cfg: &ProxyConfig) -> Result<Strin
 }
 
 /// Validates and atomically writes access tables to their single source owner.
+#[cfg(test)]
 pub(in crate::api) async fn save_access_sections_to_disk(
     config_path: &Path,
     cfg: &ProxyConfig,
@@ -110,6 +111,24 @@ pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
     config_path: &Path,
     cfg: &ProxyConfig,
     sections: &[AccessSection],
+    expected_revision: Option<&str>,
+) -> Result<String, ApiFailure> {
+    save_access_sections_and_fields_if_revision(
+        config_path,
+        cfg,
+        sections,
+        Vec::new(),
+        expected_revision,
+    )
+    .await
+}
+
+/// Commits legacy user tables and precise source-deny edits in one owner file.
+pub(in crate::api) async fn save_access_sections_and_fields_if_revision(
+    config_path: &Path,
+    cfg: &ProxyConfig,
+    sections: &[AccessSection],
+    fields: Vec<FieldEdit>,
     expected_revision: Option<&str>,
 ) -> Result<String, ApiFailure> {
     let loaded = load_config_snapshot(config_path, false).await?;
@@ -132,7 +151,17 @@ pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
                     .is_some_and(|value| toml_path_exists(&value, section.table_name()))
             })
     });
-    if applied.is_empty() {
+    let compare_source_deny = !fields.is_empty();
+    let precise = if fields.is_empty() {
+        None
+    } else {
+        let source = loaded.clone();
+        let path = config_path.to_path_buf();
+        tokio::task::spawn_blocking(move || prepare_field_edits(&source, &path, &fields))
+            .await
+            .map_err(|_| ApiFailure::internal("Source edit worker failed"))??
+    };
+    if applied.is_empty() && precise.is_none() {
         return Ok(loaded_revision);
     }
 
@@ -140,13 +169,31 @@ pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
         .iter()
         .map(|section| section.table_name())
         .collect::<Vec<_>>();
-    let owner_path = resolve_single_source_owner(&loaded, config_path, &targets)?;
-    let mut owner_contents = loaded
+    let table_owner = if targets.is_empty() {
+        None
+    } else {
+        Some(resolve_single_source_owner(&loaded, config_path, &targets)?)
+    };
+    if let (Some(table_owner), Some(precise)) = (&table_owner, &precise)
+        && table_owner != &precise.owner_path
+    {
+        return Err(ApiFailure::new(
+            hyper::StatusCode::CONFLICT,
+            "config_patch_not_atomic",
+            "User tables and source-deny rule require different source owners",
+        ));
+    }
+    let owner_path = table_owner
+        .or_else(|| precise.as_ref().map(|edit| edit.owner_path.clone()))
+        .ok_or_else(|| ApiFailure::internal("Missing user mutation owner"))?;
+    let expected_owner_contents = loaded
         .source_contents
         .get(&owner_path)
         .cloned()
         .ok_or_else(|| ApiFailure::internal("config source owner is missing from snapshot"))?;
-    let expected_owner_contents = owner_contents.clone();
+    let mut owner_contents = precise
+        .map(|edit| edit.owner_contents)
+        .unwrap_or_else(|| expected_owner_contents.clone());
     for section in applied {
         let rendered = render_access_section(cfg, section)?;
         owner_contents = upsert_toml_table(&owner_contents, section.table_name(), &rendered);
@@ -158,7 +205,25 @@ pub(in crate::api) async fn save_access_sections_to_disk_if_revision(
         owner_path.clone(),
         owner_contents.clone(),
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        if compare_source_deny {
+            ApiFailure::new(
+                error.status,
+                error.code,
+                "Cannot prepare user policy candidate",
+            )
+        } else {
+            error
+        }
+    })?;
+    if compare_source_deny
+        && candidate.config.access.user_source_deny != cfg.access.user_source_deny
+    {
+        return Err(ApiFailure::internal(
+            "Persisted source-deny rules differ from requested policy",
+        ));
+    }
     let _candidate_revision = compute_snapshot_revision(&candidate.source_contents);
     let revision = write_atomic_if_unchanged(
         config_path.to_path_buf(),
@@ -231,6 +296,10 @@ pub(super) fn render_access_section(
                 .collect();
             serialize_table_body(&rows)?
         }
+        AccessSection::UserQuotaPeriods => {
+            let rows: BTreeMap<_, _> = cfg.access.user_quota_periods.iter().collect();
+            serialize_table_body(&rows)?
+        }
         AccessSection::UserRateLimits => {
             let rows: BTreeMap<String, RateLimitBps> = cfg
                 .access
@@ -269,6 +338,7 @@ fn access_section_is_empty(cfg: &ProxyConfig, section: AccessSection) -> bool {
         AccessSection::UserMaxTcpConns => cfg.access.user_max_tcp_conns.is_empty(),
         AccessSection::UserExpirations => cfg.access.user_expirations.is_empty(),
         AccessSection::UserDataQuota => cfg.access.user_data_quota.is_empty(),
+        AccessSection::UserQuotaPeriods => cfg.access.user_quota_periods.is_empty(),
         AccessSection::UserRateLimits => cfg.access.user_rate_limits.is_empty(),
         AccessSection::UserMaxUniqueIps => cfg.access.user_max_unique_ips.is_empty(),
     }

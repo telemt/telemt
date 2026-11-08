@@ -1,6 +1,7 @@
 use super::*;
 
 /// Completes legacy synchronous loads without performing hostname resolution.
+#[cfg(test)]
 pub(super) fn load_source_graph(graph: ConfigSourceGraph) -> Result<LoadedConfig> {
     finish(parse_source_graph(graph)?)
 }
@@ -37,15 +38,36 @@ pub(super) fn finish(mut parsed: ParsedConfigSource) -> Result<LoadedConfig> {
 
 impl ParsedConfigSource {
     /// Resolves each unique decoy origin once, then builds a fully validated candidate.
-    pub(crate) async fn prepare(mut self) -> Result<LoadedConfig> {
-        decoy_dns::prepare(&mut self.config, |host, port| async move {
-            tokio::net::lookup_host((host.as_str(), port))
+    pub(crate) async fn prepare(self) -> Result<LoadedConfig> {
+        self.prepare_guarded(Arc::new(())).await
+    }
+
+    /// Retains a caller's preparation budget inside blocking work even if the
+    /// request or DNS timeout drops its future. No worker publishes this data.
+    pub(crate) async fn prepare_guarded<G: Send + Sync + 'static>(
+        mut self,
+        guard: Arc<G>,
+    ) -> Result<LoadedConfig> {
+        decoy_dns::prepare(&mut self.config, |host, port| {
+            let guard = guard.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    use std::net::ToSocketAddrs;
+                    let _guard = guard;
+                    (host.as_str(), port)
+                        .to_socket_addrs()
+                        .map(|answers| answers.collect())
+                })
                 .await
-                .map(|answers| answers.collect())
+                .map_err(|_| std::io::Error::other("DNS preparation worker failed"))?
+            }
         })
         .await?;
-        tokio::task::spawn_blocking(move || finish(self))
-            .await
-            .map_err(|error| ProxyError::Config(format!("config preparation failed: {error}")))?
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            finish(self)
+        })
+        .await
+        .map_err(|error| ProxyError::Config(format!("config preparation failed: {error}")))?
     }
 }

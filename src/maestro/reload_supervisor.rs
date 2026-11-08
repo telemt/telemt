@@ -163,6 +163,8 @@ impl ReloadSupervisor {
             .mark_phase(command.reload_id, ReloadPhase::Preparing)
             .await;
         let old_runtime = self.active_runtime.load_full();
+        self.control
+            .record_source_generation(command.reload_id, old_runtime.id);
         let resolved = match resolve_reload_config(&old_runtime.config(), &command.config) {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -309,13 +311,21 @@ impl ReloadSupervisor {
         } else {
             None
         };
+        let quota_guard = new_runtime
+            .proxy_shared
+            .quota_mutation_gate()
+            .lock_owned()
+            .await;
         let config = new_runtime.config();
-        let _ = new_runtime.proxy_shared.activate_user_config_source(
-            new_runtime.id,
-            Some(user_admission_epoch),
-            &config.access.users,
-            &config.access.user_enabled,
-        );
+        let user_config_accepted = new_runtime
+            .proxy_shared
+            .activate_user_config_source(
+                new_runtime.id,
+                Some(user_admission_epoch),
+                &config.access.users,
+                &config.access.user_enabled,
+            )
+            .is_some();
         let _ = new_runtime
             .ip_tracker
             .apply_policy_from_source(
@@ -343,6 +353,21 @@ impl ReloadSupervisor {
             old_runtime.stop_accepting_sessions();
             listener_manager.activate_runtime_generation(new_runtime.clone())
         };
+        self.control.record_activation(
+            command.reload_id,
+            new_runtime.id,
+            replaced.id,
+            replaced.config().runtime_config_epoch,
+        );
+        // A rejected admission epoch must not be bypassed by reapplying the prepared
+        // snapshot. Quota publication retains its credential and source checks.
+        let config = new_runtime.config();
+        new_runtime.proxy_shared.publish_quota_config(
+            new_runtime.id,
+            &config,
+            user_config_accepted,
+        );
+        drop(quota_guard);
         let conntrack_firewall_published = match &self.conntrack_firewall {
             Some(conntrack_firewall) => conntrack_firewall.publish(
                 new_runtime.id,
@@ -405,7 +430,10 @@ impl ReloadSupervisor {
             }
         }
 
-        if stop_background_and_middle_end(&replaced).await {
+        let retirement_timed_out = stop_background_and_middle_end(&replaced).await;
+        self.control
+            .record_retirement(command.reload_id, retirement_timed_out);
+        if retirement_timed_out {
             let warning = format!(
                 "generation {} Middle-End lifecycle shutdown timed out",
                 replaced.id

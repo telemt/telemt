@@ -10,6 +10,24 @@ pub(super) async fn handle(
 ) -> Result<Option<Response<Full<Bytes>>>, ApiFailure> {
     let api_cfg = &cfg.server.api;
     match (method.as_str(), normalized_path) {
+        ("GET", "/v1/config/state") => {
+            Ok(super::super::config_state::response(shared, query).await?)
+        }
+        ("GET", "/v1/capabilities") => {
+            discovery::reject_query(query)?;
+            let revision = current_revision(&shared.config_path).await?;
+            let data = discovery::capabilities(shared, cfg)?;
+            Ok(success_response(StatusCode::OK, data, revision))
+        }
+        ("GET", "/v1/config/schema") => {
+            discovery::reject_query(query)?;
+            let revision = current_revision(&shared.config_path).await?;
+            Ok(success_response(
+                StatusCode::OK,
+                discovery::config_schema()?,
+                revision,
+            ))
+        }
         ("GET", "/web-status") => Ok(web_status::render(query, &shared.web_trace).await),
         ("GET", "/v1/health") => {
             let revision = current_revision(&shared.config_path).await?;
@@ -200,7 +218,13 @@ pub(super) async fn handle(
         ("GET", "/v1/stats/users/quota") => {
             let revision = current_revision(&shared.config_path).await?;
             let disk_cfg = load_config_from_disk(&shared.config_path).await?;
-            let data = build_user_quota_list(&disk_cfg, shared.stats.as_ref());
+            let _quota_guard = shared.quota_state.lock().await;
+            let mut data = build_user_quota_list(&disk_cfg, shared.stats.as_ref());
+            for entry in &mut data.users {
+                entry.schedule = shared
+                    .quota_state
+                    .schedule_status(&entry.username, entry.quota_period);
+            }
             Ok(success_response(StatusCode::OK, data, revision))
         }
 

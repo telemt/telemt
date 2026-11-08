@@ -36,13 +36,19 @@ use crate::transport::middle_proxy::MePool;
 use crate::web::control::WebRuntimePublication;
 use crate::web::trace::WebTraceStore;
 
+mod access_policy;
 mod config_edit;
+mod config_projection;
+mod config_state;
 pub(crate) mod config_store;
+mod discovery;
 mod events;
 mod http_utils;
 // Authenticated request admission and route dispatch.
 mod handler;
 mod model;
+#[cfg(test)]
+mod observability_cache_tests;
 mod patch;
 #[cfg(test)]
 mod reload_tests;
@@ -112,6 +118,8 @@ pub(super) struct ApiRuntimeState {
 
 #[derive(Clone)]
 pub(super) struct ApiShared {
+    /// Generation pinned by this request, including cache reads and publication.
+    pub(super) runtime_generation: u64,
     pub(super) stats: Arc<Stats>,
     pub(super) ip_tracker: Arc<UserIpTracker>,
     pub(super) me_pool: Arc<RwLock<Option<Arc<MePool>>>>,
@@ -120,6 +128,8 @@ pub(super) struct ApiShared {
     pub(super) quota_state: Arc<QuotaStateOwner>,
     pub(super) detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
     pub(super) mutation_lock: Arc<Mutex<()>>,
+    pub(super) config_preflight_slots: Arc<Semaphore>,
+    pub(super) config_state_slots: Arc<Semaphore>,
     pub(super) minimal_cache: Arc<Mutex<Option<MinimalCacheEntry>>>,
     pub(super) runtime_edge_connections_cache: Arc<Mutex<Option<EdgeConnectionsCacheEntry>>>,
     pub(super) runtime_edge_recompute_lock: Arc<Mutex<()>>,
@@ -148,6 +158,7 @@ impl ApiShared {
 
     fn for_runtime(&self, runtime: &RuntimeGeneration) -> Self {
         Self {
+            runtime_generation: runtime.id,
             stats: runtime.stats.clone(),
             ip_tracker: runtime.ip_tracker.clone(),
             me_pool: runtime.me_pool_runtime.clone(),
@@ -156,6 +167,8 @@ impl ApiShared {
             quota_state: self.quota_state.clone(),
             detected_ips_rx: self.detected_ips_rx.clone(),
             mutation_lock: self.mutation_lock.clone(),
+            config_preflight_slots: self.config_preflight_slots.clone(),
+            config_state_slots: self.config_state_slots.clone(),
             minimal_cache: self.minimal_cache.clone(),
             runtime_edge_connections_cache: self.runtime_edge_connections_cache.clone(),
             runtime_edge_recompute_lock: self.runtime_edge_recompute_lock.clone(),
@@ -264,6 +277,9 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
     }
     match path {
         "/v1/health"
+        | "/v1/capabilities"
+        | "/v1/config/schema"
+        | "/v1/config/state"
         | "/v1/health/ready"
         | "/v1/system/info"
         | "/v1/runtime/gates"
@@ -294,8 +310,9 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         | "/v1/stats/users"
         | "/web-status" => Some(ALLOW_GET),
         "/v1/system/reload" => Some(ALLOW_POST),
+        "/v1/config/validate" => Some(ALLOW_POST),
         "/v1/users" => Some(ALLOW_GET_POST),
-        "/v1/config" => Some(ALLOW_GET_PATCH),
+        "/v1/config" | "/v1/access/policy" => Some(ALLOW_GET_PATCH),
         _ if user_action_route_matches(path, "/reset-quota") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/rotate-secret") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/enable") => Some(ALLOW_POST),
@@ -365,6 +382,7 @@ pub(crate) async fn serve(
     });
 
     let shared = Arc::new(ApiShared {
+        runtime_generation: active_runtime.load().id,
         stats,
         ip_tracker,
         me_pool,
@@ -373,6 +391,8 @@ pub(crate) async fn serve(
         quota_state,
         detected_ips_rx,
         mutation_lock: Arc::new(Mutex::new(())),
+        config_preflight_slots: Arc::new(Semaphore::new(2)),
+        config_state_slots: Arc::new(Semaphore::new(2)),
         minimal_cache: Arc::new(Mutex::new(None)),
         runtime_edge_connections_cache: Arc::new(Mutex::new(None)),
         runtime_edge_recompute_lock: Arc::new(Mutex::new(())),
