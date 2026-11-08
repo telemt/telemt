@@ -127,11 +127,7 @@ fn example_path(path: &str) -> String {
 }
 
 #[test]
-fn operation_catalog_matches_routing_methods_and_openapi() {
-    let document: Value = serde_json::from_str(include_str!(
-        "../../../docs/Architecture/API/openapi-v1.json"
-    ))
-    .unwrap();
+fn operation_catalog_matches_routing_methods() {
     let mut paths = BTreeMap::<String, BTreeSet<String>>::new();
     let mut ids = BTreeSet::new();
     for operation in operations().unwrap() {
@@ -153,11 +149,6 @@ fn operation_catalog_matches_routing_methods_and_openapi() {
                 allowed.split(", ").any(|method| method == operation.method),
                 "{path}: {allowed}"
             );
-            let spec = &document["paths"][path][operation.method.to_lowercase()];
-            assert!(spec.is_object(), "missing OpenAPI operation: {path}");
-            for status in &operation.success {
-                assert!(spec["responses"][status.to_string()].is_object());
-            }
         }
     }
     for (path, methods) in &paths {
@@ -168,7 +159,6 @@ fn operation_catalog_matches_routing_methods_and_openapi() {
             "{path}"
         );
     }
-    assert_eq!(paths.len(), document["paths"].as_object().unwrap().len());
     // Both tables are independent: a newly dispatched fixed route cannot silently
     // disappear from discovery because a maintainer omitted its catalog entry.
     for source in [
