@@ -75,7 +75,12 @@ pub(super) fn validate_source(config: &mut ProxyConfig) -> Result<()> {
         ));
     }
 
-    validate_limits(&config.web.limits)?;
+    config
+        .web
+        .retry_jitter
+        .validate()
+        .map_err(|message| ProxyError::Config(message.into()))?;
+    validate_limits(&config.web.limits, config.web.allow_wildcard_hosts)?;
     debug::validate(&config.web.debug, &config.web.limits)?;
     let carriers = negotiation::validate(&config.web)?;
     if carriers.contains(&WebCarrier::Https) && config.web.limits.max_http_handlers < 2 {
@@ -182,7 +187,7 @@ fn validate_web_listener(
     Ok(())
 }
 
-fn validate_limits(limits: &WebLimitsConfig) -> Result<()> {
+fn validate_limits(limits: &WebLimitsConfig, wildcard: bool) -> Result<()> {
     if !(8192..=MAX_WEB_HEADER_BYTES).contains(&limits.max_header_bytes) {
         return config_error("web.limits.max_header_bytes must be within [8192, 65536]");
     }
@@ -412,7 +417,7 @@ fn validate_limits(limits: &WebLimitsConfig) -> Result<()> {
             "web.limits pending ceilings must preserve one uplink batch and downlink progress",
         );
     }
-    memory::validate(limits)?;
+    memory::validate(limits, wildcard)?;
     Ok(())
 }
 

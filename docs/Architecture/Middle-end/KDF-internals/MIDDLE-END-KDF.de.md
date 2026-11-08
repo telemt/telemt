@@ -38,3 +38,7 @@ Die C-Referenzimplementierung enthält **keine Möglichkeit, den Port zu ignorie
 Falls ein Port den Wert `0` hat, wird er dennoch als `0` in die KDF übernommen.
 
 Eine „Port-Ignore“-Logik existiert nicht.
+
+### Wie wählt Telemt die KDF-Quelle bei SOCKS?
+
+Gültige öffentliche SOCKS-Werte `BND.ADDR/BND.PORT` mit einem Port ungleich null liefern das vollständige KDF-Quelltupel vor konfigurierten/ermittelten NAT-Daten. Die Familie muss dem logischen ME-Ziel entsprechen, unabhängig von der TCP-Familie zur SOCKS-Verbindung. IPv4-mapped IPv6-Ziele gelten als IPv4 und erfordern ein natives IPv4-BND-Tupel; IPv4-compatible Ziele bleiben IPv6. `strict` weist fehlendes/ungültiges BND ab, `compat` behält den bisherigen Fallback. KDF-Felder und Ports, SOCKS-CONNECT-Zielcodierung, Prüfung öffentlicher Adressen und STUN bleiben unverändert.

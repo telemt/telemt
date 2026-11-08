@@ -2,6 +2,8 @@
 
 [English](WEB_PROXY.en.md) | [Русский](WEB_PROXY.ru.md) | [Deutsch](WEB_PROXY.de.md)
 
+[Ping in der Proxyliste, RPC Ping/Pong und WEB-Latenz](PROXY_PING.de.md)
+
 Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über begrenzte HTTPS- oder WebSocket-Carrier, die mit dem Proxy-Typ `WEB` von Telegram Desktop kompatibel sind. Telemt terminiert TLS nicht selbst: NGINX, HAProxy oder Caddy verwaltet das öffentliche Zertifikat und leitet unverschlüsseltes HTTP/1.1 an einen privaten Telemt-Listener weiter.
 
 > [!IMPORTANT]
@@ -40,7 +42,7 @@ Leiten Sie den vollständigen konfigurierten WEB-Bereich an Telemt weiter. Beim 
 
 - Bei leerem `base_path` lautet der öffentliche Endpunkt `https://HOST:443/`, andernfalls `https://HOST:443/BASE/`. Der Basispfad ist groß-/kleinschreibungssensitiv und exakt; Telemt leitet ihn nicht um, normalisiert ihn nicht und entfernt ihn nicht vor der Decoy-Weiterleitung.
 - Unterstützt werden 16-Byte-MTProxy-Secrets in den Modi `plain` und `dd`. FakeTLS-Secrets mit `ee` werden im WEB-Modus nicht unterstützt.
-- `web.carrier` wählt den einzigen Carrier bei deaktivierter Auto-Negotiation und den letzten Fallback bei aktivierter Negotiation. `https` verwendet serialisierte HTTPS-Uplinks und Long Polling. `https-lanes` verwendet unabhängige HTTPS-Sequenzen und Polls pro logischem Stream. `websocket` verwendet einen geordneten WebSocket für alle Streams. `websocket-lanes` verwendet einen unabhängig verwalteten WebSocket für jeden logischen Stream ungleich null.
+- `web.carrier` wählt den einzigen Carrier bei deaktivierter Auto-Negotiation und den letzten Fallback bei aktivierter Negotiation. `https` verwendet eine gemeinsame HTTPS-Uplink-Sequenz und Long Polling. `https-lanes` verwendet unabhängige HTTPS-Sequenzen und Polls pro logischem Stream. `websocket` verwendet einen geordneten WebSocket für alle Streams. `websocket-lanes` verwendet einen unabhängig verwalteten WebSocket für jeden logischen Stream ungleich null.
 - Ein fehlendes `web.carriers` oder `web.carriers = false` deaktiviert Auto-Negotiation und Lernen. Ein nicht leeres Array aktiviert ausschließlich die sequenzielle Start-Negotiation; eine bereits festgeschriebene Sitzung wird nie migriert.
 - Native Clients ohne kanonische Carrier-Negotiation-Header verwenden den konfigurierten festen `carrier`, auch wenn `carriers` die Negotiation für fähige Clients aktiviert. Das aktuelle Telegram iOS unterstützt nur `https`; für metadatafreies iOS muss der Betreiber daher `web.carrier = "https"` setzen, `https-lanes` wird nicht unterstützt. User-Agent-Werte einschließlich CFNetwork oder Darwin leiten niemals Capabilities ab. Sendet ein nativer iOS-Client explizite Negotiation-Metadaten, schneidet Telemt sie mit der serverautoritativen Obergrenze `{https}` und lehnt ein leeres Ergebnis ab; andere explizite Clients verwenden ihren angegebenen Capability-Satz.
 - Capability-, Bootstrap- und Session-Zugangsdaten sind getrennte Werte mit begrenzter Lebensdauer. Carrier-Zugangsdaten sind geheim und dürfen nicht in Access-Logs erscheinen.
@@ -115,7 +117,176 @@ Die Behandlung überlasteter angenommener Sockets ist separat konfigurierbar. `d
 
 `decoy_fasttrack_mode` steuert ausschließlich die Capability-Verarbeitung für `GET/HEAD` am konfigurierten Basis-Root. `off` ist der Default und behält den vollständigen bisherigen Scan ohne Fast-Track-Zähler bei. `shadow` erfasst, welche strukturell unmöglichen Requests den Scan umgehen könnten, führt ihn aber weiterhin vollständig aus. `enforce` umgeht Capability-Arbeit nur bei `HEAD` oder fehlender beziehungsweise nicht kanonischer `bridge`-Query. Jeder exakte kanonische Bridge-GET am Basis-Root scannt bei Treffer und Fehlschlag vollständig alle Profile des ausgewählten vhost. Die Einstellung erfordert einen Prozessneustart; Reload speichert den gewünschten Wert, meldet `web.decoy_fasttrack_mode` aber als zurückgestellt. Fast-Track schützt nicht vor gegnerischer CPU-Last, da ein Scanner stets kanonische Kandidaten senden kann; `enforce` kann außerdem eine öffentliche Timing-Klasse der Request-Form sichtbar machen, insbesondere bei einem statischen Decoy. Aktivieren Sie diesen Modus nicht ohne externe Timing-Messungen über den produktiven TLS-Terminator.
 
+## Gemeinsame Profile für mehrere Hostnamen
+
+Ersetzen Sie den Selektor `host` durch eine nicht leere Liste `hosts`, damit
+mehrere Domains dieselben Profildefinitionen und denselben Decoy-Snapshot nutzen:
+
+```toml
+[[web.vhosts]]
+hosts = ["proxy.example.com", "backup.example.com"]
+base_path = "telegram/web"
+public_addr = "203.0.113.10:443"
+
+[web.vhosts.decoy]
+mode = "http_upstream"
+upstream = "http://127.0.0.1:18081"
+
+[[web.vhosts.profiles]]
+user = "web-user"
+secret_mode = "dd"
+max_sessions = 8
+max_streams = 512
+max_streams_per_session = 64
+```
+
+Dieses Fragment ergänzt den Zugangsbenutzer und WEB-Listener aus dem vorherigen
+Beispiel. Geben Sie genau einen Selektor an: `host` oder `hosts`. Hostnamen werden
+beim Laden normalisiert; danach identische Namen werden abgewiesen. Wildcard-Muster
+und `*` erfordern die unten beschriebene ausdrückliche Aktivierung. Alle Mitglieder
+teilen `base_path`, `public_addr`, Profile und Decoy. Bei abweichenden Einstellungen
+sind getrennte Gruppen nötig. Der TLS-Terminator muss jeden aufgeführten Hostnamen
+bedienen und den ursprünglichen kanonischen `Host` weiterreichen.
+
+Jeder Hostname hat eigene Capabilities, Bootstrap-/Sitzungszuordnungen und
+Profilquoten. Das Beispiel erlaubt bis zu acht Sitzungen dieses Profils je Domain,
+weiterhin begrenzt durch Prozess-, IP- und Zugangsbenutzerlimits. Beim Start werden
+Links für jeden ausgewählten Benutzer/jedes Profil und jeden konkreten Hostnamen
+ausgegeben. Die Gruppierung leitet Clients nicht um und macht Zugangsdaten nicht
+zwischen Aliasnamen übertragbar.
+
+Bei exakten Namen zählt `max_vhosts` jeden Hostnamen und `max_profiles` jedes
+Host-/Profilpaar. Acht Domains mit 100 Profilen benötigen beispielsweise mindestens
+acht vhosts und 800 profiles. Statische Dateien und Bytes eines Gruppensnapshots
+werden einmal gezählt; getrennte Gruppen behalten getrennte Snapshots. Konfigurierte
+Sitzungsobergrenzen reservieren keine Sitzungen vorab. Gemeinsame unveränderliche
+Richtlinien reduzieren Duplikate, Capability-Indizes wachsen aber weiterhin mit
+der Anzahl der Host-/Profilpaare.
+
+Installieren Sie zuerst die neue Binärdatei mit der bisherigen Konfiguration
+einzelner `host`-Einträge. Fassen Sie danach gleich konfigurierte Einträge per Reload
+zusammen. Gruppierung und Umordnung erhalten kompatible Bootstrap-Zugangsdaten,
+Quotenidentitäten und Lerndaten der Profile. Das Entfernen eines Aliasnamens weist
+neue Requests für diesen Namen ab, ohne neue Abbruchregeln für bestehende
+Verbindungen einzuführen. Höhere Limits erfordern einen Neustart und müssen vor
+dem Hinzufügen von Bindungen oberhalb der aktiven Grenzen wirksam sein. Vor einem
+Downgrade auf eine Version ohne `hosts` müssen Gruppen wieder in einzelne
+`host`-Einträge aufgeteilt und die Budgets statischer Snapshots geprüft werden.
+
+## Automatische Wildcard-Hosts
+
+Exakte `host`-/`hosts`-Einträge bleiben der Standard. Für beliebige Subdomains
+setzen Sie `web.allow_wildcard_hosts = true` und starten Telemt neu. Die vorhandenen
+Selektoren akzeptieren dann auch `*.example.com` und `*`, einschließlich gemischter
+Listen aus exakten Namen und Mustern:
+
+```toml
+[web]
+enabled = true
+allow_wildcard_hosts = true
+
+[web.limits]
+# Additional wildcard reservations must fit the declared envelope.
+memory_envelope_bytes = 1610612736
+
+[web.limits.wildcard]
+max_rules = 32
+max_profiles_per_request = 256
+cache_hosts = 256
+cache_bytes = 8388608
+cold_hmac_per_minute = 1000000
+cold_hmac_burst = 65536
+
+[[web.vhosts]]
+hosts = ["proxy.example.com", "*.example.com"]
+base_path = "relay"
+public_addr = "203.0.113.10:443"
+
+[web.vhosts.decoy]
+mode = "http_upstream"
+upstream = "http://127.0.0.1:8080"
+
+[[web.vhosts.profiles]]
+user = "web-user"
+secret_mode = "dd"
+```
+
+Das Beispiel ergänzt den zuvor gezeigten Listener und Zugangsbenutzer. Ein Request
+wählt genau eine Gruppe: zuerst den exakten Host, dann das längste passende Suffix,
+dann `*`. Ein Suffix erfasst Nachfahren beliebiger Tiefe, auch `a.b.example.com`,
+aber nicht den Stammnamen `example.com`. Fehlgeschlagene Authentifizierung fällt
+nicht auf eine andere Regel zurück. Eingebettete Wildcards, reguläre Ausdrücke und
+nach der Normalisierung doppelte Selektoren zwischen Gruppen sind unzulässig.
+Die ausgewählte Gruppe behält ihre festen Werte für `public_addr`, Basispfad,
+Profile und Decoy. Der Request-Host bestimmt keine Upstream-Adresse.
+
+In diesem Modus wird HTTP Host ohne Beachtung der ASCII-Groß-/Kleinschreibung
+normalisiert; entfernt wird nur ein optionales wörtliches `:443`. Doppelte
+Host-Header, IP-Literale, ungültige DNS-/ACE-Labels, abschließende Punkte und andere
+Ports werden abgewiesen. `X-Forwarded-Host` wird nicht ausgewertet. Capabilities
+verwenden den tatsächlichen kanonischen Hostnamen und die bestehende
+Client-Ableitung; Clientänderungen sind nicht nötig. Sitzungs-/Stream-/Profilquoten
+bleiben an das konkrete Tupel `(host, user, secret_mode)` gebunden; Prozess-, IP-
+und Zugangsbenutzerlimits gelten weiterhin. Startlinks enthalten nur konfigurierte
+exakte Hostnamen.
+
+Das Frontend **muss zulässige Host-Werte einschränken**; das unverschlüsselte WEB-
+Backend muss privat erreichbar bleiben. TLS-Zertifikate müssen jeden tatsächlichen
+Client-Hostnamen abdecken. Dies ist eine ausdrückliche Sicherheitsgrenze: Eine
+Capability für einen unbekannten oder aus dem Cache verdrängten fremden Wildcard-
+Host kann bei Übermittlung an einen anderen Host dessen Decoy erreichen, auch bei
+einem exakten Host in einer gemischten Konfiguration. Capabilities des aktuellen
+Hosts, der endlichen exakten Hostliste und des bekannten Positiv-Caches sowie
+authentische Bootstrap-/Sitzungstokens des Prozesses bleiben in Request-URI und
+Header-Metadaten lokal, einschließlich percent-encoded Formen. Öffentliche URLs,
+Cookies und Header werden nicht allein wegen ihrer Ähnlichkeit mit Zugangsdaten
+abgewiesen. Diagnosekopien maskieren dagegen vorsorglich ähnlich aussehende Texte,
+auch abgeschnittene Präfixe; öffentliche Request-/Response-Bytes und ursprüngliche
+User-Agent-Hashes bleiben unverändert. Daher kann die Diagnose auch gewöhnliche
+lange Zeichenfolgen maskieren.
+
+Ein kalter Request reserviert vor jeder Ableitung atomar das HMAC-Budget für die
+vollständige Profilzahl der ausgewählten Gruppe. Bei Erschöpfung folgt sofort
+HTTP 503 mit no-store, ohne Warteschlange oder Teilscan. Ein Request verwendet
+seine Tabelle sowohl zur Vermeidung von Credential-Lecks als auch zur Bridge-
+Authentifizierung. Cachetreffer vermeiden die Ableitung. Authentifizierte Carrier
+umgehen Capability-Tabellencache und Ableitung vollständig. Die Fast-Track-Modi
+Off/Shadow/Enforce steuern weiterhin die Authentifizierung am Basis-Root;
+fehlplatzierte Zugangsdaten des aktuellen Hosts bleiben in jedem Modus lokal.
+
+Nur eine erfolgreiche Bootstrap-Ausgabe für Bridge/Recovery füllt den FIFO-Cache.
+`cache_hosts = 0` deaktiviert die Speicherung. Eintrags- und Byteobergrenzen sind
+unabhängig; verdrängte Einträge belasten das Bytebudget weiter, solange ein Request
+sie referenziert. Ein fehlgeschlagener Cacheeintrag verwirft keinen gültigen
+Bootstrap, und Verdrängung setzt keine Quoten zurück. Cacheschlüssel enthalten die
+eindeutige ID des unveränderlichen WEB-Snapshots, auch bei Reloads innerhalb
+derselben Runtime-Generation. Einträge halten weder Decoy noch Generation fest.
+
+`max_vhosts` zählt exakte Einträge; `max_profiles` zählt exakte Bindungen sowie einen
+gemeinsamen Profilsatz je Wildcard-Quellgruppe. `max_rules` begrenzt Muster und
+`max_profiles_per_request` den vollständigen Scan einer Wildcard-Gruppe. Außer
+`cache_hosts` müssen die Limits positiv sein; der HMAC-Burst muss eine vollständige
+Request-Tabelle abdecken. Geprüfte Speicherreservierungen umfassen Vorlagen/Regeln,
+Cache, Arbeitsspeicher der Handler und lebende Hostbindungen nur bei aktivem
+Wildcard-Modus. Bei ansonsten standardmäßigen Limits reicht der bisherige Rahmen
+von 1280 MiB nicht aus; 1290 MiB genügen nach aktueller Berechnung, das Beispiel
+sieht 1536 MiB vor. Der Speicherrahmen und die Verarbeitung bei ausschließlich
+exakten Hosts bleiben unverändert.
+
+Der Aktivierungsparameter und alle `web.limits` erfordern einen Prozessneustart.
+Nach der Aktivierung lassen sich Selektoren und Profile per Reload ändern. Ein
+API-Update kann den Parameter und ausreichende Limits als zurückgestellte
+Änderungen speichern. Muster vor dem tatsächlichen Neustart hinzuzufügen wird
+atomar abgewiesen, auch wenn der Parameter bereits in der gewünschten Konfiguration
+steht. Zum Deaktivieren ersetzen Sie zuerst Muster durch exakte Selektoren und
+starten dann mit deaktiviertem Parameter neu. Vor einem Downgrade entfernen Sie
+Wildcard-Selektoren, den neuen Parameter und die Limittabelle.
+
 ## Serverseitige Carrier-Negotiation
+
+Bei `websocket-lanes` löst eine Ablehnung oder ein Timeout vor dem Upgrade einer Lane die gemeinsame Sitzungswiederherstellung aus. Fehler nach dem Upgrade bleiben auf die Lane begrenzt. Dieses Protokollverhalten belegt keine native macOS-/iOS-Kompatibilität bei Rückkehr aus dem Hintergrund.
+
+Die unveränderliche Bridge-Grundstruktur wird gecacht; Nonce, Bootstrap, Host und Basispfad werden für jede Antwort frisch eingesetzt. Ablaufprüfungen nutzen konservative Hinweise auf Deadlines, ohne Ablaufgrenzen zu verlängern. Diese internen Optimierungen ändern weder Wire-Formate, Zulassungslimits noch konfigurierte Timeouts und belegen allein keine kürzere Ende-zu-Ende-Verbindungszeit.
 
 Auto-Negotiation ist optional und bleibt deaktiviert, solange `carriers` nicht als explizites, nicht leeres Array gesetzt ist. Der konfigurierte `carrier` bleibt der letzte Fallback und wird genau einmal angehängt, auch wenn er bereits im Array steht:
 
@@ -145,9 +316,11 @@ Versuche laufen streng sequenziell. Akzeptierter `OPEN`- oder `DATA`-Fortschritt
 
 Nach dem Commit wiederholt ein HTTP-Fehler zunächst den exakten unveränderlichen Request mit dem aktuellen Bearer. Ein erfolgreicher Replay behält die aktuelle Sitzung. WebSocket-Verlust oder ein Foreground-, Online- oder natives Ereignis nach mindestens `reconnect_grace_secs` Scheduler-Lücke startet eine Recovery-Epoche. Die Bridge sendet genau einen GET an ihren ursprünglichen konfigurierten Basis-Root mit `bridge=<capability>`, `Accept: application/vnd.telemt.web-recovery+json` und optionaler aktueller Bearer-Authorization. Eine positive Antwort ist ein nicht cachebares JSON-Dokument mit höchstens 1024 Bytes, einem frischen Bootstrap und den aktuellen Limits, Timeouts sowie der Negotiation-Richtlinie. Telemt gibt diesen Bootstrap aus, bevor eine passende aktuelle Sitzung synchron beendet wird, sodass eine Neuerstellung auch bei Kapazität für nur eine Sitzung möglich bleibt. Unbekannte oder bereits beendete Bearer erhalten dieselbe positive Repräsentation; fehlerhafte Recovery-Header sowie deaktivierte Admission, Pause, Drain und Kapazitätsablehnung folgen dem bereinigten Decoy-Pfad.
 
-Die Recovery-Epoche besitzt eine gemeinsame absolute Wall-/Monotonic-Deadline `bridge_recovery_secs`, genau einen Request für das Recovery-Dokument und begrenzte Carrier-Wiederholungen mit Backoff von 250 ms bis 2 s. Während der Recovery wird der Status höchstens alle 2,5 Sekunden wiederholt. Eine frische Inkarnation bricht alte Requests, Sockets, Lanes und Queues ab und gibt sie frei, sendet für jeden noch aktiven nativen Stream genau ein synthetisches `CLOSE`, unterdrückt ein zweites `WELCOME` und committed erst nach echtem Carrier-Fortschritt. Beendete Stream-IDs bleiben in einer begrenzten Menge, damit gültige verspätete Frames nicht in einen neuen Stream gelangen; die native Seite muss eine neue Stream-ID vergeben. Häufige native Reconnect-Versuche sind zulässig, verlängern aber weder die Recovery-Epoche noch halten sie alten Inkarnationszustand. Das Zerstören der WebView zerstört auch diesen Recovery-Owner; ein nativer Supervisor muss danach ein neues Bridge-Dokument erzeugen.
+Die Recovery-Epoche besitzt eine gemeinsame absolute Wall-/Monotonic-Deadline `bridge_recovery_secs`, genau einen Request für das Recovery-Dokument und begrenzte Carrier-Wiederholungen mit einer Backoff-Basis von 250 ms bis 2 s ohne Serverhinweis, unter Berücksichtigung von Serverhinweisen und der Jitter-Richtlinie der Seite. Während der Recovery wird der Status höchstens alle 2,5 Sekunden wiederholt. Eine frische Inkarnation bricht alte Requests, Sockets, Lanes und Queues ab und gibt sie frei, sendet für jeden noch aktiven nativen Stream genau ein synthetisches `CLOSE`, unterdrückt ein zweites `WELCOME` und committed erst nach echtem Carrier-Fortschritt. Beendete Stream-IDs bleiben in einer begrenzten Menge, damit gültige verspätete Frames nicht in einen neuen Stream gelangen; die native Seite muss eine neue Stream-ID vergeben. Häufige native Reconnect-Versuche sind zulässig, verlängern aber weder die Recovery-Epoche noch halten sie alten Inkarnationszustand. Das Zerstören der WebView zerstört auch diesen Recovery-Owner; ein nativer Supervisor muss danach ein neues Bridge-Dokument erzeugen.
 
-Jede reguläre HTTP-Carrier-Operation der Bridge besitzt ein absolutes Budget `bridge_retry_secs` und höchstens neun Versuche. `bridge_request_secs` umfasst sowohl den Fetch-Response-Head als auch das vollständige Lesen des Response-Bodys; ein Downlink-Versuch erhält zusätzlich das konfigurierte Long-Poll-Intervall. Netzwerkfehler und Antworten mit `408`, `429`, `502`, `503` oder `504` verwenden begrenzten exponentiellen Backoff, während `Retry-After` das absolute Budget nicht verlängern kann. `carrier_probe_coalesce_ms = 0` sendet den ersten geordneten `OPEN`-Probe sofort. Ein Wert bis 10 ms kann passendes `DATA` aus diesem Fenster aufnehmen; multiplexierte Carrier bewahren die vollständige vorhergehende Frame-Reihenfolge, Lane-Carrier beanspruchen nur die ausgewählte Lane. Vor der Probe-Bestätigung startet kein HTTP-Downlink. Ein multiplexierter WebSocket-Upgrade kann unmittelbar nach seiner Auswahl durch `/session` beginnen und danach eingereihte Probe-Daten aufnehmen; ein Lane-WebSocket wartet auf die bekannte Stream-ID.
+Überlastungsantworten von Telemt enthalten `Retry-After: 1` und `X-Telemt-Retry-After-Ms: 250`. Nur Status `503` mit diesem exakten Header-Paar legt in der generierten Bridge eine **Basispause von 250 ms** fest. Bei `web.retry_jitter.enabled = false` beträgt die Pause 250 ms; bei aktiviertem Jitter kommt der konfigurierte zufällige Zuschlag hinzu. Andere Antworten verwenden die unten beschriebene Standardbehandlung von `Retry-After` oder den Backoff ohne Serverhinweis. Frühere JavaScript-Bridge-Seiten ohne Unterstützung des Millisekundenhinweises verwenden bis zum Laden einer neuen Seite die Sekundenpause; ein Update der Telegram-App ist dafür nicht erforderlich. Versuchslimits, absolute Budgets, Abbruchverhalten und Zulassungsgrenzen bleiben unverändert.
+
+Jede reguläre HTTP-Carrier-Operation der Bridge besitzt ein absolutes Budget `bridge_retry_secs` und höchstens neun Versuche. `bridge_request_secs` umfasst sowohl den Fetch-Response-Head als auch das vollständige Lesen des Response-Bodys; ein Downlink-Versuch erhält zusätzlich das konfigurierte Long-Poll-Intervall. Netzwerkfehler und Antworten mit `408`, `429`, `502`, `503` oder `504` verwenden einen positiven Serverhinweis oder exponentiellen Backoff mit der jeweiligen Jitter-Richtlinie; `Retry-After` kann das absolute Budget nicht verlängern. `carrier_probe_coalesce_ms = 0` sendet den ersten geordneten `OPEN`-Probe sofort. Ein Wert bis 10 ms kann passendes `DATA` aus diesem Fenster aufnehmen; multiplexierte Carrier bewahren die vollständige vorhergehende Frame-Reihenfolge, Lane-Carrier beanspruchen nur die ausgewählte Lane. Der HTTP-Downlink kann parallel zum ersten Upload starten; die native Zustellung wartet auf dessen erste gültige ACK/Commit-Bestätigung. Ein multiplexierter WebSocket-Upgrade kann unmittelbar nach seiner Auswahl durch `/session` beginnen und danach eingereihte Probe-Daten aufnehmen; ein Lane-WebSocket wartet auf die bekannte Stream-ID.
 
 Response-Bodys werden innerhalb expliziter Endpunktgrenzen gestreamt: `/session` enthält exakt acht Bytes, ein erfolgreicher `/down` höchstens `carrier_batch_bytes`, und bodylose Antworten akzeptieren null Bytes. Deklarierter Überlauf wird vor dem Lesen abgelehnt; ein Überlauf beim Streaming oder zu viele Chunks bricht den Reader ab, und Bodys wiederholbarer Antworten werden vor dem Backoff verworfen. Die terminale Bridge-Bereinigung sendet höchstens ein authentifiziertes `DELETE`. Kanonische Transportfehler werden für Diagnosen nach `X-Carrier-Failure` kopiert, Navigation und explizites Schließen bleiben nicht lernende Gründe.
 
@@ -157,7 +330,7 @@ Ein festgeschriebener Versuch wird erst healthy, wenn transportspezifische bidir
 
 Das Lernen ist prozesslokal, speicherresident, ausschließlich positiv und durch `max_carrier_learning_entries` begrenzt. Es sortiert nur vom Client unterstützte konfigurierte Kandidaten, hält den konfigurierten Fallback stets zuletzt und bewahrt bei gleichen Scores die Konfigurationsreihenfolge. User-Agent- und Profilevidenz haben Primärgewicht; eine zulässige IP dient nur als Tie-Breaker. IP-Evidenz erfordert genau eine explizite, global routbare `X-Forwarded-For`-Adresse; private, Loopback-, Link-Local-, Carrier-Grade-NAT-, Dokumentations-, Multicast- und entsprechende IPv4-Mapped-Adressen sind ausgeschlossen. Vom Client gemeldete Fehlerkategorien und Request-Latenz sind ausschließlich diagnostisch und erzeugen weder negative noch Ranking-Evidenz. `conservative` erfordert 3 User-Agent-Ergebnisse oder 8 Profilergebnisse aus 4 Kohorten und deaktiviert IP-Evidenz; `balanced` verwendet 2, 6 aus 3 Kohorten und 3 zulässige IP-Ergebnisse; `aggressive` verwendet 1, 4 aus 2 Kohorten und 1 IP-Ergebnis. Ein Generationswechsel mit identischer Learning-Semantik bewahrt die Evidenz und veröffentlicht deren Generation-Fence atomar neu. Das Deaktivieren des Learnings oder eine Änderung von Aggressiveness, Evidenz-Lebensdauer oder Health-Fenster erhöht die Evidenz-Epoche und trennt inkompatiblen Zustand ab; veraltete Ergebnisse können ihn nicht erneut füllen.
 
-`https` bleibt der Default und behält das ursprüngliche serialisierte Verhalten bei. Bei `https-lanes` ist Lane null für Session-Steuerung reserviert, und jeder logische Stream ungleich null erhält eine eigene Lane. Jede Lane besitzt eigene Uplink-Sequenzen, Retry-Digests, Downlink-Cursor, nicht bestätigte Replay-Batches, Queues und einen Newest-Poll-Wins-Lebenszyklus. Ein langsamer Stream blockiert daher keinen anderen Stream auf der WEB-Protokollebene.
+`https` bleibt der Default. Das Upload-Fenster wird zwischen 1 und 4 ausgehandelt; die generierte Bridge bietet `X-Telemt-Up-Window: 4` an, während Fenster 1 serielle Uploads beibehält. Bei `https-lanes` ist Lane null für Session-Steuerung reserviert, und jeder logische Stream ungleich null erhält eine eigene Lane. Jede Lane besitzt eigene Uplink-Sequenzen, Retry-Digests, Downlink-Cursor, nicht bestätigte Replay-Batches, Queues und einen Newest-Poll-Wins-Lebenszyklus. Ein langsamer Stream blockiert daher keinen anderen Stream auf der WEB-Protokollebene.
 
 Damit entfällt die Serialisierung zwischen WEB-Streams auf Anwendungsebene. Öffentliches HTTP/2 läuft weiterhin über eine oder mehrere TCP-Verbindungen, sodass Paketverlust Head-of-Line-Blocking auf Transportebene verursachen kann; `https-lanes` ist kein HTTP/3- oder QUIC-Carrier.
 
@@ -175,7 +348,9 @@ Jeder Authentifizierungs-, Shape-, Lane-Reservierungs- oder Kapazitätsfehler vo
 
 Der WEB-Listener muss `proxy_protocol = false` und `reuse_allow = false` verwenden. `client_mss`, `synlimit`, `announce` und `announce_ip` sind nicht zulässig. `web_trusted_proxy_cidrs` muss nicht leer sein und darf nur die unmittelbar vorgeschalteten NGINX- oder HAProxy-Peers enthalten; `/0`-Netze werden abgelehnt.
 
-Der HTTP-Decoy-Origin muss eine Loopback-, Link-Local- oder private IP-Adresse als Literal verwenden. Telemt bewahrt bei gewöhnlichen Requests Methode, Pfad, Query, Header, gestreamten Body, Response-Status, Header und Body und entfernt Hop-by-Hop-Header. Vor dem Fallback auf den Decoy entfernt Telemt Carrier-Zugangsdaten und Bodys aus fehlerhaften Carrier-Requests. Ein literaler Decoy-Endpunkt, der exakt einem effektiven WEB-Listener entspricht oder auf demselben Port von dessen gleichfamiliärer Wildcard-Adresse erfasst wird, wird abgelehnt. Indirekte Schleifen über DNS, NGINX, HAProxy oder eine andere Weiterleitungsschicht sind aus der Telemt-Konfiguration nicht beweisbar und müssen betrieblich ausgeschlossen werden.
+Für `http_upstream` akzeptiert `resolve` die Werte `"never"` (Standard) und `"startup"`. Standardmäßig ist ein Loopback-, Link-Local- oder privates IP-Literal erforderlich. `startup` erlaubt zusätzlich DNS-Namen: Die asynchrone Konfigurationsvorbereitung löst jedes eindeutige Host-/Portpaar auf, prüft alle Antworten gegen erlaubte Adressklassen und effektive WEB-Listener und fixiert die erste Adresse in Resolver-Reihenfolge. Fehler, leere Antworten, öffentliche Adressen oder direkte Listener-Schleifen verwerfen die Vorbereitung. Der konfigurierte Hostname bleibt in der Upstream-Authority erhalten. Es gibt weder DNS während der Request-Verarbeitung noch automatischen Wechsel zu weiteren Antworten; Reload erstellt einen frischen Snapshot. `web.timeouts.decoy_resolve_secs` begrenzt jede DNS-Abfrage für ein eindeutiges Host-/Portpaar. Die Abfragen laufen nacheinander, ohne gemeinsame Deadline für die gesamte Vorbereitung. Indirekte Schleifen über weitere Weiterleitungsschichten müssen Betreiber ausschließen.
+
+Gewöhnliche Requests behalten Methode, Pfad, Query, Header, gestreamten Body sowie Response-Status und Body, außer Hop-by-Hop-Headern. Fehlerhafte Carrier-Requests verlieren vor der Decoy-Weiterleitung Zugangsdaten und Bodys.
 
 Alternativ kann ein unveränderlicher Snapshot einer statischen Site verwendet werden:
 
@@ -189,6 +364,30 @@ index = "index.html"
 Statische Dateien werden beim Start und bei einem erfolgreichen Konfigurations-Reload gelesen. Eintragszahl, Dateigröße und Gesamtgröße des Snapshots werden durch `[web.limits]` begrenzt. Symlinks und Pfade außerhalb des konfigurierten Verzeichnisses werden abgelehnt. Ändern Sie das Verzeichnis nicht gleichzeitig, während Telemt einen Snapshot erstellt.
 
 Alle WEB-Schlüssel und Defaults sind in der [Konfigurationsreferenz](../Config_params/CONFIG_PARAMS.de.md#web) aufgeführt.
+
+### Konfigurierbarer Jitter für HTTP-Wiederholungen
+
+`[web.retry_jitter]` ergänzt jeden bestehenden HTTP-Retry der Bridge um eine unabhängig gewählte Verzögerung: Netzwerkfehler und Antworten mit 408/429/502/503/504. Telegram-Anwendungen müssen nicht geändert werden. Ohne diesen Abschnitt oder mit `enabled = false` bleiben der 250-ms-Hinweis von Telemt und das bisherige Backoff/Jitter-Verhalten erhalten.
+
+```toml
+[web.retry_jitter]
+enabled = true
+min_ms = 0
+max_ms = 250
+distribution = "uniform"
+# Only for distribution = "triangular":
+# peak_ms = 125
+```
+
+Der Bereich beschreibt einen **Zuschlag**, nicht die gesamte Pause: Zusammen mit dem Telemt-Hinweis von 250 ms ergibt dieses Beispiel 250–500 ms. Ohne positiven Serverhinweis bleibt die Basis bei 250, 500, 1000, dann 2000 ms. Aktivierter Jitter ersetzt den bisherigen Jitter von bis zu 25%. Ein gültiger standardmäßiger `Retry-After` wird im aktivierten Modus nicht auf die bisherige Grenze von 30 Sekunden verkürzt. Übersteigt die Pause das verbleibende Operationsbudget, läuft das Budget ohne vorzeitigen Retry ab.
+
+Standardwerte: `enabled = false`, `min_ms = 0`, `max_ms = 250`, `distribution = "uniform"`, ohne `peak_ms`. Es gilt `0 <= min_ms <= max_ms <= 30000`. `uniform` verteilt ganze Millisekunden gleichmäßig; `triangular` verwendet eine Dreiecksverteilung mit Rundung auf Millisekunden. Der optionale Gipfel liegt standardmäßig in der Mitte und muss innerhalb des Intervalls liegen. Ein expliziter Gipfel bei `uniform`, unbekannte Schlüssel/Verteilungen und ungültige Grenzen werden auch im deaktivierten Zustand abgelehnt. Gleiche Grenzen ergeben einen konstanten Zuschlag.
+
+Die Richtlinie wird pro Bridge-Seite festgeschrieben. Konfigurations-/API-Reload wirkt auf neu geladene Seiten; bestehende Seiten behalten ihre Einstellungen bei Recovery. Recovery-JSON und HTTP-Kompatibilitätsheader bleiben unverändert. Die Auswahl bevorzugt `crypto.getRandomValues`, mit `Math.random` als Kompatibilitätsfallback. Erfolgreicher Datenverkehr wird nicht verzögert. Versuchslimits, absolute Budgets, Abbruch und unveränderte Payload-/Sequence-Wiederholung bleiben erhalten; längere Pausen können die Anzahl der Versuche innerhalb eines Startup-/Recovery-Budgets reduzieren.
+
+Dies streut feste Retry-Intervalle, garantiert aber keinen Schutz vor DPI. Browser-Scheduling, Netzwerkwarteschlangen und andere Protokollzeiten bleiben beobachtbar. Bestehende Zeitleisten zeigen den deaktivierten Standardmodus. Bei aktiviertem Modus wird zu jeder Retry-Pause eine gezogene Verzögerung addiert, nicht zum ersten Verbindungsaufbau oder zu jedem Datenframe.
+
+Die Richtlinie ändert nur bereits vorhandene Retry-Pausen. Strengere Limits einzelner Aufrufe bleiben erhalten: Reguläre `/down`-Polls und `/up`-Aufrufe nach dem Commit führen einen Versuch aus; ihr Recovery-Replay erlaubt zwei. Die Option erzeugt keine neuen Retry-Schleifen. Sie verlängert weder `web.timeouts.bridge_retry_secs` noch Start- oder Recovery-Deadlines.
 
 ## TLS-Terminierung mit NGINX
 
@@ -307,7 +506,7 @@ proxy.example.com {
 	}
 
 	handle {
-		# gewöhnliche Site
+		# ordinary site
 	}
 }
 ```
@@ -335,11 +534,12 @@ Tragen Sie in `web_trusted_proxy_cidrs` die Adresse ein, von der aus Caddy Telem
 | Konfiguration | Runtime-Verhalten |
 | --- | --- |
 | Bestand der WEB-Listener, Bind-Adresse und Vertrauensrichtlinie | Prozesseigen; Telemt neu starten. |
-| Jeder Wert in `[web.limits]` | Prozesseigener Speicher- und Ressourcenvertrag; Telemt neu starten. |
+| `web.allow_wildcard_hosts` und jeder Wert in `[web.limits]` | Prozesseigener Speicher- und Ressourcenvertrag; Telemt neu starten. |
 | `web.enabled`, Carrier-/Negotiation-Richtlinie, `web.debug`, Timeouts, vhosts, Profile und Decoys | Werden vom Config-Watcher oder durch einen Runtime-Generations-Reload angewendet. |
+| `web.retry_jitter` | Reload gilt nur für neu erzeugte Bridge-Seiten. Geladene Seiten behalten ihre Richtlinie auch bei Recovery; Änderungen erfordern eine neue Seite. |
 | Änderung des `base_path` eines vhost | Schaltet Routing neuer HTTP-Requests und Capability-Ableitung atomar um. Geben Sie den generierten Link neu aus. Bereits hochgestufte WebSockets und laufende geroutete Austauschvorgänge laufen weiter. Spätere Requests an die alte Basis mit einem prozessauthentischen Bootstrap- oder Session-Token erhalten ein lokales, nicht cachebares `404`; die nun inaktive alte Capability folgt der gewöhnlichen Decoy-Behandlung. Ein bestehender Session-Bearer bleibt nur an der neuen exakten Basis verwendbar, während ein für die alte Capability ausgegebener ungenutzter Bootstrap an der neuen Basis keine Sitzung erstellen kann. |
 | Operator-Pause/-Drain-Zustand | Prozesseigen und flüchtig; übersteht einen Generations-Reload, schreibt niemals Konfiguration und wird nach einem Prozessneustart auf `running` zurückgesetzt. |
-| Bestehende HTTP-Verbindungen und WEB-Sitzungen | Behalten HTTP-Idle-Grenze, Carrier-Kandidaten, Grenzen, Body-Timeout, Lebensdauer des Replay-Markers geschlossener Token sowie absolute Session-/Negotiation-Deadlines ihres Erstellungszeitpunkts; jede ausgegebene Bridge enthält ihre Request-, Retry-, Recovery- und Probe-Coalescing-Werte. Eine Recovery-Epoche fixiert ihr aktuelles Bridge-Budget; eine erfolgreiche Recovery-Repräsentation aktualisiert die Richtlinie für spätere Epochen und die frische Sitzung. WebSocket-Upgrade-, Open-, Write-, Backpressure- und Eviction-Vorgänge verwenden die unveränderlichen Deadlines der Parent-Sitzung. Neue Bridges verwenden die aktive Richtlinie, neue logische Streams die aktive Relay-Generation. |
+| Bestehende HTTP-Verbindungen und WEB-Sitzungen | Behalten HTTP-Idle-Grenze, Carrier-Kandidaten, Grenzen, Body-Timeout, Lebensdauer des Replay-Markers geschlossener Token sowie absolute Session-/Negotiation-Deadlines ihres Erstellungszeitpunkts; jede ausgegebene Bridge enthält ihre Request-, Retry-, Recovery- und Probe-Coalescing-Werte. Eine Recovery-Epoche fixiert ihr aktuelles Bridge-Budget; eine erfolgreiche Recovery-Repräsentation aktualisiert die Richtlinie für spätere Epochen und die frische Sitzung. WebSocket-Upgrade-, Open-, Write-, Backpressure- und Eviction-Vorgänge verwenden die unveränderlichen Deadlines der Parent-Sitzung. Neue Bridges verwenden die aktive Richtlinie, neue logische Streams die aktive Relay-Generation. `web.retry_jitter` und die HTTP-Methode des Carriers bleiben an die Seite gebunden und werden durch Recovery nicht aktualisiert. |
 | Beenden des Prozesses | Erfasst den zuletzt geladenen Wert von `web.timeouts.shutdown_secs` einmalig und verwendet dieselbe absolute Deadline für Listener-Acceptoren und Verbindungen sowie WEB-Sitzungen und Hilfstasks. Aufeinanderfolgende Komponenten erhalten keine separaten vollständigen Budgets. |
 
 Jeder logische Stream behält die Client-IP seiner Sitzung und besitzt während der gesamten Relay-Lebensdauer einen prozessweit eindeutigen, von null verschiedenen synthetischen Quellport. Damit bleibt für Direct- und Middle-End-KDF-Routing ein stabiles, kollisionsfreies Quell-/Ziel-Tupel erhalten.
@@ -356,7 +556,7 @@ WEB-Konfiguration, Runtime-Status und begrenzte Runtime-Steuerung verwenden dens
 
 | Operation | API-Unterstützung |
 | --- | --- |
-| `[web]`, vhosts, Profile, Decoys, Timeouts oder Limits lesen oder ändern | Ja, über `GET` oder `PATCH /v1/config`. Der abgeleitete Snapshot `web.runtime` wird weder ausgegeben noch kann er geschrieben werden. Verschachtelte Tabellen werden feldweise zusammengeführt; Arrays ersetzen das bisherige Array vollständig. Jede Änderung an `[web.limits]` wird als gewünschte Konfiguration angenommen, aber bis zum Prozessneustart als zurückgestellt gemeldet. |
+| `[web]`, vhosts, Profile, Decoys, Timeouts oder Limits lesen oder ändern | Ja, über `GET` oder `PATCH /v1/config`. Der abgeleitete Snapshot `web.runtime` wird weder ausgegeben noch kann er geschrieben werden. Verschachtelte Tabellen werden feldweise zusammengeführt; Arrays ersetzen das bisherige Array vollständig. Änderungen an `web.allow_wildcard_hosts` und `[web.limits]` bleiben bis zum Prozessneustart zurückgestellt. Muster setzen einen bereits aktivierten Wildcard-Modus im laufenden Prozess voraus. |
 | `server.listeners` speichern | Ja, über `PATCH /v1/config`; ein geänderter WEB-Listener bleibt jedoch bis zum Prozessneustart zurückgestellt. |
 | Außerhalb der API geänderte WEB-Konfiguration anwenden | Ja, über `POST /v1/system/reload` und anschließende Abfrage des Vorgangsstatus. |
 | Begrenzte serverseitige WEB-Request- und Lifecycle-Details untersuchen | Ja, über ein authentifiziertes `GET /web-status`. |
@@ -441,7 +641,7 @@ curl -sS http://127.0.0.1:9091/v1/system/reload/RELOAD_ID \
   -H "Authorization: ${TELEMT_API_AUTH}"
 ```
 
-Der terminale Status `succeeded` bestätigt die Runtime-Aktivierung. Geänderte Carrier-, Kandidaten-, Deadline- oder Learning-Richtlinien werden von neu ausgegebenen Bridge-Sitzungen verwendet; bestehende Sitzungen und laufende Versuchsketten werden nicht migriert. Enthält `deferred_process_fields` den Wert `server.listeners` oder `web.limits`, ist die Datei gültig und gespeichert, diese Einstellungen erfordern aber weiterhin einen Telemt-Neustart.
+Der terminale Status `succeeded` bestätigt die Runtime-Aktivierung. Geänderte Carrier-, Kandidaten-, Deadline- oder Learning-Richtlinien werden von neu ausgegebenen Bridge-Sitzungen verwendet; bestehende Sitzungen und laufende Versuchsketten werden nicht migriert. Enthält `deferred_process_fields` den Wert `server.listeners`, `web.allow_wildcard_hosts` oder `web.limits`, ist die Datei gültig und gespeichert, diese Einstellungen erfordern aber weiterhin einen Telemt-Neustart.
 
 Operationen für Access-Benutzer verwenden die vorhandenen Endpunkte, zum Beispiel:
 
@@ -485,7 +685,7 @@ Der vollständige Vertrag für Requests, Revisionen, Fehler und alle Benutzer-En
 
 | Symptom | Prüfung |
 | --- | --- |
-| WEB-Konfiguration ist auf dem Datenträger gültig, aber das Listener-Verhalten hat sich nicht geändert | Prüfen Sie `deferred_process_fields`; Listener- und `[web.limits]`-Änderungen erfordern einen Neustart. |
+| WEB-Konfiguration ist auf dem Datenträger gültig, aber das Listener-Verhalten hat sich nicht geändert | Prüfen Sie `deferred_process_fields`; Listener- und `web.allow_wildcard_hosts` / `[web.limits]`-Änderungen erfordern einen Neustart. |
 | Carrier-Requests erreichen den Decoy | Prüfen Sie den exakten vhost, den Secret-Modus des Links, das CIDR des direkten Proxys und genau einen syntaktisch gültigen `X-Forwarded-For`-Wert. |
 | Ein Link funktioniert nach einer Änderung von `base_path` nicht mehr | Importieren Sie den neu ausgegebenen Pfad-Link und prüfen Sie, dass das vollständige neue Präfix Telemt unverändert erreicht. Bestehende Sitzungen können sich nur über die neue exakte Basis wiederherstellen; alte Capabilities sind nicht wiederverwendbar. |
 | `/telegram/web` leitet auf `/telegram/web/` um | Fügen Sie für den Pfad ohne Schrägstrich einen exakten Non-WEB-Handler hinzu. Nur der mit Schrägstrich abgeschlossene konfigurierte Teilbaum gehört zum WEB-Vertrag von Telemt. |

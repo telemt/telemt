@@ -3,6 +3,9 @@ When deploying Telemt under high-traffic load (tens or hundreds of thousands of 
 
 ---
 ## 1. System Limits & File Descriptors
+
+Also size [`server.max_connections`](../Config_params/CONFIG_PARAMS.en.md#max_connections) for the intended client load, including ME traffic. `0` removes this configured client ceiling and does not impose a 128-client ME limit. OS descriptors, per-user limits, queues, memory budgets, and writer policies still apply. Changing this setting requires a process restart.
+
 Every TCP connection requires a file descriptor. At 100k connections, standard Linux limits (often 1024 or 65535) will be exhausted immediately.
 ### System-Wide Limits (`sysctl`)
 Increase the global file descriptor limit in `/etc/sysctl.conf`:

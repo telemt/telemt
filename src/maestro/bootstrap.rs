@@ -207,6 +207,9 @@ pub(super) async fn bootstrap(
     validate_synlimit_privilege_drop(&config, privilege_drop_requested)?;
 
     if let Some(p) = data_path {
+        if config.general.data_path.as_ref() != Some(&p) {
+            config.provenance = crate::config::observation::ConfigProvenance::Mixed;
+        }
         config.general.data_path = Some(p);
     }
 

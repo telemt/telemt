@@ -74,6 +74,7 @@ impl SessionAdmission {
             .fetch_or(SESSION_ADMISSION_CLOSED, Ordering::AcqRel);
     }
 
+    #[cfg(test)]
     fn reopen(&self) {
         self.state
             .fetch_and(!SESSION_ADMISSION_CLOSED, Ordering::AcqRel);
@@ -379,7 +380,7 @@ pub(crate) fn test_runtime_generation_with_admission(
     config: ProxyConfig,
     admission_rx: watch::Receiver<bool>,
 ) -> Arc<RuntimeGeneration> {
-    let (config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
+    let (config_tx, config_rx) = watch::channel(Arc::new(config.clone().with_publication_epoch()));
     let stats = Arc::new(Stats::new());
     let upstream_manager = Arc::new(UpstreamManager::new(
         config.upstreams,

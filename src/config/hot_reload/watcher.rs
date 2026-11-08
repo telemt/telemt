@@ -144,7 +144,24 @@ fn prepare_effective_config(
     let mut applied_cfg = overlay_hot_fields(old_cfg, new_cfg);
     applied_cfg.validate_effective_web()?;
     applied_cfg.rebuild_runtime_web()?;
+    applied_cfg.provenance = if config_equal(&applied_cfg, new_cfg) {
+        new_cfg.provenance.clone()
+    } else {
+        crate::config::observation::ConfigProvenance::Mixed
+    };
     Ok(applied_cfg)
+}
+
+fn record_outcome(
+    config: &ProxyConfig,
+    phase: &'static str,
+    revision: Option<String>,
+    epoch: Option<u64>,
+    error: Option<&'static str>,
+) {
+    if let Some(observation) = &config.watcher_observation {
+        observation.record(phase, revision, epoch, error);
+    }
 }
 
 /// Diffs and publishes a fully prepared configuration on the watcher owner task.
@@ -156,6 +173,7 @@ fn reload_config_with_resolver(
     detected_ip_v6: Option<IpAddr>,
     reload_state: &mut ReloadState,
     dns_resolver: Option<&crate::network::dns_overrides::GenerationDnsResolver>,
+    refresh_quota_source: bool,
 ) -> Option<WatchManifest> {
     let (loaded, applied_cfg) = prepared;
     let LoadedConfig {
@@ -167,6 +185,7 @@ fn reload_config_with_resolver(
     let next_manifest = WatchManifest::from_source_files(&source_files);
 
     let old_cfg = config_tx.borrow().clone();
+    let revision = new_cfg.provenance.revision().map(str::to_owned);
     let old_hot = HotFields::from_config(&old_cfg);
     let applied_hot = HotFields::from_config(&applied_cfg);
     let non_hot_changed = !config_equal(&applied_cfg, &new_cfg);
@@ -178,6 +197,24 @@ fn reload_config_with_resolver(
     }
 
     if !hot_changed {
+        let published = !refresh_quota_source
+            || config_tx
+                .send(Arc::new(applied_cfg.with_publication_epoch()))
+                .is_ok();
+        let epoch = config_tx.borrow().runtime_config_epoch;
+        record_outcome(
+            &old_cfg,
+            if !published {
+                "publication_failed"
+            } else if non_hot_changed {
+                "retained"
+            } else {
+                "unchanged"
+            },
+            revision,
+            published.then_some(epoch),
+            (!published).then_some("publication_closed"),
+        );
         reload_state.mark_applied(rendered_hash);
         return Some(next_manifest);
     }
@@ -190,6 +227,13 @@ fn reload_config_with_resolver(
             "config reload: invalid network.dns_overrides: {}; keeping old config",
             e
         );
+        record_outcome(
+            &old_cfg,
+            "rejected",
+            revision,
+            None,
+            Some("dns_overrides_rejected"),
+        );
         return Some(next_manifest);
     }
 
@@ -201,7 +245,23 @@ fn reload_config_with_resolver(
         detected_ip_v4,
         detected_ip_v6,
     );
-    config_tx.send(Arc::new(applied_cfg)).ok();
+    let published = config_tx
+        .send(Arc::new(applied_cfg.with_publication_epoch()))
+        .is_ok();
+    let epoch = config_tx.borrow().runtime_config_epoch;
+    record_outcome(
+        &old_cfg,
+        if !published {
+            "publication_failed"
+        } else if non_hot_changed {
+            "published_partial"
+        } else {
+            "published"
+        },
+        revision,
+        published.then_some(epoch),
+        (!published).then_some("publication_closed"),
+    );
     reload_state.mark_applied(rendered_hash);
     Some(next_manifest)
 }
@@ -228,6 +288,7 @@ pub(super) fn reload_config(
         detected_ip_v6,
         reload_state,
         None,
+        false,
     )
 }
 
@@ -248,13 +309,26 @@ pub fn spawn_config_watcher(
     cancellation: tokio_util::sync::CancellationToken,
     dns_resolver: Option<Arc<crate::network::dns_overrides::GenerationDnsResolver>>,
     mut activation: Option<watch::Receiver<bool>>,
+    quota_mutation: Option<Arc<tokio::sync::Mutex<()>>>,
+    quota_source_refresh: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 ) -> (
     watch::Receiver<Arc<ProxyConfig>>,
     watch::Receiver<LogLevel>,
     impl std::future::Future<Output = ()> + Send + 'static,
 ) {
     let initial_level = initial.general.log_level.clone();
-    let (config_tx, config_rx) = watch::channel(initial);
+    let mut initial = (*initial).clone().with_publication_epoch();
+    initial.watcher_observation = Some(Arc::new(
+        crate::config::observation::WatchObservation::default(),
+    ));
+    record_outcome(
+        &initial,
+        "initial",
+        initial.provenance.revision().map(str::to_owned),
+        Some(initial.runtime_config_epoch),
+        None,
+    );
+    let (config_tx, config_rx) = watch::channel(Arc::new(initial));
     let (log_tx, log_rx) = watch::channel(initial_level);
 
     let config_path = normalize_watch_path(&config_path);
@@ -275,6 +349,15 @@ pub fn spawn_config_watcher(
             }
         }
         let initial_loaded = preparation::read_source(&config_path).await;
+        if initial_loaded.is_none() {
+            record_outcome(
+                &config_tx.borrow(),
+                "rejected",
+                None,
+                None,
+                Some("source_invalid_or_unreadable"),
+            );
+        }
         let initial_manifest = initial_loaded
             .as_ref()
             .map(|loaded| WatchManifest::from_source_files(&loaded.source_files))
@@ -365,7 +448,12 @@ pub fn spawn_config_watcher(
         if poll_watcher.is_some() {
             info!("config watcher: poll watcher active (Docker/NFS safe)");
         }
-        if initial_loaded.is_some() && !initial_matches_disk {
+        if initial_loaded.is_some()
+            && (!initial_matches_disk
+                || quota_source_refresh
+                    .as_ref()
+                    .is_some_and(|refresh| refresh()))
+        {
             let _ = notify_tx.try_send(());
         }
 
@@ -409,6 +497,8 @@ pub fn spawn_config_watcher(
                 &mut reload_state,
                 dns_resolver.clone(),
                 force,
+                quota_mutation.as_ref(),
+                quota_source_refresh.as_deref(),
             )
             .await;
             if next_manifest.is_none() {
@@ -423,6 +513,8 @@ pub fn spawn_config_watcher(
                     &mut reload_state,
                     dns_resolver.clone(),
                     force,
+                    quota_mutation.as_ref(),
+                    quota_source_refresh.as_deref(),
                 )
                 .await;
             }
@@ -461,3 +553,9 @@ mod path_tests {
 
 #[cfg(test)]
 mod decoy_dns_tests;
+
+#[cfg(test)]
+mod quota_period_tests;
+
+#[cfg(test)]
+mod observation_tests;

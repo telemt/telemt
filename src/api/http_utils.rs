@@ -33,6 +33,7 @@ pub(super) fn error_response(request_id: u64, failure: ApiFailure) -> hyper::Res
         error: ErrorBody {
             code: failure.code,
             message: failure.message,
+            details: failure.details,
         },
         request_id,
     };

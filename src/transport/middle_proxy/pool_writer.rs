@@ -55,6 +55,13 @@ pub(super) enum WriterReplacementPurpose {
     /// Replaces an idle writer before the upstream idle lifetime expires.
     IdleRefresh,
     /// Moves one idle slot from a donor above floor to a receiver below floor.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Legacy purpose is exercised by commit-fence regression tests"
+        )
+    )]
     FloorRebalance {
         /// Minimum writer count that must remain in the donor group.
         donor_floor: usize,

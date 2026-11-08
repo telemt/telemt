@@ -132,7 +132,7 @@ Writer replacement использует отдельное cancellation-safe с�
 7. Runtime DNS overrides применяются к резолвингу hostname в upstream-подключениях.
 8. В ME-режиме выбранный upstream также используется для ME TCP dial path.
 9. В ME-режиме для `direct` upstream с bind/interface STUN-рефлексия выполняется bind-aware для KDF материала.
-10. В ME-режиме для SOCKS upstream используются `BND.ADDR/BND.PORT` для KDF, если адрес валиден/публичен и соответствует IP family.
+10. В ME-режиме через SOCKS корректные публичные `BND.ADDR/BND.PORT` с ненулевым портом задают полный исходный кортеж KDF. Семейство адреса должно совпадать с логическим ME-назначением независимо от семейства TCP-соединения к SOCKS. Для IPv4-mapped назначения нужен обычный IPv4 BND; IPv4-compatible IPv6 остаётся IPv6.
 11. `shadowsocks` upstream требует `general.use_middle_proxy = false`. При включенном ME-режиме конфиг отклоняется при загрузке.
 
 ## Примеры конфигурации Upstreams

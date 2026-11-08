@@ -57,7 +57,7 @@ impl WebProcessRuntime {
             carrier: session.carrier(),
             attempt: entry.carrier_attempt,
             candidate_count: u8::try_from(entry.carrier_candidates.len()).unwrap_or(4),
-            deadline_secs: entry.profile.carrier_negotiation_deadlines_secs[3],
+            deadline_secs: entry.profile.shared.carrier_negotiation_deadlines_secs[3],
             state: if entry.carrier_phase == CarrierChainPhase::Provisional
                 && session.is_carrier_committed()
             {

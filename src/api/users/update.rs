@@ -48,6 +48,7 @@ async fn patch_user_to_completion(
     }
     let expiration = parse_patch_expiration(&body.expiration_rfc3339)?;
     let _guard = shared.mutation_lock.lock().await;
+    let quota_guard = shared.quota_state.lock().await;
     let (mut cfg, base_revision) =
         load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
@@ -91,6 +92,18 @@ async fn patch_user_to_completion(
             cfg.access
                 .user_expirations
                 .insert(user.to_string(), expiration);
+        }
+    }
+    let touches_user_quota_periods = !matches!(body.quota_period, Patch::Unchanged);
+    match body.quota_period {
+        Patch::Unchanged => {}
+        Patch::Remove => {
+            cfg.access.user_quota_periods.remove(user);
+        }
+        Patch::Set(period) => {
+            cfg.access
+                .user_quota_periods
+                .insert(user.to_string(), period);
         }
     }
     match body.data_quota_bytes {
@@ -152,6 +165,7 @@ async fn patch_user_to_completion(
         }
     }
 
+    let source_deny_edits = apply_source_deny(&mut cfg, user, body.source_deny)?;
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
     let staged_credential =
@@ -169,6 +183,9 @@ async fn patch_user_to_completion(
         };
 
     let mut touched_sections = Vec::new();
+    if touches_user_quota_periods {
+        touched_sections.push(AccessSection::UserQuotaPeriods);
+    }
     if touches_users {
         touched_sections.push(AccessSection::Users);
     }
@@ -194,13 +211,14 @@ async fn patch_user_to_completion(
         touched_sections.push(AccessSection::UserEnabled);
     }
 
-    let revision = if touched_sections.is_empty() {
+    let revision = if touched_sections.is_empty() && source_deny_edits.is_empty() {
         current_revision(&shared.config_path).await?
     } else {
-        save_access_sections_to_disk_if_revision(
+        save_access_sections_and_fields_if_revision(
             &shared.config_path,
             &cfg,
             &touched_sections,
+            source_deny_edits,
             Some(&base_revision),
         )
         .await?
@@ -212,6 +230,8 @@ async fn patch_user_to_completion(
             cfg.access.is_user_enabled(user),
         );
     }
+    shared.quota_state.refresh_fresh_schedule(user, &cfg);
+    drop(quota_guard);
     match max_unique_ips_change {
         Some(Some(limit)) => shared.ip_tracker.set_user_limit(user, limit).await,
         Some(None) => shared.ip_tracker.remove_user_limit(user).await,
@@ -259,6 +279,7 @@ async fn set_user_enabled_to_completion(
     shared: &ApiShared,
 ) -> Result<(UserInfo, String), ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
+    let quota_guard = shared.quota_state.lock().await;
     let (mut cfg, base_revision) =
         load_config_for_mutation(&shared.config_path, expected_revision.as_deref()).await?;
 
@@ -294,6 +315,8 @@ async fn set_user_enabled_to_completion(
     shared
         .proxy_shared
         .stage_user_credential(user, credential_id, enabled);
+    shared.quota_state.refresh_fresh_schedule(user, &cfg);
+    drop(quota_guard);
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();

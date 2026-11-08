@@ -96,8 +96,22 @@ pub(crate) struct UserMutationResult {
     /// Incarnation invalidated or created by the mutation.
     pub(crate) incarnation: UserIncarnation,
     /// Number of live owners cancelled by the mutation.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Mutation results are asserted by admission regression tests"
+        )
+    )]
     pub(crate) cancelled: usize,
     /// Whether the effective enabled state changed from enabled to disabled.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Mutation results are asserted by admission regression tests"
+        )
+    )]
     pub(crate) newly_disabled: bool,
 }
 
@@ -109,6 +123,7 @@ pub(crate) struct UserAdmissionAuthority {
 
 impl UserAdmissionAuthority {
     /// Creates an uninitialized authority for isolated tests and startup wiring.
+    #[cfg(test)]
     pub(crate) fn new() -> Arc<Self> {
         Self::new_with_quota_store(Arc::new(QuotaStore::default()))
     }
@@ -121,12 +136,59 @@ impl UserAdmissionAuthority {
         })
     }
 
+    /// Requests source evidence for pending API intent or a rejected quota snapshot.
+    pub(crate) fn has_fresh_quota_schedules(&self) -> bool {
+        self.quota_store.has_fresh_schedules()
+    }
+
+    /// Shares the process quota gate with lifecycle publication callers.
+    pub(crate) fn quota_mutation_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.quota_store.mutation_gate()
+    }
+
+    /// Publishes calendars only for credentials owned by the active config source.
+    /// The caller holds the process quota gate; disabled users retain their calendar.
+    pub(crate) fn publish_quota_config(
+        &self,
+        source: u64,
+        config: &Arc<crate::config::ProxyConfig>,
+        accepted_after_mutation: bool,
+    ) {
+        let state = self.state.lock();
+        if state.active_config_source != Some(source) {
+            return;
+        }
+        let now = crate::quota_state::now_epoch_secs();
+        for (user, secret) in &config.access.users {
+            let Some(credential) = credential_id_from_hex(secret) else {
+                continue;
+            };
+            let Some(record) = state.users.get(user) else {
+                continue;
+            };
+            if record
+                .effective()
+                .is_some_and(|effective| effective.credential_id == credential)
+            {
+                self.quota_store.request_schedule(
+                    user,
+                    record.incarnation,
+                    credential,
+                    config,
+                    now,
+                    accepted_after_mutation,
+                );
+            }
+        }
+    }
+
     /// Returns the mutation epoch used to reject stale candidate configuration.
     pub(crate) fn epoch(&self) -> u64 {
         self.state.lock().epoch
     }
 
     /// Reconciles the complete configured user set into the process authority.
+    #[cfg(test)]
     pub(crate) fn apply_config(
         &self,
         users: &HashMap<String, String>,
@@ -158,6 +220,7 @@ impl UserAdmissionAuthority {
     }
 
     /// Returns the number of rejected updates from non-owning generations.
+    #[cfg(test)]
     pub(crate) fn stale_config_source_rejections(&self) -> u64 {
         self.state.lock().stale_config_source_rejections
     }
@@ -292,6 +355,7 @@ impl UserAdmissionAuthority {
     }
 
     /// Applies one persisted user value ahead of asynchronous runtime reload.
+    #[cfg(test)]
     pub(crate) fn stage_user(
         &self,
         user: &str,
@@ -456,6 +520,7 @@ impl UserAdmissionAuthority {
     }
 
     /// Registers a legacy owner when no credential snapshot is available.
+    #[cfg(test)]
     pub(crate) fn register_legacy(self: &Arc<Self>, user: &str) -> Option<UserSessionRegistration> {
         let credential_id = {
             let state = self.state.lock();
@@ -472,6 +537,7 @@ impl UserAdmissionAuthority {
     }
 
     /// Cancels all current owners without changing admission policy.
+    #[cfg(test)]
     pub(crate) fn cancel_user_owners(&self, user: &str) -> usize {
         let tokens = self.state.lock().owner_tokens(user);
         let count = tokens.len();

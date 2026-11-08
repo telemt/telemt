@@ -342,3 +342,7 @@ mod tests {
         assert!(lifecycle.spawn_producer(async {}).is_err());
     }
 }
+
+// Cleanup reservations must remain cancellation-safe under capacity pressure.
+#[cfg(test)]
+mod connection_tests;

@@ -39,3 +39,7 @@ The C-implementation provides **no mechanism to ignore the port**:
 If a port is `0`, it is still incorporated into the KDF as `0`.
 
 There is **no conditional logic to exclude ports**
+
+### How does Telemt select a SOCKS KDF source?
+
+A valid public SOCKS `BND.ADDR/BND.PORT` with a nonzero port supplies the complete KDF source tuple, ahead of configured/discovered NAT information. Its family must match the logical ME destination, independently of the TCP family used to reach SOCKS. IPv4-mapped IPv6 destinations count as IPv4 and require a native IPv4 BND tuple; IPv4-compatible destinations remain IPv6. `strict` rejects unavailable/invalid BND; `compat` retains the existing fallback. This does not change KDF fields, ports, SOCKS CONNECT destination encoding, public-address checks, or STUN behavior.
