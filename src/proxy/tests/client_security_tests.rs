@@ -2048,7 +2048,8 @@ async fn fragmented_tls_mtproto_with_interleaved_ccs_is_accepted() {
 #[tokio::test]
 async fn chunked_tls_response_preserves_complete_records_and_configured_mss() {
     use crate::proxy::handshake::{
-        TlsResponseWriteOptions, handle_tls_handshake_with_shared_and_options,
+        TlsResponseFragmentation, TlsResponseWriteOptions,
+        handle_tls_handshake_with_shared_and_options,
     };
     use crate::proxy::shared_state::ProxySharedState;
     use crate::transport::socket::{ListenOptions, create_listener};
@@ -2093,7 +2094,13 @@ async fn chunked_tls_response_preserves_complete_records_and_configured_mss() {
         &rng,
         None,
         &shared,
-        TlsResponseWriteOptions::tcp(raw_fd, Some(92)),
+        TlsResponseWriteOptions::tcp(
+            raw_fd,
+            Some(TlsResponseFragmentation {
+                fragment_size: 92,
+                prefix: crate::config::ClientMssPrefix::ServerHello,
+            }),
+        ),
     )
     .await
     {

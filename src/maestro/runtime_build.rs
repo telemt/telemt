@@ -366,6 +366,7 @@ pub(crate) fn project_reload_config(
         || old.server.listen_tcp != desired.server.listen_tcp
         || old.server.client_mss != desired.server.client_mss
         || old.server.client_mss_bulk != desired.server.client_mss_bulk
+        || old.server.client_mss_prefix != desired.server.client_mss_prefix
         || old.server.proxy_protocol != desired.server.proxy_protocol
         || old.server.listen_backlog != desired.server.listen_backlog;
     let listener_policy_changed =
@@ -380,6 +381,7 @@ pub(crate) fn project_reload_config(
         effective.server.listen_tcp = old.server.listen_tcp;
         effective.server.client_mss = old.server.client_mss.clone();
         effective.server.client_mss_bulk = old.server.client_mss_bulk.clone();
+        effective.server.client_mss_prefix = old.server.client_mss_prefix.clone();
         effective.server.proxy_protocol = old.server.proxy_protocol;
         effective.server.listen_backlog = old.server.listen_backlog;
         effective.server.listeners = old.server.listeners.clone();

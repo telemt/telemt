@@ -1933,6 +1933,7 @@ Gültige öffentliche SOCKS-Werte `BND.ADDR/BND.PORT` mit einem Port ungleich nu
 | [`listen_tcp`](#listen_tcp) | `bool` | — (automatisch) | `✘` |
 | [`client_mss`](#client_mss) | `String` | `""` | `✘` |
 | [`client_mss_bulk`](#client_mss_bulk) | `String` | `""` | `✘` |
+| [`client_mss_prefix`](#client_mss_prefix) | `String` | `""` | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | `false` | `✘` |
 | [`proxy_protocol_header_timeout_ms`](#proxy_protocol_header_timeout_ms) | `u64` | `500` | `✘` |
 | [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `[]` | `✘` |
@@ -2017,7 +2018,7 @@ Gültige öffentliche SOCKS-Werte `BND.ADDR/BND.PORT` mit einem Port ungleich nu
     ```
 ## client_mss
   - **Einschränkungen / Validierung**: `String`. Leer oder ausgelassen bedeutet: Kernel-MSS nicht verändern. Presets: `"extreme-low"` = `88`, `"tspu"` = `92`, `"2in8"` = `256`. Benutzerdefinierte Dezimalwerte müssen im Bereich `88..=4096` liegen.
-  - **Beschreibung**: Steuert die Segmentgröße für Client-Verbindungen. Standardmäßig wird der Wert auf den TCP-Listener angewendet und bleibt für die gesamte Verbindung aktiv. Wenn unter Linux zusätzlich `client_mss_bulk` gesetzt ist, begrenzt Telemt `TCP_MAXSEG` des akzeptierten Sockets während der ersten authentifizierten FakeTLS-Antwort (`ServerHello`) vorübergehend auf `client_mss` und stellt danach bei Erfolg, Schreibfehler oder Task-Abbruch die Bulk-MSS wieder her. Die Einstellung betrifft weder API, Metriken, Unix-Sockets, Telegram-Upstreams, ME-Sockets noch Mask-Backend-Verbindungen. Änderungen erfordern Listener-Neustart/Rebind.
+  - **Beschreibung**: Steuert die Segmentgröße für Client-Verbindungen. Standardmäßig wird der Wert auf den TCP-Listener angewendet und bleibt für die gesamte Verbindung aktiv. Wenn unter Linux zusätzlich `client_mss_bulk` gesetzt ist, läuft der Listener mit der Bulk-MSS, und Telemt schreibt die erste authentifizierte FakeTLS-Antwort (`ServerHello`) oder den per [`client_mss_prefix`](#client_mss_prefix) gewählten Teil davon in Userspace-Blöcken, die jeweils in ein Segment bei `client_mss` passen. Die Einstellung betrifft weder API, Metriken, Unix-Sockets, Telegram-Upstreams, ME-Sockets noch Mask-Backend-Verbindungen. Änderungen erfordern Listener-Neustart/Rebind.
   - **Betreiberhinweis**: Das zweistufige `synlimit`-Profil verlangt nicht, dass Telemt MSS automatisch deaktiviert. Betreiber, die externe Host-Tuning-Rezepte übernehmen, sollten bewusst entscheiden, ob MSS-Shaping für Handshake-Fragmentierung aktiv bleibt oder zugunsten höheren Medien-Durchsatzes deaktiviert wird.
   - **Performance-Hinweis**: Niedriges MSS erhöht die Paketanzahl vorhersehbar. Der ungefähre Segmentmultiplikator ist `ceil(1460 / client_mss)`.
   - **Beispiel**:
@@ -2028,13 +2029,24 @@ Gültige öffentliche SOCKS-Werte `BND.ADDR/BND.PORT` mit einem Port ungleich nu
     ```
 ## client_mss_bulk
   - **Einschränkungen / Validierung**: Nur Linux, Typ `String`. Gleiche Grammatik wie [`client_mss`](#client_mss): leer/ausgelassen, Presets `"extreme-low"`/`"tspu"`/`"2in8"` oder ein Dezimalwert in `88..=4096`. Ein nicht leerer Wert erfordert mindestens einen Listener mit effektivem `client_mss` und muss größer als der Handshake-Wert jedes teilnehmenden Listeners sein. Ein Listener kann mit `client_mss = ""` ausdrücklich aus dem Profil ausgenommen werden.
-  - **Beschreibung**: Aktiviert ein experimentelles Profil mit zwei Größen. Der Listener verwendet `client_mss_bulk` ab dem Beginn der Verbindung, einschließlich des Empfangs von `ClientHello`. Während der ersten authentifizierten FakeTLS-Antwort (`ServerHello`) begrenzt Telemt `TCP_MAXSEG` des akzeptierten Sockets vorübergehend auf `client_mss` und verwendet Schreibvorgänge, die nicht größer als dieser Wert sind; vor normalem MTProto-Verkehr wird die vorherige MSS wiederhergestellt. Die Wiederherstellung wird bei Erfolg, Schreibfehler und Task-Abbruch versucht. TCP ist ein Bytestrom: `MSG_EOR`, TCP-Offloads, Verluste und Neuübertragungen können beobachtete Capture-Grenzen verändern; deshalb bleibt das Packet-Capture-Release-Gate maßgeblich. Wenn die Option leer ist oder fehlt, bleibt `client_mss` die Kernel-MSS für die gesamte Verbindung. Änderungen erfordern Listener-Neustart/Rebind.
+  - **Beschreibung**: Aktiviert ein experimentelles Profil mit zwei Größen. Der Listener verwendet `client_mss_bulk` ab dem Beginn der Verbindung, einschließlich des Empfangs von `ClientHello`. Die erste authentifizierte FakeTLS-Antwort (`ServerHello`) oder der per [`client_mss_prefix`](#client_mss_prefix) gewählte Teil davon wird mit `MSG_EOR`-Schreibvorgängen gesendet, die jeweils in ein Segment bei `client_mss` passen (abzüglich der TCP-Timestamps-Option, falls ausgehandelt, und nie über der Sende-MSS der Verbindung); der Rest wird mit der Bulk-MSS geschrieben. Die Socket-MSS wird nicht verändert: Auf einem etablierten Linux-Socket wirkt `TCP_MAXSEG` nicht auf ausgehende Segmente. TCP ist ein Bytestrom: `MSG_EOR`, TCP-Offloads, Verluste und Neuübertragungen können beobachtete Capture-Grenzen verändern; deshalb bleibt das Packet-Capture-Release-Gate maßgeblich. Wenn die Option leer ist oder fehlt, bleibt `client_mss` die Kernel-MSS für die gesamte Verbindung. Änderungen erfordern Listener-Neustart/Rebind.
   - **Beispiel**:
 
     ```toml
     [server]
     client_mss = "tspu"
     client_mss_bulk = "1400"
+    ```
+## client_mss_prefix
+  - **Einschränkungen / Validierung**: Nur Linux, Typ `String`, nur zusammen mit [`client_mss_bulk`](#client_mss_bulk). Leer oder ausgelassen bedeutet `"full"`. Werte: `"full"`, `"server-hello"` oder eine dezimale Byteanzahl in `1..=65535`. Ein nicht leerer Wert ohne `client_mss_bulk` wird abgelehnt.
+  - **Beschreibung**: Wählt den Anfangsteil der ersten authentifizierten FakeTLS-Antwort, der in `client_mss`-Blöcken geschrieben wird. `"full"` teilt die gesamte Antwort (`ServerHello`, `ChangeCipherSpec`, die emulierten Zertifikat-Records und Tickets). `"server-hello"` teilt nur den ersten TLS-Record (`ServerHello`, höchstens 2048 Bytes) und schreibt den Rest mit der Bulk-MSS; beginnt die Antwort nicht mit einem vollständigen Handshake-Record, wird die gesamte Antwort geteilt. Eine Byteanzahl teilt entsprechend viele Anfangsbytes. Das `MSG_EOR` am letzten Block verhindert, dass der Bulk-Rest mit dem kleinen Ende verschmilzt. Ein kleinerer Präfix bedeutet weniger Segmente: Bei etwa 2 % Verlust verliert eine 4-KiB-Antwort in 80-Byte-Segmenten in etwa 64 % der Handshakes mindestens ein Segment, bei drei Segmenten in etwa 6 %; weniger Pakete verlassen außerdem das initiale Congestion Window schneller. Änderungen erfordern Listener-Neustart/Rebind.
+  - **Beispiel**:
+
+    ```toml
+    [server]
+    client_mss = "tspu"
+    client_mss_bulk = "1400"
+    client_mss_prefix = "server-hello"
     ```
 ## proxy_protocol
   - **Einschränkungen / Validierung**: `bool`.

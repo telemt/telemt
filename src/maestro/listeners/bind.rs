@@ -130,10 +130,11 @@ fn log_listener_profile(spec: &ListenerBindSpec) {
             "Client-facing TCP MSS configured"
         );
     }
-    if let Some(fragment_size) = spec.tls_response_fragment_size {
+    if let Some(fragmentation) = spec.tls_response_fragmentation {
         info!(
             addr = %spec.addr,
-            fragment_size,
+            fragment_size = fragmentation.fragment_size,
+            prefix = ?fragmentation.prefix,
             bulk_mss = spec.options.client_mss,
             "Initial FakeTLS response best-effort chunking configured"
         );

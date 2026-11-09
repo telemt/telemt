@@ -418,11 +418,12 @@ async fn write_tls_response<W: AsyncWrite + Unpin>(
     options: TlsResponseWriteOptions,
 ) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
-    if let (Some(fd), Some(fragment_size)) = (options.socket_fd, options.fragment_size) {
+    if let (Some(fd), Some(fragmentation)) = (options.socket_fd, options.fragmentation) {
         return crate::transport::socket::send_tcp_fragmented_fd(
             fd,
             response,
-            usize::from(fragment_size),
+            usize::from(fragmentation.fragment_size),
+            fragmentation.prefix,
         )
         .await;
     }

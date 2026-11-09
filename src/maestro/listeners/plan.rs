@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::config::{
     ListenerTransport, ProxyConfig, ServerConfig, SynLimitMode, WebClientIpSource,
 };
+use crate::proxy::handshake::TlsResponseFragmentation;
 use crate::transport::ListenOptions;
 
 use super::tcp_mss_runtime_profile;
@@ -16,7 +17,7 @@ pub(super) struct ListenerBindSpec {
     pub(super) transport: ListenerTransport,
     pub(super) options: ListenOptions,
     pub(super) proxy_protocol: bool,
-    pub(super) tls_response_fragment_size: Option<u16>,
+    pub(super) tls_response_fragmentation: Option<TlsResponseFragmentation>,
     pub(super) web_client_ip_source: WebClientIpSource,
     pub(super) web_trusted_proxy_cidrs: Arc<[ipnetwork::IpNetwork]>,
 }
@@ -34,6 +35,11 @@ pub(crate) fn listener_bind_plan(
         .server
         .client_mss_bulk_value()
         .map_err(|error| format!("invalid server.client_mss_bulk: {error}"))?;
+    let client_mss_prefix = config
+        .server
+        .client_mss_prefix_value()
+        .map_err(|error| format!("invalid server.client_mss_prefix: {error}"))?
+        .unwrap_or_default();
 
     for listener in &config.server.listeners {
         let addr = SocketAddr::new(
@@ -60,7 +66,12 @@ pub(crate) fn listener_bind_plan(
         let (client_mss, tls_response_fragment_size) =
             tcp_mss_runtime_profile(configured_client_mss, listener_bulk_mss);
         #[cfg(not(target_os = "linux"))]
-        let (client_mss, tls_response_fragment_size) = (configured_client_mss, None);
+        let (client_mss, tls_response_fragment_size) = (configured_client_mss, None::<u16>);
+        let tls_response_fragmentation =
+            tls_response_fragment_size.map(|fragment_size| TlsResponseFragmentation {
+                fragment_size,
+                prefix: client_mss_prefix,
+            });
         let spec = ListenerBindSpec {
             addr,
             transport: listener.transport,
@@ -74,7 +85,7 @@ pub(crate) fn listener_bind_plan(
             proxy_protocol: listener
                 .proxy_protocol
                 .unwrap_or(config.server.proxy_protocol),
-            tls_response_fragment_size,
+            tls_response_fragmentation,
             web_client_ip_source: listener.web_client_ip_source,
             web_trusted_proxy_cidrs: Arc::from(listener.web_trusted_proxy_cidrs.clone()),
         };
