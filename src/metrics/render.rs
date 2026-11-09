@@ -45,6 +45,7 @@ pub(super) async fn render_metrics(
         telemetry,
         tls_full_cert_budget,
     );
+    process::render_config_watch(&mut out, config);
     super::render_tls_front_profile_health(&mut out, config, tls_cache).await;
     connections::render(&mut out, stats, shared_state, core_enabled);
     traffic::render(
