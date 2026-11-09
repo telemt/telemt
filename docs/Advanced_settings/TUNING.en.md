@@ -1,5 +1,7 @@
 # Telemt Tuning Guide: Middle-End and Upstreams
 
+[English](TUNING.en.md) · [Русский](TUNING.ru.md) · [Deutsch](TUNING.de.md) · [EN / RU / DE terminology](../TERMINOLOGY.md)
+
 This document describes the current runtime behavior for Middle-End (ME) and upstream routing based on:
 - `src/config/types.rs`
 - `src/config/defaults.rs`
@@ -8,6 +10,8 @@ This document describes the current runtime behavior for Middle-End (ME) and ups
 
 Defaults below are code defaults (used when a key is omitted), not necessarily values from `config.full.toml` examples.
 
+`Option<T>` and `null` in type/default columns describe optional internal values. TOML has no `null` literal. To use legacy update intervals, omit `general.update_every` and explicitly set the legacy keys; otherwise the unified default is 300 seconds. Object-valued null members in config PATCH are ignored, not used to remove settings.
+
 ## Middle-End Parameters
 
 ### 1) Core ME mode, NAT, and STUN
@@ -15,7 +19,7 @@ Defaults below are code defaults (used when a key is omitted), not necessarily v
 | Parameter | Type | Default | Constraints / validation | Runtime effect | Example |
 |---|---|---:|---|---|---|
 | `general.use_middle_proxy` | `bool` | `true` | none | Enables ME transport mode. If `false`, Direct mode is used. | `use_middle_proxy = true` |
-| `general.proxy_secret_path` | `Option<String>` | `"proxy-secret"` | path may be `null` | Path to Telegram infrastructure proxy-secret file. | `proxy_secret_path = "proxy-secret"` |
+| `general.proxy_secret_path` | `Option<String>` | `"proxy-secret"` | optional internal path; TOML has no `null` | Path to Telegram infrastructure proxy-secret file. | `proxy_secret_path = "proxy-secret"` |
 | `general.middle_proxy_nat_ip` | `Option<IpAddr>` | `null` | valid IP when set | Manual public NAT IP override for ME address material. | `middle_proxy_nat_ip = "203.0.113.10"` |
 | `general.middle_proxy_nat_probe` | `bool` | `true` | none | Enables ME NAT probing when ME mode and `network.stun_use` are both enabled. | `middle_proxy_nat_probe = true` |
 | `general.stun_nat_probe_concurrency` | `usize` | `8` | must be `> 0` | Max parallel STUN probes during NAT discovery. | `stun_nat_probe_concurrency = 16` |
@@ -65,7 +69,7 @@ Defaults below are code defaults (used when a key is omitted), not necessarily v
 | `general.proxy_secret_stable_snapshots` | `u8` | `2` | must be `> 0` | Number of identical proxy-secret snapshots required before rotation. | `proxy_secret_stable_snapshots = 3` |
 | `general.proxy_secret_rotate_runtime` | `bool` | `true` | none | Enables runtime proxy-secret rotation. | `proxy_secret_rotate_runtime = true` |
 | `general.proxy_secret_len_max` | `usize` | `256` | must be within `[32,4096]` | Upper limit for accepted proxy-secret length. | `proxy_secret_len_max = 512` |
-| `general.update_every` | `Option<u64>` | `300` | if set: must be `> 0`; if `null`: legacy min fallback | Unified refresh interval for ME config + secret updater. | `update_every = 300` |
+| `general.update_every` | `Option<u64>` | `300` | if set: must be `> 0`; omitted with explicit legacy keys: legacy minimum | Unified refresh interval for ME config + secret updater. | `update_every = 300` |
 | `general.me_pool_drain_ttl_secs` | `u64` | `90` | none | Age threshold for prolonged-drain warnings and the lower-bound normalization of force-close timeout; it does not grant stale binds. | `me_pool_drain_ttl_secs = 120` |
 | `general.me_bind_stale_mode` | `"never"`, `"ttl"`, or `"always"` | `"never"` | none | Controls whether new bindings may use draining stale writers for uncovered DC-family groups. | `me_bind_stale_mode = "never"` |
 | `general.me_bind_stale_ttl_secs` | `u64` | `90` | none | Stale-bind eligibility window used only when `me_bind_stale_mode = "ttl"`; `0` disables TTL expiry for eligible draining writers. | `me_bind_stale_ttl_secs = 90` |
@@ -86,8 +90,8 @@ Operators can observe pending age, writer count and deficit, missing DC groups, 
 |---|---|---|---|---|
 | `general.middle_proxy_nat_stun` | Deprecated | `network.stun_servers` | Merged into `network.stun_servers` only when `network.stun_servers` is not explicitly set. | Move value into `network.stun_servers` and remove legacy key. |
 | `general.middle_proxy_nat_stun_servers` | Deprecated | `network.stun_servers` | Merged into `network.stun_servers` only when `network.stun_servers` is not explicitly set. | Move values into `network.stun_servers` and remove legacy key. |
-| `general.proxy_secret_auto_reload_secs` | Deprecated | `general.update_every` | Used only when `update_every = null` (legacy fallback path). | Set `general.update_every` explicitly and remove legacy key. |
-| `general.proxy_config_auto_reload_secs` | Deprecated | `general.update_every` | Used only when `update_every = null` (legacy fallback path). | Set `general.update_every` explicitly and remove legacy key. |
+| `general.proxy_secret_auto_reload_secs` | Deprecated | `general.update_every` | Used when `update_every` is omitted and legacy intervals are explicitly configured. | Set `general.update_every` explicitly and remove legacy key. |
+| `general.proxy_config_auto_reload_secs` | Deprecated | `general.update_every` | Used when `update_every` is omitted and legacy intervals are explicitly configured. | Set `general.update_every` explicitly and remove legacy key. |
 
 ## How Upstreams Are Configured
 
@@ -182,26 +186,35 @@ weight = 2
 enabled = true
 ```
 
-### Example 5: Mixed upstreams with scopes
+### Selecting an upstream by user scope
+
+In Direct relay, a user named `scope_premium` selects the exact scope `premium`. The suffix must contain 1–64 ASCII letters, digits or hyphens. A missing or invalid suffix uses unscoped selection. With a valid scope and no matching upstream, the connection fails; it does not fall back to an unscoped route. Scope tags do not create users or grant authorization.
+
+For a selected scope, SOCKS4 `user_id` and SOCKS5 username/password are replaced by that scope string. In this example the SOCKS5 server must accept `premium` as both username and password. Ordinary users select the unscoped direct route. Replace the example secret and SOCKS address before use.
 
 ```toml
+[general]
+use_middle_proxy = false
+
+[access.users]
+scope_premium = "0123456789abcdef0123456789abcdef"
+
 [[upstreams]]
 type = "direct"
-weight = 5
-enabled = true
 scopes = ""
 
 [[upstreams]]
 type = "socks5"
 address = "203.0.113.40:1080"
-username = "edge"
-password = "edgepass"
-weight = 3
-enabled = true
-scopes = "premium,me"
+username = "premium"
+password = "premium"
+scopes = "premium"
 ```
 
-### Example 5: ME-focused tuning profile
+This per-user mechanism belongs to Direct relay. ME dialing currently passes no user scope, so a tag named `me` does not automatically select a ME upstream. TLS-front metadata fetches use the separate `censorship.tls_fetch_scope` setting. See [scope filtering](../Config_params/CONFIG_PARAMS.en.md#scopes).
+
+
+### Example 6: ME-focused tuning profile
 
 ```toml
 [general]

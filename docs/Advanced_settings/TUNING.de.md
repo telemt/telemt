@@ -1,5 +1,7 @@
 # Telemt Tuning-Leitfaden: Middle-End und Upstreams
 
+[English](TUNING.en.md) · [Русский](TUNING.ru.md) · [Deutsch](TUNING.de.md) · [EN / RU / DE terminology](../TERMINOLOGY.md)
+
 Dieses Dokument beschreibt das aktuelle Laufzeitverhalten für Middle-End (ME) und Upstream-Routing basierend auf:
 - `src/config/types.rs`
 - `src/config/defaults.rs`
@@ -7,6 +9,8 @@ Dieses Dokument beschreibt das aktuelle Laufzeitverhalten für Middle-End (ME) u
 - `src/transport/upstream.rs`
 
 Die unten angegebenen `Default`-Werte sind Code-Defaults (bei fehlendem Schlüssel), nicht zwingend die Werte aus `config.full.toml`.
+
+`Option<T>` und `null` in Typ- und Standardwertspalten beschreiben optionale interne Werte. TOML kennt kein `null`-Literal. Für die alten Aktualisierungsintervalle lassen Sie `general.update_every` weg und setzen die alten Schlüssel ausdrücklich; andernfalls beträgt das einheitliche Standardintervall 300 Sekunden. Null-Werte in Objektfeldern eines Konfigurations-PATCH werden ignoriert und entfernen keine Einstellungen.
 
 ## Middle-End-Parameter
 
@@ -65,7 +69,7 @@ Die unten angegebenen `Default`-Werte sind Code-Defaults (bei fehlendem Schlüss
 | `general.proxy_secret_stable_snapshots` | `u8` | `2` | muss `> 0` sein | Anzahl identischer Secret-Snapshots vor Rotation. | `proxy_secret_stable_snapshots = 3` |
 | `general.proxy_secret_rotate_runtime` | `bool` | `true` | keine | Aktiviert Runtime-Rotation des Proxy-Secrets. | `proxy_secret_rotate_runtime = true` |
 | `general.proxy_secret_len_max` | `usize` | `256` | Bereich `[32,4096]` | Obergrenze für akzeptierte Secret-Länge. | `proxy_secret_len_max = 512` |
-| `general.update_every` | `Option<u64>` | `300` | wenn gesetzt: `> 0`; bei `null`: Legacy-Min-Fallback | Einheitliches Refresh-Intervall für ME-Config + Secret-Updater. | `update_every = 300` |
+| `general.update_every` | `Option<u64>` | `300` | wenn gesetzt: `> 0`; ohne diesen Schlüssel mit expliziten alten Intervallen: deren Minimum | Einheitliches Refresh-Intervall für ME-Config + Secret-Updater. | `update_every = 300` |
 | `general.me_pool_drain_ttl_secs` | `u64` | `90` | keine | Altersschwelle für Warnungen bei langem Drain und Untergrenze der Force-Close-Normalisierung; gewährt keine stale Binds. | `me_pool_drain_ttl_secs = 120` |
 | `general.me_bind_stale_mode` | `"never"`, `"ttl"` oder `"always"` | `"never"` | keine | Steuert neue Bindings auf draining stale Writer für nicht abgedeckte DC-Family-Gruppen. | `me_bind_stale_mode = "never"` |
 | `general.me_bind_stale_ttl_secs` | `u64` | `90` | keine | Stale-Bind-Fenster nur für `me_bind_stale_mode = "ttl"`; `0` deaktiviert den TTL-Ablauf für zulässige draining Writer. | `me_bind_stale_ttl_secs = 90` |
@@ -74,11 +78,11 @@ Die unten angegebenen `Default`-Werte sind Code-Defaults (bei fehlendem Schlüss
 | `general.auto_degradation_enabled` | `bool` | `true` | keine | Reserviertes Kompatibilitätsfeld in aktueller Revision (kein aktiver Runtime-Consumer). | `auto_degradation_enabled = true` |
 | `general.degradation_min_unavailable_dc_groups` | `u8` | `2` | keine | Reservierter Kompatibilitäts-Schwellenwert in aktueller Revision (kein aktiver Runtime-Consumer). | `degradation_min_unavailable_dc_groups = 2` |
 
-Eine Hardswap-Kandidatengeneration ist nur für denselben Desired-Map-Hash und dieselbe Endpoint-Revision maßgeblich. Wiederholte Versuche verwenden diese pending Generation höchstens 1800 Sekunden wieder; danach wird eine neue Generation angelegt. Der Commit validiert die Authority erneut und verlangt mindestens `me_pool_min_fresh_ratio` frische DC-Family-Coverage. Fehlende Gruppen blockieren den Commit bei `me_bind_stale_mode = "never"`; `ttl` oder `always` können mit policy-begrenztem stale Fallback für diese Gruppen committen. Abgedeckte alte Writer können sofort retiret werden; Hardswap ist daher ein atomarer Policy-Übergang, keine universelle Zero-Drop-Garantie.
+Eine für Hardswap vorbereitete Generation darf nur übernommen werden, solange der Hash der gewünschten ME-Zuordnung und die Revision der Verbindungsziele unverändert sind. Wiederholungsversuche verwenden sie höchstens 1800 Sekunden; danach wird eine neue Generation angelegt. Vor der Übernahme prüft Telemt diese Voraussetzungen erneut. Der Anteil der durch neue Verbindungen abgedeckten Gruppen aus DC und IP-Adressfamilie muss mindestens `me_pool_min_fresh_ratio` betragen. Bei `me_bind_stale_mode = "never"` blockiert jede fehlende Gruppe die Übernahme. Mit `ttl` oder `always` dürfen für solche Gruppen ältere Verbindungen innerhalb der gewählten Richtlinie weiterverwendet werden. Alte ME Writer bereits abgedeckter Gruppen können sofort außer Betrieb genommen werden. Der atomare Wechsel der Richtlinie garantiert daher nicht den Erhalt aller Verbindungen.
 
-Writer-Replacement verwendet separat den cancellation-sicheren Zustand `Open -> Preparing -> Retiring`. `Preparing` verhindert doppelte Replacement-Arbeit, erlaubt aber weiterhin neue Binds. Unter dem Registry-Binding-Guard validiert der Commit das Opfer erneut, setzt es auf `Retiring`, um neue Binds zu blockieren, installiert und publiziert den Nachfolger und beginnt das Draining des Vorgängers, bevor der Guard freigegeben wird. Das Verwerfen einer Reservation vor dieser Commit-Grenze stellt `Open` wieder her.
+Der Austausch eines einzelnen ME Writers verwendet die Zustände `Open -> Preparing -> Retiring` und berücksichtigt den Abbruch der Operation. `Preparing` verhindert einen zweiten Austausch desselben Writers, lässt aber neue Stream-Zuordnungen zu. Unter der Sperre des Zuordnungsregisters prüft Telemt den bisherigen Writer erneut, setzt ihn auf `Retiring`, um neue Zuordnungen zu sperren, installiert und veröffentlicht den Nachfolger und beginnt, den Vorgänger auslaufen zu lassen. Erst dann wird die Sperre freigegeben. Wird die Reservierung vor dieser Übernahmegrenze verworfen, gilt wieder `Open`.
 
-Pending-Alter, Writer-Anzahl und -Defizit, fehlende DC-Gruppen, Map-Aktualität, verwaiste Warm-Writer und die Phasen `preparing`/`retiring` sind über `/v1/runtime/me_pool_state` sichtbar. Die entsprechenden Gauges `telemt_me_hardswap_*` und `telemt_me_writer_replacement_current` liefern Null, wenn ME-Telemetrie `silent` ist oder kein aktiver ME-Snapshot vorliegt. In Prometheus muss `telemt_me_hardswap_pending_map_current` zusammen mit `telemt_me_hardswap_pending` ausgewertet werden: Map-Currency Null bedeutet auch, dass keine pending Generation existiert; die API verwendet dann `null`. Alarmieren Sie bei einem Pending-Alter nahe 1800 Sekunden, dauerhaftem Defizit oder fehlenden Gruppen, stale Map, verwaisten Warm-Writern oder nicht konvergierenden Replacement-Phasen.
+`/v1/runtime/me_pool_state` zeigt das Alter der wartenden Generation, Anzahl und Defizit der ME Writer, fehlende DC-Gruppen, die Aktualität der Zuordnung, vorbereitete Verbindungen ohne Besitzer und die Phasen `preparing`/`retiring`. Die Messwerte `telemt_me_hardswap_*` und `telemt_me_writer_replacement_current` sind null, wenn die ME-Telemetrie auf `silent` steht oder kein aktiver Zustandsstand vorliegt. Werten Sie `telemt_me_hardswap_pending_map_current` zusammen mit `telemt_me_hardswap_pending` aus: Null kann auch bedeuten, dass keine Generation wartet, statt dass die Zuordnung veraltet ist. Die API liefert dann `null`. Richten Sie Alarme für ein Alter nahe 1800 Sekunden, anhaltende Defizite oder fehlende Gruppen, veraltete Zuordnungen, vorbereitete Verbindungen ohne Besitzer und festhängende Austauschphasen ein.
 
 ## Deprecated / Legacy Parameter
 
@@ -86,8 +90,8 @@ Pending-Alter, Writer-Anzahl und -Defizit, fehlende DC-Gruppen, Map-Aktualität,
 |---|---|---|---|---|
 | `general.middle_proxy_nat_stun` | Deprecated | `network.stun_servers` | Wird nur dann in `network.stun_servers` gemerged, wenn `network.stun_servers` nicht explizit gesetzt ist. | Wert nach `network.stun_servers` verschieben, Legacy-Key entfernen. |
 | `general.middle_proxy_nat_stun_servers` | Deprecated | `network.stun_servers` | Wird nur dann in `network.stun_servers` gemerged, wenn `network.stun_servers` nicht explizit gesetzt ist. | Werte nach `network.stun_servers` verschieben, Legacy-Key entfernen. |
-| `general.proxy_secret_auto_reload_secs` | Deprecated | `general.update_every` | Nur aktiv, wenn `update_every = null` (Legacy-Fallback). | `general.update_every` explizit setzen, Legacy-Key entfernen. |
-| `general.proxy_config_auto_reload_secs` | Deprecated | `general.update_every` | Nur aktiv, wenn `update_every = null` (Legacy-Fallback). | `general.update_every` explizit setzen, Legacy-Key entfernen. |
+| `general.proxy_secret_auto_reload_secs` | Deprecated | `general.update_every` | Aktiv, wenn `update_every` fehlt und alte Intervalle ausdrücklich gesetzt sind. | `general.update_every` explizit setzen, Legacy-Key entfernen. |
+| `general.proxy_config_auto_reload_secs` | Deprecated | `general.update_every` | Aktiv, wenn `update_every` fehlt und alte Intervalle ausdrücklich gesetzt sind. | `general.update_every` explizit setzen, Legacy-Key entfernen. |
 
 ## Wie Upstreams konfiguriert werden
 
@@ -182,26 +186,35 @@ weight = 2
 enabled = true
 ```
 
-### Beispiel 5: Gemischte Upstreams mit Scopes
+### Upstream anhand des Benutzernamens auswählen
+
+Im Direct-Relay wählt ein Benutzer namens `scope_premium` den exakten Scope `premium`. Der Suffix muss aus 1–64 ASCII-Buchstaben, Ziffern oder Bindestrichen bestehen. Ohne gültigen Suffix erfolgt die Auswahl ohne Scope. Gibt es zu einem gültigen Scope keinen passenden Upstream, schlägt die Verbindung fehl; sie weicht nicht auf eine unmarkierte Route aus. Scope-Tags erstellen keine Benutzer und ersetzen keine Authentifizierung.
+
+Ein ausgewählter Scope ersetzt die SOCKS4-`user_id` sowie SOCKS5-Benutzername und -Passwort. Im Beispiel muss der SOCKS5-Server `premium` sowohl als Benutzername als auch als Passwort akzeptieren. Gewöhnliche Benutzer verwenden die unmarkierte direkte Route. Ersetzen Sie Secret und SOCKS-Adresse vor dem Einsatz.
 
 ```toml
+[general]
+use_middle_proxy = false
+
+[access.users]
+scope_premium = "0123456789abcdef0123456789abcdef"
+
 [[upstreams]]
 type = "direct"
-weight = 5
-enabled = true
 scopes = ""
 
 [[upstreams]]
 type = "socks5"
 address = "203.0.113.40:1080"
-username = "edge"
-password = "edgepass"
-weight = 3
-enabled = true
-scopes = "premium,me"
+username = "premium"
+password = "premium"
+scopes = "premium"
 ```
 
-### Beispiel 5: ME-orientiertes Tuning-Profil
+Diese benutzerbezogene Auswahl gilt für Direct-Relay. ME-Verbindungen übergeben derzeit keinen Benutzerscope; das Tag `me` wählt daher nicht automatisch einen ME-Upstream. TLS-Profilabfragen verwenden die separate Einstellung `censorship.tls_fetch_scope`. Siehe [Scope-Filterung](../Config_params/CONFIG_PARAMS.de.md#scopes).
+
+
+### Beispiel 6: ME-orientiertes Tuning-Profil
 
 ```toml
 [general]
