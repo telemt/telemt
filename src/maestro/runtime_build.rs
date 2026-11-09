@@ -337,6 +337,29 @@ pub(crate) fn resolve_reload_config(
     old: &ProxyConfig,
     desired: &ProxyConfig,
 ) -> Result<ResolvedReloadConfig, String> {
+    let mut resolved = project_reload_config(old, desired);
+    resolved
+        .effective
+        .validate_effective_web()
+        .map_err(|error| format!("effective WEB configuration is invalid: {error}"))?;
+    resolved
+        .effective
+        .rebuild_runtime_user_auth()
+        .map_err(|error| format!("effective user runtime preparation failed: {error}"))?;
+    resolved
+        .effective
+        .rebuild_runtime_web()
+        .map_err(|error| format!("effective WEB runtime preparation failed: {error}"))?;
+    resolved.runtime_changed = !configs_equal(old, &resolved.effective);
+    Ok(resolved)
+}
+
+/// Projects retained process policy without DNS, static acquisition or validation.
+/// State inspection uses this projection; preflight still uses the full resolver.
+pub(crate) fn project_reload_config(
+    old: &ProxyConfig,
+    desired: &ProxyConfig,
+) -> ResolvedReloadConfig {
     let mut effective = desired.clone();
     let mut fields = Vec::new();
     let listener_identity_matches = listeners_have_same_bind_identity(&old.server, &desired.server);
@@ -465,21 +488,15 @@ pub(crate) fn resolve_reload_config(
         fields.push("web.debug".to_string());
         effective.web.debug = old.web.debug.clone();
     }
-    effective
-        .validate_effective_web()
-        .map_err(|error| format!("effective WEB configuration is invalid: {error}"))?;
-    effective
-        .rebuild_runtime_user_auth()
-        .map_err(|error| format!("effective user runtime preparation failed: {error}"))?;
-    effective
-        .rebuild_runtime_web()
-        .map_err(|error| format!("effective WEB runtime preparation failed: {error}"))?;
+    if !fields.is_empty() {
+        effective.provenance = crate::config::observation::ConfigProvenance::Mixed;
+    }
     let runtime_changed = !configs_equal(old, &effective);
-    Ok(ResolvedReloadConfig {
+    ResolvedReloadConfig {
         effective,
         deferred_process_fields: fields,
         runtime_changed,
-    })
+    }
 }
 
 fn listeners_have_same_bind_identity(old: &ServerConfig, desired: &ServerConfig) -> bool {

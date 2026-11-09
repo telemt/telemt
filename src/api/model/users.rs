@@ -28,6 +28,9 @@ pub(in crate::api) struct UserInfo {
     pub(in crate::api) rate_limit_up_bps: Option<u64>,
     pub(in crate::api) rate_limit_down_bps: Option<u64>,
     pub(in crate::api) max_unique_ips: Option<usize>,
+    pub(in crate::api) limits: UserLimitState,
+    pub(in crate::api) source_deny: Vec<ipnetwork::IpNetwork>,
+    pub(in crate::api) source_deny_status: SourceDenyState,
     pub(in crate::api) current_connections: u64,
     pub(in crate::api) active_unique_ips: usize,
     pub(in crate::api) active_unique_ips_list: Vec<IpAddr>,
@@ -35,6 +38,37 @@ pub(in crate::api) struct UserInfo {
     pub(in crate::api) recent_unique_ips_list: Vec<IpAddr>,
     pub(in crate::api) total_octets: u64,
     pub(in crate::api) links: UserLinks,
+}
+
+#[derive(Serialize)]
+pub(in crate::api) struct InheritedLimit {
+    pub(in crate::api) value: Option<usize>,
+    pub(in crate::api) configured_override: Option<usize>,
+    pub(in crate::api) global_value: usize,
+    pub(in crate::api) origin: &'static str,
+}
+
+#[derive(Serialize)]
+pub(in crate::api) struct UserLimitSnapshot {
+    pub(in crate::api) max_tcp_conns: InheritedLimit,
+    pub(in crate::api) max_unique_ips: InheritedLimit,
+}
+
+#[derive(Serialize)]
+pub(in crate::api) struct UserLimitState {
+    pub(in crate::api) desired: UserLimitSnapshot,
+    pub(in crate::api) effective: Option<UserLimitSnapshot>,
+    pub(in crate::api) effective_scope: &'static str,
+    pub(in crate::api) subsystem_convergence: &'static str,
+}
+
+#[derive(Serialize)]
+pub(in crate::api) struct SourceDenyState {
+    pub(in crate::api) effective: Option<Vec<ipnetwork::IpNetwork>>,
+    pub(in crate::api) runtime_reload_required: Option<bool>,
+    pub(in crate::api) apply_mode: &'static str,
+    pub(in crate::api) reload_endpoint: &'static str,
+    pub(in crate::api) effective_scope: &'static str,
 }
 
 #[derive(Serialize)]
@@ -94,6 +128,9 @@ pub(in crate::api) struct CreateUserRequest {
     pub(in crate::api) rate_limit_down_bps: Option<u64>,
     pub(in crate::api) max_unique_ips: Option<usize>,
     pub(in crate::api) enabled: Option<bool>,
+    /// Omission retains any orphan rule; null explicitly removes it on recreation.
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(in crate::api) source_deny: Patch<Vec<ipnetwork::IpNetwork>>,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +155,8 @@ pub(in crate::api) struct PatchUserRequest {
     pub(in crate::api) max_unique_ips: Patch<usize>,
     #[serde(default, deserialize_with = "patch_field")]
     pub(in crate::api) enabled: Patch<bool>,
+    #[serde(default, deserialize_with = "patch_field")]
+    pub(in crate::api) source_deny: Patch<Vec<ipnetwork::IpNetwork>>,
 }
 
 #[derive(Default, Deserialize)]

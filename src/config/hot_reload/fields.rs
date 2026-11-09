@@ -229,7 +229,7 @@ impl HotFields {
     }
 }
 
-pub(super) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
+pub(crate) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     let mut cfg = old.clone();
     cfg.quota_source_read_at = new.quota_source_read_at;
 

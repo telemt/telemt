@@ -58,7 +58,7 @@ pub use fields::HotFields;
 pub use watcher::spawn_config_watcher;
 
 use diff::{config_equal, warn_non_hot_changes};
-use fields::overlay_hot_fields;
+pub(crate) use fields::overlay_hot_fields;
 use reporting::log_changes;
 #[cfg(test)]
 use watcher::{ReloadState, reload_config};
