@@ -9,7 +9,9 @@ use std::io::Result;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(unix)]
+use tracing::warn;
 
 #[cfg(target_os = "linux")]
 mod fragmented_send;
@@ -327,6 +329,7 @@ pub(crate) fn bind_listener_socket(addr: SocketAddr, options: &ListenOptions) ->
         socket.set_only_v6(true)?;
     }
 
+    #[cfg(unix)]
     if let Some(client_mss) = options.client_mss {
         if let Err(error) = socket.set_tcp_mss(u32::from(client_mss)) {
             warn!(
