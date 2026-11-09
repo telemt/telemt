@@ -14,12 +14,52 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
+use parking_lot::Mutex;
+
+/// Minimum interval between two log lines about the limit, per kind.
+pub(crate) const PENDING_HANDSHAKE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Default)]
 pub(crate) struct PendingHandshakeLimiter {
     pending: DashMap<IpAddr, u32>,
+    pub(crate) rejected_log: LogThrottle,
+    pub(crate) observed_log: LogThrottle,
+}
+
+/// Lets one log line through per `PENDING_HANDSHAKE_LOG_INTERVAL` and counts
+/// the events suppressed in between, so a flood of rejections costs one line
+/// every few seconds instead of one line per connection.
+#[derive(Debug, Default)]
+pub(crate) struct LogThrottle {
+    last: Mutex<Option<Instant>>,
+    suppressed: AtomicU64,
+}
+
+impl LogThrottle {
+    /// Records one event at `now`. Returns `Some(suppressed)` when a line
+    /// should be logged, with the number of events suppressed since the
+    /// previous line, or `None` when this event is suppressed.
+    pub(crate) fn note(&self, now: Instant) -> Option<u64> {
+        // Contention means another thread is deciding right now; count this
+        // event as suppressed instead of waiting on the hot path.
+        let Some(mut last) = self.last.try_lock() else {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        if let Some(prev) = *last
+            && now.saturating_duration_since(prev) < PENDING_HANDSHAKE_LOG_INTERVAL
+        {
+            self.suppressed.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        *last = Some(now);
+        Some(self.suppressed.swap(0, Ordering::Relaxed))
+    }
 }
 
 /// Holds one pending-handshake slot for an address until dropped.
@@ -79,11 +119,13 @@ impl PendingHandshakeLimiter {
     }
 
     /// Number of pending handshakes currently held by `ip`.
+    #[cfg(test)]
     pub(crate) fn pending_for(&self, ip: IpAddr) -> u32 {
         self.pending.get(&ip).map(|v| *v).unwrap_or(0)
     }
 
     /// Number of addresses that currently have pending handshakes.
+    #[cfg(test)]
     pub(crate) fn tracked_ips(&self) -> usize {
         self.pending.len()
     }
@@ -91,14 +133,16 @@ impl PendingHandshakeLimiter {
 
 impl Drop for PendingHandshakeGuard {
     fn drop(&mut self) {
-        if let Some(mut pending) = self.limiter.pending.get_mut(&self.ip) {
-            *pending = pending.saturating_sub(1);
+        // Decrement and remove under a single shard lock, so a concurrent
+        // acquire either sees the entry before the decrement or a fresh one.
+        if let Entry::Occupied(mut pending) = self.limiter.pending.entry(self.ip) {
+            let left = pending.get().saturating_sub(1);
+            if left == 0 {
+                pending.remove();
+            } else {
+                *pending.get_mut() = left;
+            }
         }
-        // The predicate runs under the shard lock, so a concurrent acquire
-        // that bumped the counter back above zero keeps the entry.
-        self.limiter
-            .pending
-            .remove_if(&self.ip, |_, pending| *pending == 0);
     }
 }
 
@@ -188,6 +232,25 @@ mod tests {
             assert_eq!(limiter.tracked_ips(), 2);
         }
         assert_eq!(limiter.tracked_ips(), 0);
+    }
+
+    #[test]
+    fn log_throttle_lets_one_line_per_interval_and_counts_the_rest() {
+        let throttle = LogThrottle::default();
+        let start = Instant::now();
+
+        assert_eq!(throttle.note(start), Some(0));
+        for i in 1..=99 {
+            assert_eq!(throttle.note(start + Duration::from_millis(i * 10)), None);
+        }
+
+        let next = start + PENDING_HANDSHAKE_LOG_INTERVAL;
+        assert_eq!(throttle.note(next), Some(99));
+        assert_eq!(throttle.note(next + Duration::from_secs(1)), None);
+        assert_eq!(
+            throttle.note(next + PENDING_HANDSHAKE_LOG_INTERVAL),
+            Some(1)
+        );
     }
 
     #[test]

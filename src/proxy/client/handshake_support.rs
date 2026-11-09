@@ -261,15 +261,40 @@ pub(super) fn admit_pending_handshake(
         PendingHandshakeAdmission::Admitted(guard) => Ok(Some(guard)),
         PendingHandshakeAdmission::Observed(guard) => {
             stats.increment_pending_handshake_per_ip_observed_total();
+            if let Some(suppressed) = shared
+                .pending_handshakes
+                .observed_log
+                .note(std::time::Instant::now())
+            {
+                tracing::info!(
+                    peer = %peer,
+                    limit = config.server.max_pending_handshakes_per_ip,
+                    suppressed,
+                    "Pending handshakes from this IP over the limit (dry run, connection kept)"
+                );
+            }
             Ok(Some(guard))
         }
         PendingHandshakeAdmission::Rejected => {
             stats.increment_pending_handshake_per_ip_rejected_total();
-            debug!(
-                peer = %peer,
-                limit = config.server.max_pending_handshakes_per_ip,
-                "Too many pending handshakes from this IP, closing"
-            );
+            if let Some(suppressed) = shared
+                .pending_handshakes
+                .rejected_log
+                .note(std::time::Instant::now())
+            {
+                warn!(
+                    peer = %peer,
+                    limit = config.server.max_pending_handshakes_per_ip,
+                    suppressed,
+                    "Too many pending handshakes from this IP, closing"
+                );
+            } else {
+                debug!(
+                    peer = %peer,
+                    limit = config.server.max_pending_handshakes_per_ip,
+                    "Too many pending handshakes from this IP, closing"
+                );
+            }
             record_beobachten_class(beobachten, config, peer.ip(), "pending_limit");
             Err(())
         }

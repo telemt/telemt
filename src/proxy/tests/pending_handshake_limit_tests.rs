@@ -1,3 +1,8 @@
+use crate::config::{UpstreamConfig, UpstreamType};
+use crate::crypto::{AesCtr, sha256};
+use crate::protocol::constants::{
+    DC_IDX_POS, HANDSHAKE_LEN, IV_LEN, PREKEY_LEN, PROTO_TAG_POS, ProtoTag, SKIP_LEN,
+};
 use crate::proxy::client::handle_client_stream_with_shared;
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
@@ -11,8 +16,10 @@ use crate::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, DuplexStream, duplex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
+use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 struct Harness {
@@ -22,7 +29,7 @@ struct Harness {
 }
 
 fn harness(limit: u32, dry_run: bool) -> Harness {
-    harness_with_first_byte_idle(limit, dry_run, None)
+    harness_with(limit, dry_run, |_| {})
 }
 
 fn harness_with_first_byte_idle(
@@ -30,16 +37,22 @@ fn harness_with_first_byte_idle(
     dry_run: bool,
     first_byte_idle: Option<u64>,
 ) -> Harness {
+    harness_with(limit, dry_run, |cfg| {
+        if let Some(secs) = first_byte_idle {
+            cfg.timeouts.client_first_byte_idle_secs = secs;
+        }
+    })
+}
+
+fn harness_with(limit: u32, dry_run: bool, customize: impl FnOnce(&mut ProxyConfig)) -> Harness {
     let mut cfg = ProxyConfig::default();
-    if let Some(secs) = first_byte_idle {
-        cfg.timeouts.client_first_byte_idle_secs = secs;
-    }
     cfg.censorship.mask = false;
     cfg.general.modes.classic = true;
     cfg.general.modes.secure = true;
     cfg.timeouts.client_handshake = 30;
     cfg.server.max_pending_handshakes_per_ip = limit;
     cfg.server.pending_handshakes_per_ip_dry_run = dry_run;
+    customize(&mut cfg);
     Harness {
         config: Arc::new(cfg),
         stats: Arc::new(Stats::new()),
@@ -72,7 +85,31 @@ fn silent_connection(
         peer,
         h.config.clone(),
         stats.clone(),
-        Arc::new(UpstreamManager::new(vec![], 1, 1, 1, 10, 1, false, stats)),
+        Arc::new(UpstreamManager::new(
+            vec![UpstreamConfig {
+                upstream_type: UpstreamType::Direct {
+                    interface: None,
+                    bind_addresses: None,
+                    bindtodevice: None,
+                },
+                weight: 1,
+                enabled: true,
+                scopes: String::new(),
+                selected_scope: String::new(),
+                ipv4: None,
+                ipv6: None,
+                prefer: None,
+            }],
+            1,
+            1,
+            // Connect budget in milliseconds: generous, so a loaded test
+            // runner does not time out connecting to the local stand-in DC.
+            5_000,
+            10,
+            1,
+            false,
+            stats,
+        )),
         Arc::new(ReplayChecker::new(128, Duration::from_secs(60))),
         Arc::new(BufferPool::new()),
         Arc::new(SecureRandom::new()),
@@ -218,4 +255,250 @@ fn runtime_generations_share_the_pending_handshake_limiter() {
         new_generation.pending_handshakes.try_acquire(ip, 1, false),
         PendingHandshakeAdmission::Rejected
     ));
+}
+
+const SECRET_HEX: &str = "77777777777777777777777777777777";
+
+/// Builds a valid obfuscated MTProto handshake for `SECRET_HEX` and `dc_idx`.
+fn valid_mtproto_handshake(proto_tag: ProtoTag, dc_idx: i16) -> [u8; HANDSHAKE_LEN] {
+    let secret = hex::decode(SECRET_HEX).unwrap();
+
+    let mut handshake = [0x5Au8; HANDSHAKE_LEN];
+    for (idx, b) in handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN]
+        .iter_mut()
+        .enumerate()
+    {
+        *b = (idx as u8).wrapping_add(1);
+    }
+
+    let mut dec_key_input = Vec::with_capacity(PREKEY_LEN + secret.len());
+    dec_key_input.extend_from_slice(&handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN]);
+    dec_key_input.extend_from_slice(&secret);
+    let dec_key = sha256(&dec_key_input);
+
+    let mut dec_iv = [0u8; IV_LEN];
+    dec_iv.copy_from_slice(&handshake[SKIP_LEN + PREKEY_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN]);
+    let keystream =
+        AesCtr::new(&dec_key, u128::from_be_bytes(dec_iv)).encrypt(&[0u8; HANDSHAKE_LEN]);
+
+    let mut plain = [0u8; HANDSHAKE_LEN];
+    plain[PROTO_TAG_POS..PROTO_TAG_POS + 4].copy_from_slice(&proto_tag.to_bytes());
+    plain[DC_IDX_POS..DC_IDX_POS + 2].copy_from_slice(&dc_idx.to_le_bytes());
+    for idx in PROTO_TAG_POS..HANDSHAKE_LEN {
+        handshake[idx] = plain[idx] ^ keystream[idx];
+    }
+    handshake
+}
+
+/// Accepts connections on a local listener and keeps them open, standing in
+/// for a Telegram DC or a mask backend. Returns the address and the number of
+/// connections accepted so far.
+async fn holding_backend() -> (SocketAddr, Arc<AtomicUsize>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_in_task = accepted.clone();
+    let task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut stream, _)) = listener.accept().await {
+            accepted_in_task.fetch_add(1, Ordering::SeqCst);
+            held.push(tokio::spawn(async move {
+                let mut sink = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut sink).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            }));
+        }
+    });
+    (addr, accepted, task)
+}
+
+async fn wait_accepted(accepted: &AtomicUsize, expected: usize) {
+    for _ in 0..300 {
+        if accepted.load(Ordering::SeqCst) >= expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "backend accepted {}, want {expected}",
+        accepted.load(Ordering::SeqCst)
+    );
+}
+
+// An authenticated session is past the handshake and must not hold a
+// pending-handshake slot while it relays, otherwise with limit = 1 every
+// client could keep only one connection per IP.
+#[tokio::test]
+async fn authenticated_session_does_not_hold_a_pending_slot() {
+    let (dc_addr, dc_accepted, dc_task) = holding_backend().await;
+    let h = harness_with(1, false, |cfg| {
+        cfg.access
+            .users
+            .insert("user".to_string(), SECRET_HEX.to_string());
+        cfg.dc_overrides
+            .insert("2".to_string(), vec![dc_addr.to_string()]);
+    });
+    let ip = "198.51.100.70";
+
+    let (mut session, session_task) = silent_connection(&h, &format!("{ip}:40001"));
+    session
+        .write_all(&valid_mtproto_handshake(ProtoTag::Intermediate, 2))
+        .await
+        .unwrap();
+    wait_accepted(&dc_accepted, 1).await;
+    wait_pending(&h, ip, 0).await;
+    assert!(
+        !session_task.is_finished(),
+        "the session must keep relaying"
+    );
+
+    // A second handshake from the same address is admitted, not rejected.
+    let (_second, second_task) = stalled_connection(&h, &format!("{ip}:40002")).await;
+    wait_pending(&h, ip, 1).await;
+    assert!(!second_task.is_finished());
+    assert_eq!(h.stats.get_pending_handshake_per_ip_rejected_total(), 0);
+
+    drop(session);
+    dc_task.abort();
+}
+
+// Same for the masking fallback: a bad client relayed to the mask backend is
+// no longer in the handshake and must not hold a slot.
+#[tokio::test]
+async fn masking_relay_does_not_hold_a_pending_slot() {
+    let (mask_addr, mask_accepted, mask_task) = holding_backend().await;
+    let h = harness_with(1, false, |cfg| {
+        cfg.general.beobachten = false;
+        cfg.censorship.mask = true;
+        cfg.censorship.mask_unix_sock = None;
+        cfg.censorship.mask_host = Some("127.0.0.1".to_string());
+        cfg.censorship.mask_port = mask_addr.port();
+        cfg.censorship.mask_proxy_protocol = 0;
+    });
+    let ip = "198.51.100.71";
+
+    // A TLS record header with an out-of-range length goes straight to masking.
+    let (mut probe, probe_task) = silent_connection(&h, &format!("{ip}:40001"));
+    probe
+        .write_all(&[0x16, 0x03, 0x01, 0x00, 0x10])
+        .await
+        .unwrap();
+    wait_accepted(&mask_accepted, 1).await;
+    wait_pending(&h, ip, 0).await;
+    assert!(
+        !probe_task.is_finished(),
+        "the masking relay must stay open"
+    );
+
+    let (_second, second_task) = stalled_connection(&h, &format!("{ip}:40002")).await;
+    wait_pending(&h, ip, 1).await;
+    assert!(!second_task.is_finished());
+    assert_eq!(h.stats.get_pending_handshake_per_ip_rejected_total(), 0);
+
+    drop(probe);
+    mask_task.abort();
+}
+
+/// Counts log events at `level` whose message mentions pending handshakes.
+struct PendingLimitLines {
+    level: tracing::Level,
+    lines: Arc<AtomicUsize>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PendingLimitLines {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Message(bool);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 |= format!("{value:?}").contains("ending handshakes");
+                }
+            }
+        }
+        if event.metadata().level() == &self.level {
+            let mut message = Message(false);
+            event.record(&mut message);
+            if message.0 {
+                self.lines.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+async fn assert_flood_logs_one_line(dry_run: bool) {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let lines = Arc::new(AtomicUsize::new(0));
+    let level = if dry_run {
+        tracing::Level::INFO
+    } else {
+        tracing::Level::WARN
+    };
+    let subscriber = tracing_subscriber::registry().with(PendingLimitLines {
+        level,
+        lines: lines.clone(),
+    });
+    let _default = tracing::subscriber::set_default(subscriber);
+
+    let h = harness(1, dry_run);
+    let ip = "198.51.100.80";
+    let (_first, _t1) = stalled_connection(&h, &format!("{ip}:40000")).await;
+    wait_pending(&h, ip, 1).await;
+
+    // Other tests hit the same log callsites without a subscriber; a callsite
+    // registered concurrently with ours can cache "not interested". Rebuild
+    // the cache so this thread-local subscriber sees the flood.
+    tracing::callsite::rebuild_interest_cache();
+
+    const FLOOD: u64 = 20;
+    let mut flood = Vec::new();
+    for port in 1..=FLOOD {
+        flood.push(stalled_connection(&h, &format!("{ip}:{}", 40000 + port)).await);
+    }
+    if dry_run {
+        wait_pending(&h, ip, 1 + FLOOD as u32).await;
+    } else {
+        for (_client, task) in flood.drain(..) {
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("rejected connection must be closed promptly")
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    // Every event is counted by the metric, but only one line is logged.
+    let counted = if dry_run {
+        h.stats.get_pending_handshake_per_ip_observed_total()
+    } else {
+        h.stats.get_pending_handshake_per_ip_rejected_total()
+    };
+    assert_eq!(counted, FLOOD);
+    assert_eq!(lines.load(Ordering::Relaxed), 1);
+    let throttle = if dry_run {
+        &h.shared.pending_handshakes.observed_log
+    } else {
+        &h.shared.pending_handshakes.rejected_log
+    };
+    // The next line, once the interval passes, reports the suppressed rest.
+    let later =
+        std::time::Instant::now() + crate::proxy::pending_handshake::PENDING_HANDSHAKE_LOG_INTERVAL;
+    assert_eq!(throttle.note(later), Some(FLOOD - 1));
+}
+
+#[tokio::test]
+async fn rejection_flood_logs_one_line_and_counts_every_rejection() {
+    assert_flood_logs_one_line(false).await;
+}
+
+#[tokio::test]
+async fn dry_run_flood_logs_one_line_and_counts_every_observation() {
+    assert_flood_logs_one_line(true).await;
 }
