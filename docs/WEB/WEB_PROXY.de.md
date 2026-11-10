@@ -32,9 +32,11 @@ Leiten Sie den vollständigen konfigurierten WEB-Bereich an Telemt weiter. Beim 
 | --- | --- | --- |
 | `GET` | `BASE?bridge=<capability>` | Erstes Bridge-Dokument oder, mit Recovery-`Accept`-Header und optionalem Bearer, die Recovery-Repräsentation. |
 | `POST`, `DELETE` | `BASEapi/v1/session` | Parent-Sitzung erstellen oder schließen. |
-| `POST` | `BASEapi/v1/up` | Uplink des HTTPS-Carriers. |
-| `POST` | `BASEapi/v1/down` | Downlink des HTTPS-Carriers. |
+| `POST`, `PUT` | `BASEapi/v1/up` | Uplink des HTTPS-Carriers. |
+| `POST`, `PUT` | `BASEapi/v1/down` | Downlink des HTTPS-Carriers. |
 | `GET` | `BASEapi/v1/ws` | WebSocket-Upgrade. |
+
+`web.carrier_method` wählt `post` (Standard) oder `put` für neue Bridge-Seiten; der Server akzeptiert beide Methoden auf `/up` und `/down`. Bestehende Seiten behalten ihre Methode bei der Wiederherstellung. `web.conveyor = true` (Standard) erlaubt für neue HTTPS-Sitzungen ein ausdrücklich ausgehandeltes Sendefenster von 1 bis 4; deaktiviert bleibt der Upload sequenziell. Bestehende Sitzungen behalten ihr Fenster. Methoden für Sitzungserstellung, Löschung und WebSocket Upgrade bleiben unverändert. Siehe [Methoden- und Pipelining-Vertrag](../Config_params/CONFIG_PARAMS.de.md#webcarrier_method).
 
 `POST BASEapi/v1/diagnostic` ist eine interne Sideband-Route der generierten Bridge und keine öffentliche Client-API. Das Routing ist groß-/kleinschreibungssensitiv und bytegenau: Es gibt keine Aliase, Varianten mit zusätzlichen oder percent-encoded Schrägstrichen und keine Query-Parameter an Carrier-Endpunkten. Ein falsch geformter Request mit einer vom aktuellen Prozess authentifizierten Capability oder einem solchen Bearer erhält lokal ein nicht cachebares `404`; ein nicht passender Request ohne authentisches Carrier-Material folgt dem konfigurierten Decoy. `base_path` ändert nur diese Routen des WEB-Listeners. Control API, `/web-status` und Prometheus-Metriken erhalten kein Präfix.
 
@@ -57,7 +59,7 @@ tg://webproxy?server=proxy.example.com&secret=dd0123456789abcdef0123456789abcdef
 tg://webproxy?server=proxy.example.com%2Ftelegram%2Fweb&secret=cAABAgMEBQYHCAkKCwwNDg8
 ```
 
-Telemt gibt beim Prozessstart Links für die durch `[general.links].show` ausgewählten WEB-Profile über das vorhandene Log-Target `telemt::links` aus. Root-Links behalten das bisherige hexadezimale Secret. Bei einem Pfad-Link ist `HOST/BASE` im Parameter `server` percent-encoded; das Secret ist ungepolstertes base64url von `0x70 || client_secret`, wobei `client_secret` im Modus `plain` das rohe 16-Byte-Secret und im Modus `dd` den Wert `0xdd || secret` bezeichnet. Die Users-API liefert nur das rohe Secret und keinen WEB-Link. `[general.links].public_host` und `public_port` wirken nur auf native Links und überschreiben keine WEB-vhost-Links.
+Telemt gibt beim Prozessstart Links für die durch `[general.links].show` ausgewählten WEB-Profile über das vorhandene Log-Target `telemt::links` aus. Root-Links behalten das bisherige hexadezimale Secret. Bei einem Pfad-Link ist `HOST/BASE` im Parameter `server` percent-encoded; das Secret ist ungepolstertes base64url von `0x70 || client_secret`, wobei `client_secret` im Modus `plain` das rohe 16-Byte-Secret und im Modus `dd` den Wert `0xdd || secret` bezeichnet. `GET /v1/users/{username}/links?transport=web` liefert WEB-Links mit Zugangsdaten über denselben Formatter, unabhängig vom `show`-Filter für die Startausgabe. `[general.links].public_host` und `public_port` wirken nur auf native Links und überschreiben keine WEB-vhost-Links.
 
 ## Voraussetzungen
 
@@ -655,7 +657,7 @@ curl -sS -X POST http://127.0.0.1:9091/v1/users/web-user/rotate-secret \
   -d '{}'
 ```
 
-Nach einer Secret-Rotation erstellt der Config-Watcher die WEB-Capabilities neu. Die Users-API liefert das Secret, aber keine `tg://webproxy`-URL. Erstellen Sie den Link mit dem konfigurierten Hostnamen und der `plain`- oder `dd`-Darstellung des Profils. Entfernen und aktivieren Sie vor dem Löschen eines Benutzers zuerst das WEB-Profil, das auf ihn verweist, damit die resultierende Konfiguration gültig bleibt.
+Nach einer Secret-Rotation erstellt der Config-Watcher die WEB-Capabilities neu. Rufen Sie `GET /v1/users/{username}/links?transport=web` ab und prüfen Sie vor der Ausgabe wirksamer Links, ob `usable=true` gilt. Solange das veröffentlichte Profil und die prozessweite Zulassung das neue Secret nicht akzeptieren, enthält die Antwort keine Links und meldet pending oder unavailable. `view=desired` zeigt eine Vorschau für exakte konfigurierte Hosts und Pfade mit `usable=false`; Wildcard-Muster werden nie als Links ausgegeben. Die [Beschreibung der WEB-Links](../Architecture/API/API.md#web-user-links) erläutert Grenzen des Snapshots und Fehler. Entfernen und aktivieren Sie vor dem Löschen eines Benutzers zuerst das WEB-Profil, das auf ihn verweist, damit die resultierende Konfiguration gültig bleibt.
 
 Der vollständige Vertrag für Requests, Revisionen, Fehler und alle Benutzer-Endpunkte steht in der [Dokumentation der Control API](../Architecture/API/API.md).
 

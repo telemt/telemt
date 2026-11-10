@@ -32,9 +32,11 @@ Let `BASE` mean `/` for an empty `base_path`, or `/<base_path>/` otherwise. The 
 | --- | --- | --- |
 | `GET` | `BASE?bridge=<capability>` | Initial bridge document, or the recovery representation when the recovery `Accept` header and optional bearer are present. |
 | `POST`, `DELETE` | `BASEapi/v1/session` | Create or close the parent session. |
-| `POST` | `BASEapi/v1/up` | HTTPS carrier uplink. |
-| `POST` | `BASEapi/v1/down` | HTTPS carrier downlink. |
+| `POST`, `PUT` | `BASEapi/v1/up` | HTTPS carrier uplink. |
+| `POST`, `PUT` | `BASEapi/v1/down` | HTTPS carrier downlink. |
 | `GET` | `BASEapi/v1/ws` | WebSocket Upgrade. |
+
+`web.carrier_method` selects `post` (default) or `put` for new bridge pages; the server accepts both on `/up` and `/down`. Existing pages retain their method during recovery. `web.conveyor = true` (default) permits an explicitly negotiated uplink window of 1–4 for new HTTPS sessions; disabling it retains serialized uploads. Existing sessions keep their window. These settings do not alter session creation, deletion or WebSocket Upgrade methods. See the [method and conveyor contract](../Config_params/CONFIG_PARAMS.en.md#webcarrier_method).
 
 `POST BASEapi/v1/diagnostic` is an internal generated-bridge sideband route, not a public client API. Route matching is case-sensitive and byte-exact: there are no aliases, extra-slash variants, percent-encoded slash variants, or query parameters on carrier endpoints. A wrong-shaped request containing a capability or bearer authenticated by the current process receives a local no-store `404`; an unmatched request without authentic carrier material follows the configured decoy. `base_path` changes only these WEB listener routes. It does not prefix the Control API, `/web-status`, or Prometheus metrics.
 
@@ -57,7 +59,7 @@ tg://webproxy?server=proxy.example.com&secret=dd0123456789abcdef0123456789abcdef
 tg://webproxy?server=proxy.example.com%2Ftelegram%2Fweb&secret=cAABAgMEBQYHCAkKCwwNDg8
 ```
 
-Telemt prints links at process startup for WEB profiles selected by `[general.links].show` through the existing `telemt::links` log target. Root links keep the legacy hexadecimal secret. A path link percent-encodes `HOST/BASE` in `server` and uses unpadded base64url of `0x70 || client_secret`, where `client_secret` is the raw 16-byte secret in `plain` mode or `0xdd || secret` in `dd` mode. The users API returns only the raw secret, not a WEB link. `[general.links].public_host` and `public_port` affect native links only and do not override WEB vhost links.
+Telemt prints links at process startup for WEB profiles selected by `[general.links].show` through the existing `telemt::links` log target. Root links keep the legacy hexadecimal secret. A path link percent-encodes `HOST/BASE` in `server` and uses unpadded base64url of `0x70 || client_secret`, where `client_secret` is the raw 16-byte secret in `plain` mode or `0xdd || secret` in `dd` mode. `GET /v1/users/{username}/links?transport=web` returns credential-bearing WEB links using the same formatter, independently of the startup `show` filter. `[general.links].public_host` and `public_port` affect native links only and do not override WEB vhost links.
 
 ## Prerequisites
 
@@ -641,7 +643,7 @@ curl -sS -X POST http://127.0.0.1:9091/v1/users/web-user/rotate-secret \
   -d '{}'
 ```
 
-The config watcher rebuilds WEB capabilities after a secret rotation. The users API returns the secret, not a `tg://webproxy` URL; construct the link with the configured hostname and the profile's `plain` or `dd` representation. Before deleting a user referenced by a WEB profile, remove and apply that profile first so the resulting configuration remains valid.
+The config watcher rebuilds WEB capabilities after a secret rotation. Read `GET /v1/users/{username}/links?transport=web` and check `usable=true` before provisioning its effective links. Until the published binding and process admission accept the new credential, the response withholds links as pending or unavailable. `view=desired` previews exact configured hosts and paths with `usable=false`; wildcard patterns are never emitted as links. See [WEB user links](../Architecture/API/API.md#web-user-links) for snapshot limits and errors. Before deleting a user referenced by a WEB profile, remove and apply that profile first so the resulting configuration remains valid.
 
 See the complete [Control API contract](../Architecture/API/API.md) for request envelopes, revisions, failure modes, and all user endpoints.
 
