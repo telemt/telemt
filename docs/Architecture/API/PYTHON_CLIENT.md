@@ -48,6 +48,7 @@ Existing statistics commands retain their names: `health`, `info`, `status`,
 | `reload-status ID` | `reload_status(id)` | Read one retained operation. |
 | `reload-wait ID [--expected-revision REV]` | `wait_reload(id, ...)` | Poll to `succeeded`, `failed` or `rolled_back`. |
 | `users`, `user NAME` | `list_users()`, `get_user(name)` | User/link responses can carry provisioning secrets. |
+| `user-links NAME [--transport web] [--view effective]` | `user_links(name, transport="web", view="effective")` | Credential-bearing exact WEB profiles; `view="desired"` always returns an unusable preview. |
 | `create NAME`, `patch NAME`, `delete NAME` | `create_user()`, `patch_user()`, `delete_user()` | Existing convenience methods and command names remain available. |
 | `patch NAME --json FILE` or `--clear FIELD` | `patch_user_fields(name, fields)` | Exact omitted/null/value semantics. |
 | `secret NAME [--secret HEX]` | `rotate_secret(name, ...)` | Implemented rotation endpoint, not a reserved route. |
@@ -69,10 +70,23 @@ Existing statistics commands retain their names: `health`, `info`, `status`,
 | `web-resume --runtime-instance INSTANCE` | `web_resume(instance)` | Resumes operator admission subject to other policy gates. |
 | `gen-secret` | `TelemtAPI.generate_secret()` | Generates a new 32-hex secret locally. |
 
-The client covers all 53 JSON operations in the operation catalog. Open the
+The client covers all 54 JSON operations in the operation catalog. Open the
 HTML `/web-status` viewer in a browser; it is not decoded as a JSON response.
 Feature gates and missing runtime planes still return the server's documented
 errors. Discovery availability is a snapshot, not a reservation.
+
+WEB provisioning uses the dedicated user-link endpoint. The client sends
+`transport=web` explicitly and defaults to `view=effective`. It preserves the
+server's `state`, `usable`, `reason`, runtime identity and link rows; a successful
+HTTP response alone does not mean a link is usable. After a rotation, retry a
+pending effective response after configuration publication. A desired preview
+contains credentials but always has `usable=false`. See the
+[WEB user-link contract](API.md#web-user-links).
+
+```bash
+python3 tools/telemt_api.py user-links alice --json-output
+python3 tools/telemt_api.py user-links alice --view desired --json-output
+```
 
 ## Sparse values and user updates
 
@@ -294,7 +308,6 @@ Run the local mock HTTP and CLI contract suite from the repository root:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/tests -v
-python3 tools/generate_api_openapi.py --check
 ```
 
 These checks need no live proxy, Telegram connection or deployment credentials.
