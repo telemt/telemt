@@ -222,6 +222,7 @@ operations or pending publication; they are not silently promoted to success.
 | `GET /v1/users` | Returns disk-first user views sorted by username. |
 | `POST /v1/users` | Creates a user and returns the effective user view plus secret. |
 | `GET /v1/users/{username}` | Returns one disk-first user view or `404` when absent. |
+| `GET /v1/users/{username}/links?transport=web` | Credential-bearing WEB links for this user's exact profiles; effective by default, explicitly unusable desired preview available. |
 | `PATCH /v1/users/{username}` | Updates selected per-user fields with JSON Merge Patch semantics. |
 | `DELETE /v1/users/{username}` | Deletes one user and related API-managed per-user access-map entries. It does not modify `access.user_source_deny`. |
 | `POST /v1/users/{username}/rotate-secret` | Rotates one user's secret and returns the effective secret. |
@@ -234,6 +235,7 @@ operations or pending publication; they are not silently promoted to success.
 | HTTP | `error.code` | Trigger |
 | --- | --- | --- |
 | `400` | `bad_request` | Invalid JSON, validation failures, malformed request body. |
+| `400` | `too_many_links` | WEB link projection exceeds 4096 rows; no partial link response is returned. |
 | `400` | `access_not_editable` | `PATCH /v1/config` body contains an `access` key (managed via users API). |
 | `400` | `section_not_editable` | `PATCH /v1/config` body contains an unknown top-level key or a non-null, non-object partial section. |
 | `400` | `field_not_editable` | `PATCH /v1/config` body contains a forbidden nested field under a partially editable section (e.g. `server.api.auth_header`, `server.port`, `network.ipv4`). |
@@ -243,7 +245,7 @@ operations or pending publication; they are not silently promoted to success.
 | `404` | `not_found` | Unknown route, unknown user, or unsupported sub-route. |
 | `405` | `method_not_allowed` | Unsupported method for `/v1/users/{username}` route shape. |
 | `409` | `revision_conflict` | `If-Match` mismatch, or the source graph/owner changed during a fenced write. |
-| `409` | `runtime_conflict` | Active generation/config publication changed during config preparation, or `If-Runtime-Match` is stale. |
+| `409` | `runtime_conflict` | Active generation/config publication changed during config preparation, `If-Runtime-Match` is stale, or WEB link configuration/admission changed while being sampled. |
 | `429` | `config_preflight_busy` | Both config preflight preparation slots are occupied. |
 | `504` | `config_preflight_timeout` | Config preflight exceeded its 30-second deadline. |
 | `409` | `reload_in_progress` | Another reload operation is non-terminal. |
@@ -294,9 +296,8 @@ applied. Reading that revision requires the source graph to remain readable.
 ### CapabilitiesData
 
 Top-level fields are `api_version` (`v1`), `schema_version` (`1`),
-`software_version`, `config_schema`, `openapi_artifact`, `read_only`,
-`availability_scope`, and `operations`. `openapi_artifact` identifies the versioned
-repository artifact; it is not another HTTP route.
+`software_version`, `config_schema`, `read_only`, `availability_scope`, and
+`operations`.
 
 Each operation has a stable `id`, `method`, canonical `path`, optional `aliases`,
 `gate`, possible success status codes in `success`, `credential_bearing`, optional
@@ -371,20 +372,19 @@ validation, and reset is unsupported. One mutation may touch only one independen
 writable source. This differs from supported user PATCH fields, where null
 removes an override. Discovery does not expand either write allowlist.
 
-### Versioned artifact and maintenance
+### Contract maintenance
 
-[openapi-v1.json](openapi-v1.json) publishes the implemented routes, aliases,
-request shapes and common response envelopes, with detailed schemas for both
-discovery responses. Legacy response payloads and query filters remain described
-in this reference. The artifact is intentionally not a complete configuration
-validator; `/v1/config/schema` supplements it with field contracts.
+`GET /v1/capabilities` lists implemented routes, aliases and operation metadata;
+`GET /v1/config/schema` describes configuration field contracts. Request shapes,
+response envelopes and query filters are documented in this reference.
 
-Regenerate with `python3 tools/generate_api_openapi.py` and verify with
-`python3 tools/generate_api_openapi.py --check`. `cargo test --bin telemt
-api::discovery` checks route/field inventories, defaults, enums, application
-classification, credential exclusion and HTTP admission. Contract changes must
-update the registry and artifact together. Additive metadata and operations are
-compatible; incompatible discovery changes require a new `schema_version`.
+`cargo test --bin telemt api::discovery` checks the operation catalog directly
+against routing, plus field inventories, defaults, enums, application
+classification, credential exclusion and HTTP admission. The Python client
+suite checks user fields against the Rust request DTOs. Contract changes must
+update the runtime registries, request DTOs, clients and documentation together.
+Additive metadata and operations are compatible; incompatible discovery changes
+require a new `schema_version`.
 
 ## Body and JSON Semantics
 
@@ -1832,7 +1832,7 @@ JA3 follows the Salesforce ClientHello field order. JA4 follows the FoxIO TLS-cl
 
 #### `UserLinks`
 
-`UserLinks` contains only native MTProxy links. It never contains a WEB `tg://webproxy` link; WEB links use a separate startup-only derivation contract based on every configured exact hostname selected by `web.vhosts[].host` or `hosts` (never a wildcard pattern), `base_path`, and profile secret mode.
+`UserLinks` contains only native MTProxy links. WEB `tg://webproxy` links are available separately through [WEB user links](#web-user-links), using the same formatter as startup output and each exact hostname selected by `web.vhosts[].host` or `hosts`, `base_path`, and profile secret mode.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -1858,6 +1858,71 @@ Link generation uses active config and enabled modes:
 - If no host can be resolved from listeners, fallback is startup-detected `IPv4 -> IPv6`.
 - Final compatibility fallback uses `listen_addr_ipv4`/`listen_addr_ipv6` when routable, otherwise `"UNKNOWN"`.
 - User rows are sorted by `username` in ascending lexical order.
+
+### WEB user links
+
+`GET /v1/users/{username}/links?transport=web` returns the common success envelope
+with the captured desired-source revision. `transport=web` is required;
+`view=effective` is the default and `view=desired` requests a preview. Unknown,
+duplicate or invalid query parameters return `400 bad_request`. The endpoint
+inherits API authentication, whitelist and enabled gates, permits `read_only`,
+and advertises `credential_bearing=true` in capabilities.
+
+| Data field | Type | Meaning |
+| --- | --- | --- |
+| `username`, `transport`, `view` | `string` | Requested user, `web`, and `effective` or `desired`. |
+| `state` | `string` | `available`, `pending`, `unavailable`, or `preview`. |
+| `usable` | `bool` | True only for an available effective projection passing the checks below. |
+| `reason` | optional `string` | Stable state reason; absent for available links. |
+| `runtime` | object | Sampled active `active_generation`, `config_epoch`, and opaque `runtime_match`, also when returning a desired preview. |
+| `admission_epoch`, `web_lifecycle_epoch` | `u64` | Sampled process user-admission and WEB publication epochs. |
+| `links` | object array | At most 4096 rows, each with `host`, `base_path`, `secret_mode`, and credential-bearing `link`. |
+
+Only profiles belonging to the route user are included. `host` and `hosts`
+expand to exact normalized hostnames; wildcard selectors are never links.
+`base_path` is empty for root or a case-preserving path without outer slashes.
+`secret_mode` is `plain` or `dd`. Root links retain hexadecimal secrets; path
+links percent-encode `HOST/BASE` and encode `0x70 || client_secret` as unpadded
+base64url. The startup formatter supplies both representations.
+`general.links.show`, `public_host` and `public_port` do not filter or override
+these per-profile API links.
+
+For `usable=true`, the active config must enable the user and WEB, its prepared
+exact profile must carry the current credential, and the initialized process
+admission authority must accept that credential. The sampled desired user must
+still exist, be enabled and have the same secret. The published WEB lifecycle
+must be `running` with a retained process runtime, nonempty listener set and open
+operator/generation admission. This is a configuration/admission snapshot, not a
+reservation or a guarantee of external TLS reachability, listener health, quota,
+expiration, source-IP policy, or client connectivity. No bootstrap token or
+session is issued by this read.
+
+| State | Reasons and behavior |
+| --- | --- |
+| `available` | `usable=true`, nonempty effective links. |
+| `pending` | `user_pending`, `credential_pending`, `web_pending`, `web_config_pending`, or `profile_pending`; `usable=false`, empty links until publication/credential convergence. |
+| `unavailable` | `user_disabled`, `user_deleted`, `user_disabled_or_deleted`, `admission_unavailable`, `web_disabled`, `web_unavailable`, `admission_closed`, or `no_exact_profile`; `usable=false`, empty links. |
+| `preview` | `desired_preview`; encoded desired exact profiles, always `usable=false`, including when WEB is disabled or absent. No DNS resolution or static-site acquisition is performed. |
+
+Disabled users receive no links in either view. A deleted user still present in
+the active config returns `unavailable/user_deleted` in the effective view;
+otherwise a missing user returns `404 not_found`. After secret rotation, old
+effective credentials are withheld until config, WEB binding and process
+admission agree. After a base-path edit, the existing effective path can remain
+available while `view=desired` previews the new path. A generation/config,
+admission or WEB lifecycle change during the read returns `409 runtime_conflict`
+without partial links; retry the GET. Invalid/unreadable desired source returns
+a bounded `500 internal_error` without source text.
+
+```bash
+curl -sS 'http://127.0.0.1:9091/v1/users/alice/links?transport=web' \
+  -H "Authorization: ${TELEMT_API_AUTH}"
+curl -sS 'http://127.0.0.1:9091/v1/users/alice/links?transport=web&view=desired' \
+  -H "Authorization: ${TELEMT_API_AUTH}"
+```
+
+The response contains provisioning credentials. Host/path/link details remain
+absent from general WEB status and Prometheus labels.
 
 ### `CreateUserResponse`
 | Field | Type | Description |

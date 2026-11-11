@@ -32,9 +32,11 @@ WEB-listener Telemt
 | --- | --- | --- |
 | `GET` | `BASE?bridge=<capability>` | Исходный bridge document или recovery representation при наличии recovery-заголовка `Accept` и необязательного bearer. |
 | `POST`, `DELETE` | `BASEapi/v1/session` | Создание или закрытие parent session. |
-| `POST` | `BASEapi/v1/up` | Uplink HTTPS carrier. |
-| `POST` | `BASEapi/v1/down` | Downlink HTTPS carrier. |
+| `POST`, `PUT` | `BASEapi/v1/up` | Uplink HTTPS carrier. |
+| `POST`, `PUT` | `BASEapi/v1/down` | Downlink HTTPS carrier. |
 | `GET` | `BASEapi/v1/ws` | WebSocket Upgrade. |
+
+`web.carrier_method` выбирает `post` (по умолчанию) или `put` для новых страниц моста; сервер принимает оба метода на `/up` и `/down`. Существующие страницы сохраняют метод при восстановлении. `web.conveyor = true` (по умолчанию) разрешает явно согласуемое окно отправки от 1 до 4 для новых HTTPS-сессий; при отключении отправка последовательная. Действующие сессии сохраняют своё окно. Эти параметры не меняют методы создания и удаления сессии или WebSocket Upgrade. См. [контракт метода и конвейера](../Config_params/CONFIG_PARAMS.ru.md#webcarrier_method).
 
 `POST BASEapi/v1/diagnostic` — внутренний sideband-маршрут сгенерированного bridge, а не публичный client API. Сопоставление путей регистрозависимо и побайтно точно: нет aliases, вариантов с лишним или percent-encoded слешем и query parameters у carrier endpoints. Запрос неправильной формы с capability или bearer, аутентифицированным текущим процессом, получает локальный не кэшируемый `404`; несовпавший запрос без подлинного carrier material следует в настроенный decoy. `base_path` меняет только эти маршруты WEB-listener. Он не добавляется к Control API, `/web-status` или Prometheus metrics.
 
@@ -57,7 +59,7 @@ tg://webproxy?server=proxy.example.com&secret=dd0123456789abcdef0123456789abcdef
 tg://webproxy?server=proxy.example.com%2Ftelegram%2Fweb&secret=cAABAgMEBQYHCAkKCwwNDg8
 ```
 
-При запуске процесса Telemt печатает ссылки для WEB-профилей, выбранных в `[general.links].show`, через существующий log target `telemt::links`. Root-ссылки сохраняют прежний шестнадцатеричный secret. В path-ссылке `HOST/BASE` в параметре `server` percent-encoded, а secret равен base64url без padding от `0x70 || client_secret`, где `client_secret` — исходный 16-байтовый secret для режима `plain` либо `0xdd || secret` для режима `dd`. Users API возвращает только исходный секрет, а не WEB-ссылку. `[general.links].public_host` и `public_port` влияют только на нативные ссылки и не переопределяют ссылки WEB-vhost.
+При запуске процесса Telemt печатает ссылки для WEB-профилей, выбранных в `[general.links].show`, через существующий log target `telemt::links`. Root-ссылки сохраняют прежний шестнадцатеричный secret. В path-ссылке `HOST/BASE` в параметре `server` percent-encoded, а secret равен base64url без padding от `0x70 || client_secret`, где `client_secret` — исходный 16-байтовый secret для режима `plain` либо `0xdd || secret` для режима `dd`. `GET /v1/users/{username}/links?transport=web` возвращает WEB-ссылки с учётными данными через тот же форматтер, независимо от фильтра `show` для вывода при запуске. `[general.links].public_host` и `public_port` влияют только на нативные ссылки и не переопределяют ссылки WEB-vhost.
 
 ## Предварительные требования
 
@@ -648,7 +650,7 @@ curl -sS -X POST http://127.0.0.1:9091/v1/users/web-user/rotate-secret \
   -d '{}'
 ```
 
-После ротации секрета config watcher перестраивает WEB capabilities. Users API возвращает секрет, но не URL `tg://webproxy`; соберите ссылку из настроенного hostname и представления `plain` или `dd` соответствующего профиля. Перед удалением пользователя, на которого ссылается WEB-профиль, сначала удалите и примените этот профиль, чтобы итоговая конфигурация оставалась валидной.
+После ротации секрета config watcher перестраивает WEB capabilities. Запросите `GET /v1/users/{username}/links?transport=web` и проверьте `usable=true` перед выдачей действующих ссылок. Пока опубликованный профиль и механизм допуска процесса не принимают новый секрет, ответ не содержит ссылок и сообщает pending или unavailable. `view=desired` показывает предварительные ссылки для точных хостов и путей с `usable=false`; wildcard-шаблоны в ссылки не попадают. Ограничения снимка и ошибки описаны в [контракте WEB-ссылок](../Architecture/API/API.md#web-user-links). Перед удалением пользователя, на которого ссылается WEB-профиль, сначала удалите и примените этот профиль, чтобы итоговая конфигурация оставалась валидной.
 
 Полный контракт запросов, revisions, ошибок и всех user endpoints приведён в [документации Control API](../Architecture/API/API.md).
 
