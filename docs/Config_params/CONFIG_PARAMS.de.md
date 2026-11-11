@@ -1,5 +1,7 @@
 # Telemt-Referenz der Konfigurationsparameter
 
+[English](CONFIG_PARAMS.en.md) · [Русский](CONFIG_PARAMS.ru.md) · [Deutsch](CONFIG_PARAMS.de.md) · [Terminology](../TERMINOLOGY.md)
+
 Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akzeptiert.
 
 > [!NOTE]
@@ -10,7 +12,20 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 >
 > Die in diesem Dokument beschriebenen Konfigurationsparameter richten sich an erfahrene Nutzer und dienen dem Feintuning. Änderungen ohne klares Verständnis der jeweiligen Funktion können zu Instabilität oder anderem unerwarteten Verhalten führen. Gehen Sie entsprechend vorsichtig und auf eigenes Risiko vor.
 
-> `Hot-Reload` zeigt an, ob der Config-Watcher einen geänderten Wert direkt übernimmt. `✘` bedeutet, dass der Watcher ihn nicht anwendet; je nach Feld ist für die vollständige Wirkung ein prozessinterner Runtime-Generation-Reload oder ein Prozessneustart erforderlich.
+## Konfigurationsänderungen anwenden
+
+`Hot-Reload` beschreibt nur die Dateiüberwachung: `✔` bedeutet, dass sie den neuen Wert übernehmen kann; bei `✘` bleibt der aktive Wert erhalten. `telemt reload` sendet SIGHUP an dieselbe Dateiüberwachung und erzeugt keine neue Laufzeitgeneration.
+
+| Verfahren | Einstellungen und Wirkung |
+| --- | --- |
+| Automatisches Neuladen der Datei | Mit `✔` markierte Felder, etwa `general.log_level`, `network.dns_overrides` und unterstützte Benutzerlimits. Die Übernahme erfolgt asynchron. Die Feldbeschreibung erläutert, ob laufende Vorgänge oder nur neue Verbindungen betroffen sind. |
+| Expliziter Generationswechsel | `[censorship]`, `[timeouts]`, `upstreams` und die von der Generation verwalteten API-Einstellungen. Verwenden Sie `POST /v1/system/reload` oder einen zulässigen Konfigurations-PATCH mit `reload=instant` bzw. `reload=drain`. Warten Sie auf den Abschluss der Operation. Ob bestehende Verbindungen erhalten bleiben, hängt vom Modus ab. |
+| Prozessneustart | `logging`, `general.data_path`, `general.quota_state_path`, `general.disable_colors`, `general.direct_relay_buffer_budget_max_bytes`, `server.metrics_listen`, `server.metrics_port`, `server.max_connections`, `server.conntrack_control`, `server.listen_unix_sock`, `server.listen_unix_sock_perm`, die API-Felder `enabled`/`listen`/`runtime_edge_events_capacity`, `web.limits`, `web.allow_wildcard_hosts` und `web.decoy_fasttrack_mode`. |
+| Bedingt anwendbar | Adressänderungen nativer Listener sind nur im unterstützten Rebind-Verfahren möglich. WEB-Listener, Socket- und Vertrauensregeln sowie SYN-Regeln erfordern einen Prozessneustart. WEB-Lern- und Diagnoseeinstellungen können zurückgestellt werden, wenn sie größere Prozesslimits voraussetzen. |
+
+Für über die API bearbeitbare Felder zeigt `POST /v1/config/validate` vor dem Speichern `apply.watcher_paths`, `apply.generation_paths` und `apply.process_restart_paths`. Prüfen Sie danach das Operationsergebnis, `deferred_process_fields` und `GET /v1/config/state`. Das ältere Feld `restart_required` bedeutet, dass die Änderung außerhalb der Dateiüberwachung liegt; daraus folgt allein noch kein Prozessneustart. Siehe [API-Vertrag zum Neuladen](../Architecture/API/API.md#runtime-reload-endpoints) und [CLI-Referenz](../CLI.de.md).
+
+WEB-Einstellungen haben unterschiedliche Lebensdauern: `carrier_method` und Retry-Jitter gelten für neu erzeugte Bridge-Seiten, `conveyor` wird für neue Sitzungen ausgehandelt, und Prozesslimits bleiben bis zum Neustart fest. Bestehende Seiten und Sitzungen behalten die im [WEB-Leitfaden](../WEB/WEB_PROXY.de.md) beschriebenen Regeln.
 
 # Inhaltsverzeichnis
  - [Schlüssel auf oberster Ebene](#schlüssel-auf-oberster-ebene)
@@ -28,6 +43,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
  - [web.debug](#webdebug)
  - [web.limits](#weblimits)
  - [web.limits.wildcard](#weblimitswildcard)
+ - [web.retry_jitter](#webretry_jitter)
  - [web.timeouts](#webtimeouts)
  - [web.vhosts](#webvhosts)
  - [web.vhosts.decoy](#webvhostsdecoy)
@@ -42,7 +58,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
 | Schlüssel | Typ | Default | Hot-Reload |
 | --- | --- | --- | --- |
-| [`include`](#include) | `String` (Proberdirektive) | — | `✔` |
+| [`include`](#include) | `String` (Include-Anweisung) | — | `✔` |
 | [`show_link`](#show_link) | `"*"` oder `String[]` | `[]` (`ShowLink::None`) | `✘` |
 | [`logging`](#logging) | Tabelle | Default-Werte | `✘` |
 | [`dc_overrides`](#dc_overrides) | `Map<String, String or String[]>` | `{}` | `✘` |
@@ -106,7 +122,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 
 ## logging.destination
   - **Einschränkungen / Validierung**: Muss `stderr`, `syslog` oder `file` sein. `syslog` wird nur auf Unix-Plattformen unterstützt. `file` erfordert `logging.path`.
-  - **Beschreibung**: Wählt das Runtime-Log-Ziel aus. CLI-Flags überschreiben diesen Wert.
+  - **Beschreibung**: Legt fest, wohin Telemt Protokollmeldungen schreibt. Kommandozeilenoptionen haben Vorrang.
   - **Beispiel**:
 
     ```toml
@@ -116,7 +132,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```
 ## logging.path
   - **Einschränkungen / Validierung**: Erforderlich, wenn `logging.destination = "file"`; darf nicht leer sein.
-  - **Beschreibung**: Dateipfad, der für die File-Logging verwendet wird. Bei der Zeitrotation wird der Dateiname als rollierendes Präfix verwendet.
+  - **Beschreibung**: Pfad für die Protokolldatei. Bei zeitgesteuerter Rotation dient der Dateiname als Präfix der erzeugten Dateien.
   - **Beispiel**:
 
     ```toml
@@ -2638,6 +2654,8 @@ Der WEB-Modus transportiert MTProxy-Datenverkehr von Telegram Desktop über HTTP
 | `enabled` | `bool` | `false` | `✔` |
 | `allow_wildcard_hosts` | `bool` | `false` | `✘` |
 | `carrier` | `"https"`, `"https-lanes"`, `"websocket"` oder `"websocket-lanes"` | `"https"` | `✔` |
+| [`carrier_method`](#webcarrier_method) | `"post"`, `"put"` | `"post"` | `✔` |
+| [`conveyor`](#webconveyor) | `bool` | `true` | `✔` |
 | `carriers` | `false` oder ein nicht leeres Array eindeutiger Carrier | `false` | `✔` |
 | `carrier_learning` | `bool` | `true` | `✔` |
 | `carrier_negotiation_aggressiveness` | `"conservative"`, `"balanced"` oder `"aggressive"` | `"conservative"` | `✔` |
@@ -2657,6 +2675,24 @@ Fehlt `carriers` oder ist es `false`, sind Auto-Negotiation und Lernen deaktivie
 `decoy_fasttrack_mode` ist restart-only und betrifft nur Capability-Arbeit für `GET/HEAD` am konfigurierten Basis-Root. `off` behält den vollständigen Scan bei, `shadow` zählt geeignete Requests ohne den Scan zu überspringen, und `enforce` überspringt ihn nur für `HEAD` oder eine fehlende/nicht kanonische `bridge`-Query. Ein kanonisch geformtes Bridge-`GET` scannt immer alle Profile des ausgewählten vhost. Die Optimierung begrenzt keine feindlichen kanonischen Probes; `enforce` muss hinter dem produktiven TLS-Terminator auf Timing-Unterscheidbarkeit geprüft werden.
 
 `carrier_learning` wirkt nur bei aktivierter Negotiation. Das Lernen ist prozesslokal, speicherresident, begrenzt und ausschließlich positiv: Nur ein Carrier, der den serverdefinierten Zustand healthy erreicht, liefert Evidenz. `conservative` erfordert die breiteste Evidenz und deaktiviert IP-Ranking, `balanced` verwendet mittlere User-Agent-/Profil-Schwellen sowie geeignete öffentliche IPs nur als Tie-Breaker, und `aggressive` reagiert auf die ersten begrenzten Samples. Vom Client gemeldete Fehler bleiben rein diagnostisch und erzeugen keine negative Evidenz. Ein Reload wendet die Richtlinie auf neue Negotiation-Ketten an und verwirft inkompatible gespeicherte Evidenz. Das Deaktivieren von WEB beendet die Ausgabe neuer Bridge- und Session-Zugangsdaten; zum Widerrufen aktiver Sitzungen eines einzelnen Benutzers verwenden Sie die Users-API.
+
+## web.carrier_method
+
+`"post"` (Standard) oder `"put"` bestimmt die HTTP-Methode neu erzeugter Bridge-Seiten für `/api/v1/up` und `/api/v1/down`, einschließlich Wiederholungen. Der Server akzeptiert unabhängig davon beide Methoden. Sitzungserstellung und Diagnose verwenden weiterhin `POST`, das Schließen einer Sitzung `DELETE` und WebSocket Upgrade `GET`. Der TLS-Terminator muss `POST` und `PUT` durchlassen. `put` ermöglicht die Wiederverwendung von Verbindungen in Linux-WebKitGTK-Implementierungen, die idempotente Methoden unterscheiden; eine geringere Latenz muss am jeweiligen Client gemessen werden.
+
+Die Dateiüberwachung übernimmt diese Einstellung. Bestehende Seiten behalten ihre Methode auch bei der Wiederherstellung einer Sitzung. Zugangsdaten werden dadurch nicht rotiert und aktive Sitzungen nicht verschoben.
+
+## web.conveyor
+
+`true` (Standard) erlaubt HTTP-Uplink-Pipelining mit einem begrenzten Fenster für neue `https`- und `https-lanes`-Sitzungen. Der Client bietet über `X-Telemt-Up-Window` ausdrücklich einen Wert von `1` bis `4` an; der Server bestätigt das Fenster. Bei `false` oder einem WebSocket-Transport wird ein ausdrückliches Angebot mit Fenster `1` beantwortet. Ohne diesen Header bleiben Anfragen sequenziell, und die Antwort enthält keinen Fenster-Header. Das native `WELCOME`-Format bleibt unverändert.
+
+Das ausgehandelte Fenster erlaubt DATA vor der OPEN-Bestätigung. Reihenfolge, identische Wiederholungen, Bestätigungsprüfungen und Speicherbudgets bleiben erhalten. Die Dateiüberwachung ändert die Regel für neue Sitzungen; bestehende Sitzungen behalten ihr Fenster. Diese Einstellung ist unabhängig von der automatischen Transportauswahl.
+
+```toml
+[web]
+carrier_method = "post"
+conveyor = true
+```
 
 # [web.debug]
 
@@ -2918,8 +2954,8 @@ Vor dem Hinzufügen von Mustern über die API muss `web.allow_wildcard_hosts` im
     client_handshake = 30
     ```
 ## client_first_byte_idle_secs
-  - **Einschränkungen / Validierung**: `u64` (Sekunden). `0` deaktiviert die Erzwingung des Leerlaufs im ersten Byte.
-  - **Beschreibung**: Maximale Leerlaufzeit zum Warten auf das erste Client-Payloadbyte nach dem Sitzungsaufbau.
+  - **Einschränkungen / Validierung**: `u64` (Sekunden). `0` deaktiviert das Zeitlimit für das Warten auf das erste Client-Byte.
+  - **Beschreibung**: Maximale Wartezeit auf das erste Client-Byte vor der Verarbeitung des Handshakes, nach einem gegebenenfalls erforderlichen PROXY-Header. Dieses Limit ist von `client_handshake` und den Leerlaufzeiten der Datenübertragung getrennt.
   - **Beispiel**:
 
     ```toml
@@ -3043,7 +3079,7 @@ Vor dem Hinzufügen von Mustern über die API muss `web.allow_wildcard_hosts` im
 ## tls_domain
   - **Einschränkungen / Validierung**: Muss ein nicht leerer Domainname sein. Darf keine Leerzeichen und kein `/` enthalten.
   - **Beschreibung**: Primäre Domäne, die für das Fake-TLS-Masking-/Fronting-Profil verwendet wird und als Standard-SNI-Domäne für Clients angezeigt wird.
-    Dieser Wert wird Teil der generierten `ee`-Links; eine Änderung macht zuvor generierte Links ungültig.
+    Dieser Wert wird Teil der erzeugten `ee`-Links. Um alte Links bei einem Domainwechsel zu erhalten, behalten Sie die bisherige Domain in `tls_domains` und wenden Sie die Konfiguration an.
   - **Beispiel**:
 
     ```toml
@@ -3062,11 +3098,11 @@ Vor dem Hinzufügen von Mustern über die API muss `web.allow_wildcard_hosts` im
     ```
 ## unknown_sni_action
   - **Einschränkungen / Validierung**: `"drop"`, `"mask"`, `"accept"` oder `"reject_handshake"`.
-  - **Beschreibung**: Aktion für TLS ClientHello mit unbekanntem/nicht konfiguriertem SNI.
-    - `drop` — schließt die Verbindung ohne Antwort (stilles FIN nach Anwendung von `server_hello_delay`). Timing-identisch zum Success-Zweig, aber auf dem Wire leiser als ein echter Webserver.
-    - `mask` — proxyt die Verbindung transparent zu `mask_host:mask_port` (TLS-Fronting). Der Client erhält ein echtes ServerHello vom Backend mit dessen echtem Zertifikat. Maximale Tarnung, öffnet aber für jede fehlgeleitete Anfrage eine ausgehende Verbindung.
-    - `accept` — behandelt SNI so, als wäre es gültig, und fährt im Auth-Pfad fort. Schwächt die Resistenz gegen aktives Probing; nur in engen Szenarien sinnvoll.
-    - `reject_handshake` — sendet einen fatalen TLS-Alert `unrecognized_name` (RFC 6066, AlertDescription = 112) und schließt die Verbindung. Auf dem Wire identisch zu einem modernen nginx mit `ssl_reject_handshake on;` im Default-vhost: wirkt wie ein gewöhnlicher HTTPS-Server, der den angefragten Namen schlicht nicht hostet. Empfohlen, wenn maximale Parität mit einem Standard-Webserver wichtiger ist als TLS-Fronting. `server_hello_delay` wird absichtlich **nicht** auf diesen Zweig angewendet, sodass der Alert wie bei Referenz-nginx „sofort“ gesendet wird.
+  - **Beschreibung**: Regel für ein ClientHello, dessen SNI weder in `tls_domain` noch in `tls_domains` enthalten ist.
+    - `drop` — Verbindung nach der konfigurierten ServerHello-Verzögerung ohne Antwort schließen. Dies ist der Standard; eine gleiche Verzögerung belegt keine zeitliche Ununterscheidbarkeit.
+    - `mask` — den konfigurierten Masking-Pfad verwenden, sofern Masking aktiviert ist. Ein erreichbarer TLS-Zielserver kann seinen eigenen Handshake und sein Zertifikat liefern; der Client wird dabei nicht für MTProxy authentifiziert.
+    - `accept` — MTProxy-Authentifizierung trotz unbekanntem SNI fortsetzen. Damit werden mehr Namen zugelassen; gültige Zugangsdaten bleiben erforderlich. Um bestimmte alte Links zu erhalten, tragen Sie deren Domains in `tls_domains` ein.
+    - `reject_handshake` — einen fatalen TLS-Alert `unrecognized_name` (RFC 6066, AlertDescription = 112) senden und schließen. Die ServerHello-Verzögerung wird hier nicht angewendet. Dieser Ablehnungsmechanismus wird auch von nginx mit `ssl_reject_handshake on` verwendet; vollständige Ununterscheidbarkeit im Netz ist damit nicht belegt.
   - **Beispiel**:
 
     ```toml
@@ -3148,7 +3184,7 @@ Vor dem Hinzufügen von Mustern über die API muss `web.allow_wildcard_hosts` im
     - Darf nicht leer sein, wenn gesetzt.
     - Nur Unix; auf Nicht-Unix-Plattformen abgelehnt.
     - Auf Unix muss der Pfad \(\le 107\) Bytes lang sein.
-    - Mutually exclusive mit `mask_host`.
+    - Kann nicht zusammen mit `mask_host` verwendet werden.
   - **Beschreibung**: Unix-Socket-Pfad für das Mask-Backend statt TCP `mask_host`/`mask_port`.
   - **Beispiel**:
 
@@ -3839,6 +3875,9 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     enabled = false
     ```
 ## scopes
+
+Das [vollständige Direct-Beispiel](../Advanced_settings/TUNING.de.md#upstream-anhand-des-benutzernamens-auswählen) erläutert Benutzernamen, den Ersatz von SOCKS-Zugangsdaten und das Verhalten ohne passenden Upstream.
+
   - **Einschränkungen / Validierung**: `String`. Durch Kommas getrennte Liste; Leerzeichen werden beim Abgleich entfernt.
   - **Beschreibung**: Scope-Tags, die für die Upstream-Filterung auf Anfrageebene verwendet werden. Wenn eine Anfrage einen Bereich angibt, können nur Upstreams ausgewählt werden, deren `scopes` dieses Tag enthält. Wenn eine Anfrage keinen Bereich angibt, sind nur Upstreams mit leerem `scopes` berechtigt.
   - **Beispiel**:
