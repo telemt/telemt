@@ -115,6 +115,12 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
         ));
     }
 
+    if config.server.max_pending_handshakes_per_ip > 65_535 {
+        return Err(ProxyError::Config(
+            "server.max_pending_handshakes_per_ip must be within [0, 65535]".to_string(),
+        ));
+    }
+
     if config.server.conntrack_control.pressure_high_watermark_pct == 0
         || config.server.conntrack_control.pressure_high_watermark_pct > 100
     {

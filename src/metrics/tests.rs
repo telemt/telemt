@@ -102,6 +102,9 @@ async fn test_render_metrics_format() {
         .await
         .unwrap();
 
+    stats.increment_pending_handshake_per_ip_rejected_total();
+    stats.increment_pending_handshake_per_ip_rejected_total();
+    stats.increment_pending_handshake_per_ip_observed_total();
     let output = render_metrics(
         &stats,
         shared_state.as_ref(),
@@ -126,6 +129,8 @@ async fn test_render_metrics_format() {
         )
     );
     assert!(output.contains("telemt_handshake_timeouts_total 1"));
+    assert!(output.contains("telemt_pending_handshake_per_ip_limit_total{action=\"rejected\"} 2"));
+    assert!(output.contains("telemt_pending_handshake_per_ip_limit_total{action=\"observed\"} 1"));
     assert!(output.contains("telemt_handshake_failures_by_class_total{class=\"timeout\"} 1"));
     assert!(output.contains("telemt_conntrack_rule_reconcile_total{result=\"success\"} 1"));
     assert!(output.contains("telemt_conntrack_rule_reconcile_total{result=\"error\"} 1"));

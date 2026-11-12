@@ -159,6 +159,11 @@ impl RunningClientHandler {
             }
         };
 
+        // Per-IP limit on concurrent unauthenticated handshakes (see below):
+        // the slot lives here and is released when this function returns - on
+        // success, failure, timeout and masking fallback alike.
+        let mut _pending_handshake = None;
+
         let handshake_timeout = handshake_timeout_with_mask_grace(&self.config);
         let stats = self.stats.clone();
         let config_for_timeout = self.config.clone();
@@ -170,10 +175,27 @@ impl RunningClientHandler {
             let mut first_bytes = [0u8; 5];
             if let Some(first_byte) = first_byte {
                 first_bytes[0] = first_byte;
-                self.stream.read_exact(&mut first_bytes[1..]).await?;
             } else {
-                self.stream.read_exact(&mut first_bytes).await?;
+                // client_first_byte_idle_secs = 0 skips the idle wait, but the
+                // first byte is still read here, inside the handshake deadline.
+                self.stream.read_exact(&mut first_bytes[..1]).await?;
             }
+
+            // The pending-handshake slot is taken only once the client has
+            // actually sent a byte, so idle and preconnected connections are
+            // never counted, whatever client_first_byte_idle_secs is.
+            match admit_pending_handshake(
+                &self.shared,
+                &self.config,
+                &self.stats,
+                &self.beobachten,
+                self.peer,
+            ) {
+                Ok(guard) => _pending_handshake = guard,
+                Err(()) => return Ok(None),
+            }
+
+            self.stream.read_exact(&mut first_bytes[1..]).await?;
 
             let is_tls = tls::is_tls_handshake(&first_bytes[..3]);
             let peer = self.peer;
@@ -181,14 +203,20 @@ impl RunningClientHandler {
             debug!(peer = %peer, is_tls = is_tls, "Handshake type detected");
 
             if is_tls {
-                self.handle_tls_client(first_bytes, local_addr).await
+                self.handle_tls_client(first_bytes, local_addr)
+                    .await
+                    .map(Some)
             } else {
-                self.handle_direct_client(first_bytes, local_addr).await
+                self.handle_direct_client(first_bytes, local_addr)
+                    .await
+                    .map(Some)
             }
         })
         .await
         {
-            Ok(Ok(outcome)) => outcome,
+            Ok(Ok(Some(outcome))) => outcome,
+            // Over the per-IP pending-handshake limit: close quietly.
+            Ok(Ok(None)) => return Ok(None),
             Ok(Err(e)) => {
                 debug!(peer = %peer_for_log, error = %e, "Handshake failed");
                 stats.increment_handshake_failure_class(classify_handshake_failure_class(&e));
