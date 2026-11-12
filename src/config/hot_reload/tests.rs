@@ -1,5 +1,32 @@
 use super::*;
 
+#[test]
+fn watcher_publication_epoch_distinguishes_hot_round_trips_and_rejected_candidates() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let source = "[general]\nlog_level = 'normal'\n";
+    std::fs::write(&path, source).unwrap();
+    let initial = Arc::new(ProxyConfig::load(&path).unwrap().with_publication_epoch());
+    let (sender, _receiver) = watch::channel(initial.clone());
+    let (log_sender, _log_receiver) = watch::channel(initial.general.log_level.clone());
+    let mut state = ReloadState::new(None);
+    let mut last_epoch = initial.runtime_config_epoch;
+    for level in ["debug", "normal"] {
+        std::fs::write(&path, format!("[general]\nlog_level = '{level}'\n")).unwrap();
+        assert!(reload_config(&path, &sender, &log_sender, None, None, &mut state).is_some());
+        assert!(sender.borrow().runtime_config_epoch > last_epoch);
+        last_epoch = sender.borrow().runtime_config_epoch;
+    }
+    assert_eq!(
+        serde_json::to_value(initial.as_ref()).unwrap(),
+        serde_json::to_value(sender.borrow().as_ref()).unwrap()
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    std::fs::write(&path, "[general]\nlog_level = 'invalid'\n").unwrap();
+    assert!(reload_config(&path, &sender, &log_sender, None, None, &mut state).is_none());
+    assert_eq!(sender.borrow().runtime_config_epoch, last_epoch);
+}
+
 fn sample_config() -> ProxyConfig {
     ProxyConfig::default()
 }

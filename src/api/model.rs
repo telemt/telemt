@@ -16,6 +16,7 @@ pub(super) struct ApiFailure {
     pub(super) code: &'static str,
     pub(super) message: String,
     pub(super) allow: Option<&'static str>,
+    pub(super) details: Vec<FieldIssue>,
 }
 
 impl ApiFailure {
@@ -25,6 +26,7 @@ impl ApiFailure {
             code,
             message: message.into(),
             allow: None,
+            details: Vec::new(),
         }
     }
 
@@ -42,14 +44,25 @@ impl ApiFailure {
             code: "method_not_allowed",
             message: "Unsupported HTTP method for this route".to_string(),
             allow: Some(allow),
+            details: Vec::new(),
         }
     }
+}
+
+/// Value-free diagnostics shared by config preview, mutation and validation.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct FieldIssue {
+    pub(super) path: String,
+    pub(super) code: &'static str,
+    pub(super) message: String,
 }
 
 #[derive(Serialize)]
 pub(super) struct ErrorBody {
     pub(super) code: &'static str,
     pub(super) message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) details: Vec<FieldIssue>,
 }
 
 #[derive(Serialize)]

@@ -1,5 +1,7 @@
 # Telemt Config Parameters Reference
 
+[English](CONFIG_PARAMS.en.md) · [Русский](CONFIG_PARAMS.ru.md) · [Deutsch](CONFIG_PARAMS.de.md) · [Terminology](../TERMINOLOGY.md)
+
 This document lists all configuration keys accepted by `config.toml`.
 
 > [!NOTE]
@@ -10,7 +12,20 @@ This document lists all configuration keys accepted by `config.toml`.
 >
 > The configuration parameters detailed in this document are intended for advanced users and fine-tuning purposes. Modifying these settings without a clear understanding of their function may lead to application instability or other unexpected behavior. Please proceed with caution and at your own risk.
 
-> `Hot-Reload` marks whether a changed value is applied directly by the config watcher. `✘` means the watcher does not apply it; depending on the field, full effect requires an in-process runtime-generation reload or a process restart.
+## Applying configuration changes
+
+`Hot-Reload` describes the file watcher only: `✔` means it can publish the setting, `✘` means it retains the active value. `telemt reload` sends SIGHUP to this same watcher; it does not create a runtime generation.
+
+| Application path | Settings and effect |
+| --- | --- |
+| Automatic file reload | Fields marked `✔`; examples include `general.log_level`, `network.dns_overrides` and supported user limits. Publication is asynchronous. Each field's description determines whether existing work or only new connections see it. |
+| Explicit generation reload | `[censorship]`, `[timeouts]`, `upstreams` and generation-owned API settings. Use `POST /v1/system/reload` or an editable config PATCH with `reload=instant` or `reload=drain`. Follow the returned operation to completion. Connection survival depends on the selected mode. |
+| Process restart | `logging`, `general.data_path`, `general.quota_state_path`, `general.disable_colors`, `general.direct_relay_buffer_budget_max_bytes`, `server.metrics_listen`, `server.metrics_port`, `server.max_connections`, `server.conntrack_control`, `server.listen_unix_sock`, `server.listen_unix_sock_perm`, API `enabled`/`listen`/`runtime_edge_events_capacity`, `web.limits`, `web.allow_wildcard_hosts`, and `web.decoy_fasttrack_mode`. |
+| Conditional | Native listener address changes can use only the supported rebind plan; WEB listeners, listener socket/trust policy and SYN rules require process restart. WEB learning/debug changes depending on larger process limits can also be deferred. |
+
+For API-editable fields, `POST /v1/config/validate` reports `apply.watcher_paths`, `apply.generation_paths` and `apply.process_restart_paths` before saving. After an update, inspect the reload result, `deferred_process_fields` and `GET /v1/config/state`. The legacy `restart_required` flag means “outside the watcher subset”; it does not by itself require a process restart. See the [API reload contract](../Architecture/API/API.md#runtime-reload-endpoints) and [CLI reference](../CLI.en.md).
+
+WEB settings have separate lifetimes: `carrier_method` and retry jitter belong to newly rendered bridge pages, `conveyor` is negotiated for new sessions, and process limits stay fixed until restart. Existing pages and sessions retain the policies described in the [WEB guide](../WEB/WEB_PROXY.en.md#lifecycle-and-reload-behavior).
 
 # Table of contents
  - [Top-level keys](#top-level-keys)
@@ -28,6 +43,7 @@ This document lists all configuration keys accepted by `config.toml`.
  - [web.debug](#webdebug)
  - [web.limits](#weblimits)
  - [web.limits.wildcard](#weblimitswildcard)
+ - [web.retry_jitter](#webretry_jitter)
  - [web.timeouts](#webtimeouts)
  - [web.vhosts](#webvhosts)
  - [web.vhosts.decoy](#webvhostsdecoy)
@@ -1903,11 +1919,12 @@ A valid public SOCKS `BND.ADDR/BND.PORT` with a nonzero port supplies the comple
     cache_public_ip_path = "cache/public_ip.txt"
     ```
 ## dns_overrides
-  - **Constraints / validation**: `String[]`. Each entry must use `host:port:ip` format.
-    - `host`: domain name (must be non-empty and must not contain `:`)
-    - `port`: `u16`
-    - `ip`: IPv4 (`1.2.3.4`) or bracketed IPv6 (`[2001:db8::1]`). **Unbracketed IPv6 is rejected**.
-  - **Description**: Runtime DNS overrides for `host:port` targets. Useful for forcing specific IPs for given upstream domains without touching system DNS.
+  - **Constraints / validation**: `String[]`, at most `4096` entries. Each entry must use `host:port:ip` format.
+    - `host`: domain name (must be nonempty and must not contain `:`).
+    - `port`: `u16`.
+    - `ip`: IPv4 (`1.2.3.4`) or bracketed IPv6 (`[2001:db8::1]`). Unbracketed IPv6 is rejected.
+  - **Description**: Overrides future `host:port` lookups through the generation resolver without changing system DNS. Host matching is case-insensitive and port-specific; the last duplicate host/port entry wins. The existing watcher publishes changes, while established connections keep their endpoints.
+  - **Control API**: `GET /v1/config` exposes only `network.dns_overrides` from `[network]`, including the default `[]`. `PATCH /v1/config` and `POST /v1/config/validate` accept this field; other network fields remain rejected. The array replaces the complete list; `[]` clears it, while `null` does not. Persistence changes only the value or inserts its declaration in the owning source, preserving sibling settings and other include files. Ambiguous or multiple source owners return `409 config_patch_not_atomic`. PATCH does not wait for watcher publication; inspect `GET /v1/config/state?sections=network` for publication evidence. See [DNS overrides in the API](../Architecture/API/API.md#dns-overrides).
   - **Example**:
 
     ```toml
@@ -2216,8 +2233,33 @@ Note: The conntrack-control worker runs **only on Linux**. On other operating sy
 
 # [server.api]
 
-Note: This section also accepts the legacy alias `[server.admin_api]` (same schema as `[server.api]`).
+The legacy alias `[server.admin_api]` uses the same schema.
 
+All fields in this section have `Hot-Reload = ✘`: the file watcher retains the
+active API settings. Explicit generation reload applies `whitelist`,
+`gray_action`, `auth_header`, `request_body_limit_bytes`,
+`minimal_runtime_enabled`, `minimal_runtime_cache_ttl_ms`,
+`runtime_edge_enabled`, `runtime_edge_cache_ttl_ms`, `runtime_edge_top_n`, and
+`read_only`. `enabled`, `listen`, and `runtime_edge_events_capacity` require a
+process restart.
+
+`GET /v1/config`, `PATCH /v1/config`, and `POST /v1/config/validate` expose only
+`minimal_runtime_enabled`, `minimal_runtime_cache_ttl_ms`, `runtime_edge_enabled`,
+`runtime_edge_cache_ttl_ms`, and `runtime_edge_top_n` under `server.api`, alongside
+`server.listeners`. GET includes defaults; sparse PATCH preserves API siblings.
+Both TTLs accept `0..60000` ms (`0` disables caching); top-N accepts `1..1000`.
+Omission and allowed `null` members retain values. Forbidden fields are rejected
+even when `null`. A server patch without a concrete editable value is rejected.
+Saving alone leaves these settings pending: use `?reload=instant`, `?reload=drain`,
+or `POST /v1/system/reload` and wait for activation. The watcher retains them even
+in mixed changes. The API listener and event-ring capacity remain process-owned;
+late cache writes cannot cross request-generation boundaries. Other API settings
+still require editing the owning TOML source. See
+[API observability settings](../Architecture/API/API.md#api-observability-settings).
+`GET /v1/config/schema` describes each field's exposure and application policy.
+`GET /v1/config/state` reports desired/published differences without claiming
+complete consumer convergence. See the [API reference](../Architecture/API/API.md)
+and [Python client guide](../Architecture/API/PYTHON_CLIENT.md).
 
 | Key | Type | Default | Hot-Reload |
 | --- | ---- | ------- | ---------- |
@@ -2246,7 +2288,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 ## gray_action
   - **Constraints / validation**: `"drop"`, `"api"`, or `"200"`.
-  - **Description**: API response policy for gray/limited states: drop request, serve normal API response, or force `200 OK`.
+  - **Description**: Applies only to direct peers outside `whitelist`: `"drop"` closes the connection without an HTTP response, `"api"` returns structured `403 forbidden`, and `"200"` returns an empty `200 OK` with `text/html; charset=utf-8`. It never grants API access. Allowed peers still undergo authentication and read-only checks; an empty gray response is not a JSON success envelope.
   - **Example**:
 
     ```toml
@@ -2281,7 +2323,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     auth_header = "Bearer MY_TOKEN"
     ```
 ## request_body_limit_bytes
-  - **Constraints / validation**: Must be `> 0` (bytes).
+  - **Constraints / validation**: `1..=1048576` (bytes).
   - **Description**: Maximum accepted HTTP request body size (bytes).
   - **Example**:
 
@@ -2606,6 +2648,8 @@ WEB mode carries Telegram Desktop MTProxy traffic through HTTPS terminated by an
 | `enabled` | `bool` | `false` | `✔` |
 | `allow_wildcard_hosts` | `bool` | `false` | `✘` |
 | `carrier` | `"https"`, `"https-lanes"`, `"websocket"`, or `"websocket-lanes"` | `"https"` | `✔` |
+| [`carrier_method`](#webcarrier_method) | `"post"`, `"put"` | `"post"` | `✔` |
+| [`conveyor`](#webconveyor) | `bool` | `true` | `✔` |
 | `carriers` | `false` or a non-empty array of unique carriers | `false` | `✔` |
 | `carrier_learning` | `bool` | `true` | `✔` |
 | `carrier_negotiation_aggressiveness` | `"conservative"`, `"balanced"`, or `"aggressive"` | `"conservative"` | `✔` |
@@ -2625,6 +2669,24 @@ When `carriers` is missing or `false`, auto-negotiation and learning are disable
 `decoy_fasttrack_mode` is restart-only. `off` preserves legacy root-request scanning and collects no fast-track decisions. `shadow` records eligible requests while preserving the full scan. `enforce` skips scans only for `HEAD` or absent/noncanonical bridge queries. A canonical bridge-shaped `GET`, including an unknown capability, always scans every profile in the selected vhost. The optimization does not bound hostile canonical probes and enforce mode must be validated for request-shape timing distinguishability behind the production TLS terminator.
 
 `carrier_learning` applies only while negotiation is enabled. Learning is process-local, in-memory, bounded, and positive-only: only a carrier that reaches the server-defined healthy state contributes evidence. `conservative` requires the broadest evidence and disables IP ranking, `balanced` admits moderate User-Agent/profile evidence plus eligible public-IP tie breaking, and `aggressive` reacts to the first bounded samples. Reported client failures remain diagnostic and never create negative evidence. Reload preserves evidence across a generation change only when enabled state, aggressiveness, evidence lifetime, and health window are identical; any semantic change advances the evidence epoch and fences stale outcomes. Because `[web.limits]` is process-owned, a reload that enables learning or negotiation using only a desired larger `max_carrier_learning_entries` atomically defers the dependent learning/carrier field rather than publishing an invalid effective combination. Disabling WEB stops issuance of new bridge and session credentials after reload; use the users API to revoke one user's active sessions.
+
+## web.carrier_method
+
+`"post"` (default) or `"put"` selects the HTTP method emitted by new bridge pages for `/api/v1/up` and `/api/v1/down`, including retries. The server accepts both methods independently of this setting. Session creation and diagnostics remain `POST`, session closure remains `DELETE`, and WebSocket Upgrade remains `GET`. Allow both `POST` and `PUT` through the TLS terminator. `put` supports connection reuse by Linux WebKitGTK implementations that distinguish idempotent methods; measure the actual client before assuming a latency improvement.
+
+The watcher can apply this setting. Existing pages keep their method during session recovery; it does not rotate credentials or move established sessions.
+
+## web.conveyor
+
+`true` (default) permits bounded HTTP uplink pipelining for new `https` and `https-lanes` sessions. The client explicitly offers `X-Telemt-Up-Window: 1` through `4`; the reply confirms the window. With `false` or a WebSocket carrier, an explicit offer receives window `1`. A client without this header remains on the serialized path and receives no window header. Native `WELCOME` framing is unchanged.
+
+The negotiated window allows DATA to be sent before the OPEN acknowledgment while preserving ordering, exact retries, acknowledgment checks and memory budgets. The watcher changes the policy for new sessions; existing sessions keep their negotiated window. This is independent of carrier auto-negotiation.
+
+```toml
+[web]
+carrier_method = "post"
+conveyor = true
+```
 
 # [web.debug]
 
@@ -2870,7 +2932,7 @@ The process must already have `web.allow_wildcard_hosts` enabled before a patch 
     ```
 ## client_first_byte_idle_secs
   - **Constraints / validation**: `u64` (seconds). `0` disables first-byte idle enforcement.
-  - **Description**: Maximum idle time to wait for the first client payload byte after session setup.
+  - **Description**: Maximum wait for the first client byte before parsing the client handshake, after any required PROXY header. This is separate from `client_handshake` and relay idle timeouts.
   - **Example**:
 
     ```toml
@@ -3013,11 +3075,11 @@ The process must already have `web.allow_wildcard_hosts` enabled before a patch 
     ```
 ## unknown_sni_action
   - **Constraints / validation**: `"drop"`, `"mask"`, `"accept"` or `"reject_handshake"`.
-  - **Description**: Action for TLS ClientHello with unknown / non-configured SNI.
-    - `drop` — close the connection without any response (silent FIN after `server_hello_delay` is applied). Timing-indistinguishable from the Success branch, but wire-quieter than what a real web server would do.
-    - `mask` — transparently proxy the connection to `mask_host:mask_port` (TLS fronting). The client receives a real ServerHello from the backend with its real certificate. Maximum camouflage, but opens an outbound connection for every misdirected request.
-    - `accept` — pretend the SNI is valid and continue on the auth path. Weakens active-probing resistance; only meaningful in narrow scenarios.
-    - `reject_handshake` — emit a fatal TLS `unrecognized_name` alert (RFC 6066, AlertDescription = 112) and close the connection. Identical on the wire to a modern nginx with `ssl_reject_handshake on;` on its default vhost: looks like an ordinary HTTPS server that simply does not host the requested name. Recommended when the goal is maximal parity with a stock web server rather than TLS fronting. `server_hello_delay` is intentionally **not** applied to this branch, so the alert is emitted "instantly" the way a reference nginx would.
+  - **Description**: Policy for a ClientHello whose SNI is outside `tls_domain` and `tls_domains`.
+    - `drop` — close without a response after the configured ServerHello delay. This is the default; matching a delay does not establish timing indistinguishability.
+    - `mask` — use the configured masking path when masking is enabled. A reachable TLS fallback can return its own handshake and certificate; this does not authenticate the client to MTProxy.
+    - `accept` — continue MTProxy authentication despite the unknown SNI. It broadens the accepted names and still requires valid credentials. To preserve selected old links, add their domains to `tls_domains` instead.
+    - `reject_handshake` — send a fatal TLS `unrecognized_name` alert (RFC 6066, AlertDescription = 112) and close. The configured ServerHello delay is not applied to this branch. This matches a rejection mechanism used by nginx with `ssl_reject_handshake on`, not a claim of full network indistinguishability.
   - **Example**:
 
     ```toml
@@ -3572,6 +3634,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     alice = 500
     ```
 ## user_max_tcp_conns_global_each
+  - **API**: `GET/PATCH /v1/access/policy` exposes this field. Omission preserves it; scalar `null` restores the type default. Publication uses the watcher; the response separates `desired` and `effective` snapshots.
   - **Constraints / validation**: `usize`. `0` disables the inherited limit.
   - **Description**: Global per-user maximum concurrent TCP connections, applied when a user has **no positive** entry in `[access.user_max_tcp_conns]` (a missing key, or a value of `0`, both fall through to this setting). Per-user limits greater than `0` in `user_max_tcp_conns` take precedence.
   - **Example**:
@@ -3634,6 +3697,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     alice = 16
     ```
 ## user_max_unique_ips_global_each
+  - **API**: `GET/PATCH /v1/access/policy` exposes this field. Omission preserves it; scalar `null` restores the type default. Publication uses the watcher; the response separates `desired` and `effective` snapshots.
   - **Constraints / validation**: `usize`. `0` disables the inherited limit.
   - **Description**: Global per-user unique IP limit applied when a user has no individual override in `[access.user_max_unique_ips]`.
   - **Example**:
@@ -3643,6 +3707,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     user_max_unique_ips_global_each = 8
     ```
 ## user_max_unique_ips_mode
+  - **API**: `GET/PATCH /v1/access/policy` exposes this field. Omission preserves it; scalar `null` restores the type default. Publication uses the watcher; the response separates `desired` and `effective` snapshots.
   - **Constraints / validation**: Must be one of `"active_window"`, `"time_window"`, `"combined"`.
   - **Description**: Unique source IP limit accounting mode.
   - **Example**:
@@ -3652,6 +3717,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     user_max_unique_ips_mode = "active_window"
     ```
 ## user_max_unique_ips_window_secs
+  - **API**: `GET/PATCH /v1/access/policy` exposes this field. Omission preserves it; scalar `null` restores the type default. Publication uses the watcher; the response separates `desired` and `effective` snapshots.
   - **Constraints / validation**: Must be `> 0`.
   - **Description**: Window size (seconds) used by unique-IP accounting modes that include a time window (`"time_window"` and `"combined"`).
   - **Example**:
@@ -3661,6 +3727,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     user_max_unique_ips_window_secs = 30
     ```
 ## user_source_deny
+  - **API**: `source_deny` in user GET/create/PATCH exposes this list. Omission retains it, an array replaces it, and `null` removes the authored entry. Strict validation accepts this map. `source_deny_status.runtime_reload_required` compares desired and published rules; apply with `POST /v1/system/reload`. The watcher does not update these rules, and saving does not cancel sessions. Deleting a user retains the rule; recreation inherits it unless `source_deny=null` is explicit.
   - **Constraints / validation**: Table `username -> IpNetwork[]`. Each network must parse as CIDR (for example `203.0.113.0/24` or `2001:db8::/32`).
   - **Description**: Per-user source IP/CIDR deny-list applied **after successful auth** in TLS and MTProto handshake paths. A matched source IP is rejected via the same fail-closed path as invalid auth.
   - **Example**:
@@ -3713,6 +3780,7 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     alice = { up_bps = 1048576, down_bps = 2097152 }
     ```
 ## cidr_rate_limits
+  - **API**: `GET/PATCH /v1/access/policy` exposes this field. Omission preserves it; scalar `null` restores the type default. For `cidr_rate_limits`, a map merges keys, a null entry deletes one rule, and whole-map `null` clears all rules. Rate objects replace both directions, in bits per second. Publication uses the watcher; the response separates `desired` and `effective` snapshots.
   - **Constraints / validation**: Table `CIDR or auto-template -> { up_bps, down_bps }`. Each direction must be within `0..=100000000000`; `0` means unlimited for that direction, and at least one direction must be non-zero. Explicit CIDR keys must parse as `IpNetwork`; auto-template keys must be `*4/N` (`N=0..32`), `*6/N` (`N=0..128`), or `*/N` (`N=0..32`). Duplicate normalized auto-templates are rejected.
   - **Description**: Source-subnet bandwidth caps applied alongside per-user limits. Explicit CIDR rules use longest-prefix-wins and take priority over auto-templates. Auto-templates create buckets lazily per matched source subnet: `*4/N` for IPv4, `*6/N` for IPv6, and `*/N` as a dual-stack shorthand where IPv4 uses `/N` and IPv6 uses `/(N * 4)`.
   - **Example**:
@@ -3784,6 +3852,9 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     enabled = false
     ```
 ## scopes
+
+See the [complete Direct user-scope example](../Advanced_settings/TUNING.en.md#selecting-an-upstream-by-user-scope) for user naming, SOCKS credential replacement and behavior when no upstream matches.
+
   - **Constraints / validation**: `String`. Comma-separated list; whitespace is trimmed during matching.
   - **Description**: Scope tags used for request-level upstream filtering. If a request specifies a scope, only upstreams whose `scopes` contains that tag can be selected. If a request does not specify a scope, only upstreams with empty `scopes` are eligible.
   - **Example**:

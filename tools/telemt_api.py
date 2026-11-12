@@ -1,6 +1,6 @@
 """
 Telemt Control API Python Client
-Full-coverage client for https://github.com/telemt/telemt
+Standard-library JSON client and CLI for Telemt's Control API.
 
 Usage:
     client = TelemtAPI("http://127.0.0.1:9091", auth_header="your-secret")
@@ -13,10 +13,14 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import secrets
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+import time
+from dataclasses import dataclass
+from http.client import HTTPException
+from typing import Any, Dict
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -28,11 +32,14 @@ class TelemtAPIError(Exception):
     """Raised when the API returns an error envelope or a transport error."""
 
     def __init__(self, message: str, code: str | None = None,
-                 http_status: int | None = None, request_id: int | None = None):
+                 http_status: int | None = None, request_id: int | None = None,
+                 details: list | None = None, last_response: APIResponse | None = None):
         super().__init__(message)
         self.code = code
         self.http_status = http_status
         self.request_id = request_id
+        self.details = details or []
+        self.last_response = last_response
 
     def __repr__(self) -> str:
         return (f"TelemtAPIError(message={str(self)!r}, code={self.code!r}, "
@@ -49,14 +56,19 @@ class APIResponse:
     ok: bool
     data: Any
     revision: str | None = None
+    http_status: int = 200
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"APIResponse(ok={self.ok}, revision={self.revision!r}, data={self.data!r})"
+        return (f"APIResponse(ok={self.ok}, http_status={self.http_status}, "
+                f"revision={self.revision!r}, data={self.data!r})")
 
 
 # ---------------------------------------------------------------------------
 # Main client
 # ---------------------------------------------------------------------------
+
+_UNSET = object()
+
 
 class TelemtAPI:
     """
@@ -78,18 +90,19 @@ class TelemtAPI:
             self,
             base_url: str = "http://127.0.0.1:9091",
             auth_header: str | None = None,
-            timeout: int = 10,
+            timeout: float = 10,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.auth_header = auth_header
-        self.timeout = timeout
+        self.timeout = _positive_seconds(timeout, "timeout")
 
     # ------------------------------------------------------------------
     # Low-level HTTP helpers
     # ------------------------------------------------------------------
 
     def _headers(self, extra: dict | None = None) -> dict:
-        h = {"Content-Type": "application/json; charset=utf-8",
+        # WEB controls require this exact media type without charset parameters.
+        h = {"Content-Type": "application/json",
              "Accept": "application/json"}
         if self.auth_header:
             h["Authorization"] = self.auth_header
@@ -104,19 +117,27 @@ class TelemtAPI:
             body: dict | None = None,
             if_match: str | None = None,
             query: dict | None = None,
+            *,
+            if_runtime_match: str | None = None,
+            success_statuses: tuple[int, ...] = (),
+            timeout: float | None = None,
     ) -> APIResponse:
         url = self.base_url + path
         if query:
-            qs = "&".join(f"{k}={v}" for k, v in query.items())
+            qs = urlencode(query)
             url = f"{url}?{qs}"
 
         raw_body: bytes | None = None
         if body is not None:
-            raw_body = json.dumps(body).encode()
+            raw_body = json.dumps(body, allow_nan=False).encode("utf-8")
+            if method == "POST" and path.startswith("/v1/runtime/web/") and len(raw_body) > 65536:
+                raise ValueError("WEB control JSON exceeds 65536 bytes")
 
         extra_headers: dict = {}
         if if_match is not None:
             extra_headers["If-Match"] = if_match
+        if if_runtime_match is not None:
+            extra_headers["If-Runtime-Match"] = if_runtime_match
 
         req = Request(
             url,
@@ -126,42 +147,46 @@ class TelemtAPI:
         )
 
         try:
-            with urlopen(req, timeout=self.timeout) as resp:
-                payload = json.loads(resp.read())
-        except HTTPError as exc:
-            raw = exc.read()
+            request_timeout = self.timeout if timeout is None else min(self.timeout, timeout)
             try:
-                payload = json.loads(raw)
-            except Exception:
-                raise TelemtAPIError(
-                    str(exc), http_status=exc.code
-                ) from exc
-            err = payload.get("error", {})
-            raise TelemtAPIError(
-                err.get("message", str(exc)),
-                code=err.get("code"),
-                http_status=exc.code,
-                request_id=payload.get("request_id"),
-            ) from exc
-        except URLError as exc:
+                response = urlopen(req, timeout=request_timeout)
+            except HTTPError as error:
+                response = error
+            with response:
+                status, raw = response.status, response.read()
+        except (URLError, OSError, HTTPException) as exc:
             raise TelemtAPIError(str(exc)) from exc
 
-        if not payload.get("ok"):
+        try:
+            payload = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise TelemtAPIError("Expected a JSON API envelope (empty gray_action responses are not success)",
+                                 code="invalid_response", http_status=status) from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
+            raise TelemtAPIError("Invalid API envelope", code="invalid_response", http_status=status)
+        if not payload["ok"]:
             err = payload.get("error", {})
+            if not isinstance(err, dict):
+                err = {}
             raise TelemtAPIError(
                 err.get("message", "unknown error"),
                 code=err.get("code"),
+                http_status=status,
                 request_id=payload.get("request_id"),
+                details=err.get("details"),
             )
+        if not (200 <= status < 300 or status in success_statuses) or "data" not in payload:
+            raise TelemtAPIError("Unexpected API success response", code="invalid_response", http_status=status)
 
         return APIResponse(
             ok=True,
             data=payload.get("data"),
             revision=payload.get("revision"),
+            http_status=status,
         )
 
-    def _get(self, path: str, query: dict | None = None) -> APIResponse:
-        return self._request("GET", path, query=query)
+    def _get(self, path: str, query: dict | None = None, **options) -> APIResponse:
+        return self._request("GET", path, query=query, **options)
 
     def _post(self, path: str, body: dict | None = None,
               if_match: str | None = None) -> APIResponse:
@@ -181,6 +206,83 @@ class TelemtAPI:
     def health(self) -> APIResponse:
         """GET /v1/health — liveness probe."""
         return self._get("/v1/health")
+
+    def health_ready(self) -> APIResponse:
+        """Return readiness data for both 200 and a documented 503 ok=true response."""
+        return self._get("/v1/health/ready", success_statuses=(503,))
+
+    def capabilities(self) -> APIResponse:
+        return self._get("/v1/capabilities")
+
+    def config_schema(self) -> APIResponse:
+        return self._get("/v1/config/schema")
+
+    def get_config(self) -> APIResponse:
+        """Desired editable configuration; the legacy response can contain credentials."""
+        return self._get("/v1/config")
+
+    def config_state(self, sections: list[str] | None = None) -> APIResponse:
+        """Redacted publication state, including partial results and nullable revision."""
+        query = None
+        if sections is not None:
+            allowed = {"general", "network", "server", "timeouts", "censorship", "upstreams",
+                       "dc_overrides", "web", "access", "logging", "root"}
+            if isinstance(sections, str) or not sections or len(set(sections)) != len(sections) or not set(sections) <= allowed:
+                raise ValueError("sections must contain unique known section names")
+            query = {"sections": ",".join(sections)}
+        return self._get("/v1/config/state", query)
+
+    def access_policy(self) -> APIResponse:
+        """Desired/published access defaults and CIDR shaping, without credentials."""
+        return self._get("/v1/access/policy")
+
+    def patch_access_policy(self, patch: dict, *, if_match: str | None = None,
+                            if_runtime_match: str | None = None) -> APIResponse:
+        """Preserve explicit null resets and CIDR entry deletion semantics."""
+        _object(patch, "patch")
+        return self._request("PATCH", "/v1/access/policy", patch, if_match,
+                             if_runtime_match=if_runtime_match)
+
+    def patch_config(self, patch: dict, *, if_match: str | None = None,
+                     if_runtime_match: str | None = None, reload: str | None = None,
+                     timeout_secs: int | None = None, failure_policy: str | None = None) -> APIResponse:
+        """Send a sparse patch unchanged; nested nulls keep the server's merge semantics."""
+        _object(patch, "patch")
+        return self._request("PATCH", "/v1/config", patch, if_match,
+                             _reload_query(reload, timeout_secs, failure_policy),
+                             if_runtime_match=if_runtime_match)
+
+    def validate_config(self, patch: dict, *, if_match: str | None = None,
+                        if_runtime_match: str | None = None, reload: str | None = None,
+                        timeout_secs: int | None = None, failure_policy: str | None = None) -> APIResponse:
+        """Prepare a candidate without committing; accepts the same inputs as PATCH."""
+        _object(patch, "patch")
+        return self._request("POST", "/v1/config/validate", patch, if_match,
+                             _reload_query(reload, timeout_secs, failure_policy),
+                             if_runtime_match=if_runtime_match)
+
+    def reload(self, mode: str = "instant", *, timeout_secs: int | None = None,
+               failure_policy: str | None = None, if_match: str | None = None) -> APIResponse:
+        body = _reload_query(mode, timeout_secs, failure_policy)
+        body["mode"] = body.pop("reload")
+        return self._post("/v1/system/reload", body, if_match)
+
+    def reload_status(self, reload_id: int) -> APIResponse:
+        _bounded(reload_id, 0, 2**64 - 1, "reload_id")
+        return self._get(f"/v1/system/reload/{reload_id}")
+
+    def wait_reload(self, reload_id: int, *, timeout: float = 60, poll_interval: float = 0.25,
+                    expected_revision: str | None = None) -> APIResponse:
+        """Poll an accepted ID; failed/rolled_back are returned as terminal data."""
+        _bounded(reload_id, 0, 2**64 - 1, "reload_id")
+        def state(response):
+            data = _object(response.data, "reload status")
+            if data.get("reload_id") != reload_id or (expected_revision is not None and data.get("config_revision") != expected_revision):
+                raise TelemtAPIError("Reload identity changed while polling", code="operation_mismatch", last_response=response)
+            return data.get("state")
+        return _poll(lambda remaining: self._get(f"/v1/system/reload/{reload_id}", timeout=remaining),
+                     state, {"succeeded", "failed", "rolled_back"},
+                     {"accepted", "preparing", "activating", "draining"}, timeout, poll_interval)
 
     def system_info(self) -> APIResponse:
         """GET /v1/system/info — binary version, uptime, config hash."""
@@ -278,8 +380,22 @@ class TelemtAPI:
         limit:
             Optional cap on returned events (1–1000, server default 50).
         """
+        if limit is not None:
+            _bounded(limit, 1, 1000, "limit")
         query = {"limit": str(limit)} if limit is not None else None
         return self._get("/v1/runtime/events/recent", query=query)
+
+    def runtime_tls_fingerprints(self, limit: int | None = None) -> APIResponse:
+        if limit is not None:
+            _bounded(limit, 1, 1000, "limit")
+        return self._get("/v1/runtime/tls-fingerprints", {"limit": limit} if limit is not None else None)
+
+    def users_quota(self) -> APIResponse:
+        """Desired quota/period and effective recurring quota schedule are distinct."""
+        return self._get("/v1/stats/users/quota")
+
+    def users_active_ips(self) -> APIResponse:
+        return self._get("/v1/stats/users/active-ips")
 
     # ------------------------------------------------------------------
     # Users (read)
@@ -307,6 +423,11 @@ class TelemtAPI:
             expiration_rfc3339: str | None = None,
             data_quota_bytes: int | None = None,
             max_unique_ips: int | None = None,
+            quota_period: str | None = None,
+            rate_limit_up_bps: int | None = None,
+            rate_limit_down_bps: int | None = None,
+            enabled: bool | None = None,
+            source_deny: list[str] | None | object = _UNSET,
             if_match: str | None = None,
     ) -> APIResponse:
         """POST /v1/users — create a new user.
@@ -327,6 +448,15 @@ class TelemtAPI:
             Per-user traffic quota in bytes.
         max_unique_ips:
             Per-user unique source IP limit.
+        quota_period:
+            Optional UTC recurring period: daily, weekly or monthly.
+        rate_limit_up_bps, rate_limit_down_bps:
+            Per-user upload/download bit rates; zero values are transmitted.
+        enabled:
+            Optional admission flag; False is transmitted.
+        source_deny:
+            Source CIDRs; omission retains an orphan rule, None removes it.
+            Changes require a generation reload.
         if_match:
             Optional ``If-Match`` revision for optimistic concurrency.
         """
@@ -337,6 +467,12 @@ class TelemtAPI:
         _opt(body, "expiration_rfc3339", expiration_rfc3339)
         _opt(body, "data_quota_bytes", data_quota_bytes)
         _opt(body, "max_unique_ips", max_unique_ips)
+        _opt(body, "quota_period", quota_period)
+        _opt(body, "rate_limit_up_bps", rate_limit_up_bps)
+        _opt(body, "rate_limit_down_bps", rate_limit_down_bps)
+        _opt(body, "enabled", enabled)
+        if source_deny is not _UNSET:
+            body["source_deny"] = source_deny
         return self._post("/v1/users", body=body, if_match=if_match)
 
     def patch_user(
@@ -349,6 +485,11 @@ class TelemtAPI:
             expiration_rfc3339: str | None = None,
             data_quota_bytes: int | None = None,
             max_unique_ips: int | None = None,
+            quota_period: str | None = None,
+            rate_limit_up_bps: int | None = None,
+            rate_limit_down_bps: int | None = None,
+            enabled: bool | None = None,
+            source_deny: list[str] | None = None,
             if_match: str | None = None,
     ) -> APIResponse:
         """PATCH /v1/users/{username} — partial update; only provided fields change.
@@ -369,6 +510,11 @@ class TelemtAPI:
             New quota in bytes.
         max_unique_ips:
             New unique IP limit.
+        quota_period, rate_limit_up_bps, rate_limit_down_bps, enabled:
+            Recurring quota, bit rates and admission flag. None omits a field,
+            preserving the legacy helper contract; use patch_user_fields to clear.
+        source_deny:
+            Replace the source CIDR list; use patch_user_fields to send null.
         if_match:
             Optional ``If-Match`` revision.
         """
@@ -379,10 +525,32 @@ class TelemtAPI:
         _opt(body, "expiration_rfc3339", expiration_rfc3339)
         _opt(body, "data_quota_bytes", data_quota_bytes)
         _opt(body, "max_unique_ips", max_unique_ips)
-        if not body:
-            raise ValueError("patch_user: at least one field must be provided")
-        return self._patch(f"/v1/users/{_safe(username)}", body=body,
-                           if_match=if_match)
+        _opt(body, "quota_period", quota_period)
+        _opt(body, "rate_limit_up_bps", rate_limit_up_bps)
+        _opt(body, "rate_limit_down_bps", rate_limit_down_bps)
+        _opt(body, "enabled", enabled)
+        _opt(body, "source_deny", source_deny)
+        return self.patch_user_fields(username, body, if_match=if_match)
+
+    def patch_user_fields(self, username: str, fields: dict, *, if_match: str | None = None) -> APIResponse:
+        """Exact sparse PATCH: omission preserves a field; explicit None sends JSON null.
+
+        The older patch_user convenience method still omits None-valued arguments.
+        Server-specific null semantics apply, including secret:null being ignored.
+        """
+        _object(fields, "fields")
+        if not fields or not fields.keys() <= USER_FIELDS:
+            raise ValueError("patch_user_fields requires at least one known user field")
+        return self._patch(f"/v1/users/{_safe(username)}", fields, if_match)
+
+    def enable_user(self, username: str, *, if_match: str | None = None) -> APIResponse:
+        return self._post(f"/v1/users/{_safe(username)}/enable", if_match=if_match)
+
+    def disable_user(self, username: str, *, if_match: str | None = None) -> APIResponse:
+        return self._post(f"/v1/users/{_safe(username)}/disable", if_match=if_match)
+
+    def reset_user_quota(self, username: str, *, if_match: str | None = None) -> APIResponse:
+        return self._post(f"/v1/users/{_safe(username)}/reset-quota", if_match=if_match)
 
     def delete_user(
             self,
@@ -399,9 +567,6 @@ class TelemtAPI:
         """
         return self._delete(f"/v1/users/{_safe(username)}", if_match=if_match)
 
-    # NOTE: POST /v1/users/{username}/rotate-secret currently returns 404
-    # in the route matcher (documented limitation). The method is provided
-    # for completeness and future compatibility.
     def rotate_secret(
             self,
             username: str,
@@ -411,10 +576,8 @@ class TelemtAPI:
     ) -> APIResponse:
         """POST /v1/users/{username}/rotate-secret — rotate user secret.
 
-        .. warning::
-            This endpoint currently returns ``404 not_found`` in all released
-            versions (documented route matcher limitation). The method is
-            included for future compatibility.
+        Returns the new credential. Owners of the old identity are cancelled;
+        watcher publication and existing-session retirement remain asynchronous.
 
         Parameters
         ----------
@@ -425,6 +588,91 @@ class TelemtAPI:
         _opt(body, "secret", secret)
         return self._post(f"/v1/users/{_safe(username)}/rotate-secret",
                           body=body or None, if_match=if_match)
+
+    # ------------------------------------------------------------------
+    # WEB runtime: opaque references are always supplied by the caller.
+    # ------------------------------------------------------------------
+
+    def web_status(self) -> APIResponse:
+        return self._get("/v1/runtime/web/status")
+
+    def web_sessions(self, *, limit: int | None = None, cursor: str | None = None,
+                     session_ref: str | None = None, ip: str | None = None,
+                     host: str | None = None, user: str | None = None,
+                     user_agent_id: str | None = None, key_id: str | None = None,
+                     carrier: str | None = None, state: str | None = None) -> APIResponse:
+        if limit is not None:
+            _bounded(limit, 1, 200, "limit")
+        if session_ref is not None and (cursor is not None or limit is not None):
+            raise ValueError("session_ref cannot be combined with cursor or limit")
+        query = {key: value for key, value in dict(limit=limit, cursor=cursor, session_ref=session_ref,
+                 ip=ip, host=host, user=user, user_agent_id=user_agent_id, key_id=key_id,
+                 carrier=carrier, state=state).items() if value is not None}
+        return self._get("/v1/runtime/web/sessions", query)
+
+    def web_session(self, session_ref: str) -> APIResponse:
+        """A 410 ok=true tombstone is data, with http_status retained."""
+        return self._get(f"/v1/runtime/web/sessions/{_safe(session_ref)}", success_statuses=(410,))
+
+    def web_close_sessions(self, runtime_instance: str, selector: dict) -> APIResponse:
+        _object(selector, "selector")
+        kind = selector.get("kind")
+        if kind == "refs":
+            refs = selector.get("session_refs")
+            if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs) or not 1 <= len(refs) <= 200 or len(set(refs)) != len(refs) or set(selector) != {"kind", "session_refs"}:
+                raise ValueError("refs selector requires 1..200 unique session references")
+        elif kind == "all":
+            if set(selector) != {"kind"}:
+                raise ValueError("all selector accepts only kind")
+        elif kind == "filter":
+            allowed = {"kind", "session_ref", "ip", "host", "user", "user_agent_id", "key_id", "carrier", "state"}
+            if not selector.keys() <= allowed or not any(value is not None for key, value in selector.items() if key != "kind"):
+                raise ValueError("filter selector requires at least one known non-null filter")
+        else:
+            raise ValueError("selector.kind must be refs, filter or all")
+        return self._post("/v1/runtime/web/sessions/close", {"runtime_instance": runtime_instance, "selector": selector})
+
+    def web_operation(self, operation_id: str) -> APIResponse:
+        return self._get(f"/v1/runtime/web/operations/{_safe(operation_id)}")
+
+    def wait_web_operation(self, operation_id: str, *, timeout: float = 60, poll_interval: float = 0.25) -> APIResponse:
+        path = f"/v1/runtime/web/operations/{_safe(operation_id)}"
+        def state(response):
+            data = _object(response.data, "WEB operation")
+            if data.get("operation_id") != operation_id:
+                raise TelemtAPIError("WEB operation identity changed", code="operation_mismatch", last_response=response)
+            return data.get("state")
+        return _poll(lambda remaining: self._get(path, timeout=remaining), state,
+                     {"completed", "cancelled", "failed"}, {"queued", "running"}, timeout, poll_interval)
+
+    def web_debug_clear(self, runtime_instance: str) -> APIResponse:
+        return self._post("/v1/runtime/web/debug/clear", {"runtime_instance": runtime_instance})
+
+    def web_learning_reset(self, runtime_instance: str) -> APIResponse:
+        return self._post("/v1/runtime/web/carrier-learning/reset", {"runtime_instance": runtime_instance})
+
+    def web_pause(self, runtime_instance: str) -> APIResponse:
+        return self._post("/v1/runtime/web/lifecycle/pause", {"runtime_instance": runtime_instance})
+
+    def web_drain(self, runtime_instance: str, timeout_secs: int) -> APIResponse:
+        _bounded(timeout_secs, 1, 3600, "timeout_secs")
+        return self._post("/v1/runtime/web/lifecycle/drain", {"runtime_instance": runtime_instance, "timeout_secs": timeout_secs})
+
+    def web_resume(self, runtime_instance: str) -> APIResponse:
+        return self._post("/v1/runtime/web/lifecycle/resume", {"runtime_instance": runtime_instance})
+
+    def wait_web_drain(self, runtime_instance: str, operation_id: str, *,
+                       timeout: float = 60, poll_interval: float = 0.25) -> APIResponse:
+        """Poll the same drain through WEB status; never substitute a new process or drain."""
+        def state(response):
+            data = _object(response.data, "WEB status")
+            runtime = data.get("runtime") or {}
+            drain = (data.get("operator_lifecycle") or {}).get("drain") or {}
+            if runtime.get("runtime_instance") != runtime_instance or drain.get("operation_id") != operation_id:
+                raise TelemtAPIError("WEB process or drain identity changed", code="operation_mismatch", last_response=response)
+            return drain.get("state")
+        return _poll(lambda remaining: self._get("/v1/runtime/web/status", timeout=remaining), state,
+                     {"completed", "cancelled"}, {"draining", "force_closing"}, timeout, poll_interval)
 
     # ------------------------------------------------------------------
     # Convenience helpers
@@ -440,11 +688,15 @@ class TelemtAPI:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _safe(username: str) -> str:
-    """Minimal guard: reject obvious path-injection attempts."""
-    if "/" in username or "\\" in username:
-        raise ValueError(f"Invalid username: {username!r}")
-    return username
+USER_FIELDS = {"secret", "user_ad_tag", "max_tcp_conns", "expiration_rfc3339", "data_quota_bytes",
+               "quota_period", "rate_limit_up_bps", "rate_limit_down_bps", "max_unique_ips", "enabled", "source_deny"}
+
+
+def _safe(value: str) -> str:
+    """Keep one opaque path segment from becoming a path, query or fragment."""
+    if not isinstance(value, str) or not value or value in (".", "..") or "/" in value or "\\" in value:
+        raise ValueError("Expected one nonempty path segment")
+    return quote(value, safe="")
 
 
 def _opt(d: dict, key: str, value: Any) -> None:
@@ -453,277 +705,72 @@ def _opt(d: dict, key: str, value: Any) -> None:
         d[key] = value
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-def _print(resp: APIResponse) -> None:
-    print(json.dumps(resp.data, indent=2))
-    if resp.revision:
-        print(f"# revision: {resp.revision}", flush=True)
+def _object(value, name):
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return value
 
 
-def _build_parser():
-    import argparse
+def _bounded(value, minimum, maximum, name):
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be within {minimum}..{maximum}")
 
-    p = argparse.ArgumentParser(
-        prog="telemt_api.py",
-        description="Telemt Control API CLI",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-COMMANDS (read)
-  health                          Liveness check
-  info                            System info (version, uptime, config hash)
-  status                          Runtime gates + startup progress
-  init                            Runtime initialization timeline
-  limits                          Effective limits (timeouts, upstream, ME)
-  posture                         Security posture summary
-  whitelist                       IP whitelist entries
-  summary                         Stats summary (conns, uptime, users)
-  zero                            Zero-cost counters (core/upstream/ME/pool/desync)
-  upstreams                       Upstream health + zero counters
-  minimal                         ME writers + DC snapshot  [minimal_runtime_enabled]
-  me-writers                      Per-writer ME status      [minimal_runtime_enabled]
-  dcs                             Per-DC coverage           [minimal_runtime_enabled]
-  me-pool                         ME pool generation/writer/refill snapshot
-  me-quality                      ME KDF, route-drops, per-DC RTT
-  upstream-quality                Per-upstream health + latency
-  nat-stun                        NAT probe state + STUN servers
-  me-selftest                     KDF/timeskew/IP/PID/BND health
-  connections                     Live connection totals + top-N  [runtime_edge_enabled]
-  events [--limit N]              Recent ring-buffer events       [runtime_edge_enabled]
 
-COMMANDS (users)
-  users                           List all users
-  user <username>                 Get single user
-  create <username> [OPTIONS]     Create user
-  patch  <username> [OPTIONS]     Partial update user
-  delete <username>               Delete user
-  secret <username> [--secret S]  Rotate secret (reserved; returns 404 in current release)
-  gen-secret                      Print a random 32-hex secret and exit
+def _positive_seconds(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite positive number of seconds")
+    return value
 
-USER OPTIONS (for create / patch)
-  --secret S          32 hex chars
-  --ad-tag S          32 hex chars (ad tag)
-  --max-conns N       Max concurrent TCP connections
-  --expires DATETIME  RFC3339 expiration (e.g. 2026-12-31T23:59:59Z)
-  --quota N           Data quota in bytes
-  --max-ips N         Max unique source IPs
 
-EXAMPLES
-  telemt_api.py health
-  telemt_api.py -u http://10.0.0.1:9091 -a mysecret users
-  telemt_api.py create alice --max-conns 5 --quota 10000000000
-  telemt_api.py patch  alice --expires 2027-01-01T00:00:00Z
-  telemt_api.py delete alice
-  telemt_api.py events --limit 20
-        """,
-    )
+def _reload_query(mode, timeout_secs, failure_policy):
+    if mode is None:
+        if timeout_secs is not None or failure_policy is not None:
+            raise ValueError("timeout_secs and failure_policy require reload mode")
+        return None
+    if mode not in ("instant", "drain"):
+        raise ValueError("reload mode must be instant or drain")
+    if mode == "drain":
+        _bounded(timeout_secs, 1, 3600, "timeout_secs")
+    elif timeout_secs is not None:
+        raise ValueError("instant reload forbids timeout_secs")
+    if failure_policy is not None and failure_policy not in ("keep_new", "rollback"):
+        raise ValueError("failure_policy must be keep_new or rollback")
+    return {key: value for key, value in dict(reload=mode, timeout_secs=timeout_secs,
+            failure_policy=failure_policy).items() if value is not None}
 
-    p.add_argument("-u", "--url", default="http://127.0.0.1:9091",
-                   metavar="URL", help="API base URL (default: http://127.0.0.1:9091)")
-    p.add_argument("-a", "--auth", default=None, metavar="TOKEN",
-                   help="Authorization header value")
-    p.add_argument("-t", "--timeout", type=int, default=10, metavar="SEC",
-                   help="Request timeout in seconds (default: 10)")
 
-    p.add_argument("command", nargs="?", default="help",
-                   help="Command to run (see COMMANDS below)")
-    p.add_argument("arg", nargs="?", default=None, metavar="USERNAME",
-                   help="Username for user commands")
+def _poll(fetch, state, terminal, pending, timeout, interval):
+    deadline = time.monotonic() + _positive_seconds(timeout, "poll timeout")
+    _positive_seconds(interval, "poll interval")
+    last = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TelemtAPIError("Polling budget expired; the server operation was not cancelled",
+                                 code="poll_timeout", last_response=last)
+        last = fetch(remaining)
+        if time.monotonic() >= deadline:
+            raise TelemtAPIError("Polling budget expired; the server operation was not cancelled",
+                                 code="poll_timeout", last_response=last)
+        try:
+            phase = state(last)
+            known = phase in terminal or phase in pending
+        except (ValueError, TypeError, AttributeError) as error:
+            raise TelemtAPIError("Invalid operation response", code="invalid_response", last_response=last) from error
+        if phase in terminal:
+            return last
+        if not known:
+            raise TelemtAPIError("Unknown operation phase", code="invalid_response", last_response=last)
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
 
-    # user create/patch fields
-    p.add_argument("--secret", default=None)
-    p.add_argument("--ad-tag", dest="ad_tag", default=None)
-    p.add_argument("--max-conns", dest="max_conns", type=int, default=None)
-    p.add_argument("--expires", default=None)
-    p.add_argument("--quota", type=int, default=None)
-    p.add_argument("--max-ips", dest="max_ips", type=int, default=None)
 
-    # events
-    p.add_argument("--limit", type=int, default=None,
-                   help="Max events for `events` command")
-
-    # optimistic concurrency
-    p.add_argument("--if-match", dest="if_match", default=None,
-                   metavar="REVISION", help="If-Match revision header")
-
-    return p
+def main(argv=None):
+    if __package__:
+        from .telemt_api_cli import main as cli_main
+    else:
+        from telemt_api_cli import main as cli_main
+    return cli_main(argv)
 
 
 if __name__ == "__main__":
-    import sys
-
-    parser = _build_parser()
-    args = parser.parse_args()
-
-    cmd = (args.command or "help").lower()
-
-    if cmd in ("help", "--help"):
-        parser.print_help()
-        sys.exit(0)
-
-    if cmd == "gen-secret":
-        print(TelemtAPI.generate_secret())
-        sys.exit(0)
-
-    api = TelemtAPI(args.url, auth_header=args.auth, timeout=args.timeout)
-
-    try:
-        # -- read endpoints --------------------------------------------------
-        if cmd == "health":
-            _print(api.health())
-
-        elif cmd == "info":
-            _print(api.system_info())
-
-        elif cmd == "status":
-            _print(api.runtime_gates())
-
-        elif cmd == "init":
-            _print(api.runtime_initialization())
-
-        elif cmd == "limits":
-            _print(api.limits_effective())
-
-        elif cmd == "posture":
-            _print(api.security_posture())
-
-        elif cmd == "whitelist":
-            _print(api.security_whitelist())
-
-        elif cmd == "summary":
-            _print(api.stats_summary())
-
-        elif cmd == "zero":
-            _print(api.stats_zero_all())
-
-        elif cmd == "upstreams":
-            _print(api.stats_upstreams())
-
-        elif cmd == "minimal":
-            _print(api.stats_minimal_all())
-
-        elif cmd == "me-writers":
-            _print(api.stats_me_writers())
-
-        elif cmd == "dcs":
-            _print(api.stats_dcs())
-
-        elif cmd == "me-pool":
-            _print(api.runtime_me_pool_state())
-
-        elif cmd == "me-quality":
-            _print(api.runtime_me_quality())
-
-        elif cmd == "upstream-quality":
-            _print(api.runtime_upstream_quality())
-
-        elif cmd == "nat-stun":
-            _print(api.runtime_nat_stun())
-
-        elif cmd == "me-selftest":
-            _print(api.runtime_me_selftest())
-
-        elif cmd == "connections":
-            _print(api.runtime_connections_summary())
-
-        elif cmd == "events":
-            _print(api.runtime_events_recent(limit=args.limit))
-
-        # -- user read -------------------------------------------------------
-        elif cmd == "users":
-            resp = api.list_users()
-            users = resp.data or []
-            if not users:
-                print("No users configured.")
-            else:
-                fmt = "{:<24} {:>7}  {:>14}  {}"
-                print(fmt.format("USERNAME", "CONNS", "OCTETS", "LINKS"))
-                print("-" * 72)
-                for u in users:
-                    links = (u.get("links") or {})
-                    all_links = (links.get("classic") or []) + \
-                                (links.get("secure") or []) + \
-                                (links.get("tls") or [])
-                    link_str = all_links[0] if all_links else "-"
-                    print(fmt.format(
-                        u["username"],
-                        u.get("current_connections", 0),
-                        u.get("total_octets", 0),
-                        link_str,
-                    ))
-            if resp.revision:
-                print(f"# revision: {resp.revision}")
-
-        elif cmd == "user":
-            if not args.arg:
-                parser.error("user command requires <username>")
-            _print(api.get_user(args.arg))
-
-        # -- user write ------------------------------------------------------
-        elif cmd == "create":
-            if not args.arg:
-                parser.error("create command requires <username>")
-            resp = api.create_user(
-                args.arg,
-                secret=args.secret,
-                user_ad_tag=args.ad_tag,
-                max_tcp_conns=args.max_conns,
-                expiration_rfc3339=args.expires,
-                data_quota_bytes=args.quota,
-                max_unique_ips=args.max_ips,
-                if_match=args.if_match,
-            )
-            d = resp.data or {}
-            print(f"Created: {d.get('user', {}).get('username')}")
-            print(f"Secret:  {d.get('secret')}")
-            links = (d.get("user") or {}).get("links") or {}
-            for kind, lst in links.items():
-                for link in (lst or []):
-                    print(f"Link ({kind}): {link}")
-            if resp.revision:
-                print(f"# revision: {resp.revision}")
-
-        elif cmd == "patch":
-            if not args.arg:
-                parser.error("patch command requires <username>")
-            if not any([args.secret, args.ad_tag, args.max_conns,
-                        args.expires, args.quota, args.max_ips]):
-                parser.error(
-                    "patch requires at least one field (--secret, --max-conns, --expires, --quota, --max-ips, --ad-tag)")
-            _print(api.patch_user(
-                args.arg,
-                secret=args.secret,
-                user_ad_tag=args.ad_tag,
-                max_tcp_conns=args.max_conns,
-                expiration_rfc3339=args.expires,
-                data_quota_bytes=args.quota,
-                max_unique_ips=args.max_ips,
-                if_match=args.if_match,
-            ))
-
-        elif cmd == "delete":
-            if not args.arg:
-                parser.error("delete command requires <username>")
-            resp = api.delete_user(args.arg, if_match=args.if_match)
-            print(f"Deleted: {resp.data}")
-            if resp.revision:
-                print(f"# revision: {resp.revision}")
-
-        elif cmd == "secret":
-            if not args.arg:
-                parser.error("secret command requires <username>")
-            _print(api.rotate_secret(args.arg, secret=args.secret,
-                                     if_match=args.if_match))
-
-        else:
-            print(f"Unknown command: {cmd!r}\nRun with 'help' to see available commands.",
-                  file=sys.stderr)
-            sys.exit(1)
-
-    except TelemtAPIError as exc:
-        print(f"API error [{exc.http_status}] {exc.code}: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except KeyboardInterrupt:
-        sys.exit(130)
+    raise SystemExit(main())

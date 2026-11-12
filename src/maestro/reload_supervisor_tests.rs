@@ -158,6 +158,11 @@ async fn revision_rollback_keeps_old_generation_and_cleans_candidate() {
     assert!(fixture.old_runtime.spawn_session(async {}));
     let status = fixture.control.status(1).await.unwrap();
     assert_eq!(status.state, ReloadPhase::RolledBack);
+    let observed = fixture.control.observation().unwrap().unwrap();
+    assert_eq!(observed.phase, ReloadPhase::RolledBack);
+    assert_eq!(observed.activated_generation, None);
+    assert_eq!(observed.retiring_generation, None);
+    assert_eq!(observed.retirement, None);
     fixture.old_runtime.stop_sessions().await;
 }
 
@@ -206,12 +211,33 @@ async fn drain_publishes_new_generation_before_old_sessions_finish() {
     assert!(!activation.is_finished());
     assert!(!fixture.old_runtime.spawn_session(async {}));
 
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while fixture.control.status(1).await.unwrap().state != ReloadPhase::Draining {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let observed = fixture.control.observation().unwrap().unwrap();
+    assert_eq!(observed.phase, ReloadPhase::Draining);
+    assert_eq!(observed.activated_generation, Some(2));
+    assert_eq!(observed.retiring_generation, Some(1));
+    assert_eq!(
+        observed.retiring_config_epoch,
+        Some(fixture.old_runtime.config().runtime_config_epoch)
+    );
+    assert_eq!(observed.retirement, Some("draining"));
+
     old_release.notify_one();
     activation.await.unwrap();
     assert_eq!(
         fixture.control.status(1).await.unwrap().state,
         ReloadPhase::Succeeded
     );
+    let observed = fixture.control.observation().unwrap().unwrap();
+    assert_eq!(observed.phase, ReloadPhase::Succeeded);
+    assert_eq!(observed.retiring_generation, Some(1));
+    assert_eq!(observed.retirement, Some("retired"));
     fixture.new_runtime.stop_sessions().await;
 }
 
@@ -255,6 +281,23 @@ async fn drain_timeout_cancels_old_sessions_and_records_one_warning() {
     assert_eq!(status.warnings.len(), 1);
     assert!(status.warnings[0].contains("exceeded drain timeout"));
     fixture.new_runtime.stop_sessions().await;
+}
+
+#[tokio::test]
+async fn rejected_reload_observes_source_generation_without_activation() {
+    let mut fixture = fixture(ReloadRequest::default()).await;
+    Arc::make_mut(&mut fixture.command.config).web.enabled = true;
+    fixture.supervisor.reload(fixture.command).await;
+    let observed = fixture.control.observation().unwrap().unwrap();
+    assert_eq!(observed.phase, ReloadPhase::Failed);
+    assert_eq!(observed.source_generation, Some(1));
+    assert_eq!(observed.activated_generation, None);
+    assert_eq!(observed.retiring_generation, None);
+    assert!(observed.error_present);
+    assert!(Arc::ptr_eq(
+        &fixture.supervisor.active_runtime.load_full(),
+        &fixture.old_runtime
+    ));
 }
 
 #[tokio::test]

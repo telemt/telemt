@@ -9,6 +9,10 @@ use tokio::sync::mpsc;
 
 use crate::config::ProxyConfig;
 
+#[path = "reload_observation.rs"]
+mod observation;
+pub(crate) use observation::ReloadObservation;
+
 const RELOAD_HISTORY_CAPACITY: usize = 32;
 const RELOAD_COMMAND_CAPACITY: usize = 1;
 const MAX_DRAIN_TIMEOUT_SECS: u64 = 3_600;
@@ -151,6 +155,16 @@ pub(crate) struct ReloadStatus {
     pub(crate) warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+    #[serde(skip)]
+    source_generation: Option<u64>,
+    #[serde(skip)]
+    activated_generation: Option<u64>,
+    #[serde(skip)]
+    retiring_generation: Option<u64>,
+    #[serde(skip)]
+    retiring_config_epoch: Option<u64>,
+    #[serde(skip)]
+    retirement: Option<&'static str>,
 }
 
 /// Accepted operation metadata returned before asynchronous preparation starts.
@@ -395,6 +409,11 @@ impl ReloadStatusStore {
             deferred_fields: Vec::new(),
             warnings: Vec::new(),
             error: None,
+            source_generation: None,
+            activated_generation: None,
+            retiring_generation: None,
+            retiring_config_epoch: None,
+            retirement: None,
         };
         state.active_reload_id = Some(reload_id);
         state.statuses.push_back(status.clone());
@@ -416,6 +435,9 @@ impl ReloadStatusStore {
     fn mark_phase(&self, reload_id: u64, phase: ReloadPhase) {
         self.update(reload_id, |status| {
             status.state = phase;
+            if phase == ReloadPhase::Draining {
+                status.retirement = Some("draining");
+            }
             if status.started_at_epoch_secs.is_none() && phase != ReloadPhase::Accepted {
                 status.started_at_epoch_secs = Some(now_epoch_secs());
             }

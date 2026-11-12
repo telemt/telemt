@@ -165,6 +165,7 @@ async fn patch_user_to_completion(
         }
     }
 
+    let source_deny_edits = apply_source_deny(&mut cfg, user, body.source_deny)?;
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
     let staged_credential =
@@ -210,13 +211,14 @@ async fn patch_user_to_completion(
         touched_sections.push(AccessSection::UserEnabled);
     }
 
-    let revision = if touched_sections.is_empty() {
+    let revision = if touched_sections.is_empty() && source_deny_edits.is_empty() {
         current_revision(&shared.config_path).await?
     } else {
-        save_access_sections_to_disk_if_revision(
+        save_access_sections_and_fields_if_revision(
             &shared.config_path,
             &cfg,
             &touched_sections,
+            source_deny_edits,
             Some(&base_revision),
         )
         .await?

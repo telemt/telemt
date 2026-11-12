@@ -1,5 +1,10 @@
 # High-Load Configuration & Tuning Guide
-When deploying Telemt under high-traffic load (tens or hundreds of thousands of concurrent connections), the standard OS network stack limits can lead to packet drops, high CPU context switching, and connection failures. This guide covers Linux kernel tuning, hardware configuration, and architecture optimizations required to prepare the server for high-load scenarios.
+
+[English](HIGH_LOAD.en.md) · [Русский](HIGH_LOAD.ru.md) · [Deutsch](HIGH_LOAD.de.md)
+
+Use this guide when measured load exposes a specific resource limit. The values below are example capacities, not a tested guarantee of a particular connection count. Record the kernel version, active configuration, connection rate, memory use and latency before changing a setting. Save the previous values and change one group at a time so you can compare and revert it.
+
+For terminology, see the [shared glossary](../TERMINOLOGY.md).
 
 ---
 ## 1. System Limits & File Descriptors
@@ -51,45 +56,57 @@ net.ipv4.tcp_max_syn_backlog = 65535
 net.ipv4.tcp_syncookies = 1
 ```
 ### 2.2 Port Exhaustion & TIME-WAIT Sockets
-High churn rates lead to ephemeral port exhaustion. Expand the range and rapidly recycle closed sockets:
+First distinguish failed outbound connects caused by exhausted source ports from a large but harmless TIME-WAIT population. Inspect the failing error, destination tuples and `ss -s`. Expanding the ephemeral range can help when this is the limiting resource; account for ports reserved by other services:
+
 ```ini
 net.ipv4.ip_local_port_range = 10000 65535
-net.ipv4.tcp_fin_timeout = 15
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_max_tw_buckets = 2000000
 ```
-### 2.3 TCP Keepalive (Aggressive Dead Connection Culling)
-By default, Linux keeps silent, dropped connections open for over 2 hours. This consumes memory at scale. The values below start probing after five idle minutes and abandon an unresponsive peer after the subsequent probe budget, roughly 7–8 minutes after it became idle:
+
+`tcp_tw_reuse` controls reuse of TIME-WAIT sockets when the protocol permits it. In the referenced kernel documentation, `0` disables it, `1` enables it globally and `2` limits it to loopback; inspect your running kernel's current value before changing it. `tcp_max_tw_buckets` limits retained TIME-WAIT entries, not the duration of TIME-WAIT.
+
+`tcp_fin_timeout` applies to orphaned connections in `FIN_WAIT_2`; reducing it does not shorten `TIME_WAIT`. Keep these mechanisms separate when investigating port exhaustion. See the [Linux IP sysctl reference](https://docs.kernel.org/networking/ip-sysctl.html).
+
+### 2.3 TCP Keepalive
+These sysctls are defaults for sockets with TCP keepalive enabled that do not override the corresponding options. They start probing after five idle minutes and exhaust the subsequent probe budget after roughly 7–8 minutes of total inactivity:
+
 ```ini
 net.ipv4.tcp_keepalive_time = 300
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 5
 ```
+
+Telemt overrides keepalive time and interval on client sockets using `timeouts.client_keepalive` (default 15 seconds). On Linux its ME sockets use 30 seconds idle, a 10-second interval and 3 probes. These are TCP socket settings; ME RPC Ping/Pong, `timeouts.client_ack` and relay idle policies impose separate checks. The sysctl example therefore does not define the lifetime of every Telemt connection. Verify the relevant socket and configured application timeout.
+
 ### 2.4 TCP Buffers & Congestion Control
-Optimize memory usage per socket and switch to BBR (Bottleneck Bandwidth and Round-trip propagation time) to improve latency on lossy networks:
+Measure memory pressure, throughput and p95/p99 latency with the same workload before and after changing buffers. The maximum below is a ceiling for an eligible socket, not a fixed allocation for every connection. Telemt also sets socket buffer sizes explicitly, so kernel defaults alone do not describe its effective buffers.
+
 ```ini
-# Core buffer sizes
+# Example buffer ceilings: size them for the available memory and workload.
 net.core.rmem_default = 262144
 net.core.wmem_default = 262144
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
-# TCP-specific buffers (min, default, max)
 net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 65536 16777216
-# Enable BBR
+```
+
+Check available congestion-control algorithms with `sysctl net.ipv4.tcp_available_congestion_control`. If BBR is supported, evaluate it against the current algorithm under representative RTT, loss and load; this guide does not establish that it always improves latency. An example BBR configuration is:
+
+```ini
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 ```
 
+
 ---
 ## 3. Conntrack (Netfilter) Tuning
-If your server uses `iptables`, `ufw`, or `firewalld`, the Linux kernel tracks every connection state in a table (`nf_conntrack`). When this table fills up, Linux drops new packets.
+Stateful firewall and NAT rules can use `nf_conntrack` to track connections. Check whether tracking is active on the relevant route, especially with NOTRACK rules. Exhausting the conntrack table can cause new packets to be dropped.
 Check your current limit and usage:
 ```bash
 sysctl net.netfilter.nf_conntrack_max
 sysctl net.netfilter.nf_conntrack_count
 ```
-If it gets close to the limit, tune it up, and reduce the time established connections linger in the tracker:
+If measured occupancy approaches the limit and memory permits, evaluate a larger table. Shorter tracking timeouts can remove idle NAT/firewall state needed by long-lived connections, so validate them separately. These are example values, not a universal profile:
 ```ini
 # In /etc/sysctl.d/99-telemt-highload.conf
 net.netfilter.nf_conntrack_max = 2097152
@@ -138,7 +155,7 @@ backend telemt_backend
     # Preserve the client IP for Telemt through PROXY v2
     server telemt_core 10.10.10.1:443 maxconn 250000 send-proxy-v2 check inter 5s
 ```
-**Important**: Telemt must be configured to process the `PROXY` protocol on port `443` for this chain to work and preserve client IPs.
+**Important**: configure the explicit Telemt listener for PROXY protocol and set `server.proxy_protocol_trusted_cidrs` to the immediate HAProxy addresses. Check its bind address and host firewall. The [two-hop example](../Setup_examples/VPS_DOUBLE_HOP.en.md#step-2-installing-telemt-on-server-b-conditionally-netherlands) shows the complete listener setup.
 
 ### 4.2 WEB deployment
 

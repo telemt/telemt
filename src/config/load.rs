@@ -29,6 +29,7 @@ mod runtime_web;
 mod decode;
 mod effective;
 mod pipeline;
+mod publication;
 // Candidate-owned DNS preparation is separate from pure runtime reconstruction.
 mod decoy_dns;
 mod validate_core;
@@ -156,6 +157,14 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub default_dc: Option<u8>,
 
+    /// Process-local identity assigned by the owner of a published config snapshot.
+    #[serde(skip)]
+    pub(crate) runtime_config_epoch: u64,
+    #[serde(skip)]
+    pub(crate) provenance: super::observation::ConfigProvenance,
+    #[serde(skip)]
+    pub(crate) watcher_observation: Option<Arc<super::observation::WatchObservation>>,
+
     /// Monotonic start of source acquisition, used only for cold quota policy fencing.
     #[serde(skip)]
     pub(crate) quota_source_read_at: Option<std::time::Instant>,
@@ -258,6 +267,11 @@ impl ProxyConfig {
     /// Parses source without resolving decoys or creating runtime WEB snapshots.
     pub(crate) fn parse_source<P: AsRef<Path>>(path: P) -> Result<ParsedConfigSource> {
         Self::parse_source_with_overrides(path, &BTreeMap::new())
+    }
+
+    /// Parses an already captured source manifest without DNS or static-site reads.
+    pub(crate) fn parse_captured_source(graph: ConfigSourceGraph) -> Result<ParsedConfigSource> {
+        pipeline::parse_source_graph(graph)
     }
 
     /// Checks decoy mode-specific keys before a source or API patch loses unknown fields.

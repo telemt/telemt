@@ -60,7 +60,7 @@ pub(super) async fn handle(
             }
         };
         let runtime_cfg = config_rx.borrow().clone();
-        data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
+        users::refresh_runtime_view(&mut data, &runtime_cfg);
         shared
             .runtime_events
             .record("api.user.enable.ok", format!("username={}", base_user));
@@ -102,7 +102,7 @@ pub(super) async fn handle(
             }
         };
         let runtime_cfg = config_rx.borrow().clone();
-        data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
+        users::refresh_runtime_view(&mut data, &runtime_cfg);
         shared
             .runtime_events
             .record("api.user.disable.ok", format!("username={}", base_user));
@@ -229,7 +229,7 @@ pub(super) async fn handle(
             }
         };
         let runtime_cfg = config_rx.borrow().clone();
-        data.user.in_runtime = runtime_cfg.access.users.contains_key(&data.user.username);
+        users::refresh_runtime_view(&mut data.user, &runtime_cfg);
         shared.runtime_events.record(
             "api.user.rotate_secret.ok",
             format!("username={}", base_user),
@@ -293,7 +293,7 @@ pub(super) async fn handle(
                 }
             };
             let runtime_cfg = config_rx.borrow().clone();
-            data.in_runtime = runtime_cfg.access.users.contains_key(&data.username);
+            users::refresh_runtime_view(&mut data, &runtime_cfg);
             shared
                 .runtime_events
                 .record("api.user.patch.ok", format!("username={}", data.username));
