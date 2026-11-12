@@ -196,6 +196,7 @@ const SERVER_CONFIG_KEYS: &[&str] = &[
     "listen_tcp",
     "client_mss",
     "client_mss_bulk",
+    "client_mss_prefix",
     "proxy_protocol",
     "proxy_protocol_header_timeout_ms",
     "proxy_protocol_trusted_cidrs",

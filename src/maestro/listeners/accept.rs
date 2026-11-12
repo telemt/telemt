@@ -100,7 +100,7 @@ fn spawn_client_session(
     let beobachten = runtime.beobachten.clone();
     let shared = runtime.proxy_shared.clone();
     let proxy_protocol_enabled = spec.proxy_protocol;
-    let tls_response_fragment_size = spec.tls_response_fragment_size;
+    let tls_response_fragmentation = spec.tls_response_fragmentation;
     let real_peer_report = Arc::new(std::sync::Mutex::new(None));
     let real_peer_report_for_handler = real_peer_report.clone();
 
@@ -127,7 +127,7 @@ fn spawn_client_session(
             #[cfg(unix)]
             raw_fd,
             rst_mode,
-            tls_response_fragment_size,
+            tls_response_fragmentation,
         )
         .run()
         .await

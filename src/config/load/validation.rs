@@ -124,11 +124,20 @@ pub(super) fn validate_listener_runtime_profiles(config: &ProxyConfig) -> Result
         }
     }
 
+    let prefix = config
+        .server
+        .client_mss_prefix_value()
+        .map_err(|error| ProxyError::Config(format!("server.client_mss_prefix {error}")))?;
     let Some(bulk_mss) = config
         .server
         .client_mss_bulk_value()
         .map_err(|error| ProxyError::Config(format!("server.client_mss_bulk {error}")))?
     else {
+        if prefix.is_some() {
+            return Err(ProxyError::Config(
+                "server.client_mss_prefix requires server.client_mss_bulk".to_string(),
+            ));
+        }
         return Ok(());
     };
     if !cfg!(target_os = "linux") {

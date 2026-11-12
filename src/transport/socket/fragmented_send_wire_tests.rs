@@ -12,7 +12,7 @@ use crate::error::HandshakeResult;
 use crate::protocol::constants::TLS_VERSION;
 use crate::protocol::tls;
 use crate::proxy::handshake::{
-    TlsResponseWriteOptions, handle_tls_handshake_with_shared_and_options,
+    TlsResponseFragmentation, TlsResponseWriteOptions, handle_tls_handshake_with_shared_and_options,
 };
 use crate::proxy::shared_state::ProxySharedState;
 use crate::stats::ReplayChecker;
@@ -95,7 +95,11 @@ async fn wait_for_file(path: &Path) {
     .expect("wire-test release barrier timed out");
 }
 
-async fn run_server(addr: SocketAddr, fragment_size: u16, fake_cert_len: usize) {
+async fn run_server(
+    addr: SocketAddr,
+    fragmentation: TlsResponseFragmentation,
+    fake_cert_len: usize,
+) {
     let socket = create_listener(
         addr,
         &ListenOptions {
@@ -143,7 +147,7 @@ async fn run_server(addr: SocketAddr, fragment_size: u16, fake_cert_len: usize) 
         &rng,
         None,
         &shared,
-        TlsResponseWriteOptions::tcp(raw_fd, Some(fragment_size)),
+        TlsResponseWriteOptions::tcp(raw_fd, Some(fragmentation)),
     )
     .await
     {
@@ -226,7 +230,20 @@ async fn fake_tls_fragmentation_wire_role() {
                 .unwrap()
                 .parse()
                 .unwrap();
-            run_server(addr, fragment_size, fake_cert_len).await;
+            // Optional `server.client_mss_prefix` value; omitted keeps "full".
+            let server = crate::config::ServerConfig {
+                client_mss_prefix: std::env::var("TELEMT_WIRE_PREFIX").ok(),
+                ..Default::default()
+            };
+            let prefix = server
+                .client_mss_prefix_value()
+                .expect("TELEMT_WIRE_PREFIX must be a valid client_mss_prefix")
+                .unwrap_or_default();
+            let fragmentation = TlsResponseFragmentation {
+                fragment_size,
+                prefix,
+            };
+            run_server(addr, fragmentation, fake_cert_len).await;
         }
         "client" => run_client(addr).await,
         _ => panic!("TELEMT_WIRE_ROLE must be server or client"),

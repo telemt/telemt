@@ -79,6 +79,7 @@ pub(super) fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot
         || old.server.listen_addr_ipv6 != new.server.listen_addr_ipv6
         || old.server.listen_tcp != new.server.listen_tcp
         || old.server.client_mss != new.server.client_mss
+        || old.server.client_mss_prefix != new.server.client_mss_prefix
         || old.server.listen_unix_sock != new.server.listen_unix_sock
         || old.server.listen_unix_sock_perm != new.server.listen_unix_sock_perm
     {
