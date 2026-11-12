@@ -78,6 +78,9 @@ pub(super) async fn reload(
             published.then_some(config.runtime_config_epoch),
             (!published).then_some("publication_closed"),
         );
+        if published {
+            record_restart_pending(&config, false);
+        }
         reload_state.mark_applied(source.rendered_hash);
         return Some(manifest);
     }

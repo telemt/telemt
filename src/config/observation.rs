@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
@@ -139,10 +139,21 @@ pub(crate) struct WatchOutcome {
     pub(crate) error_code: Option<&'static str>,
 }
 
+/// Closed set of watcher rejection codes, exported as Prometheus label values.
+pub(crate) const WATCH_REJECTION_CODES: [&str; 5] = [
+    "source_invalid_or_unreadable",
+    "preparation_failed",
+    "effective_config_invalid",
+    "preparation_worker_failed",
+    "dns_overrides_rejected",
+];
+
 #[derive(Debug, Default)]
 pub(crate) struct WatchObservation {
     next_sequence: AtomicU64,
     latest: ArcSwapOption<WatchOutcome>,
+    rejected: [AtomicU64; WATCH_REJECTION_CODES.len()],
+    restart_pending: AtomicBool,
 }
 
 impl WatchObservation {
@@ -153,6 +164,15 @@ impl WatchObservation {
         epoch: Option<u64>,
         error_code: Option<&'static str>,
     ) {
+        if phase == "rejected" {
+            let index = WATCH_REJECTION_CODES
+                .iter()
+                .position(|code| Some(*code) == error_code);
+            debug_assert!(index.is_some(), "unlisted rejection code {error_code:?}");
+            if let Some(index) = index {
+                self.rejected[index].fetch_add(1, Ordering::Relaxed);
+            }
+        }
         self.latest.store(Some(Arc::new(WatchOutcome {
             sequence: self
                 .next_sequence
@@ -171,5 +191,22 @@ impl WatchObservation {
 
     pub(crate) fn snapshot(&self) -> Option<Arc<WatchOutcome>> {
         self.latest.load_full()
+    }
+
+    /// Records whether the accepted source still differs in restart-only fields.
+    pub(crate) fn record_restart_pending(&self, pending: bool) {
+        self.restart_pending.store(pending, Ordering::Relaxed);
+    }
+
+    pub(crate) fn restart_pending(&self) -> bool {
+        self.restart_pending.load(Ordering::Relaxed)
+    }
+
+    /// Rejection totals in `WATCH_REJECTION_CODES` order.
+    pub(crate) fn rejected_totals(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
+        WATCH_REJECTION_CODES
+            .iter()
+            .zip(&self.rejected)
+            .map(|(code, total)| (*code, total.load(Ordering::Relaxed)))
     }
 }
