@@ -5,6 +5,7 @@ function create(settings){
  let closed=false,order=0,ready=settings.committed(),resolveReady;
  const readyPromise=new Promise(resolve=>{resolveReady=resolve});if(ready)resolveReady();
  const alive=channel=>!closed&&!channel.closed&&settings.alive(channel.lane);
+ const remainingBudget=()=>settings.remaining?settings.remaining():Infinity;
  const markReady=()=>{if(!ready){ready=true;resolveReady();settings.commit()}};
  function waitReady(signal){
   if(ready)return Promise.resolve();
@@ -45,14 +46,14 @@ function create(settings){
   const frozen=settings.options(settings.method,token,lease.body,headers,lease.controller.signal);
   try{
    while(alive(channel)&&!lease.cancelled){
-    try{const response=await settings.request('/api/v1/up',frozen,null,()=>ready?1:9);if(!alive(channel))return;checkAck(response,sequence);acknowledge(channel,sequence,lease);return}
+    try{const response=await settings.request('/api/v1/up',frozen,remainingBudget,()=>ready?1:9);if(!alive(channel))return;checkAck(response,sequence);acknowledge(channel,sequence,lease);return}
     catch(error){
      if(!alive(channel)||lease.cancelled)return;
      if(!ready){settings.failed(error);return}
      let replayed=false;
-     const recovered=await settings.recover(error,async(signal,remaining)=>{
-      const response=await settings.request('/api/v1/up',Object.assign({},frozen,{signal}),remaining,2);
-      if(!alive(channel)||lease.cancelled)return;checkAck(response,sequence);replayed=true;acknowledge(channel,sequence,lease);
+     const recovered=await settings.recover(error,async(signal,remaining,accepted)=>{
+      const response=await settings.request('/api/v1/up',Object.assign({},frozen,{signal}),remaining,2,undefined,accepted);
+      if(!alive(channel)||lease.cancelled)return;if(remaining()<=0)throw settings.failure('timeout','recovery deadline');checkAck(response,sequence);accepted();replayed=true;acknowledge(channel,sequence,lease);
      });
      if(!recovered||!alive(channel)||replayed)return;
     }
@@ -73,14 +74,15 @@ function create(settings){
     const cursor=channel.cursor,headers={'X-Down-Cursor':cursor};if(channel.id!==null)headers['X-Lane-ID']=String(channel.id);
     channel.controller=new AbortController();const frozen=settings.options(settings.method,token,null,headers,channel.controller.signal);
     try{
-     const response=await settings.request('/api/v1/down',frozen,null,1,channel.receiver.read);
+     const response=await settings.request('/api/v1/down',frozen,remainingBudget,1,channel.receiver.read);
      if(!alive(channel))return;if(response.status!==200&&response.status!==204)throw settings.failure('http','downlink rejected');
      if(ready)settings.connected();
     }catch(error){
      if(!alive(channel))return;
      if(!ready){settings.failed(error);return}
-     const recovered=await settings.recover(error,async(signal,remaining)=>{
-      const response=await settings.request('/api/v1/down',Object.assign({},frozen,{signal}),remaining,2,channel.receiver.read);
+     const recovered=await settings.recover(error,async(signal,remaining,accepted)=>{
+      const response=await settings.request('/api/v1/down',Object.assign({},frozen,{signal}),remaining,2,channel.receiver.read,accepted);
+      if(remaining()<=0)throw settings.failure('timeout','recovery deadline');
       if(response.status!==200&&response.status!==204)throw settings.failure('http','downlink replay rejected');
      });
      if(!recovered||!alive(channel))return;

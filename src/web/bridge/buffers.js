@@ -1,7 +1,8 @@
 (()=>{'use strict';
 function create(settings){
  let queuedBytes=0,queuedItems=0;
- const retiredLimit=4096,activeStreams=new Set(),retiredStreams=new Set(),retiredStreamOrder=[];
+ const retiredLimit=4096,activeStreams=new Set(),retiredStreams=new Set(),retiredStreamOrder=[],recoveryFresh=new Set();
+ let recoveryOwnershipUncertain=false;
  function reserve(data,lane){
   const limits=settings.limits(),buffered=settings.buffered();
   if(!data.byteLength||data.byteLength>limits.queueBytes-queuedBytes-buffered||queuedItems>=limits.queueItems)return false;
@@ -44,15 +45,17 @@ function create(settings){
   if(retiredStreamOrder.length===retiredLimit)retiredStreams.delete(retiredStreamOrder.shift());
   retiredStreams.add(id);retiredStreamOrder.push(id);
  }
- function acceptNativeFrames(data){
+ function acceptNativeFrames(data,holdRecovery=false){
   const values=splitFrames(data),accepted=[];
   for(const value of values){
    if(retiredStreams.has(value.id)&&!activeStreams.has(value.id))continue;
+   if(!holdRecovery&&!recoveryOwnershipUncertain&&(value.type===2||value.type===4)&&value.id&&!activeStreams.has(value.id))recoveryOwnershipUncertain=true;
    if(value.type===1){
     if(!activeStreams.has(value.id)&&activeStreams.size>=settings.maxStreams())throw settings.failure('capacity','stream capacity exhausted');
+    if(holdRecovery&&value.id&&!activeStreams.has(value.id)&&!retiredStreams.has(value.id))recoveryFresh.add(value.id);
     activeStreams.add(value.id);accepted.push(value.data);continue;
    }
-   if(value.type===3){activeStreams.delete(value.id);rememberStreamRetired(value.id)}
+   if(value.type===3){activeStreams.delete(value.id);recoveryFresh.delete(value.id);rememberStreamRetired(value.id)}
    accepted.push(value.data);
   }
   if(accepted.length===values.length)return data;if(!accepted.length)return null;
@@ -62,33 +65,55 @@ function create(settings){
   return joined.buffer;
  }
  function observeServerFrames(data){
-  for(const value of splitFrames(data))if(value.type===3){activeStreams.delete(value.id);rememberStreamRetired(value.id)}
+  for(const value of splitFrames(data))if(value.type===3){activeStreams.delete(value.id);recoveryFresh.delete(value.id);rememberStreamRetired(value.id)}
  }
- function probeFrames(){
-  const result=[];let scanned=0,pending=settings.pending(),batchLimit=settings.limits().batchBytes;
+ function probeFrames(excludedRanges){
+  const result=[];let scanned=0,pending=settings.pending(),batchLimit=settings.limits().batchBytes,more=false;
   for(let index=0;index<pending.length;index++){
-   const source=pending[index],view=new DataView(source);let start=0;
+   const source=pending[index],view=new DataView(source),ranges=excludedRanges&&excludedRanges.get(source)||[];let start=0,rangeIndex=0;
    while(start<source.byteLength){
-    if(source.byteLength-start<8||result.length>=4096)throw new Error('invalid frame batch');
+    while(rangeIndex<ranges.length&&ranges[rangeIndex].end<=start)rangeIndex++;
+    if(rangeIndex<ranges.length&&ranges[rangeIndex].start===start){start=ranges[rangeIndex++].end;continue}
+    if(source.byteLength-start<8)throw new Error('invalid frame batch');
     const type=view.getUint8(start),id=(view.getUint8(start+1)<<16)|(view.getUint8(start+2)<<8)|view.getUint8(start+3);
     const size=view.getUint32(start+4),end=start+8+size,bytes=end-start;
     if((type===2&&!size)||size>1048576||end>source.byteLength)throw new Error('invalid frame');
-    if(scanned+bytes>batchLimit)return result;
-    result.push({source,index,start,end,type,id});scanned+=bytes;start=end;
+    const frame={source,index,start,end,type,id};start=end;
+    if(result.length>=4096||scanned+bytes>batchLimit){more=true;return {frames:result,more}}
+    result.push(frame);scanned+=bytes;
    }
   }
-  return result;
+  return {frames:result,more};
  }
- function findProbe(includeData){
-  const frames=probeFrames(),first=frames.findIndex(frame=>frame.type===1||frame.type===2);if(first<0)return null;
-  const laneMode=settings.laneMode(),selected=[];let hasData=frames[first].type===2;
-  if(laneMode){
-   selected.push(frames[first]);
-   if(includeData&&!hasData)for(let index=first+1;index<frames.length;index++)if(frames[index].id===frames[first].id){selected.push(frames[index]);if(frames[index].type===2){hasData=true;break}}
-  }else{
+ function findProbe(includeData,excludeSpans,targetID,targetType,collectAll){
+  const excludedRanges=new Map();
+  for(const span of excludeSpans||[]){const ranges=excludedRanges.get(span.source)||[];ranges.push(span);excludedRanges.set(span.source,ranges)}
+  const scanned=probeFrames(excludedRanges),frames=scanned.frames;
+  let first;const selected=[];let hasData;
+  if(targetID!==undefined){
+   first=frames.findIndex(frame=>frame.id===targetID&&frame.type===(targetType===undefined?2:targetType));
+   if(first<0){
+    if(!scanned.more)return null;
+    const laneMode=settings.laneMode();for(const frame of frames)if(!laneMode||frame.id===targetID)selected.push(frame);
+    if(!selected.length)return null;
+    first=frames.indexOf(selected[0]);
+   }
    let last=first;
-   if(includeData&&!hasData)for(let index=first+1;index<frames.length;index++){if(frames[index].id===frames[first].id&&frames[index].type===2){last=index;hasData=true;break}}
-   for(let index=0;index<=(hasData?last:first);index++)selected.push(frames[index]);
+   if(collectAll)for(let index=first+1;index<frames.length;index++)if(frames[index].id===targetID&&frames[index].type===(targetType===undefined?2:targetType))last=index;
+   const laneMode=settings.laneMode();
+   if(selected.length===0)for(let index=0;index<=last;index++)if(!laneMode||frames[index].id===targetID)selected.push(frames[index]);
+   hasData=selected.some(frame=>frame.type===2);
+  }else{
+   first=frames.findIndex(frame=>frame.type===1||frame.type===2);if(first<0)return null;
+   hasData=frames[first].type===2;
+   if(settings.laneMode()){
+    selected.push(frames[first]);
+    if(includeData&&!hasData)for(let index=first+1;index<frames.length;index++)if(frames[index].id===frames[first].id){selected.push(frames[index]);if(frames[index].type===2){hasData=true;break}}
+   }else{
+    let last=first;
+    if(includeData&&!hasData)for(let index=first+1;index<frames.length;index++){if(frames[index].id===frames[first].id&&frames[index].type===2){last=index;hasData=true;break}}
+    for(let index=0;index<=(hasData?last:first);index++)selected.push(frames[index]);
+   }
   }
   const spans=[];let total=0;
   for(const frame of selected){
@@ -96,9 +121,30 @@ function create(settings){
    if(previous&&previous.source===frame.source&&previous.end===frame.start)previous.end=frame.end;
    else spans.push({source:frame.source,index:frame.index,start:frame.start,end:frame.end});
   }
-  const joined=new Uint8Array(total);let offset=0;
-  for(const span of spans){const part=new Uint8Array(span.source,span.start,span.end-span.start);joined.set(part,offset);offset+=part.byteLength}
-  return {spans,id:frames[first].id,data:joined.buffer,hasData};
+  return {spans,id:frames[first].id,size:total,hasData,more:scanned.more};
+ }
+ function copyProbe(probe){
+  const joined=new Uint8Array(probe.size);let offset=0;
+  for(const span of probe.spans){const part=new Uint8Array(span.source,span.start,span.end-span.start);joined.set(part,offset);offset+=part.byteLength}
+  return joined.buffer;
+ }
+ function canSendCandidate(laneID,socketBuffered,sendBytes){
+  const limits=settings.limits();if(queuedBytes>limits.queueBytes)return 'capacity';
+  if(queuedBytes+sendBytes>limits.queueBytes)return 'reserved';
+  if(queuedBytes+settings.buffered()+sendBytes>limits.queueBytes)return 'buffered';
+  if(laneID===null)return true;
+  let laneBytes=0,laneItems=0;
+  for(const source of settings.pending()){
+   const view=new DataView(source);let offset=0;
+   while(offset<source.byteLength){
+    const id=(view.getUint8(offset+1)<<16)|(view.getUint8(offset+2)<<8)|view.getUint8(offset+3),size=view.getUint32(offset+4),end=offset+8+size;
+    if(end>source.byteLength)throw new Error('invalid frame');
+    if(id===laneID){laneBytes+=end-offset;laneItems++}offset=end;
+   }
+  }
+  if(laneItems>limits.laneItems||laneBytes>limits.laneBytes)return 'capacity';
+  if(laneBytes+sendBytes>limits.laneBytes)return 'reserved';
+  return laneBytes+socketBuffered+sendBytes<=limits.laneBytes?true:'buffered';
  }
  function consumeProbe(probe){
   const pending=settings.pending(),groups=new Map();
@@ -133,11 +179,37 @@ function create(settings){
  function settleBatch(lease){if(!lease||lease.settled)return false;lease.settled=true;release(lease.total,lease.count,lease.lane);return true}
  function cancelBatch(lease){if(!lease||lease.settled)return;lease.cancelled=true;if(lease.controller)lease.controller.abort();settleBatch(lease)}
  function closeFrame(id){const value=new Uint8Array(8);value[0]=3;value[1]=(id>>>16)&255;value[2]=(id>>>8)&255;value[3]=id&255;return value.buffer}
- function retireStream(id){activeStreams.delete(id);rememberStreamRetired(id)}
- function retireAllStreams(){const ids=Array.from(activeStreams);activeStreams.clear();for(const id of ids)rememberStreamRetired(id);return ids}
- function clearStreams(){activeStreams.clear();retiredStreams.clear();retiredStreamOrder.length=0}
+ function recoveryHandoff(values,limits){
+  const eligible=new Set(recoveryOwnershipUncertain?[]:[...recoveryFresh].filter(id=>activeStreams.has(id))),history=new Map(),records=[];
+  for(const id of eligible)history.set(id,{open:false,seen:false,valid:true});
+  for(const source of values)for(const value of splitFrames(source)){
+   const state=history.get(value.id);if(!state)continue;
+   const size=value.data.byteLength-8,view=new DataView(value.data);
+   if(!state.seen){state.seen=true;if(value.type!==1||size!==0){state.valid=false;continue}state.open=true}
+   else if(value.type===2&&state.open&&size>0){}
+   else if(value.type===4&&state.open&&size===4&&view.getUint32(8)>0){}
+   else{state.valid=false;continue}
+   records.push({id:value.id,data:value.data});
+  }
+  const survivors=[...eligible].filter(id=>{const value=history.get(id);return value.valid&&value.open&&value.seen&&activeStreams.has(id)}),survivorSet=new Set(survivors),frames=records.filter(value=>survivorSet.has(value.id));
+  const byStream=new Map();let totalBytes=0;
+  for(const value of frames){const size=value.data.byteLength;totalBytes+=size;let stream=byStream.get(value.id);if(!stream){stream={bytes:0,items:0};byStream.set(value.id,stream)}stream.bytes+=size;stream.items++}
+  if(survivors.length>limits.maxStreams||totalBytes>limits.queueBytes||frames.length>limits.queueItems)return {ok:false,ids:[],batches:[]};
+  for(const value of frames)if(value.data.byteLength>limits.batchBytes)return {ok:false,ids:[],batches:[]};
+  for(const stream of byStream.values())if(stream.bytes>limits.laneBytes||stream.items>limits.laneItems)return {ok:false,ids:[],batches:[]};
+  const batches=[];let current=[],currentBytes=0;
+  for(const value of frames){if(current.length&&(current.length>=4096||currentBytes+value.data.byteLength>limits.batchBytes)){batches.push(joinFrames(current));current=[];currentBytes=0}current.push(value.data);currentBytes+=value.data.byteLength}
+  if(current.length)batches.push(joinFrames(current));
+  return {ok:true,ids:survivors,batches};
+ }
+ function joinFrames(values){let total=0;for(const value of values)total+=value.byteLength;const joined=new Uint8Array(total);let offset=0;for(const value of values){joined.set(new Uint8Array(value),offset);offset+=value.byteLength}return joined.buffer}
+ function retireStream(id){activeStreams.delete(id);recoveryFresh.delete(id);rememberStreamRetired(id)}
+ function retireAllStreams(preserveIds=[]){const preserve=new Set(preserveIds),ids=[];for(const id of activeStreams){if(preserve.has(id))continue;ids.push(id);activeStreams.delete(id);recoveryFresh.delete(id);rememberStreamRetired(id)}return ids}
+ function clearRecoveryFresh(){recoveryFresh.clear()}
+ function resetRecoveryOwnershipUncertain(){recoveryOwnershipUncertain=false}
+ function clearStreams(){activeStreams.clear();retiredStreams.clear();retiredStreamOrder.length=0;recoveryFresh.clear();recoveryOwnershipUncertain=false}
  function assertEmpty(){if(queuedBytes!==0||queuedItems!==0)throw new Error('queue accounting leak')}
- return Object.freeze({reserve,release,releasePending,frameBound,splitFrames,acceptNativeFrames,observeServerFrames,findProbe,consumeProbe,takeBatch,settleBatch,cancelBatch,closeFrame,retireStream,retireAllStreams,clearStreams,assertEmpty});
+ return Object.freeze({reserve,release,releasePending,frameBound,splitFrames,acceptNativeFrames,observeServerFrames,findProbe,copyProbe,consumeProbe,canSendCandidate,takeBatch,settleBatch,cancelBatch,closeFrame,retireStream,retireAllStreams,recoveryHandoff,clearRecoveryFresh,resetRecoveryOwnershipUncertain,clearStreams,assertEmpty});
 }
 globalThis.TelemtBridgeBuffers=Object.freeze({create});
 })();

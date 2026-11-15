@@ -145,10 +145,13 @@ impl Case {
             page.content_security_policy,
             expected.content_security_policy
         );
+        let nonce_scripts = page.body.matches("<script nonce=\"").count();
+        assert_eq!(nonce_scripts, if self.diagnostics { 9 } else { 8 });
         assert_eq!(
             page.body.matches(&format!("nonce=\"{nonce}\"")).count(),
-            if self.diagnostics { 8 } else { 7 }
+            nonce_scripts
         );
+        assert!(page.body.contains("globalThis.TelemtBridgeResumeProbe"));
         nonce.to_string()
     }
 }

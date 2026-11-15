@@ -23,6 +23,10 @@ use crate::web::manager::{
 
 #[path = "tests/base_path.rs"]
 mod base_path;
+#[path = "tests/pre_ack.rs"]
+mod pre_ack;
+#[path = "tests/resume_probe.rs"]
+mod resume_probe;
 
 fn request(protocol: &str) -> Request<()> {
     Request::builder()

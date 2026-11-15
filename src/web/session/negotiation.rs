@@ -29,6 +29,15 @@ impl WebSession {
         self.state.lock().negotiation_phase == SessionNegotiationPhase::Committed
     }
 
+    /// Requires a live committed WebSocket session before accepting a resume proof.
+    pub(crate) fn is_resume_probe_eligible(&self) -> bool {
+        if self.cancel.is_cancelled() || !self.selected_carrier.uses_websocket() {
+            return false;
+        }
+        let state = self.state.lock();
+        !state.closed && state.negotiation_phase == SessionNegotiationPhase::Committed
+    }
+
     /// Rejects mutation after replacement, supersede, or the final chain deadline.
     pub(super) fn ensure_carrier_active_locked(
         &self,

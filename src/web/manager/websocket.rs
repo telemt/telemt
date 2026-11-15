@@ -12,6 +12,8 @@ use crate::web::telemetry::WebRejectionReason;
 
 // Deterministic victim ordering remains isolated from registry mutation.
 mod policy;
+// Committed-session resume proofs require the exact active connection claim.
+mod resume;
 
 /// One process-owned WebSocket carrier class used for eviction priority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

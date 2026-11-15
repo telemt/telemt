@@ -343,11 +343,12 @@ impl WebProcessRuntime {
             epoch,
             ip_learning_eligible,
         });
-        let session = WebSession::new(
+        let session = WebSession::new_for_generation(
             Arc::downgrade(self),
             session_hash,
             client_ip,
             trace_session_id,
+            generation.id,
             Arc::clone(&profile),
             profile_key,
             carrier,

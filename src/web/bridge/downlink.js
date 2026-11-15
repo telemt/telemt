@@ -18,6 +18,7 @@ function create(settings){
  let transaction=null,closed=false;
  const protocol=message=>settings.failure('protocol',message);
  const current=signal=>!closed&&settings.alive()&&!(signal&&signal.aborted);
+ const withinBudget=remaining=>{if(remaining&&remaining()<=0)throw settings.failure('timeout','recovery deadline')};
  function dispose(){if(transaction){transaction.release();transaction=null}}
  function shape(type,id,size){
   if(type===2)return id!==0&&size>0&&size<=1048576;
@@ -26,12 +27,15 @@ function create(settings){
   if(type===5)return id===0&&size<=64;
   return type===31&&id===0&&size===0;
  }
- async function read(response,signal){
+ async function read(response,signal,remaining,accepted){
+  withinBudget(remaining);
   if(!current(signal))throw new Error('downlink retired');
   if(response.status===204){
    settings.cancel(response);if(transaction)throw protocol('missing replay batch');
    const cursor=response.headers.get('X-Down-Cursor');
    if(cursor!==null&&cursor!==settings.cursor())throw protocol('changed empty cursor');
+   withinBudget(remaining);
+   if(accepted)accepted();
    if(response.headers.get('X-Lane-Closed')==='1')settings.finished();
    return new ArrayBuffer(0);
   }
@@ -42,18 +46,21 @@ function create(settings){
   if(transaction&&(transaction.base!==base||transaction.next!==next||(transaction.declared!==null&&declared!==null&&transaction.declared!==declared)))throw protocol('changed replay metadata');
   if(!transaction){
    const capacity=declared===null?settings.limit():declared,release=await settings.budget.acquire(capacity,signal);
+   try{withinBudget(remaining)}catch(error){release();throw error}
    if(!current(signal)){release();throw new Error('downlink retired');}
    transaction={base,next,declared,bytes:new Uint8Array(capacity),retained:0,delivered:0,release};
   }
   const owner=transaction;
   if(owner.declared===null&&declared!==null)owner.declared=declared;
   await settings.ready(signal);
+  withinBudget(remaining);
   if(!current(signal)||transaction!==owner)throw new Error('downlink retired');
   if(!response.body)throw protocol('missing response body');
   const reader=response.body.getReader();let position=0,offset=0,frames=0,chunks=0,complete=false;
   try{
    for(;;){
     let part;try{part=await reader.read();}catch(error){throw settings.failure('network','response stream interrupted');}
+    withinBudget(remaining);
     if(!current(signal)||transaction!==owner)throw new Error('downlink retired');
     if(part.done)break;
     const data=part.value;if(!(data instanceof Uint8Array)||++chunks>65536||data.byteLength>owner.bytes.byteLength-position)throw protocol('response body overflow');
@@ -67,6 +74,7 @@ function create(settings){
      if(type===4&&view.getUint32(8)===0)throw protocol('invalid WINDOW credit');
      if(end>owner.delivered){
       if(offset!==owner.delivered)throw protocol('invalid replay boundary');
+      withinBudget(remaining);
       const frame=owner.bytes.slice(offset,end).buffer;
       settings.deliver(frame);owner.delivered=end;
      }
@@ -74,7 +82,7 @@ function create(settings){
     }
    }
    if(!position||offset!==position||position<owner.retained||(owner.declared!==null&&position!==owner.declared))throw protocol('incomplete downlink batch');
-   settings.advance(next);complete=true;dispose();return new ArrayBuffer(0);
+   withinBudget(remaining);if(accepted)accepted();settings.advance(next);complete=true;dispose();return new ArrayBuffer(0);
   }finally{
    if(!complete)try{const cancelled=reader.cancel();if(cancelled)cancelled.catch(()=>{});}catch(error){}
    reader.releaseLock();
