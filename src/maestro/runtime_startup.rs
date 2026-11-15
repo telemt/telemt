@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use crate::config::{LogLevel, ProxyConfig};
 use crate::conntrack_control;
 use crate::crypto::SecureRandom;
+use crate::error::ProxyError;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{NetworkDecision, NetworkProbe};
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, run_direct_buffer_budget_controller};
@@ -64,7 +65,7 @@ pub(super) async fn prepare_runtime(
     runtime_log_filter: &runtime_tasks::RuntimeLogFilter,
     has_rust_log: bool,
     effective_log_level: &LogLevel,
-) -> RuntimeStartupState {
+) -> Result<RuntimeStartupState, ProxyError> {
     let prefer_ipv6 = decision.prefer_ipv6();
     let mut use_middle_proxy = config.general.use_middle_proxy;
     let beobachten = Arc::new(BeobachtenStore::new());
@@ -158,6 +159,8 @@ pub(super) async fn prepare_runtime(
         )
         .await
     };
+
+    validate_initial_me_selection(&config, me_pool.is_some())?;
 
     if direct_first_startup {
         startup_tracker.set_transport_mode("direct").await;
@@ -352,7 +355,7 @@ pub(super) async fn prepare_runtime(
         config.server.max_connections,
     ));
 
-    RuntimeStartupState {
+    Ok(RuntimeStartupState {
         config,
         beobachten,
         rng,
@@ -364,5 +367,37 @@ pub(super) async fn prepare_runtime(
         detected_ip_v4,
         detected_ip_v6,
         admission_tx,
+    })
+}
+
+fn validate_initial_me_selection(
+    config: &ProxyConfig,
+    me_pool_available: bool,
+) -> Result<(), ProxyError> {
+    if config.general.use_middle_proxy && !config.general.me2dc_fallback && !me_pool_available {
+        return Err(ProxyError::Proxy(
+            "Required Middle-End route is unavailable".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_initial_me_selection;
+    use crate::config::ProxyConfig;
+
+    #[test]
+    fn strict_me_requires_a_pool_but_direct_fallback_does_not() {
+        let mut config = ProxyConfig::default();
+        config.general.use_middle_proxy = true;
+        config.general.me2dc_fallback = false;
+        assert!(validate_initial_me_selection(&config, false).is_err());
+
+        config.general.me2dc_fallback = true;
+        assert!(validate_initial_me_selection(&config, false).is_ok());
+
+        config.general.use_middle_proxy = false;
+        assert!(validate_initial_me_selection(&config, false).is_ok());
     }
 }

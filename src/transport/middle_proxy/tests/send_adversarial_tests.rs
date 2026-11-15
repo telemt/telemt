@@ -265,6 +265,54 @@ async fn send_proxy_req_uses_live_same_dc_writer_while_preferred_endpoint_refill
 }
 
 #[tokio::test]
+async fn absent_configured_dc_never_uses_another_signed_dc_writer() {
+    let decision = NetworkDecision {
+        ipv4_dc: true,
+        ipv4_me: true,
+        effective_prefer: 4,
+        ..NetworkDecision::default()
+    };
+    let (pool, _rng) = make_pool_with_decision(decision).await;
+    let dc2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 2, 2)), 443);
+    let dc5 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 5, 5)), 443);
+    let mut dc2_rx = insert_writer(&pool, 51, 2, dc2, true).await;
+    pool.update_proxy_maps(
+        HashMap::from([
+            (2, vec![(dc2.ip(), dc2.port())]),
+            (5, vec![(dc5.ip(), dc5.port())]),
+        ]),
+        None,
+    )
+    .await;
+    assert!(pool.admission_ready_conditional_cast().await);
+
+    let (conn_id, _rx) = pool.registry.register().await;
+    let result = pool
+        .send_proxy_req(
+            conn_id,
+            5,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30005),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            b"must-stay-on-dc5",
+            0,
+            None,
+            None,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "an unavailable signed DC must fail: {result:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), dc2_rx.recv())
+            .await
+            .is_err(),
+        "the DC2 sentinel must not receive a DC5 request"
+    );
+}
+
+#[tokio::test]
 async fn send_proxy_req_does_not_replay_when_first_bind_commit_fails() {
     let (pool, _rng) = make_pool().await;
     pool.rr.store(0, Ordering::Relaxed);

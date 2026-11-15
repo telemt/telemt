@@ -352,7 +352,7 @@ pub(super) async fn run_telemt_core(
         has_rust_log,
         &effective_log_level,
     )
-    .await;
+    .await?;
     let _admission_tx_hold = runtime.admission_tx;
 
     let runtime_generation = generation::RuntimeGeneration::new(
