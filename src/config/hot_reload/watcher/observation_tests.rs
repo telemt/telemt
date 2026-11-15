@@ -113,3 +113,67 @@ async fn lost_receivers_never_report_successful_publication() {
     assert_eq!(outcome.published_config_epoch, None);
     assert_eq!(outcome.error_code, Some("publication_closed"));
 }
+
+#[tokio::test]
+async fn rejection_totals_and_restart_pending_follow_watcher_outcomes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "").unwrap();
+    let loaded = ProxyConfig::load_prepared(path.clone()).await.unwrap();
+    let mut initial = loaded.config.with_publication_epoch();
+    let observer = Arc::new(WatchObservation::default());
+    initial.watcher_observation = Some(observer.clone());
+    let (sender, _receiver) = watch::channel(Arc::new(initial));
+    let (log, _) = watch::channel(sender.borrow().general.log_level.clone());
+    let mut state = ReloadState::new(Some(loaded.rendered_hash));
+    let rejected = |observer: &WatchObservation| {
+        observer
+            .rejected_totals()
+            .find(|(code, _)| *code == "source_invalid_or_unreadable")
+            .unwrap()
+            .1
+    };
+    for (text, phase, pending, rejections) in [
+        ("[general]\nlog_level='debug'", "published", false, 0),
+        (
+            "[general]\nlog_level='debug'\ndisable_colors=true",
+            "retained",
+            true,
+            0,
+        ),
+        ("[general]\nlog_level='invalid'", "rejected", true, 1),
+        ("[general]\nlog_level='invalid'", "rejected", true, 2),
+        ("[general]\nlog_level='debug'", "unchanged", false, 2),
+    ] {
+        std::fs::write(&path, text).unwrap();
+        preparation::reload(
+            &path, &sender, &log, None, None, &mut state, None, false, None, None,
+        )
+        .await;
+        assert_eq!(observer.snapshot().unwrap().phase, phase);
+        assert_eq!(observer.restart_pending(), pending, "{text}");
+        assert_eq!(rejected(&observer), rejections, "{text}");
+    }
+    assert_eq!(
+        observer
+            .rejected_totals()
+            .map(|(_, total)| total)
+            .sum::<u64>(),
+        2
+    );
+}
+
+#[test]
+fn only_rejected_phases_count_and_every_listed_code_has_a_series() {
+    let observer = WatchObservation::default();
+    observer.record("publication_failed", None, None, Some("publication_closed"));
+    for code in crate::config::observation::WATCH_REJECTION_CODES {
+        observer.record("rejected", None, None, Some(code));
+    }
+    let totals: Vec<_> = observer.rejected_totals().collect();
+    assert_eq!(
+        totals.len(),
+        crate::config::observation::WATCH_REJECTION_CODES.len()
+    );
+    assert!(totals.iter().all(|(_, total)| *total == 1));
+}

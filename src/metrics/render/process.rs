@@ -232,3 +232,45 @@ pub(super) fn render(
         tls_full_cert_budget.cap_drops_for_metrics()
     );
 }
+
+/// Watcher outcomes of the active generation; a generation reload starts a new watcher.
+pub(super) fn render_config_watch(out: &mut String, config: &ProxyConfig) {
+    let unobserved = crate::config::observation::WatchObservation::default();
+    let observation = config.watcher_observation.as_deref().unwrap_or(&unobserved);
+    let _ = writeln!(
+        out,
+        "# HELP telemt_config_reload_rejected_total Config hot reloads refused by the watcher while the previous config stayed active"
+    );
+    let _ = writeln!(out, "# TYPE telemt_config_reload_rejected_total counter");
+    for (reason, total) in observation.rejected_totals() {
+        let _ = writeln!(
+            out,
+            "telemt_config_reload_rejected_total{{reason=\"{reason}\"}} {total}"
+        );
+    }
+
+    let last_rejected = observation
+        .snapshot()
+        .is_some_and(|outcome| outcome.phase == "rejected");
+    let _ = writeln!(
+        out,
+        "# HELP telemt_config_reload_last_rejected Whether the latest config source considered by the watcher was refused"
+    );
+    let _ = writeln!(out, "# TYPE telemt_config_reload_last_rejected gauge");
+    let _ = writeln!(
+        out,
+        "telemt_config_reload_last_rejected {}",
+        u8::from(last_rejected)
+    );
+
+    let _ = writeln!(
+        out,
+        "# HELP telemt_config_restart_pending Whether the accepted config source has changes that apply only after restart"
+    );
+    let _ = writeln!(out, "# TYPE telemt_config_restart_pending gauge");
+    let _ = writeln!(
+        out,
+        "telemt_config_restart_pending {}",
+        u8::from(observation.restart_pending())
+    );
+}

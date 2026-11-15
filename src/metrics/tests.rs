@@ -534,3 +534,67 @@ async fn test_endpoint_integration() {
         .unwrap();
     assert_eq!(resp404.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn test_render_config_watch_outcome_metrics() {
+    let stats = Stats::new();
+    let shared_state = ProxySharedState::new();
+    let tracker = UserIpTracker::new();
+    let render = |config: ProxyConfig| {
+        let stats = &stats;
+        let shared_state = &shared_state;
+        let tracker = &tracker;
+        async move {
+            render_metrics(
+                stats,
+                shared_state.as_ref(),
+                &config,
+                tracker,
+                None,
+                &TlsFullCertBudget::new(),
+                &test_web_publication(),
+                None,
+            )
+            .await
+        }
+    };
+
+    let unobserved = render(ProxyConfig::default()).await;
+    assert!(unobserved.contains("# TYPE telemt_config_reload_rejected_total counter"));
+    assert!(unobserved.contains(
+        "telemt_config_reload_rejected_total{reason=\"source_invalid_or_unreadable\"} 0"
+    ));
+    assert!(unobserved.contains("telemt_config_reload_last_rejected 0"));
+    assert!(unobserved.contains("telemt_config_restart_pending 0"));
+
+    let observer = Arc::new(crate::config::observation::WatchObservation::default());
+    observer.record_restart_pending(true);
+    observer.record("rejected", None, None, Some("dns_overrides_rejected"));
+    observer.record("rejected", None, None, Some("dns_overrides_rejected"));
+    observer.record("rejected", None, None, Some("effective_config_invalid"));
+    let config = ProxyConfig {
+        watcher_observation: Some(observer.clone()),
+        ..ProxyConfig::default()
+    };
+    let output = render(config.clone()).await;
+    assert!(
+        output.contains("telemt_config_reload_rejected_total{reason=\"dns_overrides_rejected\"} 2")
+    );
+    assert!(
+        output
+            .contains("telemt_config_reload_rejected_total{reason=\"effective_config_invalid\"} 1")
+    );
+    assert!(output.contains("# TYPE telemt_config_reload_last_rejected gauge"));
+    assert!(output.contains("telemt_config_reload_last_rejected 1"));
+    assert!(output.contains("# TYPE telemt_config_restart_pending gauge"));
+    assert!(output.contains("telemt_config_restart_pending 1"));
+
+    observer.record("published", None, Some(2), None);
+    observer.record_restart_pending(false);
+    let output = render(config).await;
+    assert!(output.contains("telemt_config_reload_last_rejected 0"));
+    assert!(output.contains("telemt_config_restart_pending 0"));
+    assert!(
+        output.contains("telemt_config_reload_rejected_total{reason=\"dns_overrides_rejected\"} 2")
+    );
+}

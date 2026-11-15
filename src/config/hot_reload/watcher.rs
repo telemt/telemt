@@ -164,6 +164,12 @@ fn record_outcome(
     }
 }
 
+fn record_restart_pending(config: &ProxyConfig, pending: bool) {
+    if let Some(observation) = &config.watcher_observation {
+        observation.record_restart_pending(pending);
+    }
+}
+
 /// Diffs and publishes a fully prepared configuration on the watcher owner task.
 fn reload_config_with_resolver(
     prepared: (LoadedConfig, ProxyConfig),
@@ -215,6 +221,9 @@ fn reload_config_with_resolver(
             published.then_some(epoch),
             (!published).then_some("publication_closed"),
         );
+        if published {
+            record_restart_pending(&old_cfg, non_hot_changed);
+        }
         reload_state.mark_applied(rendered_hash);
         return Some(next_manifest);
     }
@@ -262,6 +271,9 @@ fn reload_config_with_resolver(
         published.then_some(epoch),
         (!published).then_some("publication_closed"),
     );
+    if published {
+        record_restart_pending(&old_cfg, non_hot_changed);
+    }
     reload_state.mark_applied(rendered_hash);
     Some(next_manifest)
 }
