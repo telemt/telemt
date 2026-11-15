@@ -22,6 +22,8 @@ impl MePool {
         let mut live_writers_by_dc = HashMap::<i16, usize>::new();
         for writer in writers.iter() {
             if writer.draining.load(Ordering::Relaxed)
+                || writer.tx.is_closed()
+                || writer.cancel.is_cancelled()
                 || writer.generation != active_generation
                 || WriterContour::from_u8(writer.contour.load(Ordering::Relaxed))
                     != WriterContour::Active
@@ -29,18 +31,27 @@ impl MePool {
                 continue;
             }
             if let Ok(dc) = i16::try_from(writer.writer_dc) {
+                let family_enabled = if writer.addr.is_ipv4() {
+                    self.decision.ipv4_me
+                } else {
+                    self.decision.ipv6_me
+                };
+                if !family_enabled
+                    || !endpoints_by_dc
+                        .get(&dc)
+                        .is_some_and(|endpoints| !endpoints.is_empty())
+                {
+                    continue;
+                }
                 *live_writers_by_dc.entry(dc).or_insert(0) += 1;
             }
         }
 
-        for dc in endpoints_by_dc.keys() {
-            let alive = live_writers_by_dc.get(dc).copied().unwrap_or(0);
-            if alive == 0 {
-                return false;
-            }
-        }
-
-        true
+        // A signed DC route with live coverage keeps conditional admission open.
+        // The send path still resolves the exact requested DC before writing.
+        endpoints_by_dc
+            .keys()
+            .any(|dc| live_writers_by_dc.get(dc).copied().unwrap_or(0) > 0)
     }
 
     #[allow(dead_code)]

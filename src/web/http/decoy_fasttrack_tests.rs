@@ -4,6 +4,90 @@ use crate::config::WebDecoyFastTrackMode;
 use crate::web::telemetry::WebDecoyFastTrackDisposition;
 
 const RECOVERY_TYPE: &str = "application/vnd.telemt.web-recovery+json";
+const ORIGIN_DATE: &str = "Thu, 15 Oct 2026 00:00:00 GMT";
+
+fn normalized_date_response(response: &[u8]) -> Vec<u8> {
+    let separator = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("complete response must have a header boundary");
+    let mut date_count = 0;
+    let mut replacement = None;
+    let mut position = 0;
+    while position < separator {
+        let relative_end = response[position..separator]
+            .windows(2)
+            .position(|window| window == b"\r\n");
+        let line_end = relative_end.map_or(separator, |offset| position + offset);
+        let line = &response[position..line_end];
+        if let Some(colon) = line.iter().position(|byte| *byte == b':')
+            && line[..colon].eq_ignore_ascii_case(b"date")
+        {
+            let value = &line[colon + 1..];
+            let leading = value
+                .iter()
+                .take_while(|byte| byte.is_ascii_whitespace())
+                .count();
+            let trailing = value
+                .iter()
+                .rev()
+                .take_while(|byte| byte.is_ascii_whitespace())
+                .count();
+            let date_end = value.len().saturating_sub(trailing);
+            assert!(leading < date_end, "empty HTTP Date header");
+            let date = std::str::from_utf8(&value[leading..date_end]).unwrap();
+            assert!(
+                httpdate::parse_http_date(date).is_ok(),
+                "invalid HTTP Date header"
+            );
+            date_count += 1;
+            replacement = Some((
+                position + colon + 1 + leading,
+                position + colon + 1 + date_end,
+            ));
+        }
+        position = line_end + usize::from(relative_end.is_some()) * 2;
+    }
+    assert_eq!(date_count, 1, "expected exactly one HTTP Date header");
+    let (start, end) = replacement.unwrap();
+    let mut normalized = Vec::with_capacity(response.len());
+    normalized.extend_from_slice(&response[..start]);
+    normalized.extend_from_slice(b"<validated-date>");
+    normalized.extend_from_slice(&response[end..]);
+    normalized
+}
+
+#[test]
+fn date_normalization_preserves_everything_except_a_valid_date_value() {
+    let left = b"HTTP/1.1 200 OK\r\nX-Keep: one\r\nDate: Thu, 15 Oct 2026 00:00:00 GMT\r\n\r\nbody";
+    let right =
+        b"HTTP/1.1 200 OK\r\nX-Keep: one\r\nDate: Fri, 16 Oct 2026 00:00:00 GMT\r\n\r\nbody";
+    assert_eq!(
+        normalized_date_response(left),
+        normalized_date_response(right)
+    );
+
+    let changed_header =
+        b"HTTP/1.1 200 OK\r\nX-Keep: two\r\nDate: Fri, 16 Oct 2026 00:00:00 GMT\r\n\r\nbody";
+    let changed_body =
+        b"HTTP/1.1 200 OK\r\nX-Keep: one\r\nDate: Fri, 16 Oct 2026 00:00:00 GMT\r\n\r\nother";
+    assert_ne!(
+        normalized_date_response(left),
+        normalized_date_response(changed_header)
+    );
+    assert_ne!(
+        normalized_date_response(left),
+        normalized_date_response(changed_body)
+    );
+
+    for invalid in [
+        &b"HTTP/1.1 200 OK\r\nX-Keep: one\r\n\r\nbody"[..],
+        &b"HTTP/1.1 200 OK\r\nDate: invalid\r\n\r\nbody"[..],
+        &b"HTTP/1.1 200 OK\r\nDate: Thu, 15 Oct 2026 00:00:00 GMT\r\nDate: Fri, 16 Oct 2026 00:00:00 GMT\r\n\r\nbody"[..],
+    ] {
+        assert!(std::panic::catch_unwind(|| normalized_date_response(invalid)).is_err());
+    }
+}
 
 struct Observation {
     response: Vec<u8>,
@@ -51,10 +135,11 @@ async fn capture_origin_request(listener: &TcpListener) -> Vec<u8> {
             break;
         }
     }
-    stream
-        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\norigin")
-        .await
-        .unwrap();
+    // Keep the origin response stable across modes and wall-clock seconds.
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\nDate: {ORIGIN_DATE}\r\n\r\norigin"
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
     captured
 }
 
@@ -79,6 +164,9 @@ async fn observe_http_origin(
         request(&listener, &runtime, request_bytes),
         capture_origin_request(origin)
     );
+    let (headers, body) = split_response(&response);
+    assert_eq!(response_header(headers, "date"), ORIGIN_DATE);
+    assert_eq!(body, b"origin");
     let counters = WebDecoyFastTrackDisposition::ALL
         .map(|disposition| runtime.telemetry().decoy_fasttrack_total(disposition));
 
@@ -142,8 +230,14 @@ async fn impossible_root_shapes_preserve_decoy_bytes_and_follow_the_selected_mod
         .await;
         let enforce = observe(WebDecoyFastTrackMode::Enforce, capability, request_bytes).await;
 
-        assert_eq!(shadow.response, off.response);
-        assert_eq!(enforce.response, off.response);
+        assert_eq!(
+            normalized_date_response(&shadow.response),
+            normalized_date_response(&off.response)
+        );
+        assert_eq!(
+            normalized_date_response(&enforce.response),
+            normalized_date_response(&off.response)
+        );
         assert_eq!(off.counters, [0, 0, 0, 0]);
         assert_eq!(shadow.counters, [1, 0, 0, 0]);
         assert_eq!(enforce.counters, [0, 0, 1, 0]);

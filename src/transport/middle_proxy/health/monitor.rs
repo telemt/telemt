@@ -3,6 +3,10 @@ use super::scheduler::{
 };
 use super::*;
 
+fn family_unavailable(floor: &FamilyFloorPlan) -> bool {
+    !floor.by_dc.is_empty() && floor.by_dc.values().all(|entry| entry.alive == 0)
+}
+
 /// Observes family health independently of bounded, lifecycle-owned network operations.
 pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_connections: usize) {
     let mut scheduler = HealthScheduler::default();
@@ -32,7 +36,11 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
                     .values()
                     .any(|entry| entry.alive < entry.target_required);
                 if health_tick {
-                    update_family_runtime_state(&pool, family, family_degraded);
+                    update_family_runtime_state(
+                        &pool,
+                        family,
+                        family_unavailable(&observation.floor),
+                    );
                 }
                 degraded |= family_degraded;
                 target_total += observation
@@ -289,5 +297,48 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
                 health_tick = tokio::time::Instant::now() >= next_tick;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn floor(alive: &[usize]) -> FamilyFloorPlan {
+        let by_dc = alive
+            .iter()
+            .enumerate()
+            .map(|(index, alive)| {
+                (
+                    index as i32 + 2,
+                    DcFloorPlanEntry {
+                        dc: index as i32 + 2,
+                        endpoints: vec![SocketAddr::from(([127, 0, 0, index as u8 + 1], 443))],
+                        alive: *alive,
+                        min_required: 1,
+                        target_required: 1,
+                        max_required: 1,
+                        has_bound_clients: false,
+                        floor_capped: false,
+                    },
+                )
+            })
+            .collect();
+        FamilyFloorPlan {
+            by_dc,
+            active_cap_configured_total: 0,
+            active_cap_effective_total: 0,
+            warm_cap_configured_total: 0,
+            warm_cap_effective_total: 0,
+            active_writers_current: 0,
+            warm_writers_current: 0,
+        }
+    }
+
+    #[test]
+    fn family_suppression_requires_nonempty_all_zero_dc_observations() {
+        assert!(!family_unavailable(&floor(&[])));
+        assert!(family_unavailable(&floor(&[0, 0])));
+        assert!(!family_unavailable(&floor(&[0, 1])));
     }
 }

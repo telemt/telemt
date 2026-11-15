@@ -30,6 +30,7 @@ impl MePool {
             "Initializing ME pool"
         );
 
+        let mut missing_dc_groups = Vec::new();
         for family in family_order {
             let map = self.proxy_map_for_family(family).await;
             let mut dc_addrs: Vec<(i32, Vec<(IpAddr, u16)>)> = map
@@ -61,7 +62,7 @@ impl MePool {
                     .map(|(ip, port)| SocketAddr::new(*ip, *port))
                     .collect();
                 if self
-                    .active_writer_count_for_dc_endpoints(dc, &endpoints)
+                    .active_usable_writer_count_for_dc_endpoints(dc, &endpoints)
                     .await
                     >= target_writers
                 {
@@ -90,7 +91,7 @@ impl MePool {
                     .map(|(ip, port)| SocketAddr::new(*ip, *port))
                     .collect();
                 if self
-                    .active_writer_count_for_dc_endpoints(*dc, &endpoints)
+                    .active_usable_writer_count_for_dc_endpoints(*dc, &endpoints)
                     .await
                     == 0
                 {
@@ -98,9 +99,7 @@ impl MePool {
                 }
             }
             if !missing_dcs.is_empty() {
-                return Err(ProxyError::Proxy(format!(
-                    "ME init incomplete: no live writers for DC groups {missing_dcs:?}"
-                )));
+                missing_dc_groups.extend(missing_dcs.iter().copied());
             }
 
             // Stage 2: continue saturating multi-endpoint DC groups in background.
@@ -140,13 +139,26 @@ impl MePool {
                 debug!("Background ME saturation skipped: pool lifecycle closed");
             }
 
-            if !self.decision.effective_multipath && self.connection_count() > 0 {
+            if !self.decision.effective_multipath && self.admission_ready_conditional_cast().await {
                 break;
             }
         }
 
-        if self.writers.read().await.is_empty() {
-            return Err(ProxyError::Proxy("No ME connections".into()));
+        missing_dc_groups.sort_unstable();
+        missing_dc_groups.dedup();
+        if !self.admission_ready_conditional_cast().await {
+            if self.writers.read().await.is_empty() {
+                return Err(ProxyError::Proxy("No ME connections".into()));
+            }
+            return Err(ProxyError::Proxy(format!(
+                "ME init incomplete: no live writers for DC groups {missing_dc_groups:?}"
+            )));
+        }
+        if !missing_dc_groups.is_empty() {
+            warn!(
+                missing_dcs = ?missing_dc_groups,
+                "ME started with partial coverage; missing DCs recover in background"
+            );
         }
         info!(
             active_writers = self.connection_count(),
@@ -177,7 +189,7 @@ impl MePool {
 
         loop {
             let alive = self
-                .active_writer_count_for_dc_endpoints(dc, &endpoint_set)
+                .active_usable_writer_count_for_dc_endpoints(dc, &endpoint_set)
                 .await;
             if alive >= target_writers {
                 info!(
@@ -224,7 +236,7 @@ impl MePool {
             }
 
             let alive_after = self
-                .active_writer_count_for_dc_endpoints(dc, &endpoint_set)
+                .active_usable_writer_count_for_dc_endpoints(dc, &endpoint_set)
                 .await;
             if alive_after >= target_writers {
                 info!(
@@ -269,5 +281,273 @@ impl MePool {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
         }
+    }
+
+    async fn active_usable_writer_count_for_dc_endpoints(
+        &self,
+        dc: i32,
+        endpoints: &HashSet<SocketAddr>,
+    ) -> usize {
+        let generation = self.current_generation();
+        self.writers
+            .read()
+            .await
+            .iter()
+            .filter(|writer| !writer.draining.load(std::sync::atomic::Ordering::Acquire))
+            .filter(|writer| !writer.tx.is_closed() && !writer.cancel.is_cancelled())
+            .filter(|writer| writer.generation == generation)
+            .filter(|writer| {
+                super::pool::WriterContour::from_u8(
+                    writer.contour.load(std::sync::atomic::Ordering::Acquire),
+                ) == super::pool::WriterContour::Active
+            })
+            .filter(|writer| writer.writer_dc == dc && endpoints.contains(&writer.addr))
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::SecureRandom;
+    use crate::network::probe::NetworkDecision;
+    use crate::transport::middle_proxy::codec::WriterCommand;
+    use crate::transport::middle_proxy::pool::{MeWriter, WriterContour};
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64};
+    use std::time::Instant;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::transport::middle_proxy::pool_writer_security_tests::make_pool_with_decision;
+
+    fn writer(
+        pool: &Arc<MePool>,
+        id: u64,
+        dc: i32,
+        addr: SocketAddr,
+    ) -> (MeWriter, mpsc::Receiver<WriterCommand>) {
+        let (tx, rx) = mpsc::channel::<WriterCommand>(8);
+        (
+            MeWriter {
+                id,
+                addr,
+                source_ip: addr.ip(),
+                writer_dc: dc,
+                generation: pool.current_generation(),
+                contour: Arc::new(AtomicU8::new(WriterContour::Active.as_u8())),
+                created_at: Instant::now(),
+                tx,
+                byte_budget: pool.new_writer_byte_budget(),
+                cancel: CancellationToken::new(),
+                degraded: Arc::new(AtomicBool::new(false)),
+                rtt_ema_ms_x10: Arc::new(AtomicU32::new(0)),
+                draining: Arc::new(AtomicBool::new(false)),
+                draining_started_at_epoch_secs: Arc::new(AtomicU64::new(0)),
+                drain_deadline_epoch_secs: Arc::new(AtomicU64::new(0)),
+                allow_drain_fallback: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn init_coverage_ignores_closed_or_cancelled_writers() {
+        let pool = make_pool_with_decision(NetworkDecision {
+            ipv4_me: true,
+            effective_prefer: 4,
+            ..NetworkDecision::default()
+        })
+        .await;
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        let endpoints = HashSet::from([addr]);
+
+        let (closed, receiver) = writer(&pool, 1, 2, addr);
+        pool.writers.write().await.push(closed);
+        assert_eq!(
+            pool.active_usable_writer_count_for_dc_endpoints(2, &endpoints)
+                .await,
+            1
+        );
+        drop(receiver);
+        assert_eq!(
+            pool.active_usable_writer_count_for_dc_endpoints(2, &endpoints)
+                .await,
+            0
+        );
+
+        pool.writers.write().await.clear();
+        let (cancelled, _receiver) = writer(&pool, 2, 2, addr);
+        cancelled.cancel.cancel();
+        pool.writers.write().await.push(cancelled);
+        assert_eq!(
+            pool.active_usable_writer_count_for_dc_endpoints(2, &endpoints)
+                .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn init_dials_when_target_coverage_is_only_a_closed_writer() {
+        let pool = make_pool_with_decision(NetworkDecision {
+            ipv4_me: true,
+            effective_prefer: 4,
+            ..NetworkDecision::default()
+        })
+        .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = attempt_tx.send(());
+                drop(stream);
+            }
+        });
+        pool.update_proxy_maps(HashMap::from([(2, vec![(addr.ip(), addr.port())])]), None)
+            .await;
+        let (closed, receiver) = writer(&pool, 1, 2, addr);
+        drop(receiver);
+        pool.writers.write().await.push(closed);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pool.init(1, &Arc::new(SecureRandom::new())),
+        )
+        .await
+        .expect("local handshake failure must stay bounded");
+        assert!(result.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(1), attempt_rx)
+            .await
+            .expect("closed writer must not satisfy startup coverage")
+            .expect("init must dial its configured endpoint");
+    }
+
+    #[tokio::test]
+    async fn init_keeps_missing_dc_and_admits_a_live_dc_with_partial_coverage() {
+        let pool = make_pool_with_decision(NetworkDecision {
+            ipv4_me: true,
+            effective_prefer: 4,
+            ..NetworkDecision::default()
+        })
+        .await;
+        let dc2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 2, 2)), 443);
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dc5 = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            probe.local_addr().unwrap().port(),
+        );
+        drop(probe);
+        pool.update_proxy_maps(
+            HashMap::from([
+                (2, vec![(dc2.ip(), dc2.port())]),
+                (5, vec![(dc5.ip(), dc5.port())]),
+            ]),
+            None,
+        )
+        .await;
+        let (writer, _writer_rx) = writer(&pool, 1, 2, dc2);
+        pool.writers.write().await.push(writer);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pool.init(1, &Arc::new(SecureRandom::new())),
+        )
+        .await
+        .expect("closed-port failure must stay bounded")
+        .expect("the live DC2 route admits partial startup");
+
+        assert!(pool.admission_ready_conditional_cast().await);
+        assert!(!pool.admission_ready_full_floor().await);
+        assert!(
+            pool.endpoint_snapshot
+                .load()
+                .map_v4
+                .get(&5)
+                .is_some_and(|endpoints| endpoints.contains(&(dc5.ip(), dc5.port())))
+        );
+        assert_eq!(
+            pool.api_status_snapshot()
+                .await
+                .dcs
+                .iter()
+                .find(|dc| dc.dc == 5)
+                .expect("missing DC5 remains visible")
+                .alive_writers,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn init_attempts_alternate_enabled_family_before_failing() {
+        let pool = make_pool_with_decision(NetworkDecision {
+            ipv4_me: true,
+            ipv6_me: true,
+            effective_prefer: 4,
+            ..NetworkDecision::default()
+        })
+        .await;
+        let v4_probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let v4 = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            v4_probe.local_addr().unwrap().port(),
+        );
+        drop(v4_probe);
+        let v6_listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let v6 = v6_listener.local_addr().unwrap();
+        let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = v6_listener.accept().await {
+                let _ = attempt_tx.send(());
+                drop(stream);
+            }
+        });
+        pool.update_proxy_maps(
+            HashMap::from([(2, vec![(v4.ip(), v4.port())])]),
+            Some(HashMap::from([(5, vec![(v6.ip(), v6.port())])])),
+        )
+        .await;
+        pool.conn_count
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            pool.init(1, &Arc::new(SecureRandom::new())),
+        )
+        .await
+        .expect("local route failures must stay bounded");
+        assert!(result.is_err(), "neither endpoint completed a ME handshake");
+        tokio::time::timeout(std::time::Duration::from_secs(1), attempt_rx)
+            .await
+            .expect("init must try enabled IPv6 after IPv4 fails")
+            .expect("the local listener must observe the IPv6 TCP attempt");
+    }
+
+    #[tokio::test]
+    async fn init_still_fails_when_every_configured_route_is_unavailable() {
+        let pool = make_pool_with_decision(NetworkDecision {
+            ipv4_me: true,
+            effective_prefer: 4,
+            ..NetworkDecision::default()
+        })
+        .await;
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            probe.local_addr().unwrap().port(),
+        );
+        drop(probe);
+        pool.update_proxy_maps(HashMap::from([(5, vec![(addr.ip(), addr.port())])]), None)
+            .await;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pool.init(1, &Arc::new(SecureRandom::new())),
+        )
+        .await
+        .expect("closed-port failure must stay bounded");
+        assert!(result.is_err());
+        assert!(!pool.admission_ready_conditional_cast().await);
     }
 }
