@@ -251,6 +251,14 @@ pub struct ServerConfig {
     #[serde(default)]
     pub client_mss_bulk: Option<String>,
 
+    /// Leading part of the authenticated FakeTLS response that is chunked at
+    /// `client_mss` when `client_mss_bulk` is set: `"full"` (the whole initial
+    /// response), `"server-hello"` (through the end of the first TLS record),
+    /// or a decimal byte count. The rest is written at the bulk MSS. Empty or
+    /// omitted keeps `"full"`.
+    #[serde(default)]
+    pub client_mss_prefix: Option<String>,
+
     /// Accept HAProxy PROXY protocol headers on incoming connections.
     /// When enabled, real client IPs are extracted from PROXY v1/v2 headers.
     #[serde(default)]
@@ -320,6 +328,7 @@ impl Default for ServerConfig {
             listen_tcp: None,
             client_mss: None,
             client_mss_bulk: None,
+            client_mss_prefix: None,
             proxy_protocol: false,
             proxy_protocol_header_timeout_ms: default_proxy_protocol_header_timeout_ms(),
             proxy_protocol_trusted_cidrs: default_proxy_protocol_trusted_cidrs(),
@@ -472,6 +481,19 @@ pub const CLIENT_MSS_MIN: u16 = CLIENT_MSS_EXTREME_LOW;
 /// Maximum accepted custom client-facing TCP MSS value.
 pub const CLIENT_MSS_MAX: u16 = 4096;
 
+/// Leading part of the initial FakeTLS response written in `client_mss` chunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClientMssPrefix {
+    /// The whole initial response.
+    #[default]
+    Full,
+    /// Through the end of the first TLS record (`ServerHello`), bounded by a
+    /// fixed ceiling.
+    ServerHello,
+    /// The first `n` bytes.
+    Bytes(u16),
+}
+
 impl ServerConfig {
     /// Resolves the global client-facing TCP MSS setting.
     pub fn client_mss_value(&self) -> std::result::Result<Option<u16>, String> {
@@ -481,6 +503,14 @@ impl ServerConfig {
     /// Resolves the bulk-transfer client MSS, if configured.
     pub fn client_mss_bulk_value(&self) -> std::result::Result<Option<u16>, String> {
         parse_client_mss(self.client_mss_bulk.as_deref())
+    }
+
+    /// Resolves the chunked prefix of the initial FakeTLS response.
+    ///
+    /// `None` means the value was empty or omitted; callers treat it as
+    /// [`ClientMssPrefix::Full`].
+    pub fn client_mss_prefix_value(&self) -> std::result::Result<Option<ClientMssPrefix>, String> {
+        parse_client_mss_prefix(self.client_mss_prefix.as_deref())
     }
 }
 
@@ -494,6 +524,30 @@ impl ListenerConfig {
             Some(value) => parse_client_mss(Some(value)),
             None => server.client_mss_value(),
         }
+    }
+}
+
+fn parse_client_mss_prefix(
+    raw: Option<&str>,
+) -> std::result::Result<Option<ClientMssPrefix>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    match value.to_ascii_lowercase().as_str() {
+        "full" => return Ok(Some(ClientMssPrefix::Full)),
+        "server-hello" => return Ok(Some(ClientMssPrefix::ServerHello)),
+        _ => {}
+    }
+
+    match value.parse::<u16>() {
+        Ok(0) => Err("custom value must be within [1, 65535]".to_string()),
+        Ok(bytes) => Ok(Some(ClientMssPrefix::Bytes(bytes))),
+        Err(_) => Err("must be \"\", full, server-hello, or a decimal byte count".to_string()),
     }
 }
 

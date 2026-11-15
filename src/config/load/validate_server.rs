@@ -59,6 +59,10 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
         .server
         .client_mss_bulk_value()
         .map_err(|error| ProxyError::Config(format!("server.client_mss_bulk {error}")))?;
+    config
+        .server
+        .client_mss_prefix_value()
+        .map_err(|error| ProxyError::Config(format!("server.client_mss_prefix {error}")))?;
     for (idx, listener) in config.server.listeners.iter().enumerate() {
         if listener.client_mss.is_some() {
             listener

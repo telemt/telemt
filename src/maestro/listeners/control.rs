@@ -406,7 +406,7 @@ mod tests {
                 ..Default::default()
             },
             proxy_protocol: false,
-            tls_response_fragment_size: None,
+            tls_response_fragmentation: None,
             web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
             web_trusted_proxy_cidrs: Arc::from([]),
         };

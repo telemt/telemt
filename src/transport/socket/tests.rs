@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ClientMssPrefix;
 use std::io::ErrorKind;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -234,9 +235,14 @@ async fn test_chunked_send_preserves_stream_and_configured_mss() {
     });
 
     let mss_before = socket2::SockRef::from(&server).tcp_mss().unwrap();
-    send_tcp_fragmented_fd(server.as_raw_fd(), &initial_response, 92)
-        .await
-        .unwrap();
+    send_tcp_fragmented_fd(
+        server.as_raw_fd(),
+        &initial_response,
+        92,
+        ClientMssPrefix::Full,
+    )
+    .await
+    .unwrap();
     server.write_all(&bulk_payload).await.unwrap();
     let mss_after = socket2::SockRef::from(&server).tcp_mss().unwrap();
 
@@ -249,13 +255,13 @@ async fn test_chunked_send_preserves_stream_and_configured_mss() {
     );
     assert_eq!(
         mss_after, mss_before,
-        "chunked send must restore the configured socket MSS"
+        "chunked send must not change the configured socket MSS"
     );
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn test_chunked_send_restores_mss_after_send_error() {
+async fn test_chunked_send_keeps_mss_after_send_error() {
     use std::os::fd::AsRawFd;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -266,9 +272,10 @@ async fn test_chunked_send_restores_mss_after_send_error() {
     let shutdown_result = unsafe { libc::shutdown(server.as_raw_fd(), libc::SHUT_WR) };
     assert_eq!(shutdown_result, 0);
 
-    let error = send_tcp_fragmented_fd(server.as_raw_fd(), &[0xA5; 4096], 92)
-        .await
-        .unwrap_err();
+    let error =
+        send_tcp_fragmented_fd(server.as_raw_fd(), &[0xA5; 4096], 92, ClientMssPrefix::Full)
+            .await
+            .unwrap_err();
 
     assert!(matches!(
         error.kind(),
@@ -283,7 +290,7 @@ async fn test_chunked_send_restores_mss_after_send_error() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_chunked_send_rejects_zero_fragment_size() {
-    let error = send_tcp_fragmented_fd(-1, b"response", 0)
+    let error = send_tcp_fragmented_fd(-1, b"response", 0, ClientMssPrefix::Full)
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
@@ -292,7 +299,7 @@ async fn test_chunked_send_rejects_zero_fragment_size() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_chunked_send_rejects_invalid_fd() {
-    let error = send_tcp_fragmented_fd(-1, b"response", 92)
+    let error = send_tcp_fragmented_fd(-1, b"response", 92, ClientMssPrefix::Full)
         .await
         .unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc::EBADF));
@@ -326,7 +333,7 @@ async fn test_chunked_send_has_no_fd_growth_after_success_and_cancellation_stres
         let blocked_fd = blocked_server.as_raw_fd();
         let payload = payload.clone();
         let sender = tokio::spawn(async move {
-            send_tcp_fragmented_fd(blocked_fd, payload.as_slice(), 92).await
+            send_tcp_fragmented_fd(blocked_fd, payload.as_slice(), 92, ClientMssPrefix::Full).await
         });
         tokio::task::yield_now().await;
         sender.abort();
@@ -334,7 +341,7 @@ async fn test_chunked_send_has_no_fd_growth_after_success_and_cancellation_stres
         assert_eq!(
             socket2::SockRef::from(&blocked_server).tcp_mss().unwrap(),
             blocked_mss_before,
-            "cancellation must restore the accepted socket MSS"
+            "cancellation must leave the accepted socket MSS unchanged"
         );
         drop(blocked_server);
         drop(blocked_client);
@@ -348,7 +355,7 @@ async fn test_chunked_send_has_no_fd_growth_after_success_and_cancellation_stres
         let (success_server, _) = success_listener.accept().await.unwrap();
         let success_mss_before = socket2::SockRef::from(&success_server).tcp_mss().unwrap();
         let success_fd = success_server.as_raw_fd();
-        send_tcp_fragmented_fd(success_fd, &[0x5A], 92)
+        send_tcp_fragmented_fd(success_fd, &[0x5A], 92, ClientMssPrefix::Full)
             .await
             .unwrap_or_else(|error| {
                 panic!("success cycle {iteration} failed with MSS {success_mss_before}: {error}")
@@ -359,7 +366,7 @@ async fn test_chunked_send_has_no_fd_growth_after_success_and_cancellation_stres
         assert_eq!(
             socket2::SockRef::from(&success_server).tcp_mss().unwrap(),
             success_mss_before,
-            "successful send must restore the accepted socket MSS"
+            "successful send must leave the accepted socket MSS unchanged"
         );
         drop(success_server);
         drop(success_client);

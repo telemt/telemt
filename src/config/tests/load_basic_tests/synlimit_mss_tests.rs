@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ClientMssPrefix;
 
 #[test]
 fn synlimit_synfix_defaults_are_loaded_for_listener() {
@@ -364,4 +365,71 @@ fn listener_client_mss_invalid_preset_is_rejected() {
     assert!(err.contains("server.listeners[0].client_mss"));
     assert!(err.contains("must be \"\", extreme-low, tspu, 2in8"));
     let _ = std::fs::remove_file(path);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn client_mss_prefix_values_are_resolved() {
+    for (name, prefix, expected) in [
+        ("omitted", None, None),
+        ("empty", Some("\"\""), None),
+        ("full", Some("\"full\""), Some(ClientMssPrefix::Full)),
+        (
+            "server_hello",
+            Some("\"Server-Hello\""),
+            Some(ClientMssPrefix::ServerHello),
+        ),
+        ("bytes", Some("\"200\""), Some(ClientMssPrefix::Bytes(200))),
+    ] {
+        let prefix = prefix
+            .map(|value| format!("client_mss_prefix = {value}\n"))
+            .unwrap_or_default();
+        let toml = format!(
+            "[server]\nclient_mss = \"92\"\nclient_mss_bulk = \"1400\"\n{prefix}\n[censorship]\ntls_domain = \"example.com\"\n\n[access.users]\nuser = \"00000000000000000000000000000000\"\n"
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("telemt_client_mss_prefix_{name}_test.toml"));
+        std::fs::write(&path, toml).unwrap();
+        let cfg = ProxyConfig::load(&path).unwrap();
+
+        assert_eq!(cfg.server.client_mss_prefix_value(), Ok(expected), "{name}");
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[test]
+fn client_mss_prefix_invalid_values_are_rejected() {
+    for (name, server, expected) in [
+        (
+            "zero",
+            "client_mss = \"92\"\nclient_mss_bulk = \"1400\"\nclient_mss_prefix = \"0\"",
+            "server.client_mss_prefix custom value must be within [1, 65535]",
+        ),
+        (
+            "too_large",
+            "client_mss = \"92\"\nclient_mss_bulk = \"1400\"\nclient_mss_prefix = \"65536\"",
+            "server.client_mss_prefix must be",
+        ),
+        (
+            "unknown",
+            "client_mss = \"92\"\nclient_mss_bulk = \"1400\"\nclient_mss_prefix = \"hello\"",
+            "server.client_mss_prefix must be",
+        ),
+        (
+            "without_bulk",
+            "client_mss = \"92\"\nclient_mss_prefix = \"server-hello\"",
+            "server.client_mss_prefix requires server.client_mss_bulk",
+        ),
+    ] {
+        let toml = format!(
+            "[server]\n{server}\n\n[censorship]\ntls_domain = \"example.com\"\n\n[access.users]\nuser = \"00000000000000000000000000000000\"\n"
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("telemt_client_mss_prefix_invalid_{name}_test.toml"));
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains(expected), "{name}: unexpected error: {err}");
+        let _ = std::fs::remove_file(path);
+    }
 }

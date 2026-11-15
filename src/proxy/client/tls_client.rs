@@ -99,7 +99,7 @@ impl RunningClientHandler {
 
         #[cfg(target_os = "linux")]
         let response_write_options =
-            TlsResponseWriteOptions::tcp(self.raw_fd, self.tls_response_fragment_size);
+            TlsResponseWriteOptions::tcp(self.raw_fd, self.tls_response_fragmentation);
         #[cfg(not(target_os = "linux"))]
         let response_write_options = TlsResponseWriteOptions::default();
 

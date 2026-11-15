@@ -116,22 +116,35 @@ const AUTH_PROBE_BACKOFF_MAX_MS: u64 = 16;
 #[cfg(not(test))]
 const AUTH_PROBE_BACKOFF_MAX_MS: u64 = 1_000;
 
+/// Best-effort chunking profile for the authenticated FakeTLS response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TlsResponseFragmentation {
+    /// Handshake MSS (`client_mss`) that bounds each chunk of the prefix.
+    pub(crate) fragment_size: u16,
+    /// Leading part of the response that is chunked; the rest is written at
+    /// the bulk MSS.
+    pub(crate) prefix: crate::config::ClientMssPrefix,
+}
+
 /// Controls how the authenticated FakeTLS response is written to a client.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct TlsResponseWriteOptions {
     #[cfg(target_os = "linux")]
     socket_fd: Option<std::os::unix::io::RawFd>,
     #[cfg(target_os = "linux")]
-    fragment_size: Option<u16>,
+    fragmentation: Option<TlsResponseFragmentation>,
 }
 
 impl TlsResponseWriteOptions {
     /// Creates Linux best-effort response chunking options for an accepted socket.
     #[cfg(target_os = "linux")]
-    pub(crate) fn tcp(fd: std::os::unix::io::RawFd, fragment_size: Option<u16>) -> Self {
+    pub(crate) fn tcp(
+        fd: std::os::unix::io::RawFd,
+        fragmentation: Option<TlsResponseFragmentation>,
+    ) -> Self {
         Self {
-            socket_fd: fragment_size.map(|_| fd),
-            fragment_size,
+            socket_fd: fragmentation.map(|_| fd),
+            fragmentation,
         }
     }
 }

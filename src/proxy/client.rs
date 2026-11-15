@@ -99,7 +99,7 @@ pub struct RunningClientHandler {
     #[cfg(unix)]
     raw_fd: std::os::unix::io::RawFd,
     rst_on_close: crate::config::RstOnCloseMode,
-    tls_response_fragment_size: Option<u16>,
+    tls_response_fragmentation: Option<crate::proxy::handshake::TlsResponseFragmentation>,
 }
 
 impl ClientHandler {
@@ -172,7 +172,7 @@ impl ClientHandler {
         real_peer_report: Arc<std::sync::Mutex<Option<SocketAddr>>>,
         #[cfg(unix)] raw_fd: std::os::unix::io::RawFd,
         rst_on_close: crate::config::RstOnCloseMode,
-        tls_response_fragment_size: Option<u16>,
+        tls_response_fragmentation: Option<crate::proxy::handshake::TlsResponseFragmentation>,
     ) -> RunningClientHandler {
         let normalized_peer = normalize_ip(peer);
         RunningClientHandler {
@@ -197,7 +197,7 @@ impl ClientHandler {
             #[cfg(unix)]
             raw_fd,
             rst_on_close,
-            tls_response_fragment_size,
+            tls_response_fragmentation,
         }
     }
 }
