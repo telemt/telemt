@@ -103,6 +103,24 @@ impl Stats {
         }
     }
 
+    /// A handshake was closed because its client IP already had
+    /// `server.max_pending_handshakes_per_ip` handshakes in progress.
+    pub fn increment_pending_handshake_per_ip_rejected_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.pending_handshake_per_ip_rejected_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A handshake exceeded `server.max_pending_handshakes_per_ip` in dry-run
+    /// mode and was admitted.
+    pub fn increment_pending_handshake_per_ip_observed_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.pending_handshake_per_ip_observed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn increment_accept_permit_timeout_total(&self) {
         if self.telemetry_core_enabled() {
             self.accept_permit_timeout_total

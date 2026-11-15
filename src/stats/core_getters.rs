@@ -41,6 +41,16 @@ impl Stats {
     pub fn get_accept_permit_timeout_total(&self) -> u64 {
         self.accept_permit_timeout_total.load(Ordering::Relaxed)
     }
+
+    pub fn get_pending_handshake_per_ip_rejected_total(&self) -> u64 {
+        self.pending_handshake_per_ip_rejected_total
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn get_pending_handshake_per_ip_observed_total(&self) -> u64 {
+        self.pending_handshake_per_ip_observed_total
+            .load(Ordering::Relaxed)
+    }
     pub fn get_current_connections_direct(&self) -> u64 {
         self.current_connections_direct.load(Ordering::Relaxed)
     }

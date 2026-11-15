@@ -123,6 +123,31 @@ pub(super) fn render(
 
     let _ = writeln!(
         out,
+        "# HELP telemt_pending_handshake_per_ip_limit_total Handshakes over server.max_pending_handshakes_per_ip: rejected, or observed in dry-run mode"
+    );
+    let _ = writeln!(
+        out,
+        "# TYPE telemt_pending_handshake_per_ip_limit_total counter"
+    );
+    for (action, value) in [
+        (
+            "rejected",
+            stats.get_pending_handshake_per_ip_rejected_total(),
+        ),
+        (
+            "observed",
+            stats.get_pending_handshake_per_ip_observed_total(),
+        ),
+    ] {
+        let _ = writeln!(
+            out,
+            "telemt_pending_handshake_per_ip_limit_total{{action=\"{action}\"}} {}",
+            if core_enabled { value } else { 0 }
+        );
+    }
+
+    let _ = writeln!(
+        out,
         "# HELP telemt_accept_permit_timeout_total Accepted connections dropped due to permit wait timeout"
     );
     let _ = writeln!(out, "# TYPE telemt_accept_permit_timeout_total counter");
