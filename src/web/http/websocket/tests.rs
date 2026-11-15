@@ -1,5 +1,7 @@
 use super::*;
 
+mod capacity;
+
 use std::sync::Arc;
 use std::time::Duration;
 
