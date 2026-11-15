@@ -27,7 +27,7 @@ function create(settings){
   if(owner.deadlineTimer)clearTimeout(owner.deadlineTimer);owner.deadlineTimer=null;
  }
  function heartbeat(owner){
-  if(current!==owner||owner.controller.signal.aborted)return;
+  if(current!==owner||owner.controller.signal.aborted||owner.accepted)return;
   const left=remaining(owner);settings.status(left);
   if(left<=0){owner.controller.abort();return}owner.heartbeat=setTimeout(()=>heartbeat(owner),Math.min(heartbeatMs,left));
  }
@@ -49,22 +49,38 @@ function create(settings){
    clearTimeout(timer);owner.controller.signal.removeEventListener('abort',abort);
   }
  }
+ function activeBeforeDeadline(owner){
+  if(current!==owner)return false;
+  if(owner.accepted)return true;
+  if(owner.controller.signal.aborted||remaining(owner)<=0)throw new Error('recovery deadline');
+  return true;
+ }
  async function run(owner,replay){
   heartbeat(owner);
   if(replay){
-   try{await replay(owner.controller.signal,()=>remaining(owner));settings.restored();return true}
-   catch(error){if(!settings.replaceable(error))throw error}
+   try{
+    if(!activeBeforeDeadline(owner))return false;
+    await replay(owner.controller.signal,()=>remaining(owner),()=>{owner.accepted=true});
+    if(!activeBeforeDeadline(owner))return false;
+    settings.restored();return true;
+   }catch(error){
+    if(current!==owner)return false;
+    if(!owner.accepted&&(owner.controller.signal.aborted||remaining(owner)<=0))throw new Error('recovery deadline');
+    if(!settings.replaceable(error))throw error;
+   }
   }
+  if(!activeBeforeDeadline(owner))return false;
   const policy=await load(owner);
-  if(remaining(owner)<=0)throw new Error('recovery deadline');
-  await settings.replace(policy,owner.controller.signal,()=>remaining(owner),owner.epoch);
+  if(!activeBeforeDeadline(owner))return false;
+  await settings.replace(policy,owner.controller.signal,()=>remaining(owner),owner.epoch,()=>{owner.accepted=true});
+  if(!activeBeforeDeadline(owner))return false;
   return true;
  }
  function recover(reason,replay){
   if(current)return current.promise;
-  const budget=settings.budgetMs(),owner={epoch:nextEpoch++,controller:new AbortController(),heartbeat:null,deadlineTimer:null,promise:null};
+  const budget=settings.budgetMs(),owner={epoch:nextEpoch++,controller:new AbortController(),heartbeat:null,deadlineTimer:null,promise:null,accepted:false};
   owner.wall=Date.now()+budget;owner.monotonic=performance.now()+budget;current=owner;
-  owner.deadlineTimer=setTimeout(()=>owner.controller.abort(),Math.max(1,remaining(owner)));
+  owner.deadlineTimer=setTimeout(()=>{if(!owner.accepted)owner.controller.abort()},Math.max(1,remaining(owner)));
   owner.promise=run(owner,replay).catch(error=>{settings.terminal(settings.reason(error,reason));return false}).finally(()=>{stop(owner);if(current===owner)current=null});
   return owner.promise;
  }

@@ -208,6 +208,7 @@ pub(crate) struct WebSession {
     token_hash: TokenHash,
     client_ip: IpAddr,
     trace_session_id: u64,
+    generation_id: u64,
     profile: Arc<WebRuntimeProfile>,
     profile_key: ProfileKey,
     selected_carrier: WebCarrier,
@@ -268,6 +269,53 @@ impl WebSession {
         timeouts: WebTimeoutsConfig,
         user_registration: Option<UserSessionRegistration>,
     ) -> Arc<Self> {
+        let generation_id = manager
+            .upgrade()
+            .map_or(0, |manager| manager.active_generation().id);
+        Self::new_for_generation(
+            manager,
+            token_hash,
+            client_ip,
+            trace_session_id,
+            generation_id,
+            profile,
+            profile_key,
+            selected_carrier,
+            carrier_attempt,
+            bootstrap_hash,
+            carrier_deadline_at,
+            carrier_class,
+            learning_context,
+            automatic_carrier,
+            recovery,
+            limits,
+            timeouts,
+            user_registration,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Creates one carrier session with the issuing generation captured explicitly.
+    pub(crate) fn new_for_generation(
+        manager: std::sync::Weak<WebProcessRuntime>,
+        token_hash: TokenHash,
+        client_ip: IpAddr,
+        trace_session_id: u64,
+        generation_id: u64,
+        profile: Arc<WebRuntimeProfile>,
+        profile_key: ProfileKey,
+        selected_carrier: WebCarrier,
+        carrier_attempt: u8,
+        bootstrap_hash: TokenHash,
+        carrier_deadline_at: Option<Instant>,
+        carrier_class: CarrierClientClass,
+        learning_context: Option<CarrierLearningContext>,
+        automatic_carrier: bool,
+        recovery: bool,
+        limits: WebLimitsConfig,
+        timeouts: WebTimeoutsConfig,
+        user_registration: Option<UserSessionRegistration>,
+    ) -> Arc<Self> {
         let created_at = Instant::now();
         let cancel = user_registration
             .as_ref()
@@ -284,6 +332,7 @@ impl WebSession {
             token_hash,
             client_ip,
             trace_session_id,
+            generation_id,
             profile,
             profile_key,
             selected_carrier,
@@ -371,6 +420,18 @@ impl WebSession {
     /// Returns the stable quota owner without exposing profile credentials.
     pub(crate) fn profile_key(&self) -> ProfileKey {
         self.profile_key
+    }
+
+    /// Returns the issuing generation retained by this frozen carrier chain.
+    pub(crate) fn generation_id(&self) -> u64 {
+        self.generation_id
+    }
+
+    /// Returns whether this session still belongs to its issuing runtime generation.
+    pub(crate) fn current_generation_matches(&self) -> bool {
+        self.manager
+            .upgrade()
+            .is_some_and(|manager| manager.active_generation().id == self.generation_id)
     }
 
     /// Returns the process-unique non-secret trace identifier.

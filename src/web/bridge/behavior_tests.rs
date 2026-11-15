@@ -18,10 +18,16 @@ pub(super) fn run(page: &super::BridgePage) {
         .write_all(page.body.as_bytes())
         .unwrap();
     let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let completed = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("telemt-bridge-behavior-complete tests="))
+        .and_then(|count| count.parse::<usize>().ok())
+        .is_some_and(|count| count > 0);
     assert!(
-        output.status.success(),
+        output.status.success() && completed,
         "bridge regressions failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        stdout,
         String::from_utf8_lossy(&output.stderr)
     );
 }

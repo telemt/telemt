@@ -51,6 +51,7 @@ pub(super) fn render(
         .replace("__BUFFER_RUNTIME__", BUFFER_RUNTIME)
         .replace("__RECOVERY_RUNTIME__", RECOVERY_RUNTIME)
         .replace("__DOWNLINK_RUNTIME__", DOWNLINK_RUNTIME)
+        .replace("__RESUME_PROBE_RUNTIME__", RESUME_PROBE_RUNTIME)
         .replace("__CONVEYOR_RUNTIME__", CONVEYOR_RUNTIME)
         .replace("__RUNTIME__", RUNTIME)
         .replace(

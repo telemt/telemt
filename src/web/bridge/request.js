@@ -46,15 +46,16 @@ function create(settings){
   if(status===204&&(path==='/api/v1/up'||path==='/api/v1/down'))return {limit:0,exact:true,reason:'protocol'};
   return {limit:0,exact:true,reason:'http'};
  }
- async function send(path,frozenOptions,remainingBudget,maxAttempts,receiver){
+ async function send(path,frozenOptions,remainingBudget,maxAttempts,receiver,accepted){
   let delay=250,attempt=0,lastReason='network';maxAttempts=maxAttempts||9;
   const attempts=()=>typeof maxAttempts==='function'?maxAttempts():maxAttempts;
   const initialBudget=remainingBudget?Math.min(settings.retryMs(),remainingBudget()):settings.retryMs();
   const deadline=Date.now()+Math.max(0,initialBudget),external=frozenOptions.signal;
+  if(remainingBudget&&remainingBudget()<=0)throw settings.failure('timeout','recovery deadline');
   const attemptLimit=path==='/api/v1/down'?settings.longPollMs()+settings.requestMs():settings.requestMs();
   while(attempt<attempts()){
    if(settings.closed()||(external&&external.aborted))throw new Error('request aborted');
-   const remaining=Math.min(deadline-Date.now(),remainingBudget?remainingBudget():Infinity);if(remaining<=0)break;attempt++;
+   const remaining=Math.min(deadline-Date.now(),remainingBudget?remainingBudget():Infinity);if(remaining<=0){if(remainingBudget)lastReason='timeout';break}attempt++;
    const controller=new AbortController(),abort=()=>controller.abort();let timedOut=false;
    if(external)external.addEventListener('abort',abort,{once:true});
    const requestOptions=Object.assign({},frozenOptions,{signal:controller.signal});
@@ -62,22 +63,25 @@ function create(settings){
    let response=null,wait=0;
    try{
     const fetched=await fetch(settings.base()+path,requestOptions);
+    if(remainingBudget&&remainingBudget()<=0){settings.cancel(fetched);lastReason='timeout';break}
     if(retryableStatus(fetched.status)){
      lastReason='http';wait=retryAfterMs(fetched);settings.cancel(fetched);
     }else{
      const policy=responsePolicy(path,fetched.status);let body;
-     try{body=receiver&&(fetched.status===200||fetched.status===204)?await receiver(fetched,controller.signal):await settings.read(fetched,policy.limit,policy.exact,controller.signal);}
+     try{body=receiver&&(fetched.status===200||fetched.status===204)?await receiver(fetched,controller.signal,remainingBudget,accepted):await settings.read(fetched,policy.limit,policy.exact,controller.signal);}
      catch(error){
       controller.abort();
       if(external&&external.aborted)throw error;
       if(timedOut)throw settings.failure('timeout','response deadline exceeded');
       throw settings.failure(settings.reason(error,policy.reason),error&&error.message);
      }
+     if(remainingBudget&&remainingBudget()<=0){settings.cancel(fetched);lastReason='timeout';break}
      response={status:fetched.status,headers:fetched.headers,body};return response;
     }
    }catch(error){
     controller.abort();
     if(settings.closed()||(external&&external.aborted))throw error;
+    if(settings.reason(error,'')==='timeout')lastReason='timeout';
     if(timedOut)lastReason='timeout';
     if(settings.reason(error,'')==='protocol')throw error;
    }finally{clearTimeout(timer);if(external)external.removeEventListener('abort',abort)}

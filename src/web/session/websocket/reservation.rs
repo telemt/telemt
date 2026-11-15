@@ -83,6 +83,33 @@ impl WebSocketLaneReservation {
         self.claim.lane.lane_id
     }
 
+    /// Confirms a lane resume proof belongs to this exact connection and stream incarnation.
+    pub(crate) fn is_current_resume_lane(&self, connection_id: u64) -> bool {
+        if self.phase != WebSocketLaneReservationPhase::StreamOwned
+            || self.claim.connection_id != Some(connection_id)
+            || self
+                .stream
+                .is_none_or(|stream| stream.id != self.claim.lane.lane_id)
+            || self.session.close_if_cancelled()
+        {
+            return false;
+        }
+        let Some(stream) = self.stream else {
+            return false;
+        };
+        let state = self.session.state.lock();
+        !state.closed
+            && self.session.ensure_carrier_active_locked(&state).is_ok()
+            && state
+                .carrier_lanes
+                .get(&self.claim.lane.lane_id)
+                .is_some_and(|lane| lane.instance == self.claim.lane.instance)
+            && state
+                .streams
+                .get(&stream.id)
+                .is_some_and(|current| current.instance == stream.instance)
+    }
+
     /// Returns the exact lane incarnation owned by this connection.
     pub(crate) fn lane_identity(&self) -> CarrierLaneIdentity {
         self.claim.lane

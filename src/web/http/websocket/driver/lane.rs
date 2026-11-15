@@ -64,6 +64,20 @@ pub(super) async fn run_lane(
         match event {
             DriverEvent::Incoming((message, _budget)) => match message {
                 Message::Binary(body) => {
+                    if super::resume::respond_lane(
+                        &body,
+                        active,
+                        socket,
+                        session,
+                        connection,
+                        reservation,
+                        &cancellation,
+                    )
+                    .await?
+                    {
+                        next_ping = Instant::now() + liveness_interval;
+                        continue;
+                    }
                     let started = Instant::now();
                     let result = process_lane(
                         runtime,

@@ -21,6 +21,7 @@ const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 
 // Cancellation-safe message I/O and budget retries remain separate from carrier loops.
 mod io;
+mod resume;
 // Per-lane carrier state remains isolated from the multiplexed driver.
 mod lane;
 use io::{flush, process_multiplex, read_message, record_message, reserve_data, send};
@@ -198,6 +199,19 @@ async fn run_multiplex(
         match event {
             DriverEvent::Incoming((message, _budget)) => match message {
                 Message::Binary(body) => {
+                    if resume::respond_multiplex(
+                        &body,
+                        active,
+                        socket,
+                        session,
+                        connection,
+                        &cancellation,
+                    )
+                    .await?
+                    {
+                        next_ping = Instant::now() + liveness_interval;
+                        continue;
+                    }
                     let started = Instant::now();
                     let result = process_multiplex(
                         runtime,
