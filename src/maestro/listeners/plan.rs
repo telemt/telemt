@@ -8,6 +8,7 @@ use crate::config::{
 use crate::proxy::handshake::TlsResponseFragmentation;
 use crate::transport::ListenOptions;
 
+#[cfg(target_os = "linux")]
 use super::tcp_mss_runtime_profile;
 
 /// Immutable socket and connection policy for one listener endpoint.
